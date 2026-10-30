@@ -94,7 +94,7 @@ The design leaves these open, or they became clear only when working through the
 | Decision | Why |
 |---|---|
 | Partition snapshots hold each key and a 64-bit row hash | A delete record needs its key, so a key hash alone isn't enough |
-| `by_stamp` without `keep_state` suppresses no-ops using row hashes of versions sealed within the lookback | Bronze flows such as §5.4 would otherwise append every lookback re-read |
+| `by_stamp` without `keep_state` suppresses no-ops using row hashes of versions whose watermark falls within the lookback | Bronze flows such as §5.4 would otherwise append every lookback re-read |
 | `by_stamp` reads once per run and splits by partition | It can't know which partitions changed until it reads |
 | A complete read with no rows fails unless `allow_empty=True` | A transient empty API response must not wipe a destination |
 | `snapshot_diff` with a `replace_partition` route also stores the whole slice | A version otherwise holds only the changes |

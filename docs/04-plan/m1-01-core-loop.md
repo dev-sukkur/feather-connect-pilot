@@ -70,7 +70,7 @@ def test_frozen_clock_advances():
 
 - [ ] **Step 2: Run them and confirm they fail.** Run: `uv run pytest packages/feather-connect/tests/test_smoke.py -q`. Expected: FAIL, with an error that the workspace or module doesn't exist.
 
-- [ ] **Step 3: Create the workspace.** The root `pyproject.toml` has `[tool.uv] package = false`, and `[tool.uv.workspace]` with `members = ["packages/*", "packages/connectors/*"]` and `exclude = ["packages/connectors"]`, because that folder holds packages but isn't one. The dev group is `pytest pytest-cov pytest-timeout hypothesis ruff pyright`. Ruff: `line-length = 110`, `target-version = "py312"`, `extend-exclude = ["spikes"]`. Pyright: `strict = ["packages/feather-connect/src"]`. Pytest: `addopts = "--import-mode=importlib"`, `timeout = 120`. The package uses hatchling, with dependencies `pyarrow` and `pydantic>=2`. `stable_id` is the first 26 characters of the base32 of a blake2b hash over the parts.
+- [ ] **Step 3: Create the workspace.** The root `pyproject.toml` has `[tool.uv] package = false`, and `[tool.uv.workspace]` with `members = ["packages/*", "packages/connectors/*"]` and `exclude = ["packages/connectors"]`, because that folder holds packages but isn't one. Add `.python-version` with `3.13`. The dev group is `pytest pytest-cov pytest-timeout hypothesis ruff pyright pyarrow-stubs`. Ruff: `line-length = 110`, `target-version = "py312"`, `extend-exclude = ["spikes"]`. Pyright: `strict = ["packages/feather-connect/src"]`. Pytest: `addopts = "--import-mode=importlib"`, `timeout = 120`. The package uses hatchling, with dependencies `pyarrow` and `pydantic>=2`. `stable_id` is the first 26 characters of the base32 of a blake2b hash over the parts.
 
 - [ ] **Step 4: Run them and confirm they pass.** Same command. Expected: 3 passed.
 
@@ -216,8 +216,8 @@ def batch(chunk=0, mode="upsert", records=(), version="v1", partition="_", first
 UP = ApplyRecord("k1", "upsert", {"a": 1})
 
 def test_source_filters_by_partition_and_since():
-    s = memory.Source(); s.load([{"id": 1, "d": "2026-10-18", "u": 5}, {"id": 2, "d": "2026-10-19", "u": 9}])
-    req = ReadRequest("date=2026-10-18", by_day("d", tz="UTC"))
+    s = memory.Source(); s.load([{"id": 1, "date": "2026-10-18", "u": 5}, {"id": 2, "date": "2026-10-19", "u": 9}])
+    req = ReadRequest("date=2026-10-18", by_day("date", tz="UTC"))
     assert [r["id"] for b in s.read(CTX, req) for r in b] == [1]
     req = ReadRequest("*", none(), since=6, stamp_field="u")
     assert [r["id"] for b in s.read(CTX, req) for r in b] == [2]
@@ -253,7 +253,7 @@ def test_sink_failure_and_rejection_hooks():
 
 - [ ] **Step 2: Run them and confirm they fail.** Run: `uv run pytest packages/feather-connect/tests/connectors/test_memory.py -q`. Expected: FAIL with `ModuleNotFoundError`.
 
-- [ ] **Step 3: Implement the types and the connector.** `ReadRequest.contains` is `partition == "*" or scheme.key_of(payload) == partition`. The sink's spec declares all three of `upsert`, `append` and `replace_partition`, and remembers each `idempotency_key` to skip repeats. `calls` records every call, repeats included. A `replace_partition` batch with `is_first=True` clears that partition's rows, and `is_last` finishes it; the whole swap happens in memory.
+- [ ] **Step 3: Implement the types and the connector.** `ReadRequest.contains` is `partition == "*" or scheme.key_of(payload) == partition`. The sink's spec declares all three of `upsert`, `append` and `replace_partition`, and remembers each `idempotency_key` to skip repeats. `calls` records every call that didn't raise, repeats included. A `replace_partition` batch with `is_first=True` clears that partition's rows, and `is_last` finishes it; the whole swap happens in memory.
 
 - [ ] **Step 4: Run them and confirm they pass.** Same command. Expected: all pass.
 
@@ -311,12 +311,12 @@ def test_on_event_needs_a_push_strategy():
 
 def test_unenumerable_partitions_need_a_planner():
     ds = fc.Dataset("d", source=memory.Source(), key="id", strategy=fc.strategy.snapshot_diff(),
-                    partition=fc.partition.by_fields("store_id", fc.partition.by_day("d", tz="UTC")))
+                    partition=fc.partition.by_fields("store_id", fc.partition.by_day("date", tz="UTC")))
     assert "planner_required" in codes(fc.Flow("f", reads=ds, deliver=[fc.to(memory.Sink())]))
 
 def test_partitioned_complete_dataset_without_state_warns_about_moves():
     ds = fc.Dataset("d", source=memory.Source(), key="id", strategy=fc.strategy.snapshot_diff(),
-                    partition=fc.partition.by_day("d", tz="UTC"))
+                    partition=fc.partition.by_day("date", tz="UTC"))
     p = {x.code: x for x in fc.Flow("f", reads=ds, deliver=[fc.to(memory.Sink())]).validate()}
     assert p["moves_need_state"].severity == "warning"
 
@@ -414,7 +414,7 @@ Write each body in full; the comments above fix what each one asserts.
 - Produces in `storage/port.py`:
   - Dataclasses `Run`, `TaskRow`, `VersionDraft(version_id, dataset, partition, run_id, complete, upserts, deletes, content_hash, schema_hash, watermark, code_sha)`, `Version` (the draft plus `status: "staged" | "sealed"`, `seal_seq: int | None`, `sealed_at`), `Delivery(route, version_id, dataset, partition, seal_seq, status, attempts, last_error, rows_applied, rows_rejected, replays, retries)` (`transition` adds 1 to `replays` on `applied → pending`, and to `retries` on `failed → pending`), `Attempt`, `StateRow(key, partition, row_hash, payload, last_version)`, `QuarantineRow(route, version_id, key, error, status)`.
   - `RunJournal`: `create_run(flow, trigger, actor, params, status="queued", reason=None) -> str`; `set_run_status(run_id, status, reason=None)`; `get_run(run_id) -> Run`; `list_runs(flow=None, status=None, limit=50, cursor=None) -> list[Run]`; `start_task(run_id, kind, ref, dataset=None, partition=None, route=None, worker=None, code_sha=None) -> str`; `finish_task(task_id, status, error=None)`; `list_tasks(run_id) -> list[TaskRow]`; `log(task_id, level, message)`; `task_logs(task_id) -> list[str]`.
-  - `VersionStore`: `stage(draft) -> Version`; `seal(version_ids, routes: Sequence[str]) -> list[Version]`; `get(version_id) -> Version`; `latest_sealed(dataset, partition) -> Version | None`; `sealed_since(dataset, partition, since) -> list[Version]`; `latest_watermark(dataset) -> Any | None`; `register_slices(run_id, dataset, partitions)`; `finish_slice(run_id, dataset, partition) -> bool` (True when all are done); `staged_for_run(run_id, dataset) -> list[Version]`; `list_versions(dataset, partition=None, limit=100) -> list[Version]`.
+  - `VersionStore`: `stage(draft) -> Version`; `seal(version_ids, routes: Sequence[str]) -> list[Version]`; `get(version_id) -> Version`; `latest_sealed(dataset, partition) -> Version | None`; `since_watermark(dataset, partition, since) -> list[Version]` (sealed versions whose stored watermark is at or after `since`, newest first); `latest_watermark(dataset) -> Any | None`; `register_slices(run_id, dataset, partitions)`; `finish_slice(run_id, dataset, partition) -> bool` (True when all are done); `staged_for_run(run_id, dataset) -> list[Version]`; `list_versions(dataset, partition=None, limit=100) -> list[Version]`.
   - `Ledger`: `oldest_open(route, partition) -> Delivery | None` (skips `applied`, `skipped` and `compensated`); `get(route, version_id) -> Delivery`; `transition(route, version_id, to, *, actor, reason=None, error=None, rows_applied=0, rows_rejected=0, code_sha=None) -> Delivery`; `attempts(route, version_id) -> list[Attempt]`; `list_deliveries(route=None, status=None, partition=None, limit=100, cursor=None) -> list[Delivery]`; `all_applied() -> bool`.
   - `RecordStateStore`: `get_many(dataset, keys) -> dict[str, StateRow]`; `put_many(dataset, rows)`; `delete_many(dataset, keys)`.
   - `QuarantineStore`: `add(route, version_id, key, error)`; `supersede(route, key, before_seal_seq) -> int`; `list_open(route=None) -> list[QuarantineRow]`.
@@ -553,8 +553,8 @@ def test_by_stamp_reads_from_the_watermark_minus_lookback():
     # capture the ReadRequest; since == previous max("u") - 2h, and the version stores the new watermark
 
 def test_by_stamp_splits_rows_into_one_version_per_partition():
-    ds = dataset(fc.strategy.by_stamp("u"), partition=fc.partition.by_day("d", tz="UTC"))
-    vs = extract(ds, [{"id": 1, "d": "2026-10-18", "u": T0}, {"id": 2, "d": "2026-10-19", "u": T0}], partition="*")
+    ds = dataset(fc.strategy.by_stamp("u"), partition=fc.partition.by_day("date", tz="UTC"))
+    vs = extract(ds, [{"id": 1, "date": "2026-10-18", "u": T0}, {"id": 2, "date": "2026-10-19", "u": T0}], partition="*")
     assert sorted(v.partition for v in vs) == ["date=2026-10-18", "date=2026-10-19"]
 
 def test_by_stamp_deleted_field_emits_a_delete():
@@ -612,9 +612,8 @@ read batches -> make Records (bad ones go to quarantine; last row wins per key w
              -> write whole-slice chunks of kind "full", and accumulate (key, row_hash) pairs
 new snapshot = pairs, de-duplicated by key, last wins
 old snapshot = latest sealed "snapshot" chunk for the partition (complete strategies),
-               or row hashes of versions from sealed_since(now - lookback) (by_stamp),
+               or row hashes of versions from since_watermark(latest watermark - lookback) (by_stamp),
                or record state (when keep_state)
-guard: complete, no rows, old snapshot not empty, not allow_empty -> ExtractFailed
 diff = strategy.diff(new, old); nothing to do -> no version
 second pass over "full" chunks: keep rows in diff.upsert_keys, write "data" chunks
 write new "snapshot" chunk; write delete candidates as a "candidates" chunk
@@ -622,7 +621,7 @@ drop "full" chunks unless a route uses replace_partition
 stage version; if not stage_only: finalize_versions([version]) (Task 9 extends it)
 ```
 
-For now `finalize_versions` turns candidates into delete records in a final data chunk and calls `versions.seal` with the route names. For `by_stamp`, the read uses `partition="*"`, and rows are grouped by `dataset.partition.key_of` into one version each. The new watermark is the maximum of the stamp field.
+For now `finalize_versions` turns candidates into delete records in a final data chunk and calls `versions.seal` with the route names. It also holds the empty-read guard: a complete version whose new snapshot has no rows and which still implies deletes raises `ExtractFailed` naming `allow_empty`, unless the dataset allows it. For `by_stamp`, the read uses `partition="*"`, and rows are grouped by `dataset.partition.key_of` into one version each. The new watermark is the maximum of the stamp field.
 
 - [ ] **Step 4: Run them and confirm they pass.** Same command. Expected: all pass.
 
@@ -651,20 +650,20 @@ def run_slices(ds, run, slices):  # slices: {partition: rows}
 
 def test_move_between_slices_of_one_run_is_not_a_delete():  # H1b, I10
     ds = day_dataset()
-    run_slices(ds, "r1", {"date=2026-10-18": [{"id": 1, "d": "2026-10-18"}], "date=2026-10-19": []})
-    vs = run_slices(ds, "r2", {"date=2026-10-18": [], "date=2026-10-19": [{"id": 1, "d": "2026-10-19"}]})
+    run_slices(ds, "r1", {"date=2026-10-18": [{"id": 1, "date": "2026-10-18"}], "date=2026-10-19": []})
+    vs = run_slices(ds, "r2", {"date=2026-10-18": [], "date=2026-10-19": [{"id": 1, "date": "2026-10-19"}]})
     ops = [(r.key, r.op) for v in vs for r in all_records(v)]
     assert ("1", "delete") not in ops and ("1", "upsert") in ops
     assert moves_of(version_for(vs, "date=2026-10-19")) == {"1": "date=2026-10-18"}
 
 def test_key_absent_from_every_slice_is_a_delete():
     ds = day_dataset()
-    run_slices(ds, "r1", {"date=2026-10-18": [{"id": 1, "d": "2026-10-18"}, {"id": 2, "d": "2026-10-18"}]})
-    vs = run_slices(ds, "r2", {"date=2026-10-18": [{"id": 1, "d": "2026-10-18"}]})
+    run_slices(ds, "r1", {"date=2026-10-18": [{"id": 1, "date": "2026-10-18"}, {"id": 2, "date": "2026-10-18"}]})
+    vs = run_slices(ds, "r2", {"date=2026-10-18": [{"id": 1, "date": "2026-10-18"}]})
     assert ("2", "delete") in [(r.key, r.op) for r in all_records(vs[0])]
 
 def test_nothing_is_sealed_until_seal_run():
-    ds = day_dataset(); ds.source.load([{"id": 1, "d": "2026-10-18"}])
+    ds = day_dataset(); ds.source.load([{"id": 1, "date": "2026-10-18"}])
     DEPS.store.versions.register_slices("r1", "d", ["date=2026-10-18"])
     v = run_extract(ds, "r1", "date=2026-10-18", routes=ROUTES, stage_only=True, deps=DEPS)[0]
     assert v.status == "staged" and DEPS.store.versions.latest_sealed("d", "date=2026-10-18") is None
@@ -673,8 +672,8 @@ def test_seal_run_seals_all_versions_together_and_is_idempotent(): ...
 
 def test_move_across_runs_with_keep_state():  # H1a
     ds = day_dataset(keep_state=True)
-    run_slices(ds, "r1", {"date=2026-10-18": [{"id": 1, "d": "2026-10-18"}]})
-    v = run_slices(ds, "r2", {"date=2026-10-19": [{"id": 1, "d": "2026-10-19"}]})[0]
+    run_slices(ds, "r1", {"date=2026-10-18": [{"id": 1, "date": "2026-10-18"}]})
+    v = run_slices(ds, "r2", {"date=2026-10-19": [{"id": 1, "date": "2026-10-19"}]})[0]
     assert moves_of(v) == {"1": "date=2026-10-18"}
     vs = run_slices(ds, "r3", {"date=2026-10-18": []})  # the old slice is read later
     assert ("1", "delete") not in [(r.key, r.op) for v in vs for r in all_records(v)]
@@ -684,7 +683,7 @@ def test_keep_state_records_the_latest_row(): ...
 
 - [ ] **Step 2: Run them and confirm they fail.** Run: `uv run pytest packages/feather-connect/tests/runtime/test_seal.py -q`. Expected: FAIL with `ModuleNotFoundError`.
 
-- [ ] **Step 3: Implement `run_seal` and extend `finalize_versions`.** Load the `candidates` of all the versions, and the `snapshot` chunks of all the run's versions. A candidate key present in another version's new snapshot is a move: drop it, and write `{key: old_partition}` to the receiving version's `moves` chunk. With `keep_state`, also drop a candidate whose current state row is in another partition, and record a move when an upserted key's state row is in another partition. Write remaining candidates as delete records in a final data chunk. Call `versions.seal` once with all version ids, so sealing is one transaction. Update record state after sealing. Versions left with no records and no moves still seal when they are complete, because a complete read is itself a fact.
+- [ ] **Step 3: Implement `run_seal` and extend `finalize_versions`.** Load the `candidates` of all the versions, and the `snapshot` chunks of all the run's versions. A candidate key present in another version's new snapshot is a move: drop it, and write `{key: old_partition}` to the receiving version's `moves` chunk. With `keep_state`, also drop a candidate whose current state row is in another partition, and record a move when an upserted key's state row is in another partition. Apply the empty-read guard only after this reconciliation, slice by slice, so a slice emptied by a move doesn't trip it. Write remaining candidates as delete records in a final data chunk. Call `versions.seal` once with all version ids, so sealing is one transaction. Update record state after sealing. Versions left with no records and no moves still seal when they are complete, because a complete read is itself a fact.
 
 - [ ] **Step 4: Run them and confirm they pass.** Same command. Expected: all pass. Also run `uv run pytest packages/feather-connect/tests/runtime/test_extract.py -q`, which must still pass.
 
@@ -902,7 +901,7 @@ def test_http_faults_raise_transient_errors():
         read_all(s)
     assert e.value.retry_after is not None
 def test_faults_are_repeatable_by_seed(): ...
-def test_fan_out_runs_under_the_harness(): ...  # with Faults(duplicate=0.2), no duplicate rows reach the sink
+def test_fan_out_on_the_local_runtime(): ...  # Runtime on LocalEngine, because FlowHarness swaps sources: with Faults(duplicate=0.2), no duplicate rows reach the sink
 def test_capture_to_writes_jsonl(tmp_path): ...
 ```
 
