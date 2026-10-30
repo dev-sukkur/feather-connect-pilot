@@ -1,6 +1,6 @@
 # Feather Connect — Discovery Document
 
-> SDLC phase 1 of 7 · Version 0.2 (draft for review) · 30 October 2026
+> SDLC phase 1 of 7 · Version 0.3 (draft for review) · 30 October 2026
 > Owner: Abdul Sukkur · Prepared with Claude Code
 > Next: [Design specification](../02-design/2026-10-30-feather-connect-design.md) · [Decision records](../adr/README.md)
 
@@ -8,6 +8,7 @@
 |---|---|---|---|
 | 0.1 | 2026-10-30 | Abdul Sukkur, with Claude Code | First draft from the discovery Q&A and the reference evaluation |
 | 0.2 | 2026-10-30 | Abdul Sukkur, with Claude Code | Sponsor direction: HTML-only front end; Postgres as the database (object storage optional) |
+| 0.3 | 2026-10-30 | Abdul Sukkur, with Claude Code | Phase 3 results: engine decided (DBOS); vendor facts re-verified; GoFrugal is now "M2 if docs arrive, otherwise M3"; open questions updated |
 
 Review status: **awaiting sponsor review.** Approving this document closes the discovery gate (§16).
 
@@ -92,7 +93,7 @@ Stakeholders: the sponsor and product owner (Abdul Sukkur), the reference organi
 | In v1.0 | Later (post-1.0) | Not planned |
 |---|---|---|
 | Python SDK, CLI, control plane, server-rendered HTML dashboard, MCP server | Helm chart / Kubernetes | Visual flow designer; single-page JavaScript front end |
-| Durable engine behind a port (DBOS or Hatchet, chosen by spike) | Kafka/Redpanda as optional transport | Hosted SaaS |
+| Durable engine behind a port (DBOS Transact, ADR-0003) | Kafka/Redpanda as optional transport | Hosted SaaS |
 | One-to-many delivery, ETL transforms, webhook events, Postgres CDC | Visual data-mapping assistant | API gateway / developer portal |
 | Partitions, versions, replay, backfill, readiness | In-dashboard AI assistant | Full BPM |
 | dev/qa/uat/prod deployments; multi-tenancy | More connectors (Salesforce, Dynamics, NetSuite, Snowflake, BigQuery, Kafka, SFTP, Excel) | |
@@ -229,7 +230,7 @@ Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and op
 | ID | Requirement | Priority | Milestone |
 |---|---|---|---|
 | FR-J1 | Connector SDK: source and sink protocols, declared capabilities and config schema, plus `check` and `discover`. | Must | M1 |
-| FR-J2 | Connector catalogue:<br>• **M1:** in-memory, JSON simulation, Postgres, S3-compatible storage, REST, GraphQL, webhook, HTTP, DuckDB/MotherDuck;<br>• **M2:** SAP, Zoho Zakya, GoFrugal, Magento;<br>• **M3:** Postgres CDC. | Must | M1–M3 |
+| FR-J2 | Connector catalogue:<br>• **M1:** in-memory, JSON simulation, Postgres, S3-compatible storage, REST, GraphQL, webhook, HTTP, DuckDB/MotherDuck;<br>• **M2:** SAP, Zoho Zakya, Magento, and GoFrugal if its API docs arrive by M1's end (otherwise M3);<br>• **M3:** Postgres CDC. | Must | M1–M3 |
 | FR-J3 | A conformance kit that every connector must pass to be labelled beta or stable. | Must | M1 |
 | FR-J4 | Connectors install as optional packages or extras. Third-party connectors work without forking. | Must | M1 |
 
@@ -304,12 +305,12 @@ This is an indicative assessment for positioning. Verify each cell against curre
 
 ### 9.2 Engine shortlist (from the reference evaluation)
 
-These facts were observed on vendor pages and in documentation during the reference evaluation (October 2026). They **must be re-verified** in the engine spike.
+These facts were observed on vendor pages and in documentation during the reference evaluation (October 2026). The ones that still affect the decision were re-verified on 30 Oct 2026 (ADR-0003).
 
 | Product | Relevant facts | Verdict for Feather Connect |
 |---|---|---|
-| Hatchet | MIT; self-hosted engine and UI are free; needs only Postgres (RabbitMQ optional); native global rate limits shared across workflows (per second up to per year); concurrency keys; event fan-out; webhook ingest with signature checks; workers dial out over gRPC. Engine still pre-1.0 at the time. 4 MB payload cap. A worker that misses heartbeats for 30 s has its work re-queued. | Shortlisted (ADR-0003) |
-| DBOS Transact | MIT library on our own Postgres, no extra server; queues with concurrency limits. Its rate limits count workflow starts, not API calls. No native fan-out or webhooks. The Conductor UI is paid (Pro $99/mo without alerting or RBAC; Teams $499/mo with them). Deploys pin workflow versions, so workflows must be kept short. | Shortlisted (ADR-0003). Its paid-UI weakness doesn't matter because we build our own dashboard. |
+| Hatchet | MIT; self-hosted engine and UI are free; needs only Postgres (RabbitMQ optional); native global rate limits shared across workflows (per second up to per year); concurrency keys; event fan-out; webhook ingest with signature checks; workers dial out over gRPC. Engine still pre-1.0 at the time. 4 MB payload cap. A worker that misses heartbeats for 30 s has its work re-queued. | Tested, and kept on a side branch (ADR-0003) |
+| DBOS Transact | MIT library on our own Postgres, no extra server; queues with concurrency limits. Its rate limits count workflow starts, not API calls. No native fan-out or webhooks. The Conductor UI is paid (Pro $99/mo without alerting or RBAC; Teams $499/mo with them). Deploys pin workflow versions, so workflows must be kept short. | Chosen (ADR-0003). Its paid UI matters less because we build our own dashboard. |
 | Windmill | Best-in-class UI and in-browser editing. Concurrency limits, agent workers, restart-from-step, critical alerts and audit logs are Enterprise features (from about $120/mo). AGPL. | Not chosen: AGPL core, and the key features are paid |
 | Dagster | Best partition grid and lineage view. No low-latency webhook fan-out, per-key ordering or time-window rate limits. Dagster+ cost at store × day partitions was estimated at about $6.3k–10.5k/mo. | Not chosen, but its partition grid inspires ours |
 | Temporal | Mature, MIT. Self-hosting means running several services. | Not shortlisted: too heavy to run for the "easy to run" goal |
@@ -362,7 +363,7 @@ These facts were observed on vendor pages and in documentation during the refere
 | Language | Python throughout: SDK, runtime, server and dashboard | [ADR-0001](../adr/0001-python-throughout-html-dashboard.md) |
 | Front end | Server-rendered HTML (Jinja2 templates, CSS, HTMX for partial refresh); no SPA framework, TypeScript or Node build | [ADR-0001](../adr/0001-python-throughout-html-dashboard.md) |
 | Architecture | Our own SDK, control plane and dashboard; engine behind a port | [ADR-0002](../adr/0002-own-control-plane-engine-behind-port.md) |
-| Engine | DBOS or Hatchet, chosen by a conformance spike | [ADR-0003](../adr/0003-durable-engine-selection-by-spike.md) (proposed) |
+| Engine | DBOS Transact, chosen by a conformance spike | [ADR-0003](../adr/0003-durable-engine-selection-by-spike.md) |
 | Data model | Dataset, record, partition, version, route ledger for both ETL and events | [ADR-0004](../adr/0004-unified-data-model.md) (proposed, confirm at design review) |
 | Database | Postgres is the only required database, holding the spool too; object storage optional; no Kafka in v1 | [ADR-0005](../adr/0005-postgres-only-required-database.md) |
 | Environments and tenancy | An environment is a deployment; a tenant is a namespace | [ADR-0006](../adr/0006-environment-is-deployment-tenant-is-namespace.md) |
@@ -382,7 +383,7 @@ These facts were observed on vendor pages and in documentation during the refere
 - **A4.** Postgres can hold the spool at the volumes in A1, with about 14 days of retention. Object storage is added only for bulk-heavy datasets or long archives.
 - **A5.** Developers are comfortable with Python and git. Operators use only the dashboard.
 - **A6.** Vendor API limits (such as Zoho's daily call caps) are hard constraints, and they are budgeted rather than worked around.
-- **A7.** The chosen engine (DBOS or Hatchet) is MIT-licensed and self-hostable without a licence fee.
+- **A7.** DBOS Transact is MIT-licensed and self-hostable without a licence fee (verified in ADR-0003).
 
 **Constraints:**
 - **C1. MIT licence.** Distributed packages must not depend on copyleft (GPL, AGPL, SSPL) code.
@@ -404,7 +405,7 @@ L = likelihood, I = impact (H/M/L).
 | R3 | The chosen engine is immature or changes direction | M | M | Engine port and conformance suite; pinned versions; `LocalEngine` keeps tests engine-free |
 | R4 | Vendor API caps fall below real volume | H | M | Shared budgets with reserves; negotiate higher caps; prefer bulk endpoints |
 | R5 | SAP connectivity and driver licensing | M | H | OData first; drivers as user-installed extras; on-prem agent; early connector spike |
-| R6 | GoFrugal API surface unknown | M | M | Connector spike in phase 3; scope the connector to what the API supports |
+| R6 | GoFrugal API surface unknown | H | M | Confirmed in phase 3: no public API docs. Ask the vendor for docs and a sandbox. The connector is M2 if they arrive by M1's end, otherwise M3. File exchange is the fallback. |
 | R7 | A tenant isolation bug leaks data | L | H | Row-level security in the DB plus API checks; automated cross-tenant tests |
 | R8 | Postgres growth (spool, versions, ledger, logs) hurts performance | M | M | Daily and monthly table partitions dropped by retention jobs; compressed spool chunks; per-dataset switch to an object-storage spool for bulk-heavy datasets |
 | R9 | Too many concepts for junior operators and new contributors | M | M | Defaults and templates; the dashboard speaks in business terms; tutorials |
@@ -431,10 +432,10 @@ L = likelihood, I = impact (H/M/L).
 
 | ID | Question | Why it matters | Owner | Needed by |
 |---|---|---|---|---|
-| Q1 | DBOS or Hatchet? | Runtime adapter, remote-worker model, ops footprint | Engine spike, then sponsor | End of phase 3 |
-| Q2 | Which GoFrugal product and API access does the reference organisation have? | Connector scope | Sponsor | Phase 3 |
-| Q3 | SAP: which S/4HANA release, which OData services are enabled, is HANA SQL read allowed, and is RFC/BAPI needed for postings? | SAP connector scope and licensing | Sponsor, SAP team | Phase 3 |
-| Q4 | What is the Zoho API daily cap for the reference organisation, now and after negotiation? | Budget sizing; whether invoice-detail pulls fit | Sponsor | Phase 3 |
+| Q1 | DBOS or Hatchet? **Answered: DBOS Transact (ADR-0003).** | Runtime adapter, remote-worker model, ops footprint | Engine spike, then sponsor | Closed 30 Oct 2026 |
+| Q2 | Which GoFrugal product and API access does the reference organisation have? Phase 3 research found no public API docs, so this needs the vendor. | Connector scope | Sponsor | Before M1 ends |
+| Q3 | SAP: which S/4HANA release, which OData services are enabled, is HANA SQL read allowed, and is RFC/BAPI needed for postings? Phase 3 research supports OData first and `snapshot_diff` for prices. | SAP connector scope and licensing | Sponsor, SAP team | Before M2 starts |
+| Q4 | What is the Zoho API daily cap for the reference organisation, now and after negotiation? Published plan caps (1,500–2,500 a day) are far below the 25,000 reported in the reference evaluation, so confirm it in writing. | Budget sizing; whether invoice-detail pulls fit | Sponsor | Before M2 starts |
 | Q5 | Which identity provider for SSO: Google Workspace, Entra ID or Keycloak? | Auth design | Sponsor | M2 |
 | Q6 | Where will the reference organisation run prod: VM, Railway, a cloud provider or on-prem? | Deployment docs, agent topology | Sponsor | M1 |
 | Q7 | Must ERP price changes reach the POS within hours, or is nightly enough? | Derived-dataset schedule | Business owner | M2 |
@@ -479,7 +480,7 @@ Estimates assume two to three engineers working with AI assistants. They will be
 | Hold | Work waiting for a human decision |
 | Override | An audited runtime change to an operational knob |
 | Agent | An on-prem executor that connects out to the control plane |
-| Engine port | The small interface behind which DBOS or Hatchet runs our tasks |
+| Engine port | The small interface behind which DBOS runs our tasks |
 | Environment | One deployment: dev, qa, uat or prod |
 | Tenant | A namespace for data, config, users and budgets inside an environment |
 
@@ -491,4 +492,4 @@ Estimates assume two to three engineers working with AI assistants. They will be
    - inventories of problems in the reference organisation's existing pipelines;
    - hard-case tests of the data model;
    - engine pricing checks on vendor pages.
-3. The vendor facts in §9.2 were observed by that session in October 2026. They must be re-verified during the engine spike before ADR-0003 is accepted.
+3. The vendor facts in §9.2 were observed by that session in October 2026. The ones that still affect the decision were re-verified when ADR-0003 was accepted.

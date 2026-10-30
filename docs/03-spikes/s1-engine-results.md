@@ -22,9 +22,11 @@ Numbers are from container workers unless noted. ✅ pass · ⚠️ passes with 
 | T1 | Priority, one at a time per key | ✅ No overlap. Priority order exact (2,2,2,1,1,1,0,0,0). | ⚠️ No overlap. The first run per key is admitted in arrival order, then priority applies (0,2,2,2,1,1,1,0,0). |
 | T2a | Crash; the same worker restarts | ✅ Effects ×1. Resumed **7.0 s** after the kill (restart 5.9 s). The completed chunk wasn't redone: native step checkpoints. | ✅ Effects ×1. Resumed **30.6 s** after the kill (heartbeat timeout). Chunk checkpoints via our table. |
 | T2b | Crash; another worker must take over | ⚠️ **No automatic takeover.** Our sweeper, calling DBOS's *internal* `_recover_pending_workflows`, finished it 7.2 s later. | ✅ **Automatic.** Done 36.7 s after the kill. |
+| T2c | Crash; the control plane recovers the work with public APIs (added during the decision; host workers) | ✅ `DBOSClient.list_workflows(status="PENDING", executor_id=…)` then `resume_workflow(…, queue_name=…)`, from outside any worker. Effects ×1, and the completed chunk wasn't redone. Done 6.4 s after the call. | Not needed |
+| T2d | As T2c, on a keyed task with another task queued on the same key | ✅ The dead worker's task holds its key until resumed. The next task then waits its turn. Effects ×1. | Not needed |
 | T3 | Deploy mid-drain, new app version | ❌ **2 of 50 in-flight tasks stranded** (version gating). Queued work moved to v2 correctly. | ✅ 50/50, no duplicates |
 | T3 | Deploy mid-drain, same version + our sweeper | ✅ 50/50, no duplicates | ✅ 50/50 |
-| T3 | DBOS `auto_upgrade` | ⛔ **Requires a DBOS enterprise key** | n/a |
+| T3 | DBOS `auto_upgrade` | ⛔ **Needs a paid DBOS key.** The docs call it a Transact Enterprise feature, and the pricing page lists it under Pro ($99/month). | n/a |
 | T4 | Dedup (10 submissions, 5 concurrent) | ✅ 1 run | ✅ 1 run (native idempotency) |
 | T5 | 20 s durable sleep across a crash | ✅ Finished at **20.03 s** | ✅ Finished at **34.4 s**: resumed only after the heartbeat timeout |
 | T6 | Retry timing (policy 1, 2, 4 s); permanent error | ✅ Gaps 1.05, 2.04, 4.04 s. Permanent error: 1 attempt. | ⚠️ Gaps 3.8, 4.9, 10.2 s: native backoff is factor^n plus about 1–2 s of dispatch, **fixed per task definition**. Permanent error: 1 attempt. |
@@ -45,11 +47,12 @@ Numbers are from container workers unless noted. ✅ pass · ⚠️ passes with 
 1. **Version gating.** Unpinned queued work is only dequeued by workers on the latest registered application version.
    - Rolling back to an older version stops all dequeuing until `set_latest_application_version` is called.
    - In-flight work on a dead old-version worker is stranded.
-   - The built-in fix, `auto_upgrade`, is enterprise-only.
+   - The built-in fix, `auto_upgrade`, is a paid feature.
    - **We must own a version policy.** For example, one application version per runtime major, with code changes guarded by `DBOS.patch`, plus deploy tooling that sets the latest version.
 2. **No liveness for executors without Conductor.** A worker's in-flight work is recovered only when a worker with the same executor id restarts.
    - Stable executor ids (one per container replica) cover restarts.
-   - Workers that are scaled away need our sweeper, which uses an **internal** API. It needs a contract test in our adapter so an upgrade fails loudly.
+   - Workers that are scaled away need our sweeper. T2b used an **internal** API, but T2c and T2d showed that public `DBOSClient` calls do the same job from the control plane, so no internal API is needed.
+   - Until the sweeper resumes it, a dead worker's keyed task holds its key (T2d), so detection time matters.
 3. **Throughput is slots ÷ polling interval per worker.** Each idle worker costs about 46 tx/s at 0.2 s polling. Size and tune both. Our runtime submits one task per (route, version), not per event, so task rates stay well below event rates.
 4. **Strengths:**
    - exact priority and per-call retries;
@@ -141,12 +144,14 @@ Re-scored after the full-deployment re-test.
 | Ops footprint (20) | 17 | 13 | 10 | **DBOS:** adds no process.<br>**Hatchet lite:** one container, token setup, its own database.<br>**Hatchet full:** four long-running services and two setup jobs, including RabbitMQ (optional) and its own Postgres. |
 | Fit with the port (20) | 19 | 14 | 14 | **DBOS:** matches priority, retries, step checkpoints and sync bodies.<br>**Hatchet:** static retries, async-only durable work, first-admitted-FIFO. |
 | Remote model and security (15) | 10 | 12 | 12 | Native agents need DB credentials (DBOS) or engine credentials (Hatchet). Both work with our gateway relay. |
-| Maturity and release stability (15) | 9 | 7 | 7 | **DBOS:** enterprise-gated features, internal recovery API, frequent majors.<br>**Hatchet:** an **intermittent stall that survives restarts** (not seen on fresh stacks), opaque engine version, no Windows workers. |
+| Maturity and release stability (15) | 9 | 7 | 7 | **DBOS:** paid-tier features, internal recovery API, frequent majors.<br>**Hatchet:** an **intermittent stall that survives restarts** (not seen on fresh stacks), opaque engine version, no Windows workers. |
 | Measured latency and throughput (10) | 8 | 5 | 5 | **DBOS:** p95 0.27 s at 50/s, 55 tasks/s per worker, 7 s recovery.<br>**Hatchet:** 37–49 tasks/s per worker on fresh stacks, but p95 tails of 10–11 s and 30–36 s takeover. |
 | Debugging tools (10) | 4 | 9 | 9 | Hatchet's UI is free. DBOS's Conductor is paid. |
 | Licence and governance (5) | 3 | 5 | 5 | Both MIT, but DBOS gates operational features behind paid tiers |
 | Workarounds needed (5) | 2 | 3 | 3 | **DBOS:** sweeper, liveness, version policy.<br>**Hatchet:** Linux workers, timeouts, async bridge, retry loop. |
 | **Total (100)** | **72** | **68** | **65** | |
+
+These scores were set before T2c and T2d showed that recovery doesn't need the internal API. They slightly understate DBOS, and the decision doesn't change.
 
 ## Recommendation
 
@@ -158,7 +163,7 @@ The deciding questions are which set of gaps we would rather own, and how much a
 
 **Recommended: DBOS Transact, with three conditions:**
 1. **A version policy:** a fixed application version per runtime major, `DBOS.patch` for in-flight compatibility, and `feather deploy` setting the latest version.
-2. **Liveness and recovery in our sweeper:** worker heartbeats in our run journal, plus dead-executor recovery behind an adapter contract test.
+2. **Liveness and recovery in our sweeper:** worker heartbeats in our own tables, plus recovery of a dead worker's tasks through DBOS's public client API.
 3. **Polling sized to load:** start at 0.2–0.5 s, add workers, and track the idle cost.
 
 **Why:**
@@ -174,4 +179,4 @@ Its gaps fall in the control plane we already planned to build, which has a lead
 - a need for engine-level automatic takeover without writing our own;
 - a team that values Hatchet's free UI for engine debugging over the extra container.
 
-**Decision owner:** the sponsor, at the end-of-day review (ADR-0003).
+**Decision (30 Oct 2026):** the sponsor chose DBOS and asked to keep Hatchet on a side branch, `side/hatchet-engine`, for use if needed later ([ADR-0003](../adr/0003-durable-engine-selection-by-spike.md)).

@@ -1,12 +1,13 @@
 # Feather Connect — Design Specification
 
-> SDLC phase 2 of 7 · Version 0.1 (draft for review) · 30 October 2026
+> SDLC phase 2 of 7 · Version 0.2 (draft for review) · 30 October 2026
 > Owner: Abdul Sukkur · Prepared with Claude Code
 > Implements: [Discovery v0.2](../01-discovery/2026-10-30-feather-connect-discovery.md) · Decisions: [ADRs](../adr/README.md)
 
 | Version | Date | Author | Change |
 |---|---|---|---|
 | 0.1 | 2026-10-30 | Abdul Sukkur, with Claude Code | First complete draft, including the sponsor's directions: HTML-only front end, Postgres as the database |
+| 0.2 | 2026-10-30 | Abdul Sukkur, with Claude Code | Phase 3 spike results applied: DBOS chosen (ADR-0003), the engine port reshaped to what the spike validated, DBOS operating rules (§6.12), invariant I10, confirm-later sinks, spool sizing, connector findings |
 
 Review status: **awaiting sponsor review.** Requirement ids (FR-…, NFR-…) refer to the discovery document; §21 maps them to the sections below.
 
@@ -22,7 +23,7 @@ This specification describes how Feather Connect v1.0 (milestones M1–M3) is bu
 - AI operability and observability;
 - testing, the repository, deployment and the delivery plan.
 
-Decisions with lasting consequences are recorded as ADRs in [`docs/adr`](../adr/README.md). One decision is deliberately left open: the durable engine (ADR-0003). The design isolates it behind a small port (§6.8).
+Decisions with lasting consequences are recorded as ADRs in [`docs/adr`](../adr/README.md). The durable engine is DBOS Transact (ADR-0003), and the design keeps it behind a small port (§6.8).
 
 ## 2. Design principles
 
@@ -57,7 +58,7 @@ flowchart TB
     GW["Agent gateway"]
   end
   PG[("Postgres: catalog, runs, spool, ledger, state, audit, engine state")]
-  ENG["Durable engine: DBOS or Hatchet, behind the Engine port"]
+  ENG["Durable engine: DBOS Transact, behind the Engine port"]
   W["feather-worker (cloud)"]
   AG["feather agent (on-prem, outbound HTTPS only)"]
   OBJ[("Object storage: optional spool backend")]
@@ -89,7 +90,7 @@ flowchart TB
 | `feather-server` | HTML dashboard, JSON API, MCP endpoint, webhook ingress, agent gateway, scheduler, sealer, sweeper, alert evaluator, retention | FastAPI, Jinja2, HTMX, psycopg 3, Alembic | Replicas behind a load balancer; singleton loops elect a leader with a Postgres advisory lock |
 | `feather-worker` | Loads flow packages, registers them in the catalogue, executes tasks | SDK + engine adapter | Replicas; labels route work |
 | `feather agent` | Executes tasks for systems reachable only on-prem; connects out only | SDK + agent client | One or more per site |
-| Engine | Durable task execution: queueing, retries, durable waits, concurrency keys | DBOS or Hatchet adapter (ADR-0003) | Per engine |
+| Engine | Durable task execution: queueing, durable waits, concurrency keys, step checkpoints | DBOS Transact, a library inside each worker, behind `DbosEngine` (ADR-0003) | Worker replicas and polling interval (§6.12) |
 | Postgres | **The only required database**: catalogue, runs, spool, ledger, record state, audit, and the engine's state | Postgres ≥ 15, no extensions | Vertical; partitioned tables |
 | Object storage | Optional spool backend for bulk-heavy datasets and long archives | S3-compatible, Azure Blob, GCS | Elastic |
 
@@ -115,7 +116,7 @@ flowchart TB
 | Route | A path from a dataset to a destination: optional transform, sink, mode and priority | `sap.price → zakya` |
 | Delivery | The application of one version to one route. The ledger of deliveries is each route's cursor **and** its dead-letter state. | v42 → `zakya`: applied |
 | Flow | The deployable unit: the datasets it reads, the routes it delivers to, and its triggers | `sap-price-to-channels` |
-| Budget | A named, shared rate limit with windows and priority reserves | `zoho-api`: 90/min and 95,000/day |
+| Budget | A named, shared rate limit with windows and priority reserves | `zoho-api`: 90/min and 24,000/day |
 | Hold | Work paused for a human decision | A dropped column on `sap.material` |
 | Override | An audited runtime change to an operational knob | Pause route `magento` until 18:00 |
 | Readiness | "Complete through T" for a dataset or group | Sales ready through 2026-10-18 |
@@ -133,6 +134,7 @@ These hold for every flow. Tests in §16 check each one.
 - **I7.** Records are keyed by business identity. Partitions are derived from record fields with an explicit timezone. A record whose partition changes is an update, not a new record.
 - **I8.** Engine task arguments carry ids only. Data lives in the spool.
 - **I9.** Every action by a human, an agent or the system is authorised, audited and attributed.
+- **I10.** Deletes implied by complete versions are decided after every slice of the run has been read. A key absent from one slice but present in another slice of the same run is a move, not a delete.
 
 ### 4.3 Change strategies
 
@@ -146,7 +148,13 @@ These hold for every flow. Tests in §16 check each one.
 
 - **No-op suppression.** Records whose `row_hash` matches the last known state are dropped from the version, so lookback re-reads don't churn destinations.
 - **Reconcile.** Any incremental dataset can schedule a periodic `snapshot_diff` over recent partitions, for example `reconcile=fc.reconcile(every="7d", partitions="last 90 days")`. This catches hard deletes and back-dated rows that change stamps miss.
-- **Partition hash snapshots.** `snapshot_diff` keeps one compact snapshot per partition: a 64-bit key hash and a row hash per record, stored as a Parquet chunk in the spool. The diff is an anti-join between the new snapshot and the previous one inside the worker (Arrow or DuckDB). A 100-million-row stampless table therefore costs 16 bytes of state per row, plus the changed rows.
+- **Partition hash snapshots.** `snapshot_diff` keeps one compact snapshot per partition: a 64-bit key hash and a row hash per record, stored as a Parquet chunk in the spool. The diff is an anti-join between the new snapshot and the previous one inside the worker (Arrow or DuckDB). A 100-million-row stampless table therefore costs 16 bytes of state per row, plus the changed rows. Spike S4 measured 16.5 bytes per row, and 0.34 s to diff 1 million rows.
+- **Run-level delete reconciliation (I10).** A run that reads one slice seals its version when the read finishes. When a run reads several slices in full:
+  - Each `extract` task stages its version, along with its candidate deletes: keys in the previous snapshot and missing from the new one.
+  - When the last slice finishes, a `seal_run` task compares the candidates with every new snapshot of the run. A candidate found in another slice is a move, so it is dropped as a delete and the upsert records `moved_from`.
+  - `seal_run` then seals all of the run's versions in one transaction.
+  - Sealing slice by slice would delete and re-insert a record that moved between slices (spike S2, case H1b). That is harmless for a warehouse, but wrong for a side-effect route, where an ERP posting could be reversed and re-posted.
+  - The cost is that a multi-slice run delivers nothing until every slice has been read. A failed slice keeps the run open until it is retried or an operator abandons the run.
 
 ### 4.4 Partitions
 
@@ -250,7 +258,7 @@ def to_magento(rec: fc.Record, ctx: fc.Context) -> dict:
 
 
 def to_gofrugal(rec: fc.Record, ctx: fc.Context) -> dict:
-    return {"item_code": rec["material"], "price": rec["amount"]}  # shape confirmed in the connector spike
+    return {"item_code": rec["material"], "price": rec["amount"]}  # shape unconfirmed: no public API docs (§8.4)
 
 
 flow = fc.Flow(
@@ -388,7 +396,7 @@ connections:
 
 budgets:
   zoho-api:
-    limits: ["90/minute", "95000/day"]         # stays under the vendor cap
+    limits: ["90/minute", "24000/day"]         # stays under Zoho's 100/minute and the plan's daily cap (Q4)
     reserve: { high: 0.6 }                     # 60% kept for high-priority work
 
 flows:
@@ -483,18 +491,23 @@ sequenceDiagram
 
 If a worker dies between the seal commit and submitting `apply`, the deliveries stay `pending`. The **sweeper** re-submits pending deliveries that have no active task. This is the outbox pattern.
 
+A run that reads several slices in full seals through `seal_run` instead, after its last `extract` (§4.3). The worker that finishes the last slice submits `seal_run`, and the sweeper re-submits it if that worker dies first.
+
 ### 6.2 Tasks
 
 | Task | What it does | Concurrency key | Idempotency key |
 |---|---|---|---|
 | `plan` | Turns a trigger into partitions | `plan:{tenant}:{flow}` (with an overlap policy) | `run_id` |
-| `extract` | Reads one partition by its strategy, writes chunks, checkpoints, seals the version | `extract:{tenant}:{dataset}:{partition}` | `run_id + dataset + partition` |
+| `extract` | Reads one partition by its strategy, writes chunks, checkpoints, then seals the version, or stages it in a multi-slice run | `extract:{tenant}:{dataset}:{partition}` | `run_id + dataset + partition` |
+| `seal_run` | Decides a multi-slice run's implied deletes (I10) and seals its versions in one transaction | `seal:{tenant}:{dataset}` | `run_id + dataset` |
 | `apply` | Applies one version to one route, chunk by chunk | `apply:{tenant}:{route}:{partition}` | `route + version` (+ chunk) |
 | `compensate` | Reverses an applied side-effect version | as `apply` | `route + version + "compensate"` |
 | `reconcile` | Scheduled `snapshot_diff` over a range of partitions | as `extract` | `run_id + partition` |
 | `remote` | Stands in for a task that an on-prem agent executes (§6.9) | as the wrapped task | as the wrapped task |
 
-**Step size.** Steps are kept to about 5 minutes or less, with checkpoints inside long reads. This suits both candidate engines: DBOS pins workflow code versions, and Hatchet re-queues a worker that misses heartbeats.
+**Step size.** Steps are kept to about 5 minutes or less, with checkpoints inside long reads, so a crash or deploy loses little work.
+
+**Task shape.** All of these run as one engine task with a stable sequence of steps. Flow code (transforms, connectors) runs inside steps, so changing a flow never changes the step sequence (§6.12).
 
 ### 6.3 Push ingestion and the latency budget
 
@@ -540,6 +553,8 @@ stateDiagram-v2
 
 Every transition writes a `delivery_attempt` row with the actor, reason, code version, error and timings. The ledger keeps one row per (route, version); its history lives in the attempts.
 
+A delivery to a confirm-later sink stays `running` until `sink.confirm` reports each record's outcome (§8.1, §8.4). Rejections found at that point are quarantined as usual.
+
 ### 6.6 Rate budgets
 
 - **Definition.** Budgets are defined in config, per tenant, as a list of windows (`"90/minute"`, `"95000/day"`) plus a priority reserve.
@@ -551,7 +566,8 @@ Every transition writes a `delivery_attempt` row with the actor, reason, code ve
 - **Exhaustion is a wait, not a failure.**
   - A short wait (< 60 s) sleeps in-process.
   - A longer wait (a daily cap reached) becomes a durable sleep until the window refills. The task is shown as "Deferred: budget zoho-api (daily)", and an alert fires at 80% and 95% of any window.
-- This design is engine-independent. Hatchet's native rate limits may sit behind the same API as an optimisation.
+- **Two windows are the norm.** Zoho, for example, caps requests both per minute and per day, so its budget declares both (spike S3).
+- This design is engine-independent: budgets live in our Postgres tables. Spike T9 confirmed it on both engines.
 
 ### 6.7 Scheduler
 
@@ -568,9 +584,13 @@ Every transition writes a `delivery_attempt` row with the actor, reason, code ve
 # feather_connect/engine/port.py
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol, TypeVar
 
-TaskFn = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+T = TypeVar("T")
+
+
+class PermanentError(Exception):
+    """A failure that must not be retried."""
 
 
 @dataclass(frozen=True)
@@ -585,37 +605,71 @@ class TaskCall:
     task: str                                   # "feather.extract", "feather.apply", ...
     args: Mapping[str, Any]                     # ids only, never data (≤ 64 KB)
     idempotency_key: str
-    concurrency_key: str | None = None          # at most `concurrency_limit` running per key; the rest queue
-    concurrency_limit: int = 1
-    labels: Mapping[str, str] = field(default_factory=dict)  # routing, e.g. {"site": "hq"}
-    priority: int = 0
-    timeout: timedelta = timedelta(minutes=15)
+    concurrency_key: str | None = None          # one running per key; the rest queue
+    labels: Mapping[str, str] = field(default_factory=dict)  # routing to a worker pool
+    priority: int = 1                           # 0 low, 1 normal, 2 high
     retry: RetryPolicy = RetryPolicy()
 
 
+class TaskContext(Protocol):
+    """What a task body may use. Everything here survives a worker restart."""
+
+    task_ref: str
+    attempt: int
+
+    def step(self, name: str, fn: Callable[[], T]) -> T: ...  # runs once; a replay returns the saved result
+    def sleep(self, duration: timedelta) -> None: ...
+    def wait_signal(self, key: str, timeout: timedelta) -> Mapping[str, Any] | None: ...
+
+
+TaskFn = Callable[[TaskContext, Mapping[str, Any]], Mapping[str, Any] | None]
+
+
 class Engine(Protocol):
-    def register(self, tasks: Mapping[str, TaskFn]) -> None: ...
+    """The control-plane side: submits and manages work, never executes it."""
+
     def submit(self, call: TaskCall) -> str: ...  # returns the engine's task reference
     def cancel(self, ref: str) -> None: ...
-    def sleep(self, duration: timedelta) -> None: ...  # durable; only inside a task
-    def wait_signal(self, key: str, timeout: timedelta) -> Mapping[str, Any] | None: ...  # durable
-    def signal(self, key: str, payload: Mapping[str, Any]) -> None: ...
-    def run_worker(self, labels: Mapping[str, str], slots: int) -> None: ...
+    def signal(self, ref: str, key: str, payload: Mapping[str, Any]) -> None: ...
+    def recover_worker(self, worker_id: str) -> list[str]: ...  # re-queues a dead worker's tasks
     def health(self) -> Mapping[str, Any]: ...
+
+
+class WorkerRuntime(Protocol):
+    """The worker side: executes registered tasks until stopped."""
+
+    def run(self, tasks: Mapping[str, TaskFn], worker_id: str, labels: Mapping[str, str], slots: int) -> None: ...
 ```
+
+The port has no wall-clock task timeout. Long waits are durable sleeps, such as a budget deferral until tomorrow, so a task's age says nothing about whether it is stuck. Connector calls have their own timeouts, and the sweeper handles dead workers.
 
 **What stays outside the port.** Scheduling, budgets, the ledger, the run journal and the catalogue are ours, in Postgres. That keeps the port small and makes the dashboard engine-independent.
 
 | Adapter | Used for | Notes |
 |---|---|---|
 | `LocalEngine` | Tests, `feather run --local` | In-process and in-memory; deterministic; not durable |
-| `DbosEngine` | Production candidate | Tasks run as DBOS workflows and steps, with state in the same Postgres. Concurrency keys map to DBOS queues where they fit, otherwise to our Postgres lock fallback. |
-| `HatchetEngine` | Production candidate | Tasks run as Hatchet tasks with native concurrency keys and labels. Durable waits are implemented with events. Needs the `hatchet-lite` container; its state lives in Postgres. |
+| `DbosEngine` | Production | One DBOS workflow, `feather_task`, dequeued from queues, with state in schema `dbos` of the same Postgres. Operating rules are in §6.12. |
 
-**Engine conformance suite.** The engine spike and CI both run these tests:
+A spike-quality Hatchet adapter is kept on the branch `side/hatchet-engine` (ADR-0003). It isn't shipped.
+
+**How `DbosEngine` maps the port.** The spike validated each of these:
+
+| Port | DBOS |
+|---|---|
+| Concurrency key | Queue `feather-keyed` with `partition_concurrency=1`, and the key as `queue_partition_key` |
+| No concurrency key | Queue `feather-free` |
+| Idempotency key | Workflow id, with reuse policy `return-existing` |
+| Priority | DBOS priority, lowest number first: high 1, normal 2, low 3 |
+| Retry policy | A loop in `feather_task` with durable sleeps between attempts, so each call carries its own policy. `PermanentError` ends it. |
+| `step` | `DBOS.run_step` |
+| `sleep`, `wait_signal`, `signal` | `DBOS.sleep`, `DBOS.recv`, `DBOSClient.send` |
+| `recover_worker` | `DBOSClient.list_workflows(status="PENDING", executor_id=…)`, then `resume_workflow(…, queue_name=…)` |
+| Labels | A worker pool listens only to its own queues, for example `feather-keyed@pool-a` |
+
+**Engine conformance suite.** CI runs these tests against `DbosEngine` on every adapter change and engine upgrade:
 1. Priority, and one task at a time per concurrency key.
 2. kill -9 in the middle of a step causes no loss and no duplicate effects.
-3. Deploying new code mid-drain is safe: tasks finish or re-queue.
+3. Deploying new code mid-drain is safe under the version policy (§6.12): tasks finish or re-queue.
 4. Submitting the same idempotency key twice runs the task once.
 5. A durable sleep survives a restart.
 6. Retry timing follows the policy.
@@ -623,15 +677,10 @@ class Engine(Protocol):
 8. Two worker processes share work without double execution.
 9. Two flows share one vendor budget and never exceed it, while the high-priority flow keeps its reserve.
 10. Webhook-triggered work starts within the latency budget.
-11. A task labelled `site=hq` runs on an agent behind NAT with outbound-only connectivity.
+11. A task for `site=hq` runs through the gateway relay, on an agent with outbound-only connectivity.
+12. `recover_worker` re-queues a dead worker's tasks. A keyed task holds its key until then, and the next task on that key waits its turn.
 
-**Selection criteria (ADR-0003).** Passing all 11 tests is the gate. After that, the engines are weighed on:
-- ops footprint;
-- fit with the port (concurrency keys, durable waits, labels);
-- latency and throughput at the NFR targets;
-- maturity and release stability;
-- licence and governance;
-- engine-level debugging tools (secondary, because the dashboard is ours).
+**Engine choice.** ADR-0003 records the comparison and the decision for DBOS.
 
 ### 6.9 On-prem agents
 
@@ -650,7 +699,7 @@ Systems such as SAP are often reachable only inside a corporate network. A `feat
 
 **Secrets.** Secrets for on-prem connections are resolved on the agent, from its local secret provider. They never pass through the server.
 
-This path works the same with either engine. Whether to use a chosen engine's native remote workers instead is open question D2.
+**Why the gateway (D2).** The spike tried both. DBOS's native site routing works, but each agent would need Postgres credentials (T11a). The gateway relay resumed the task 0.059 s after the signal and gives sites no database or engine credentials (T11b).
 
 ### 6.10 Error handling
 
@@ -669,11 +718,39 @@ This path works the same with either engine. Whether to use a chosen engine's na
 - Every task and delivery attempt records the SHA. The dashboard warns when workers serving the same flow run different SHAs. The reference evaluation found an on-prem checkout that had drifted from the repo for weeks.
 - **Graceful drain.** On SIGTERM a worker stops leasing new work, finishes its current chunk (30 s grace), and leaves the rest to be re-queued.
 
+### 6.12 DBOS operating rules
+
+These are the conditions ADR-0003 set for adopting DBOS, plus what the spike taught us. They live in `DbosEngine` and the sweeper, so the rest of the system doesn't see them.
+
+**Version policy.**
+- `application_version` is fixed per runtime major, for example `feather-1`. It doesn't change on ordinary deploys. DBOS recovers only workflows whose version matches the worker, and a new version per deploy stranded 2 of 50 in-flight tasks (T3).
+- Flow code runs inside steps, so changing a flow doesn't change a task's step sequence and needs no new version.
+- A runtime change that alters which steps run, or their order, is guarded with `DBOS.patch`. The patch is retired with `DBOS.deprecate_patch` once older tasks have finished.
+- A new runtime major is a drain: old workers finish their tasks, and `feather deploy` calls `set_latest_application_version`. A rollback makes the same call with the older version, because DBOS stops dequeuing unpinned work otherwise.
+
+**Worker identity.** `executor_id` is stable per replica, so a restarted replica recovers its own work. That took 7 s in the spike (T2a).
+
+**Liveness and recovery.**
+- Workers write a heartbeat to the `worker` table every 5 s.
+- The leader-elected sweeper in `feather-server` declares a worker dead after 30 s without a heartbeat. It then calls `Engine.recover_worker`, which needs only public `DBOSClient` calls and no worker (T2c).
+- Until then, a dead worker's keyed task holds its key, so these timings bound how long that key's stream stalls (T2d).
+- A worker wrongly declared dead is safe. Steps are checkpointed, sinks are idempotent by key, and the ledger prevents re-application (I3).
+
+**Polling.**
+- `FEATHER_ENGINE_POLL_S` defaults to 0.5 s. Lower it to 0.2 s if dispatch becomes the bottleneck.
+- A worker dispatches at most slots ÷ polling interval. DBOS's default of 1.0 s gave a p95 of 66 s at 50 tasks/s (T10), and 0.2 s gave 0.27 s.
+- We submit one task per (route, version), not per event, so task rates stay well below event rates.
+- Each idle worker costs about 46 tx/s at 0.2 s polling (T12). The dashboard shows worker count and polling interval. Revisit this at around 20 workers.
+
+**Engine upgrades.** Each release pins the DBOS version, and the conformance suite runs on every upgrade.
+
+**Paid features.** We don't use `auto_upgrade` or Conductor, because Feather Connect is open source and can't depend on them. An organisation can still connect Conductor for engine-level debugging.
+
 ## 7. Storage
 
 ### 7.1 Postgres layout
 
-All tables live in schema `feather`, and every table carries `tenant_id`. The engine keeps its own schema (DBOS) or its own database on the same server (Hatchet).
+All tables live in schema `feather`, and every table carries `tenant_id`. DBOS keeps its state in its own schema, `dbos`, in the same database. Spike T7 found no locks on our tables and no extensions needed.
 
 | Table | Purpose | Key columns |
 |---|---|---|
@@ -691,6 +768,7 @@ All tables live in schema `feather`, and every table carries `tenant_id`. The en
 | `hold` | Items awaiting approval | kind, subject, summary, requested_by, status, decided_by, reason |
 | `override` | Runtime overrides | target, key, value, reason, created_by, expires_at |
 | `budget`, `budget_window` | Budgets and their token state | limits, reserve; window, tokens, refilled_at |
+| `worker` | Connected workers and their heartbeats (§6.12) | worker_id, labels, code_sha, slots, last_seen, state |
 | `agent`, `agent_task` | Registered agents and leased tasks | labels, last_seen; task, lease_expires |
 | `alert_rule`, `alert` | Alerting | rule, severity, state |
 | `audit` | Append-only audit trail | at, actor_type, actor, action, target, request, result |
@@ -702,8 +780,9 @@ All tables live in schema `feather`, and every table carries `tenant_id`. The en
 - **Backend interface.** `put_chunk`, `get_chunk`, `delete_version`, and an optional `presign`. Two backends ship:
   - **`postgres` (the default).** Data goes to `spool_chunk` as zstd-compressed Parquet blobs of 1–8 MB each. The table is partitioned by day, so retention drops whole partitions instead of deleting rows.
   - **`objects` (optional).** The same chunks are stored as files at `{root}/{tenant}/{dataset}/{partition}/{version_id}/part-{n}.parquet` on S3-compatible storage, Azure Blob or GCS. It is chosen per environment or per dataset (`spool="objects"`), for example for 100-million-row bulk extracts or for archives that DuckDB reads directly.
-- **Chunk format.** Every chunk holds the payload columns (nested types allowed) plus `_fc_key`, `_fc_op` and `_fc_row_hash`. Partition hash snapshots (§4.3) are chunks of kind `snapshot`.
-- **Sizing guide.** Typical compressed records take about 100–300 bytes, so 5 million records a day is roughly 0.5–1.5 GB a day. With 14-day retention that is roughly 7–21 GB in Postgres. Within the volumes the discovery assumes (A1), this fits ordinary managed Postgres plans; beyond that, use the `objects` backend for the heaviest datasets.
+- **Chunk format.** Every chunk holds the payload columns (nested types allowed) plus `_fc_key`, `_fc_op` and `_fc_row_hash`. Partition hash snapshots (§4.3) are chunks of kind `snapshot`. Push micro-batches use the same format: spike S4 measured a 10-event Parquet chunk at 9.2 ms against 7.8 ms for JSONB rows (p50), so one format is enough.
+- **Throughput.** Spike S4 wrote 154,000 rows/s with one writer and 288,000–332,000 rows/s with four, and read back at 316,000–385,000 rows/s. These are laptop numbers, against a target of 20,000 rows/s per worker (NFR-02).
+- **Sizing guide.** Compressed records took about 55 bytes each on synthetic 14-column invoice lines, so 5 million records a day is about 0.3 GB a day, or about 4 GB at 14-day retention. Wider real payloads will take more, so measure your own. Within the volumes the discovery assumes (A1), this fits ordinary managed Postgres plans; beyond that, use the `objects` backend for the heaviest datasets.
 
 ### 7.3 Retention
 
@@ -758,6 +837,7 @@ class Sink(Protocol):
     spec: ClassVar[fc.ConnectorSpec]
     def check(self, ctx: fc.Context) -> fc.CheckResult: ...
     def apply(self, ctx: fc.Context, batch: fc.ApplyBatch) -> fc.ApplyResult: ...       # idempotent per key
+    def confirm(self, ctx: fc.Context, token: str) -> fc.ConfirmResult: ...             # accept-now, confirm-later sinks only (M2)
     def compensate(self, ctx: fc.Context, batch: fc.ApplyBatch) -> fc.ApplyResult: ...  # side-effect sinks only
 ```
 
@@ -766,7 +846,8 @@ class Sink(Protocol):
 | `ReadRequest` | Partition, strategy, cursor (from the previous version's watermark) and window |
 | `Batch` | An Arrow record batch or a list of dicts |
 | `ApplyBatch` | Records with key, op and payload after the route's transform, plus the version id, chunk number and idempotency key |
-| `ApplyResult` | Applied count, plus per-record rejections with error classes |
+| `ApplyResult` | Applied count, plus per-record rejections with error classes. A sink whose destination accepts a batch and reports the outcome later returns `pending_confirmation=<token>` instead (§8.4, Magento). |
+| `ConfirmResult` | `pending`, or the final applied count and per-record rejections |
 | `Context` | `config`, `secret()`, `http` (an httpx client with retries, budget metering and log redaction), `budget`, `log`, `metrics`, `checkpoint()` for resumable reads, `now` (frozen per run) and `tz` |
 
 ### 8.2 Spec and capabilities
@@ -803,7 +884,7 @@ class Invoices(fc.Source):
 | DuckDB / MotherDuck | `feather-duckdb` | ✓ SQL | ✓ `append` / `upsert` / `replace_partition` | all | M1 |
 | SAP S/4HANA | `feather-sap` | ✓ OData v2/v4, HANA SQL (read) | ✓ OData; BAPI/RFC optional | `by_stamp`, `snapshot_diff`, `replace` | M2 |
 | Zoho Zakya | `feather-zakya` | ✓ invoices, credit notes, payments, items, price lists | ✓ items, prices, stock | `by_stamp`, `replace` | M2 |
-| GoFrugal | `feather-gofrugal` | Scope set by connector spike (Q2) | Scope set by connector spike (Q2) | Set by spike | M2 |
+| GoFrugal | `feather-gofrugal` | Scope set once the vendor provides API docs (Q2) | Scope set once the vendor provides API docs (Q2) | To be set | M2 if the docs arrive by M1's end, otherwise M3 |
 | Magento 2 / Adobe Commerce | `feather-magento` | ✓ orders, products, stock | ✓ products, prices, stock | `by_stamp`, `push` where webhooks exist | M2 |
 
 REST, GraphQL and HTTP support API-key, basic, bearer and OAuth2 (client credentials and refresh token) authentication.
@@ -811,27 +892,30 @@ REST, GraphQL and HTTP support API-key, basic, bearer and OAuth2 (client credent
 ### 8.4 Notes on the business connectors
 
 **SAP.**
-- OData services first; delta comes from change dates, or from OData delta tokens where the service offers them.
+- OData services first. The pricing API documents no delta token, and on-premise change stamps were reported as unreliable (spike S3). So `snapshot_diff` is the default for prices, and `by_stamp` on `LastChangeDateTime` is used only together with `reconcile`.
 - HANA SQL reads cover bulk ETL. They respect availability windows, and a `hana-read` budget protects the ERP's read capacity.
-- Postings go through OData APIs where they exist. BAPI/RFC is an optional extra: the user supplies SAP's NetWeaver RFC SDK, and the maintenance status of the Python RFC binding is verified in the spike.
+- Postings go through OData APIs where they exist. BAPI/RFC is an optional extra: the user supplies SAP's NetWeaver RFC SDK. SAP's own PyRFC is archived, so the docs name the third-party `pyrfcx` binding and flag its status.
 - The HANA client and RFC SDK aren't redistributable (constraint C2).
 - Side-effect sinks use a content-keyed duplicate guard and implement `compensate` (a reversal posting).
 - SAP usually runs through an on-prem agent.
 
 **Zoho Zakya.**
-- OAuth2 with refresh tokens, against region-specific Zoho domains.
+- OAuth2 with refresh tokens, against region-specific hosts (`api.zakya.com`, or `api.zakya.in` for India). The access token goes only in a header.
 - List endpoints are paginated; invoice lines need one detail call per document.
-- The connection's budget is shared by every flow that uses it.
+- Zoho caps calls both per minute (100) and per day (by plan), so the budget declares both windows. The connection's budget is shared by every flow that uses it.
+- There is no native webhook, so invoices are polled with `by_stamp`. A Zoho Flow to `feather` webhook bridge is an optional latency improvement.
 - The reference evaluation found the standard list-plus-detail path simpler than a custom export endpoint, provided the daily call cap is high enough (Q4).
 
 **GoFrugal.**
-- The API surface, authentication and limits are unknown and are established in the phase 3 connector spike (discovery Q2).
+- Spike S3 found no public API documentation. Third-party descriptions of a local "WebReporter" API are unverified.
+- The connector can't be scoped until GoFrugal provides API documentation and sandbox access (discovery Q2).
 - Until then, the fallback template exchanges files through S3-compatible storage.
 
 **Magento.**
-- REST with an integration token.
+- REST, signed with OAuth 1.0a integration credentials. Since 2.4.4, integration tokens are no longer accepted as bearer tokens by default, and admin tokens expire after 4 hours.
 - Orders are polled by `updated_at` through `searchCriteria` pagination. Webhooks are used where the edition provides them.
 - Product, price and stock writes use bulk asynchronous endpoints (which need Magento's queue consumers running), or synchronous calls for small batches.
+- **Bulk writes are accepted first and confirmed later.** The sink returns `pending_confirmation` with the `bulk_uuid`. The delivery stays `running`, and the `apply` task polls `sink.confirm(token)` with durable sleeps until each record's outcome is known. Without this, a delivery would be marked `applied` before the shop had processed it.
 - Stock goes through MSI source items.
 
 **DuckDB / MotherDuck.**
@@ -884,6 +968,7 @@ Each template ships with:
 - `check` and `discover` against recorded HTTP cassettes;
 - pagination and resuming from a cursor;
 - **idempotent apply** (applying the same batch twice changes nothing);
+- accept-then-confirm behaviour, for sinks that use `confirm`;
 - delete handling;
 - budget metering;
 - error classification (retryable or permanent);
@@ -1186,7 +1271,7 @@ sla=fc.sla(max_lag="15m", expected_by="06:00", volume_tolerance=0.5)
 | Unit | SDK, services, strategies (property tests on diff/version invariants) | pytest, hypothesis | Every PR |
 | Flow harness | Templates and examples on `LocalEngine` | `feather_connect.testing` | Every PR |
 | Connector conformance | §8.7 checks with recorded cassettes; live sandboxes where credentials exist | pytest, respx/VCR | Every PR; live checks nightly |
-| Engine conformance | The 11 tests in §6.8, against each adapter | Docker | Nightly and on adapter changes |
+| Engine conformance | The tests in §6.8, against `DbosEngine` | Docker | Nightly, and on adapter changes and engine upgrades |
 | Integration / e2e | Server + worker + Postgres + mock APIs; webhook → apply; dashboard actions | Docker Compose, Playwright for Python | Smoke tests every PR; full suite nightly |
 | Hard cases | H1–H15 below | e2e harness | Nightly and every release |
 | Chaos | kill -9 of workers and server; Postgres restart; agent disconnect; network delay | e2e harness | Nightly |
@@ -1229,9 +1314,7 @@ feather-connect/
 │   ├── feather-server/           # control plane: HTML dashboard, JSON API, MCP, ingress, agent gateway
 │   │   └── feather_server/web/   #   templates/ (Jinja2), static/ (CSS, vendored HTMX, icons)
 │   ├── feather-cli/              # the `feather` command (also MCP over stdio)
-│   ├── engines/
-│   │   ├── feather-engine-dbos/
-│   │   └── feather-engine-hatchet/
+│   ├── feather-engine-dbos/      # DbosEngine
 │   └── connectors/
 │       ├── feather-postgres/  feather-s3/      feather-http/      feather-duckdb/
 │       └── feather-sap/       feather-zakya/   feather-gofrugal/  feather-magento/
@@ -1280,7 +1363,6 @@ feather-connect/
 | `postgres` | `postgres:17` | Yes (or managed Postgres ≥ 15) | Data volume; PITR through the managed service or pgBackRest |
 | `feather-server` | `ghcr.io/<org>/feather-server` | Yes | 1–2 replicas: dashboard, API, MCP, ingress, scheduler, agent gateway |
 | `feather-worker` | Your flow image, built `FROM ghcr.io/<org>/feather-worker` | Yes | N replicas |
-| `hatchet-lite` | Hatchet | Only if Hatchet is chosen | Uses the same Postgres server |
 | Object storage | Any S3-compatible service | No (profile `objects`) | Only for the object-storage spool |
 | Keycloak | — | No (profile `sso`) | Local SSO testing |
 | Collector, Prometheus, Grafana | — | No (profile `observability`) | Optional telemetry |
@@ -1291,7 +1373,8 @@ feather-connect/
 |---|---|
 | `FEATHER_ENV` | The environment name |
 | `FEATHER_DATABASE_URL` | Postgres connection URL |
-| `FEATHER_ENGINE` | `dbos`, `hatchet` or `local` |
+| `FEATHER_ENGINE` | `dbos` or `local` |
+| `FEATHER_ENGINE_POLL_S` | Queue polling interval in seconds, 0.5 by default (§6.12) |
 | `FEATHER_SPOOL` | `postgres` or `objects` |
 | `FEATHER_OBJECTS_URL` | Object-storage location, when the `objects` spool is used |
 | `FEATHER_SECRET_KEY` | Signing key for session cookies |
@@ -1306,7 +1389,7 @@ feather-connect/
 4. Loads the demo project on the JSON simulation connector.
 5. Opens the dashboard at `http://localhost:8080`.
 
-With DBOS no extra container is needed; with Hatchet, `hatchet-lite` is started too. Running without Docker, on an embedded Postgres, is open question D3.
+The engine needs no extra container. Docker stays the default for Postgres, and running on an embedded Postgres is revisited after M1 (D3).
 
 ### 18.3 On-prem agent
 
@@ -1330,7 +1413,7 @@ These are estimates, to be validated by the performance suite.
 ### 18.5 Operations
 
 - **Upgrades.** Run `feather server migrate` (forward-only), then do a rolling server restart. Workers drain and roll.
-- **Engine versions.** Each release pins the engine version and documents its upgrade steps.
+- **Engine versions.** Each release pins the DBOS version and documents its upgrade steps (§6.12).
 - **Backups.** Postgres PITR (§7.5), plus restore drills.
 - **Runbooks** (phase 7):
   - triaging failed deliveries;
@@ -1346,8 +1429,8 @@ These are estimates, to be validated by the performance suite.
 
 | Milestone | Scope | Exit criteria |
 |---|---|---|
-| **M1 — MVP: the core loop** (~8 weeks) | • **SDK:** datasets, flows, routes, strategies (`by_stamp`, `snapshot_diff`, `replace`, webhook `push`), partitions, versions, record state (`keep_state`), transforms, validation and quarantine.<br>• **Runtime:** ledger, replay, budget windows, scheduler, ingress, sealer and sweeper on `LocalEngine` plus the chosen engine adapter, with the Postgres spool.<br>• **Server:** JSON API and HTML dashboard (overview, flows, flow detail, partition grid, runs and logs, deliveries and failures, connections) with run, re-run, backfill, cancel, retry, skip and replay (with preview).<br>• **CLI:** `dev`, `new`, `validate`, `run`, `test`, `backfill`, `replay`, `status`, `logs`, `server`, `worker`.<br>• **Connectors:** in-memory, JSON simulation, Postgres, S3, REST, GraphQL, webhook, HTTP, DuckDB/MotherDuck, plus the 5 generic templates.<br>• **Platform basics:** local users and tokens, env/file secrets, structured logs, Compose, `AGENTS.md`, environment overlays, default tenant. | • The demo fans JSON simulation data out to Postgres, DuckDB and HTTP.<br>• Webhook → HTTP p95 ≤ 5 s.<br>• Re-run and replay work from the dashboard.<br>• kill -9 mid-apply loses and duplicates nothing.<br>• `feather dev` ≤ 5 minutes.<br>• H1–H4, H6 and H14 pass. |
-| **M2 — business connectors and operations** (~8 weeks) | • **Connectors and templates:** SAP (OData, HANA read), Zoho Zakya, GoFrugal, Magento, plus the retail templates.<br>• **On-prem:** agent and gateway.<br>• **Side effects:** side-effect routes with compensate, approvals and holds.<br>• **Data rules:** schema policy; readiness and `on_ready`; derived datasets and SQL transforms; bootstrapping newly added routes from history.<br>• **Operations:** budget priorities and a budgets page; overrides; RBAC; audit; PII masking; record trace and version diff; SLAs and anomalies; alerts.<br>• **AI:** MCP server and agent skills.<br>• **Delivery:** `feather deploy` and `feather diff`; the `objects` spool backend. | • The reference flows run in the reference organisation's qa/uat: Zakya invoices → MotherDuck, SAP prices → Zakya/GoFrugal/Magento, Magento orders → SAP with approvals.<br>• All hard cases pass.<br>• Agent-driven recovery is demonstrated in qa. |
+| **M1 — MVP: the core loop** (~8 weeks) | • **SDK:** datasets, flows, routes, strategies (`by_stamp`, `snapshot_diff`, `replace`, webhook `push`), partitions, versions, record state (`keep_state`), transforms, validation and quarantine.<br>• **Runtime:** ledger, replay, budget windows, scheduler, ingress, sealer and sweeper on `LocalEngine` plus `DbosEngine`, with the Postgres spool.<br>• **Server:** JSON API and HTML dashboard (overview, flows, flow detail, partition grid, runs and logs, deliveries and failures, connections) with run, re-run, backfill, cancel, retry, skip and replay (with preview).<br>• **CLI:** `dev`, `new`, `validate`, `run`, `test`, `backfill`, `replay`, `status`, `logs`, `server`, `worker`.<br>• **Connectors:** in-memory, JSON simulation, Postgres, S3, REST, GraphQL, webhook, HTTP, DuckDB/MotherDuck, plus the 5 generic templates.<br>• **Platform basics:** local users and tokens, env/file secrets, structured logs, Compose, `AGENTS.md`, environment overlays, default tenant. | • The demo fans JSON simulation data out to Postgres, DuckDB and HTTP.<br>• Webhook → HTTP p95 ≤ 5 s.<br>• Re-run and replay work from the dashboard.<br>• kill -9 mid-apply loses and duplicates nothing.<br>• `feather dev` ≤ 5 minutes.<br>• H1–H4, H6 and H14 pass. |
+| **M2 — business connectors and operations** (~8 weeks) | • **Connectors and templates:** SAP (OData, HANA read), Zoho Zakya, Magento, plus the retail templates. GoFrugal too if its API docs arrive by M1's end, otherwise it moves to M3.<br>• **On-prem:** agent and gateway.<br>• **Side effects:** side-effect routes with compensate, approvals and holds.<br>• **Data rules:** schema policy; readiness and `on_ready`; derived datasets and SQL transforms; bootstrapping newly added routes from history.<br>• **Operations:** budget priorities and a budgets page; overrides; RBAC; audit; PII masking; record trace and version diff; SLAs and anomalies; alerts.<br>• **AI:** MCP server and agent skills.<br>• **Delivery:** `feather deploy` and `feather diff`; the `objects` spool backend. | • The reference flows run in the reference organisation's qa/uat: Zakya invoices → MotherDuck, SAP prices → Zakya/GoFrugal/Magento, Magento orders → SAP with approvals.<br>• All hard cases pass.<br>• Agent-driven recovery is demonstrated in qa. |
 | **M3 — enterprise and v1.0** (~8 weeks) | • **Tenancy:** multi-tenancy (RLS, quotas, per-tenant config and RBAC, worker pools).<br>• **Environments:** environment peers and the fleet view; protections for protected environments.<br>• **Integrations:** OIDC SSO; vault secret providers; Postgres CDC; Prometheus and OpenTelemetry export.<br>• **Hardening:** chaos and performance suites with published results; a security review.<br>• **Launch:** docs site; the v1.0.0 release. | • NFR targets met.<br>• Release checklist complete.<br>• The reference organisation's in-scope flows are cut over to prod. |
 
 **Reference-organisation migration (strangler pattern):**
@@ -1360,16 +1443,16 @@ These are estimates, to be validated by the performance suite.
 
 ## 20. Open design questions
 
-| ID | Question | Resolved by |
+| ID | Question | Status |
 |---|---|---|
-| D1 | DBOS or Hatchet? | Engine spike (ADR-0003) |
-| D2 | Should agents use our gateway even if the chosen engine has native remote workers? Proposed: yes, so sites hold no database or engine credentials and tenants stay isolated. | Engine spike + security review |
-| D3 | Can `feather dev` run without Docker on an embedded Postgres? | `feather dev` spike |
-| D4 | Should transforms run per route at apply time (proposed), or be materialised as derived versions for heavy transforms? | M1 performance tests |
-| D5 | Is one Parquet chunk per push micro-batch fast enough for the 5 s target, or should tiny versions be stored as JSONB rows? | M1 performance tests |
-| D6 | Which object-storage library: fsspec or obstore? | M2 |
-| D7 | Excel and SFTP file connectors in v1? They are not in the v1 list today. | Sponsor |
-| D8 | Exact endpoints and limits for Zakya, GoFrugal, Magento and SAP | Connector spikes |
+| D1 | DBOS or Hatchet? | **Closed:** DBOS (ADR-0003) |
+| D2 | Should agents use our gateway even if the engine has native remote workers? | **Closed:** yes, so sites hold no database or engine credentials and tenants stay isolated (T11, §6.9). The security review still checks it in M3. |
+| D3 | Can `feather dev` run without Docker on an embedded Postgres? | **Deferred:** Docker stays the default; revisit after M1 |
+| D4 | Should transforms run per route at apply time (proposed), or be materialised as derived versions for heavy transforms? | Open: M1 performance tests |
+| D5 | Is one Parquet chunk per push micro-batch fast enough for the 5 s target, or should tiny versions be stored as JSONB rows? | **Closed:** one format, Parquet (S4, §7.2) |
+| D6 | Which object-storage library: fsspec or obstore? | Open: M2 |
+| D7 | Excel and SFTP file connectors in v1? They are not in the v1 list today. | Open: sponsor |
+| D8 | Exact endpoints and limits for Zakya, GoFrugal, Magento and SAP | **Partly closed:** desk research done (S3, §8.4). Live probes need sandbox access, and GoFrugal needs vendor docs. |
 
 ## 21. Requirement traceability
 

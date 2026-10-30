@@ -11,7 +11,7 @@ The system must be easy to run and maintain. Kubernetes isn't required by the sp
 ## Decision
 
 - **`feather dev`** runs a full local stack with one command.
-- **Docker Compose** runs a full environment: Postgres, server and workers, plus `hatchet-lite` if Hatchet is chosen.
+- **Docker Compose** runs a full environment: Postgres, server and workers.
 - The same images run on any VM or container platform.
 - The on-prem agent installs with pip or as a container.
 - A Helm chart follows after v1.0.

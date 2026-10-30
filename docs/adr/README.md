@@ -8,7 +8,7 @@ Each ADR records one decision with lasting consequences: its context, the decisi
 |---|---|---|
 | [0001](0001-python-throughout-html-dashboard.md) | Python throughout; server-rendered HTML dashboard | Accepted |
 | [0002](0002-own-control-plane-engine-behind-port.md) | Our own control plane and dashboard; engine behind a port | Accepted |
-| [0003](0003-durable-engine-selection-by-spike.md) | Durable engine: DBOS or Hatchet, chosen by a conformance spike | Proposed |
+| [0003](0003-durable-engine-selection-by-spike.md) | Durable engine: DBOS Transact, chosen by a conformance spike | Accepted |
 | [0004](0004-unified-data-model.md) | One data model for ETL and events | Proposed |
 | [0005](0005-postgres-only-required-database.md) | Postgres as the only required database; object storage optional; no Kafka in v1 | Accepted |
 | [0006](0006-environment-is-deployment-tenant-is-namespace.md) | An environment is a deployment; a tenant is a namespace | Accepted |

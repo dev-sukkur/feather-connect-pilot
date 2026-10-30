@@ -45,3 +45,5 @@
 {"test": "T11b", "workers": "host", "deploy": "library", "at": 1793361099.0367825, "result": {"rows": 42}, "signal_to_resume_s": 0.053}
 {"test": "T12 workers=1", "workers": "docker", "deploy": "library", "at": 1793361177.6002734, "idle_tx_per_s": 52.1, "client_connections": 10}
 {"test": "T12 workers=3", "workers": "docker", "deploy": "library", "at": 1793361235.005677, "idle_tx_per_s": 144.1, "client_connections": 25}
+{"test": "T2c public resume", "workers": "host", "deploy": "library", "at": 1793361870.4243903, "resumed": 1, "effects": {"c0": 1, "c1": 1, "c2": 1}, "chunk_execs": {"c0": 1, "c1": 2, "c2": 1}, "kill_to_done_s": 10.643463, "sweep_to_done_s": 6.403895}
+{"test": "T2d public resume, keyed", "workers": "host", "deploy": "library", "at": 1793361898.3852937, "blocked_until_resume": true, "resumed": 1, "b_started_after_a_ended": true, "effects": {"c0": 1, "c1": 1, "c2": 1}}

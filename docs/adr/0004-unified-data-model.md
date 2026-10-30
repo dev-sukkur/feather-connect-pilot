@@ -17,7 +17,7 @@ The reference evaluation tested a candidate model against 18 hard cases and had 
 
 ## Decision
 
-- **Concepts.** Dataset, Record, Partition, Version, Run, Route and Delivery ledger, with invariants I1–I9 (design §4).
+- **Concepts.** Dataset, Record, Partition, Version, Run, Route and Delivery ledger, with invariants I1–I10 (design §4).
 - **Change strategies:** `by_stamp`, `snapshot_diff`, `replace` and `push`.
 - **Route modes:** `upsert`, `append`, `replace_partition` and `side_effect`.
 - **Readiness groups** give consistent cuts. They gate only the flows that ask for them.
@@ -33,6 +33,10 @@ The reference evaluation tested a candidate model against 18 hard cases and had 
 **Costs:**
 - More concepts than a simple pipeline tool. Defaults, templates and business-language screens hide them.
 - Versions and the spool consume storage, which retention keeps in check (design §7.3).
+
+## Spike evidence (30 Oct 2026)
+
+A minimal prototype passed 8 of 8 hard cases ([S2 results](../03-spikes/s2-core-model.md)). It led to one change: invariant I10, which decides implied deletes per run instead of per slice. The spike didn't cover `compensate`, approvals, schema evolution or concurrency between runs.
 
 ## Alternatives considered
 
