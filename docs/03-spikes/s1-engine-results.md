@@ -35,7 +35,7 @@ Numbers are from container workers unless noted. ✅ pass · ⚠️ passes with 
 | T10b | 50 tasks/s in batches of 10 | ⚠️ A start-up backlog that then drained (p95 6.0 s, falling to 1.5 s) | ⚠️ Bulk submit 46 ms per batch. Latency **flat at about 10 s**: one worker's capacity is about the arrival rate. |
 | T11a | Native site routing | ✅ Exact. The **agent needs Postgres credentials.** | ✅ Exact. The **agent needs engine gRPC access and a tenant token.** |
 | T11b | Relay through our gateway (durable wait + signal) | ✅ Resumed 0.059 s after the signal | ✅ Resumed 0.051 s after the signal (after an adapter fix) |
-| T12 | Idle Postgres load | About **47 tx/s per worker** at 0.2 s polling (1 → ≈48, 3 → ≈142); about 6 connections per worker | About **37 tx/s, flat in the number of workers** (1 → 37.4, 3 → 39.4); about 30 connections held by the engine |
+| T12 | Idle Postgres load | About **46 tx/s per extra worker** at 0.2 s polling (1 → 52, 3 → 144, measured with no other engine on the server); about 7 connections per worker | About **37 tx/s, flat in the number of workers** (1 → 37.4, 3 → 39.4); about 30 connections held by the engine |
 | T13 | Drain 1,000 queued tasks, 1 worker × 16 slots | **55 tasks/s** | ❌ **The engine wedged on 2 of 2 attempts** (see the stability finding). After a restart it drained the leftover backlog at **37 tasks/s**. |
 
 ## Findings that matter for the design
@@ -50,7 +50,7 @@ Numbers are from container workers unless noted. ✅ pass · ⚠️ passes with 
 2. **No liveness for executors without Conductor.** A worker's in-flight work is recovered only when a worker with the same executor id restarts.
    - Stable executor ids (one per container replica) cover restarts.
    - Workers that are scaled away need our sweeper, which uses an **internal** API. It needs a contract test in our adapter so an upgrade fails loudly.
-3. **Throughput is slots ÷ polling interval per worker.** Each idle worker costs about 47 tx/s at 0.2 s polling. Size and tune both. Our runtime submits one task per (route, version), not per event, so task rates stay well below event rates.
+3. **Throughput is slots ÷ polling interval per worker.** Each idle worker costs about 46 tx/s at 0.2 s polling. Size and tune both. Our runtime submits one task per (route, version), not per event, so task rates stay well below event rates.
 4. **Strengths:**
    - exact priority and per-call retries;
    - native step checkpoints;
@@ -108,7 +108,7 @@ All are `latest` images as of 30 Oct 2026. Workers are Linux containers that rea
 - The stall is **not** specific to `hatchet-lite`, and our features are **not** a simple trigger.
 - It appeared only on stacks that had already run a lot: `hatchet-lite` after the whole suite, and the first full stack after two bursts.
 - Once it appeared, it **came back after engine restarts**. Only a fresh database cleared it.
-- **4 fresh-stack runs (12 bursts, 24 kills) never failed.**
+- **4 fresh-stack runs (9 bursts, 24 kills) never failed.**
 
 It's an intermittent failure mode with an unknown trigger and state that persists across restarts. Production can't fix that by rebuilding from an empty database. A fresh stack performs well: a 43–49 tasks/s drain, close to DBOS's 55.
 
@@ -138,7 +138,7 @@ Re-scored after the full-deployment re-test.
 
 | Criterion (weight) | DBOS | Hatchet lite | Hatchet full | Why |
 |---|---|---|---|---|
-| Ops footprint (20) | 17 | 13 | 10 | **DBOS:** adds no process.<br>**Hatchet lite:** one container, token setup, its own database.<br>**Hatchet full:** five services, including RabbitMQ (optional) and its own Postgres. |
+| Ops footprint (20) | 17 | 13 | 10 | **DBOS:** adds no process.<br>**Hatchet lite:** one container, token setup, its own database.<br>**Hatchet full:** four long-running services and two setup jobs, including RabbitMQ (optional) and its own Postgres. |
 | Fit with the port (20) | 19 | 14 | 14 | **DBOS:** matches priority, retries, step checkpoints and sync bodies.<br>**Hatchet:** static retries, async-only durable work, first-admitted-FIFO. |
 | Remote model and security (15) | 10 | 12 | 12 | Native agents need DB credentials (DBOS) or engine credentials (Hatchet). Both work with our gateway relay. |
 | Maturity and release stability (15) | 9 | 7 | 7 | **DBOS:** enterprise-gated features, internal recovery API, frequent majors.<br>**Hatchet:** an **intermittent stall that survives restarts** (not seen on fresh stacks), opaque engine version, no Windows workers. |
@@ -167,7 +167,7 @@ The deciding questions are which set of gaps we would rather own, and how much a
 - It recovers fastest when a worker restarts.
 - It works on every developer machine.
 
-Its gaps fall in the control plane we already planned to build, which has a leader-elected sweeper. Hatchet's gaps instead sit in the engine and SDK, which we don't control. The re-test showed one of them can stall all work and persist across restarts. The production-recommended full stack also adds five services against ADR-0005's "Postgres only".
+Its gaps fall in the control plane we already planned to build, which has a leader-elected sweeper. Hatchet's gaps instead sit in the engine and SDK, which we don't control. The re-test showed one of them can stall all work and persist across restarts. The production-recommended full stack also adds four long-running services and two setup jobs against ADR-0005's "Postgres only".
 
 **What would flip this to Hatchet:**
 - many workers (where per-worker polling load starts to matter, around 20+);
