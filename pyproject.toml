@@ -1,0 +1,44 @@
+# Workspace root. It is not a package: it defines the workspace, the shared dev tools and their
+# configuration. Each distribution lives under packages/ with its own pyproject.toml.
+#
+# There is deliberately no [project] table here. With one, `uv sync` installs only the root's own
+# dependencies; without it, `uv sync` installs every workspace member.
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*", "packages/connectors/*"]
+# packages/connectors holds packages but is not one.
+exclude = ["packages/connectors"]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "pytest-timeout",
+    "hypothesis",
+    "ruff",
+    "pyright",
+    "pyarrow-stubs",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+# spikes/ is throwaway code with its own pyproject. ruff also formats the Python code blocks in
+# Markdown files, and the snippets in docs/ are deliberately compressed, so docs/ is out as well.
+extend-exclude = ["spikes", "docs"]
+
+[tool.ruff.lint.isort]
+# The packages live under packages/*/src, where ruff can't see them, so name them here to keep
+# their imports in a separate group from third-party ones.
+known-first-party = ["feather_connect", "feather_engine_dbos", "feather_server", "feather_cli"]
+
+[tool.pyright]
+# Check the packages only: spikes/ is throwaway code with its own dependencies.
+include = ["packages"]
+strict = ["packages/feather-connect/src"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+timeout = 120
