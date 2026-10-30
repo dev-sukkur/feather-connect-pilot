@@ -1,6 +1,6 @@
 # S1 — Engine spike results: DBOS vs Hatchet (30 Oct 2026)
 
-Test spec: [s1-engine-spike.md](s1-engine-spike.md). Code and raw results: [`spikes/engine`](../../spikes/engine/README.md); facts are in `results/*.jsonl`.
+Test spec: [s1-engine-spike.md](s1-engine-spike.md). Code and raw results: [`spikes/engine`](../../spikes/engine/README.md); facts are in `results/*.jsonl`. The Hatchet adapter, its deployments and the T14 probes are on the branch `side/hatchet-engine`.
 
 ## Setup
 
@@ -83,7 +83,7 @@ The root cause was not established, and a search turned up no matching issue. Th
 
 ## Re-test on full Hatchet (sponsor request, 30 Oct afternoon)
 
-**Deployment.** Hatchet's reference Docker Compose stack, [`compose.hatchet-full.yaml`](../../spikes/engine/compose.hatchet-full.yaml):
+**Deployment.** Hatchet's reference Docker Compose stack, `spikes/engine/compose.hatchet-full.yaml` on the branch `side/hatchet-engine`:
 - its own Postgres 15.6;
 - RabbitMQ;
 - migration and setup jobs;

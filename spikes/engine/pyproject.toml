@@ -1,11 +1,10 @@
 [project]
 name = "feather-engine-spike"
 version = "0.0.0"
-description = "THROWAWAY spike: DBOS vs Hatchet conformance tests for Feather Connect (ADR-0003)"
+description = "THROWAWAY spike: engine conformance tests for Feather Connect (ADR-0003)"
 requires-python = ">=3.12"
 dependencies = [
     "dbos",
-    "hatchet-sdk",
     "psycopg[binary,pool]",
     "httpx",
     "fastapi",

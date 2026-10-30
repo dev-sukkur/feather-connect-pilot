@@ -18,7 +18,7 @@ LOGS = ROOT / "results" / "logs"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption("--engine", default="dbos", choices=["dbos", "hatchet"])
+    parser.addoption("--engine", default="dbos", choices=["dbos"])
 
 
 @pytest.fixture(scope="session")
@@ -37,29 +37,16 @@ def run(request: pytest.FixtureRequest, engine_name: str) -> str:
 
 
 @pytest.fixture(scope="session")
-def client(engine_name: str):
-    if engine_name == "dbos":
-        from spike.dbos_engine import DbosClient
+def client():
+    from spike.dbos_engine import DbosClient
 
-        c = DbosClient()
-    else:
-        from spike.hatchet_engine import HatchetClient
-
-        c = HatchetClient()
+    c = DbosClient()
     yield c
     c.close()
 
 
 IMAGE = "feather-spike-worker"
 NETWORK = "feather-spike_default"
-
-
-def _dotenv() -> dict[str, str]:
-    path = ROOT / os.environ.get("SPIKE_ENV_FILE", ".env")
-    if not path.exists():
-        return {}
-    return dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
-                if "=" in line and not line.lstrip().startswith("#"))
 
 
 class Workers:
@@ -77,13 +64,7 @@ class Workers:
 
     def _docker_run(self, name: str, args: list[str], env: dict | None) -> None:
         cname = f"fs-{uuid.uuid4().hex[:8]}-{name}"
-        token = _dotenv().get("HATCHET_CLIENT_TOKEN", "")
         envs = {"SPIKE_DB_URL": "postgresql://feather:feather_spike@postgres:5432/feather_spike",
-                "HATCHET_CLIENT_TOKEN": token, "HATCHET_CLIENT_TLS_STRATEGY": "none",
-                "HATCHET_CLIENT_HOST_PORT": os.environ.get("SPIKE_HATCHET_WORKER_HOST_PORT", "hatchet-lite:7077"),
-                "HATCHET_CLIENT_SERVER_URL": os.environ.get("SPIKE_HATCHET_WORKER_SERVER_URL",
-                                                            "http://hatchet-lite:8888"),
-                **{k: v for k, v in os.environ.items() if k.startswith("SPIKE_HATCHET_")},
                 **(env or {})}
         cmd = ["docker", "run", "-d", "--name", cname, "--network", NETWORK,
                "-v", f"{(ROOT / 'spike').as_posix()}:/app/spike:ro"]
@@ -144,7 +125,7 @@ class Workers:
 
 @pytest.fixture
 def workers(engine_name: str, run: str):
-    if engine_name == "dbos" and journal.scalar("select to_regclass('dbos.workflow_status')"):
+    if journal.scalar("select to_regclass('dbos.workflow_status')"):
         # Drop work left queued by earlier tests so it can't flood this test's worker.
         journal.execute("delete from dbos.workflow_status where status in ('ENQUEUED', 'PENDING', 'DELAYED')")
     w = Workers(engine_name, run)
@@ -192,7 +173,7 @@ def record(engine: str, test: str, **facts: Any) -> None:
     """Append measured facts for the findings report."""
     RESULTS.mkdir(exist_ok=True)
     mode = os.environ.get("SPIKE_WORKERS", "host")
-    deploy = os.environ.get("SPIKE_DEPLOY", "lite" if engine == "hatchet" else "library")
+    deploy = os.environ.get("SPIKE_DEPLOY", "library")
     with open(RESULTS / f"{engine}.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps({"test": test, "workers": mode, "deploy": deploy, "at": time.time(),
                             **facts}, default=str) + "\n")

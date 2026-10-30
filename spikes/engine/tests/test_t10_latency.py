@@ -12,8 +12,6 @@ RATE, SECONDS = 50, 30
 
 @pytest.mark.parametrize("poll_s", ["0.2", "1.0"])
 def test_t10_dispatch_latency(client, workers, run, engine_name, poll_s):
-    if engine_name != "dbos" and poll_s != "0.2":
-        pytest.skip("polling interval is a DBOS setting")
     workers.start("w1", slots=16, env={"SPIKE_DBOS_POLL_S": poll_s})
     n = RATE * SECONDS
     t0 = time.monotonic()
