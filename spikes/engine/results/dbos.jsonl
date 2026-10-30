@@ -36,3 +36,12 @@
 {"test": "T12 workers=1", "workers": "docker", "at": 1793343674.7365313, "idle_tx_per_s": 84.7, "client_connections": 40}
 {"test": "T12 workers=3", "workers": "docker", "at": 1793343729.0054126, "idle_tx_per_s": 178.4, "client_connections": 53}
 {"test": "T13 drain", "workers": "docker", "at": 1793344510.9011247, "tasks": 1000, "slots": 16, "seconds": 18.13, "tasks_per_s": 55.1}
+{"test": "T1", "workers": "host", "deploy": "library", "at": 1793360957.8476806, "overlaps": 0, "priority_order": {"A": [2, 2, 2, 1, 1, 1, 0, 0, 0], "B": [2, 2, 2, 1, 1, 1, 0, 0, 0]}}
+{"test": "T2a", "workers": "host", "deploy": "library", "at": 1793360976.7844188, "effects": {"c0": 1, "c1": 1, "c2": 1}, "chunk_execs": {"c0": 1, "c1": 2, "c2": 1}, "worker_restart_s": 3.794441800000641, "kill_to_resume_s": 4.060253}
+{"test": "T2b", "workers": "host", "deploy": "library", "at": 1793361060.4355772, "automatic_takeover": false, "effects": {"c0": 1, "c1": 1, "c2": 1}, "chunk_execs": {"c0": 1, "c1": 2, "c2": 1}, "kill_to_done_s": 75.04067, "sweep_to_done_s": 6.629569}
+{"test": "T4", "workers": "host", "deploy": "library", "at": 1793361068.3342433, "starts": 1, "ends": 1, "distinct_refs": 1}
+{"test": "T6", "workers": "host", "deploy": "library", "at": 1793361083.7249477, "attempts": 4, "gaps_s": [1.09, 2.14, 4.11], "expected_gaps_s": [1, 2, 4], "permanent_attempts": 1, "permanent_failed": 1}
+{"test": "T11a", "workers": "host", "deploy": "library", "at": 1793361093.319168, "hq_ran_on": ["agent-hq"], "cloud_ran_on": ["cloud1"]}
+{"test": "T11b", "workers": "host", "deploy": "library", "at": 1793361099.0367825, "result": {"rows": 42}, "signal_to_resume_s": 0.053}
+{"test": "T12 workers=1", "workers": "docker", "deploy": "library", "at": 1793361177.6002734, "idle_tx_per_s": 52.1, "client_connections": 10}
+{"test": "T12 workers=3", "workers": "docker", "deploy": "library", "at": 1793361235.005677, "idle_tx_per_s": 144.1, "client_connections": 25}
