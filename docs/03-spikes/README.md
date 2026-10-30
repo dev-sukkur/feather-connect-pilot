@@ -18,7 +18,7 @@ The spikes settle the riskiest open questions in the design with evidence, befor
 **S1 Engine:** DBOS passes all tests with three conditions that fit our control plane: a version policy, our own dead-worker sweeper, and polling sized to load.
 
 Hatchet was **re-tested on its full reference deployment** at the sponsor's request:
-- **Fresh stacks:** good, draining at 43–49 tasks/s with no errors in 12 bursts and 24 kills.
+- **Fresh stacks:** good, draining at 43–49 tasks/s with no errors in 9 bursts and 24 kills.
 - **The stall:** an **intermittent engine stall** (first seen on `hatchet-lite`) also hit the full deployment. It persisted across engine restarts and its trigger is unknown.
 - **Other gaps remain:** dispatch tails of about 10 s, 30–36 s failover, and workers that need Linux.
 
