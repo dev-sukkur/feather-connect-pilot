@@ -16,7 +16,6 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
     { name = "ruff" },
-    { name = "tzdata" },
 ]
 
 [[package]]
@@ -155,12 +154,14 @@ source = { editable = "packages/feather-connect" }
 dependencies = [
     { name = "pyarrow" },
     { name = "pydantic" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "pyarrow" },
     { name = "pydantic", specifier = ">=2" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
 
 [[package]]

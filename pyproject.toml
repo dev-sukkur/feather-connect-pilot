@@ -20,9 +20,6 @@ dev = [
     "ruff",
     "pyright",
     "pyarrow-stubs",
-    # Windows has no system time zone database, so zoneinfo needs this package there. The tests
-    # and the CI job on windows-latest use named zones such as Asia/Kolkata.
-    "tzdata",
 ]
 
 [tool.ruff]

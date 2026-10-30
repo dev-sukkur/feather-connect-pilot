@@ -7,6 +7,8 @@ license = "MIT"
 dependencies = [
     "pyarrow",
     "pydantic>=2",
+    # Windows has no system time zone database, so zoneinfo needs this package there.
+    "tzdata; sys_platform == 'win32'",
 ]
 
 [build-system]
