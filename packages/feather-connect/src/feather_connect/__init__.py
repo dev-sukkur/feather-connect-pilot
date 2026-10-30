@@ -1,1 +1,38 @@
+"""Feather Connect: flows written as code. Flow authors import it as `import feather_connect as fc`."""
+
+from feather_connect.core import partitions as partition
+from feather_connect.core import strategies as strategy
+from feather_connect.core.connector import CheckResult, ConnectorSpec, PushSource, Sink, Source
+from feather_connect.core.context import Context
+from feather_connect.core.dataset import Dataset
+from feather_connect.core.errors import PermanentError, RecordRejected, TransientError
+from feather_connect.core.flow import Flow, to
+from feather_connect.core.records import Record
+from feather_connect.core.transforms import batch_map
+from feather_connect.core.triggers import cron, every, manual, on_event
+
 __version__ = "0.1.0"
+
+__all__ = [
+    "CheckResult",
+    "ConnectorSpec",
+    "Context",
+    "Dataset",
+    "Flow",
+    "PermanentError",
+    "PushSource",
+    "Record",
+    "RecordRejected",
+    "Sink",
+    "Source",
+    "TransientError",
+    "__version__",
+    "batch_map",
+    "cron",
+    "every",
+    "manual",
+    "on_event",
+    "partition",
+    "strategy",
+    "to",
+]
