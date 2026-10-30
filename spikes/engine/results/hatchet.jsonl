@@ -1,0 +1,49 @@
+{"test": "T4", "at": 1793341918.5076506, "starts": 1, "ends": 1, "distinct_refs": 1}
+{"test": "T1", "at": 1793341976.3640082, "overlaps": 0, "priority_order": {"A": [0, 2, 2, 2, 1, 1, 1, 0, 0], "B": [0, 2, 2, 2, 1, 1, 1, 0, 0]}}
+{"test": "T2a", "at": 1793342035.3972225, "effects": {"c0": 1, "c1": 1, "c2": 1}, "chunk_execs": {"c0": 1, "c1": 2, "c2": 1}, "worker_restart_s": 10.183777399999599, "kill_to_resume_s": 30.593614}
+{"test": "T2b", "at": 1793342092.4244633, "automatic_takeover": true, "effects": {"c0": 1, "c1": 1, "c2": 1}, "chunk_execs": {"c0": 1, "c1": 2, "c2": 1}, "kill_to_done_s": 36.660244, "sweep_to_done_s": null}
+{"test": "T3 new_version", "at": 1793342151.2180922, "done": 50, "stranded": 0, "duplicated": 0, "completed_by_worker": {"w-v1": 10, "w-v2": 40}}
+{"test": "T3 same_version_sweeper", "at": 1793342210.3531005, "done": 50, "stranded": 0, "duplicated": 0, "completed_by_worker": {"w-v1": 10, "w-v2": 40}}
+{"test": "T5", "at": 1793342261.566175, "sleep_s": 20, "elapsed_s": 34.439362, "worker_restart_s": 11.55922819999978, "nap_start_logged": 1}
+{"test": "T6", "at": 1793342295.2946422, "attempts": 4, "gaps_s": [3.81, 4.87, 10.18], "expected_gaps_s": [1, 2, 4], "permanent_attempts": 1, "permanent_failed": 1}
+{"test": "T7", "at": 1793342310.9080465, "ddl_s": 0.03, "foreign_locks_on_feather": 0, "engine_schemas_in_app_db": ["dbos"], "extensions": ["plpgsql"], "databases": ["feather_spike", "hatchet", "postgres"]}
+{"test": "T8", "at": 1793342345.3791554, "tasks": 200, "not_exactly_once": 0, "per_worker": {"w1": 160, "w2": 40}}
+{"test": "T9", "at": 1793342398.7906017, "windows": 20, "max_units_per_window": 10, "max_low_per_window": 4, "saturated_windows": 13, "min_high_in_saturated_window": 6, "failures": 0}
+{"test": "T10 poll=0.2", "at": 1793342468.5485444, "submitted": 1500, "achieved_rate": 25.5, "p50_s": 0.057, "p95_s": 8.958, "max_s": 9.77, "lost": 0}
+{"test": "T11a", "at": 1793342497.1256294, "hq_ran_on": ["agent-hq"], "cloud_ran_on": ["cloud1"]}
+{"test": "T11b", "at": 1793342515.8272274, "result": [{"rows": 42}], "signal_to_resume_s": 0.062}
+{"test": "T12", "at": 1793342564.4776769, "idle_tx_per_s": 38.5, "client_connections": 40}
+{"test": "T10 poll=0.2", "workers": "docker", "at": 1793343816.3049822, "submitted": 1500, "achieved_rate": 25.5, "p50_s": 0.06, "p95_s": 5.896, "max_s": 6.767, "lost": 0}
+{"test": "T10b batched", "workers": "docker", "at": 1793343870.9245133, "submitted": 1500, "achieved_rate": 50.3, "batch_submit_ms_p50": 46.4, "p50_s": 10.02, "p95_s": 11.097, "max_s": 11.398, "lost": 0}
+{"test": "T11a", "workers": "docker", "at": 1793343910.3649166, "hq_ran_on": ["agent-hq"], "cloud_ran_on": ["cloud1"]}
+{"test": "T11b", "workers": "docker", "at": 1793343929.0527265, "result": {"rows": 42}, "signal_to_resume_s": 0.051}
+{"test": "T12 workers=1", "workers": "docker", "at": 1793343979.0137858, "idle_tx_per_s": 37.4, "client_connections": 30}
+{"test": "T12 workers=3", "workers": "docker", "at": 1793344045.12026, "idle_tx_per_s": 39.4, "client_connections": 34}
+{"test": "T13 drain", "workers": "docker", "deploy": "full", "at": 1793349990.3652916, "tasks": 1000, "slots": 16, "seconds": 37.64, "tasks_per_s": 26.6}
+{"test": "T13 drain", "workers": "docker", "deploy": "full", "at": 1793350098.768742, "tasks": 1000, "slots": 16, "seconds": 33.41, "tasks_per_s": 29.9}
+{"test": "T14a kill cycles", "workers": "docker", "deploy": "full", "at": 1793350978.523593, "sessions_after_each_kill": [{"idle": 19}, {"idle": 18, "idle in transaction": 1}, {"idle": 19}, {"idle": 18}, {"idle": 18}, {"active": 5, "idle": 10, "idle in transaction": 4}, {"active": 1, "idle": 34}], "smoke_ok": true}
+{"test": "T14b bursts, live worker", "workers": "docker", "deploy": "full", "at": 1793351438.6887228, "rounds": [{"round": 0, "ok": true, "tasks_per_s": 12.5, "sessions": {"idle": 45}}, {"round": 1, "ok": true, "tasks_per_s": 12.9, "sessions": {"idle": 46}}, {"round": 2, "ok": true, "tasks_per_s": 14.0, "sessions": {"idle": 40}}]}
+{"test": "T14a kill cycles", "workers": "docker", "deploy": "full-nofeatures", "at": 1793351690.4201741, "sessions_after_each_kill": [{"idle": 19}, {"idle": 19}, {"idle": 19}, {"idle": 19}, {"idle": 19}, {"idle": 19}, {"idle": 15}], "smoke_ok": true}
+{"test": "T13 drain", "workers": "docker", "deploy": "full-nofeatures", "at": 1793351762.0165093, "tasks": 1000, "slots": 16, "seconds": 26.87, "tasks_per_s": 37.2}
+{"test": "T13 drain", "workers": "docker", "deploy": "full-nofeatures", "at": 1793351831.4123363, "tasks": 1000, "slots": 16, "seconds": 25.27, "tasks_per_s": 39.6}
+{"test": "T14a kill cycles", "workers": "docker", "deploy": "full-idempotency-only", "at": 1793352047.1465113, "sessions_after_each_kill": [{"idle": 16}, {"idle": 17}, {"idle": 17}, {"idle": 17}, {"active": 7, "idle": 10}, {"idle": 17}, {"idle": 16}], "smoke_ok": true}
+{"test": "T13 drain", "workers": "docker", "deploy": "full-idempotency-only", "at": 1793352120.895174, "tasks": 1000, "slots": 16, "seconds": 25.69, "tasks_per_s": 38.9}
+{"test": "T13 drain", "workers": "docker", "deploy": "full-idempotency-only", "at": 1793352192.748944, "tasks": 1000, "slots": 16, "seconds": 24.88, "tasks_per_s": 40.2}
+{"test": "T14a kill cycles", "workers": "docker", "deploy": "full-keyed-only", "at": 1793352386.495566, "sessions_after_each_kill": [{"idle": 19}, {"idle": 19}, {"idle": 19}, {"idle": 19}, {"idle": 19}, {"idle": 19}, {"idle": 14}], "smoke_ok": true}
+{"test": "T13 drain", "workers": "docker", "deploy": "full-keyed-only", "at": 1793352455.2689645, "tasks": 1000, "slots": 16, "seconds": 24.61, "tasks_per_s": 40.6}
+{"test": "T13 drain", "workers": "docker", "deploy": "full-keyed-only", "at": 1793352525.1037936, "tasks": 1000, "slots": 16, "seconds": 24.87, "tasks_per_s": 40.2}
+{"test": "T14a kill cycles", "workers": "docker", "deploy": "full-both-control", "at": 1793352734.6112323, "sessions_after_each_kill": [{"idle": 18}, {"idle": 18}, {"idle": 18}, {"idle": 18}, {"idle": 18}, {"idle": 18}, {"idle": 18}], "smoke_ok": true}
+{"test": "T13 drain", "workers": "docker", "deploy": "full-both-control", "at": 1793352799.281627, "tasks": 1000, "slots": 16, "seconds": 23.15, "tasks_per_s": 43.2}
+{"test": "T13 drain", "workers": "docker", "deploy": "full-both-control", "at": 1793352862.2621338, "tasks": 1000, "slots": 16, "seconds": 21.44, "tasks_per_s": 46.6}
+{"test": "T13 drain", "workers": "docker", "deploy": "full-both-control", "at": 1793352925.2113218, "tasks": 1000, "slots": 16, "seconds": 20.58, "tasks_per_s": 48.6}
+{"test": "T1", "workers": "docker", "deploy": "full", "at": 1793353065.9354594, "overlaps": 0, "priority_order": {"A": [0, 2, 2, 2, 1, 1, 1, 0, 0], "B": [0, 2, 2, 2, 1, 1, 1, 0, 0]}}
+{"test": "T2a", "workers": "docker", "deploy": "full", "at": 1793353124.6376867, "effects": {"c0": 1, "c1": 1, "c2": 1}, "chunk_execs": {"c0": 1, "c1": 2, "c2": 1}, "worker_restart_s": 9.727109100000234, "kill_to_resume_s": 30.005305}
+{"test": "T2b", "workers": "docker", "deploy": "full", "at": 1793353178.726645, "automatic_takeover": true, "effects": {"c0": 1, "c1": 1, "c2": 1}, "chunk_execs": {"c0": 1, "c1": 2, "c2": 1}, "kill_to_done_s": 35.870171, "sweep_to_done_s": null}
+{"test": "T5", "workers": "docker", "deploy": "full", "at": 1793353226.5689063, "sleep_s": 20, "elapsed_s": 34.678862, "worker_restart_s": 10.290418499997031, "nap_start_logged": 1}
+{"test": "T8", "workers": "docker", "deploy": "full", "at": 1793353260.121984, "tasks": 200, "not_exactly_once": 0, "per_worker": {"w1": 200}}
+{"test": "T10 poll=0.2", "workers": "docker", "deploy": "full", "at": 1793353344.7159796, "submitted": 1500, "achieved_rate": 21.3, "p50_s": 0.061, "p95_s": 10.692, "max_s": 11.611, "lost": 0}
+{"test": "T10b batched", "workers": "docker", "deploy": "full", "at": 1793353393.5829477, "submitted": 1500, "achieved_rate": 48.1, "batch_submit_ms_p50": 150.6, "p50_s": 5.49, "p95_s": 11.051, "max_s": 11.753, "lost": 0}
+{"test": "T11a", "workers": "docker", "deploy": "full", "at": 1793353422.9374204, "hq_ran_on": ["agent-hq"], "cloud_ran_on": ["cloud1"]}
+{"test": "T11b", "workers": "docker", "deploy": "full", "at": 1793353442.8308709, "result": {"rows": 42}, "signal_to_resume_s": 0.041}
+{"test": "T12 workers=1", "workers": "docker", "deploy": "full", "at": 1793353487.8438885, "idle_tx_per_s": 32.0, "client_connections": 45}
+{"test": "T12 workers=3", "workers": "docker", "deploy": "full", "at": 1793353554.6609552, "idle_tx_per_s": 32.8, "client_connections": 16}

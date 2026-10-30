@@ -1,0 +1,53 @@
+{
+  "rows": 1000000,
+  "generate_seconds": 3.7,
+  "arrow_mb": 170.5,
+  "write_1_writer": {
+    "writers": 1,
+    "rows": 1000000,
+    "seconds": 5.86,
+    "rows_per_s": 170580,
+    "mb_per_s": 9.6,
+    "bytes_per_record": 56.2,
+    "chunk_kb_avg": 2746
+  },
+  "write_4_writers": {
+    "writers": 4,
+    "rows": 1000000,
+    "seconds": 3.47,
+    "rows_per_s": 288100,
+    "mb_per_s": 16.2,
+    "bytes_per_record": 56.2,
+    "chunk_kb_avg": 2746
+  },
+  "read": {
+    "rows": 1000000,
+    "seconds": 3.16,
+    "rows_per_s": 316132
+  },
+  "snapshot_diff": {
+    "rows": 1000000,
+    "diff_seconds": 0.343,
+    "upserts": 14962,
+    "deletes": 5000,
+    "snapshot_bytes_per_row": 16.5,
+    "snapshot_build_seconds": 0.026
+  },
+  "retention": {
+    "partition_mb": 58.5,
+    "drop_seconds": 0.029
+  },
+  "micro_batches": {
+    "batches": 500,
+    "events_per_batch": 10,
+    "parquet": {
+      "p50_ms": 9.05,
+      "p95_ms": 20.87
+    },
+    "jsonb_rows": {
+      "p50_ms": 7.53,
+      "p95_ms": 17.33
+    }
+  },
+  "spool_table_mb": 121.1
+}

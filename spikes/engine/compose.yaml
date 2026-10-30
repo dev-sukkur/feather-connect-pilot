@@ -1,0 +1,44 @@
+name: feather-spike
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: feather
+      POSTGRES_PASSWORD: feather_spike   # throwaway, local-only container
+      POSTGRES_DB: feather_spike
+    ports:
+      - "127.0.0.1:25432:5432"
+    command: ["postgres", "-c", "max_connections=300"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U feather -d feather_spike"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # Settings from docs.hatchet.run/self-hosting/hatchet-lite; uses its own database "hatchet".
+  hatchet-lite:
+    profiles: ["hatchet"]
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-lite:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:   # 7077/8888 are taken on this machine by another project's hatchet-lite
+      - "127.0.0.1:18888:8888"
+      - "127.0.0.1:17077:7077"
+    environment:
+      DATABASE_URL: "postgresql://feather:feather_spike@postgres:5432/hatchet?sslmode=disable"
+      SERVER_AUTH_COOKIE_DOMAIN: localhost
+      SERVER_AUTH_COOKIE_INSECURE: "t"
+      SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
+      SERVER_GRPC_INSECURE: "t"
+      SERVER_GRPC_BROADCAST_ADDRESS: localhost:17077
+      SERVER_GRPC_PORT: "7077"
+      SERVER_URL: http://localhost:18888
+      SERVER_AUTH_SET_EMAIL_VERIFIED: "t"
+      SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: localhost:7077
+    volumes:
+      - hatchet_lite_config:/config
+
+volumes:
+  hatchet_lite_config:

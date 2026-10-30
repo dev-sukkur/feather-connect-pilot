@@ -1,0 +1,60 @@
+_______________________ test_t10_dispatch_latency[1.0] ________________________
+
+client = <spike.dbos_engine.DbosClient object at 0x000001ABA1B1FA10>
+workers = <conftest.Workers object at 0x000001ABA319A650>
+run = 'dbos-test_t10_dispatch_latency[1.0]-234802', engine_name = 'dbos'
+poll_s = '1.0'
+
+    @pytest.mark.parametrize("poll_s", ["0.2", "1.0"])
+    def test_t10_dispatch_latency(client, workers, run, engine_name, poll_s):
+        if engine_name != "dbos" and poll_s != "0.2":
+            pytest.skip("polling interval is a DBOS setting")
+        workers.start("w1", slots=16, env={"SPIKE_DBOS_POLL_S": poll_s})
+        n = RATE * SECONDS
+        t0 = time.monotonic()
+        for i in range(n):
+            delay = t0 + i / RATE - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            task_id = f"{run}-{i}"
+            journal.execute(
+                "insert into spike.submit_log (run, task_id, at) values (%s, %s, clock_timestamp())",
+                (run, task_id))
+            client.submit(TaskCall(task="work", args={"ms": 10}, idempotency_key=task_id), run)
+        achieved_rate = n / (time.monotonic() - t0)
+        try:
+            wait_until(lambda: count(run, "end") >= n, timeout=120, what="all tasks")
+        except TimeoutError:
+            pass
+    
+        lat = [r["s"] for r in journal.query(
+            "select extract(epoch from min(e.at) - s.at)::float as s from spike.submit_log s"
+            " join spike.exec_log e on e.run = s.run and e.task_id = s.task_id and e.event = 'start'"
+            " where s.run = %s group by s.task_id, s.at", (run,))]
+        lat.sort()
+        assert lat, "no task started"
+        p95 = lat[int(0.95 * (len(lat) - 1))]
+        lost = n - count(run, "end")
+        record(engine_name, f"T10 poll={poll_s}", submitted=n, achieved_rate=round(achieved_rate, 1),
+               p50_s=round(statistics.median(lat), 3), p95_s=round(p95, 3), max_s=round(lat[-1], 3),
+               lost=lost)
+>       assert lost == 0 and p95 <= 1.0
+E       assert (0 == 0 and 66.066494 <= 1.0)
+
+tests\test_t10_latency.py:46: AssertionError
+=================================== PASSES ====================================
+=========================== short test summary info ===========================
+PASSED tests/test_t04_dedup.py::test_t04_dedup
+PASSED tests/test_t05_durable_sleep.py::test_t05_durable_sleep_across_restart
+PASSED tests/test_t06_retry.py::test_t06_retry_timing
+PASSED tests/test_t07_isolation.py::test_t07_schema_isolation_and_locks
+PASSED tests/test_t08_two_workers.py::test_t08_two_workers_share_work
+PASSED tests/test_t10_latency.py::test_t10_dispatch_latency[0.2]
+PASSED tests/test_t11_remote.py::test_t11a_native_site_routing
+PASSED tests/test_t11_remote.py::test_t11b_gateway_relay
+PASSED tests/test_t12_idle_overhead.py::test_t12_idle_overhead
+FAILED tests/test_t03_deploy.py::test_t03_deploy_mid_drain[False] - assert (4...
+FAILED tests/test_t03_deploy.py::test_t03_deploy_mid_drain[True] - TimeoutErr...
+FAILED tests/test_t09_budget.py::test_t09_shared_budget_with_reserve - assert...
+FAILED tests/test_t10_latency.py::test_t10_dispatch_latency[1.0] - assert (0 ...
+=================== 4 failed, 9 passed in 592.11s (0:09:52) ===================

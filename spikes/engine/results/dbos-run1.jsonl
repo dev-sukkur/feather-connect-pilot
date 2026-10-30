@@ -1,0 +1,4 @@
+{"test": "T1", "at": 1793338961.5223818, "overlaps": 0, "priority_order": {"A": [2, 2, 2, 1, 1, 1, 0, 0, 0], "B": [2, 2, 2, 1, 1, 1, 0, 0, 0]}}
+{"test": "T2a", "at": 1793338990.181307, "effects": {"c0": 1, "c1": 1, "c2": 1}, "chunk_execs": {"c0": 1, "c1": 2, "c2": 1}, "worker_restart_s": 11.429390100000091, "kill_to_resume_s": 11.701241}
+{"test": "T2b", "at": 1793339075.7271173, "automatic_takeover": false, "effects": {"c0": 1, "c1": 1, "c2": 1}, "chunk_execs": {"c0": 1, "c1": 2, "c2": 1}, "kill_to_done_s": 74.415933, "sweep_to_done_s": 7.048553}
+{"test": "T3 auto_upgrade=False", "at": 1793339248.6769862, "done": 48, "stranded": 2, "duplicated": 0, "completed_by_version": {"v2": 38, "v1": 10}}

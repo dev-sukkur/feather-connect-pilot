@@ -1,0 +1,80 @@
+        while time.monotonic() < deadline:
+            value = fn()
+            if value:
+                return value
+            time.sleep(interval)
+>       raise TimeoutError(f"timed out after {timeout}s waiting for {what}")
+E       TimeoutError: timed out after 90s waiting for 20 tasks
+
+tests\conftest.py:110: TimeoutError
+___________________________ test_t11b_gateway_relay ___________________________
+
+client = <spike.dbos_engine.DbosClient object at 0x000001DEB8617A10>
+workers = <conftest.Workers object at 0x000001DEBAF5B1E0>
+run = 'dbos-test_t11b_gateway_relay-27bbe5', engine_name = 'dbos'
+
+    def test_t11b_gateway_relay(client, workers, run, engine_name):
+        """The cloud task posts work for an agent and durably waits for the gateway's signal."""
+        workers.start("cloud1")
+        ref = client.submit(TaskCall(task="remote_relay", args={"job": "read-sap", "timeout_s": 60},
+                                     idempotency_key=f"{run}-relay"), run)
+>       row = wait_until(lambda: journal.query(
+            "select id from spike.agent_task where run = %s and leased_at is null", (run,)),
+            timeout=60, what="agent task posted")[0]
+
+tests\test_t11_remote.py:30: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+fn = <function test_t11b_gateway_relay.<locals>.<lambda> at 0x000001DEBAF2DA80>
+timeout = 60, what = 'agent task posted', interval = 0.25
+
+    def wait_until(fn: Callable[[], Any], timeout: float, what: str = "condition",
+                   interval: float = 0.25) -> Any:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            value = fn()
+            if value:
+                return value
+            time.sleep(interval)
+>       raise TimeoutError(f"timed out after {timeout}s waiting for {what}")
+E       TimeoutError: timed out after 60s waiting for agent task posted
+
+tests\conftest.py:110: TimeoutError
+___________________________ test_t12_idle_overhead ____________________________
+
+workers = <conftest.Workers object at 0x000001DEBAFA3890>, engine_name = 'dbos'
+
+    def test_t12_idle_overhead(workers, engine_name):
+        """Extra measurement for the ops-footprint score: Postgres load from one idle worker."""
+        workers.start("w1", slots=4)
+        time.sleep(5)
+        with psycopg.connect(PG_URL, autocommit=True) as c:
+            tx0, t0 = c.execute(SQL_TX).fetchone()[0], time.monotonic()
+            time.sleep(30)
+            tx1, t1 = c.execute(SQL_TX).fetchone()[0], time.monotonic()
+            conns = c.execute(SQL_CONNS).fetchone()[0]
+>       record(engine_name, "T12", idle_tx_per_s=round((tx1 - tx0) / (t1 - t0), 1),
+                                                       ^^^^^^^^^^^^^^^^^^^^^^^
+               client_connections=conns)
+E       TypeError: unsupported operand type(s) for /: 'decimal.Decimal' and 'float'
+
+tests\test_t12_idle_overhead.py:22: TypeError
+=================================== PASSES ====================================
+=========================== short test summary info ===========================
+PASSED tests/test_t01_priority_keys.py::test_t01_priority_and_one_at_a_time
+PASSED tests/test_t02_crash.py::test_t02a_crash_then_same_worker_restarts
+PASSED tests/test_t02_crash.py::test_t02b_crash_then_other_worker_takes_over
+FAILED tests/test_t03_deploy.py::test_t03_deploy_mid_drain[False] - assert (4...
+FAILED tests/test_t03_deploy.py::test_t03_deploy_mid_drain[True] - TimeoutErr...
+FAILED tests/test_t04_dedup.py::test_t04_dedup - TimeoutError: timed out afte...
+FAILED tests/test_t05_durable_sleep.py::test_t05_durable_sleep_across_restart
+FAILED tests/test_t06_retry.py::test_t06_retry_timing - TimeoutError: timed o...
+FAILED tests/test_t07_isolation.py::test_t07_schema_isolation_and_locks - Tim...
+FAILED tests/test_t08_two_workers.py::test_t08_two_workers_share_work - Timeo...
+FAILED tests/test_t09_budget.py::test_t09_shared_budget_with_reserve - Timeou...
+FAILED tests/test_t10_latency.py::test_t10_dispatch_latency[0.2] - IndexError...
+FAILED tests/test_t10_latency.py::test_t10_dispatch_latency[1.0] - IndexError...
+FAILED tests/test_t11_remote.py::test_t11a_native_site_routing - TimeoutError...
+FAILED tests/test_t11_remote.py::test_t11b_gateway_relay - TimeoutError: time...
+FAILED tests/test_t12_idle_overhead.py::test_t12_idle_overhead - TypeError: u...
+================== 13 failed, 3 passed in 1524.56s (0:25:24) ==================

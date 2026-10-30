@@ -1,0 +1,8 @@
+{"case": "H1a", "passed": true, "note": "move arrives as an upsert with moved_from; no stale copy"}
+{"case": "H1b", "naive_transient_deletes": 1, "run_level_deletes": 0}
+{"case": "H2", "upserts": 2, "deletes": 1}
+{"case": "H3", "business_key_rows": 1, "source_id_rows": 2}
+{"case": "H4", "reread_rows": 3, "version_upserts": 1, "records_sent": 1}
+{"case": "H6", "versions_sealed_while_down": 6, "failed_while_down": 2, "applied_after_recovery": 6}
+{"case": "H10", "quarantined_first": 1, "quarantine_status_after": "superseded"}
+{"case": "H13", "lines_landed_without_headers": 1, "ready_before": false, "ready_after": true}

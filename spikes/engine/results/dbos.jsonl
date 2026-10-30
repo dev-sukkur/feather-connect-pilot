@@ -1,0 +1,38 @@
+{"test": "T1", "at": 1793338961.5223818, "overlaps": 0, "priority_order": {"A": [2, 2, 2, 1, 1, 1, 0, 0, 0], "B": [2, 2, 2, 1, 1, 1, 0, 0, 0]}}
+{"test": "T2a", "at": 1793338990.181307, "effects": {"c0": 1, "c1": 1, "c2": 1}, "chunk_execs": {"c0": 1, "c1": 2, "c2": 1}, "worker_restart_s": 11.429390100000091, "kill_to_resume_s": 11.701241}
+{"test": "T2b", "at": 1793339075.7271173, "automatic_takeover": false, "effects": {"c0": 1, "c1": 1, "c2": 1}, "chunk_execs": {"c0": 1, "c1": 2, "c2": 1}, "kill_to_done_s": 74.415933, "sweep_to_done_s": 7.048553}
+{"test": "T3 auto_upgrade=False", "at": 1793339248.6769862, "done": 48, "stranded": 2, "duplicated": 0, "completed_by_version": {"v2": 38, "v1": 10}}
+{"test": "T3 auto_upgrade=False", "at": 1793340718.9731684, "done": 48, "stranded": 2, "duplicated": 0, "completed_by_version": {"v2-dbos-test_t03_deploy_mid_drain[False]-9ab278": 38, "v1-dbos-test_t03_deploy_mid_drain[False]-9ab278": 10}}
+{"test": "T4", "at": 1793340828.1064363, "starts": 1, "ends": 1, "distinct_refs": 1}
+{"test": "T5", "at": 1793340853.0766163, "sleep_s": 20, "elapsed_s": 20.031675, "worker_restart_s": 7.613896199998635, "nap_start_logged": 1}
+{"test": "T6", "at": 1793340866.5518873, "attempts": 4, "gaps_s": [1.07, 2.09, 4.06], "expected_gaps_s": [1, 2, 4], "permanent_attempts": 1, "permanent_failed": 1}
+{"test": "T7", "at": 1793340872.6507843, "ddl_s": 0.067, "foreign_locks_on_feather": 0, "engine_schemas_in_app_db": ["dbos"], "extensions": ["plpgsql"], "databases": ["feather_spike", "postgres"]}
+{"test": "T8", "at": 1793340896.6824331, "tasks": 200, "not_exactly_once": 0, "per_worker": {"w1": 99, "w2": 101}}
+{"test": "T9", "at": 1793340940.3840017, "windows": 20, "max_units_per_window": 10, "max_low_per_window": 4, "contended_windows": 14, "high_share_when_contended": 0.588, "failures": 0}
+{"test": "T10 poll=0.2", "at": 1793340975.8820693, "submitted": 1500, "achieved_rate": 49.2, "p50_s": 0.191, "p95_s": 0.337, "max_s": 0.512, "lost": 0}
+{"test": "T10 poll=1.0", "at": 1793341081.2331922, "submitted": 1500, "achieved_rate": 50.0, "p50_s": 34.871, "p95_s": 66.066, "max_s": 70.012, "lost": 0}
+{"test": "T11a", "at": 1793341093.1736422, "hq_ran_on": ["agent-hq"], "cloud_ran_on": ["cloud1"]}
+{"test": "T11b", "at": 1793341102.2258265, "result": {"rows": 42}, "signal_to_resume_s": 0.037}
+{"test": "T12", "at": 1793341143.4506142, "idle_tx_per_s": 48.1, "client_connections": 15}
+{"test": "T3 new_version", "at": 1793341369.7494874, "done": 48, "stranded": 2, "duplicated": 0, "completed_by_worker": {"w-v1": 10, "w-v2": 38}}
+{"test": "T3 same_version_sweeper", "at": 1793341410.4284647, "done": 50, "stranded": 0, "duplicated": 0, "completed_by_worker": {"w-v1": 10, "w-v2": 40}}
+{"test": "T9", "at": 1793341452.317138, "windows": 20, "max_units_per_window": 10, "max_low_per_window": 4, "saturated_windows": 13, "min_high_in_saturated_window": 6, "failures": 0}
+{"test": "T1", "workers": "docker", "at": 1793342934.8599997, "overlaps": 0, "priority_order": {"A": [2, 2, 2, 1, 1, 1, 0, 0, 0], "B": [2, 2, 2, 1, 1, 1, 0, 0, 0]}}
+{"test": "T2a", "workers": "docker", "at": 1793342963.4858313, "effects": {"c0": 1, "c1": 1, "c2": 1}, "chunk_execs": {"c0": 1, "c1": 2, "c2": 1}, "worker_restart_s": 5.924853000000439, "kill_to_resume_s": 6.955297}
+{"test": "T2b", "workers": "docker", "at": 1793343054.6415105, "automatic_takeover": false, "effects": {"c0": 1, "c1": 1, "c2": 1}, "chunk_execs": {"c0": 1, "c1": 2, "c2": 1}, "kill_to_done_s": 75.178334, "sweep_to_done_s": 7.190052}
+{"test": "T3 new_version", "workers": "docker", "at": 1793343225.1203306, "done": 48, "stranded": 2, "duplicated": 0, "completed_by_worker": {"w-v1": 10, "w-v2": 38}}
+{"test": "T3 same_version_sweeper", "workers": "docker", "at": 1793343270.588739, "done": 50, "stranded": 0, "duplicated": 0, "completed_by_worker": {"w-v1": 10, "w-v2": 40}}
+{"test": "T4", "workers": "docker", "at": 1793343281.6582918, "starts": 1, "ends": 1, "distinct_refs": 1}
+{"test": "T5", "workers": "docker", "at": 1793343311.6762407, "sleep_s": 20, "elapsed_s": 20.027586, "worker_restart_s": 6.266487300001245, "nap_start_logged": 1}
+{"test": "T6", "workers": "docker", "at": 1793343328.4093883, "attempts": 4, "gaps_s": [1.05, 2.04, 4.04], "expected_gaps_s": [1, 2, 4], "permanent_attempts": 1, "permanent_failed": 1}
+{"test": "T7", "workers": "docker", "at": 1793343338.7725961, "ddl_s": 0.046, "foreign_locks_on_feather": 0, "engine_schemas_in_app_db": ["core", "dbos", "spool"], "extensions": ["plpgsql"], "databases": ["feather_spike", "hatchet", "postgres"]}
+{"test": "T8", "workers": "docker", "at": 1793343360.5783122, "tasks": 200, "not_exactly_once": 0, "per_worker": {"w1": 96, "w2": 104}}
+{"test": "T9", "workers": "docker", "at": 1793343412.1673276, "windows": 22, "max_units_per_window": 10, "max_low_per_window": 4, "saturated_windows": 12, "min_high_in_saturated_window": 6, "failures": 0}
+{"test": "T10 poll=0.2", "workers": "docker", "at": 1793343454.8185282, "submitted": 1500, "achieved_rate": 50.0, "p50_s": 0.154, "p95_s": 0.269, "max_s": 0.358, "lost": 0}
+{"test": "T10 poll=1.0", "workers": "docker", "at": 1793343564.7090707, "submitted": 1500, "achieved_rate": 49.9, "p50_s": 35.365, "p95_s": 66.316, "max_s": 69.902, "lost": 0}
+{"test": "T10b batched", "workers": "docker", "at": 1793343602.573833, "submitted": 1500, "achieved_rate": 50.2, "batch_submit_ms_p50": 115.7, "p50_s": 3.99, "p95_s": 5.958, "max_s": 6.337, "lost": 0}
+{"test": "T11a", "workers": "docker", "at": 1793343619.4374228, "hq_ran_on": ["agent-hq"], "cloud_ran_on": ["cloud1"]}
+{"test": "T11b", "workers": "docker", "at": 1793343631.3701224, "result": {"rows": 42}, "signal_to_resume_s": 0.059}
+{"test": "T12 workers=1", "workers": "docker", "at": 1793343674.7365313, "idle_tx_per_s": 84.7, "client_connections": 40}
+{"test": "T12 workers=3", "workers": "docker", "at": 1793343729.0054126, "idle_tx_per_s": 178.4, "client_connections": 53}
+{"test": "T13 drain", "workers": "docker", "at": 1793344510.9011247, "tasks": 1000, "slots": 16, "seconds": 18.13, "tasks_per_s": 55.1}

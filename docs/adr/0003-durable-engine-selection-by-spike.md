@@ -41,6 +41,17 @@ The open questions are footprint, remote execution, durability under failure, an
 - Roughly a week of spike work.
 - Both adapters must avoid leaking engine specifics into the SDK.
 
+## Spike evidence (30 Oct 2026)
+
+- Results: [S1 engine results](../03-spikes/s1-engine-results.md).
+- Score after the full-deployment re-test: DBOS 72, Hatchet lite 68, Hatchet full 65.
+- **Recommendation: DBOS Transact,** on three conditions:
+  - a version policy;
+  - executor liveness and recovery in our sweeper;
+  - polling sized to load.
+- Hatchet, both lite and full, showed an intermittent engine stall that persisted across restarts, though fresh stacks never failed. It also has dispatch tails of about 10 s and 30–36 s failover.
+- **Awaiting the sponsor's decision.** This ADR becomes Accepted when the sponsor decides.
+
 ## Re-verify before accepting
 
 Re-verify the pricing, licence and feature facts copied from the reference evaluation on the vendors' pages at spike time.

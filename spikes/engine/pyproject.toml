@@ -1,0 +1,24 @@
+[project]
+name = "feather-engine-spike"
+version = "0.0.0"
+description = "THROWAWAY spike: DBOS vs Hatchet conformance tests for Feather Connect (ADR-0003)"
+requires-python = ">=3.12"
+dependencies = [
+    "dbos",
+    "hatchet-sdk",
+    "psycopg[binary,pool]",
+    "httpx",
+    "fastapi",
+    "uvicorn",
+    "pyarrow",
+    "duckdb",
+    "numpy>=2.5.4",
+]
+
+[dependency-groups]
+dev = ["pytest", "pytest-timeout"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+timeout = 600

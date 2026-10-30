@@ -1,0 +1,30 @@
+        try:
+            wait_until(lambda: count(run, "end") >= n, timeout=120, what="all tasks")
+        except TimeoutError:
+            pass
+    
+        lat = sorted(r["s"] for r in journal.query(
+            "select extract(epoch from min(e.at) - s.at)::float as s from spike.submit_log s"
+            " join spike.exec_log e on e.run = s.run and e.task_id = s.task_id and e.event = 'start'"
+            " where s.run = %s group by s.task_id, s.at", (run,)))
+        assert lat, "no task started"
+        p95 = lat[int(0.95 * (len(lat) - 1))]
+        lost = n - count(run, "end")
+        record(engine_name, "T10b batched", submitted=n, achieved_rate=round(achieved_rate, 1),
+               batch_submit_ms_p50=round(statistics.median(submit_ms), 1),
+               p50_s=round(statistics.median(lat), 3), p95_s=round(p95, 3), max_s=round(lat[-1], 3),
+               lost=lost)
+>       assert lost == 0 and p95 <= 1.0
+E       assert (0 == 0 and 11.096949 <= 1.0)
+
+tests\test_t10_latency.py:85: AssertionError
+=================================== PASSES ====================================
+=========================== short test summary info ===========================
+PASSED tests/test_t11_remote.py::test_t11a_native_site_routing
+PASSED tests/test_t11_remote.py::test_t11b_gateway_relay
+PASSED tests/test_t12_idle_overhead.py::test_t12_idle_overhead[1]
+PASSED tests/test_t12_idle_overhead.py::test_t12_idle_overhead[3]
+SKIPPED [1] tests\test_t10_latency.py:16: polling interval is a DBOS setting
+FAILED tests/test_t10_latency.py::test_t10_dispatch_latency[0.2] - assert (0 ...
+FAILED tests/test_t10_latency.py::test_t10b_batched_dispatch - assert (0 == 0...
+============= 2 failed, 4 passed, 1 skipped in 310.43s (0:05:10) ==============
