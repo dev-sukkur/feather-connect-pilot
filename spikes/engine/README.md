@@ -1,6 +1,8 @@
 # Engine spike (throwaway)
 
-This folder runs the 11-test conformance suite from [docs/03-spikes/s1-engine-spike.md](../../docs/03-spikes/s1-engine-spike.md) against spike adapters for DBOS and Hatchet.
+This folder runs the conformance suite from [docs/03-spikes/s1-engine-spike.md](../../docs/03-spikes/s1-engine-spike.md) against spike adapters for DBOS and Hatchet.
+
+This is the `side/hatchet-engine` branch. For the Hatchet deployments, the stall probes and what it would take to adopt Hatchet, see [HATCHET.md](HATCHET.md).
 
 ## Run
 
@@ -40,6 +42,6 @@ This folder runs the 11-test conformance suite from [docs/03-spikes/s1-engine-sp
 | `spike/dbos_engine.py`, `spike/hatchet_engine.py` | One adapter per engine |
 | `spike/journal.py` | The `spike.exec_log` and `spike.effects` tables that every test asserts on |
 | `spike/worker.py` | The worker process entry point; tests start and kill it |
-| `tests/` | `test_t01_*.py` … `test_t11_*.py` |
+| `tests/` | `test_t01_*.py` … `test_t14_*.py` |
 
 The Postgres credentials in `compose.yaml` are local-only throwaway values for this container.
