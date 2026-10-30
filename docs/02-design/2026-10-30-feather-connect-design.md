@@ -110,8 +110,8 @@ flowchart TB
 | Connection | A configured connector instance in one environment and tenant; secrets by reference | `sap` in prod for tenant `default` |
 | Dataset | A named stream of keyed records from one source entity, with a key, partition scheme and change strategy | `zakya.invoice` |
 | Record | One keyed document: the unit of identity and storage. It carries `key`, `op` (upsert/delete), `payload` and `row_hash`. | Invoice INV-1001 with its lines |
-| Partition | A named business slice derived from record fields, with an explicit timezone. It is used to plan, re-run, verify and backfill, **not** to store. | `store=1509/date=2026-10-18` |
-| Version | An immutable batch of upserts and deletes for one dataset partition, from one extraction, with a manifest (counts, hashes, watermark, run, code version).<br>• A **complete** version describes the whole slice and may imply deletes.<br>• An **incomplete** version carries only explicit deletes. | v42 of `zakya.invoice` for `store=1509/date=2026-10-18` |
+| Partition | A named business slice derived from record fields, with an explicit timezone. It is used to plan, re-run, verify and backfill, **not** to store. | `store_id=1509/date=2026-10-18` |
+| Version | An immutable batch of upserts and deletes for one dataset partition, from one extraction, with a manifest (counts, hashes, watermark, run, code version).<br>• A **complete** version describes the whole slice and may imply deletes.<br>• An **incomplete** version carries only explicit deletes. | v42 of `zakya.invoice` for `store_id=1509/date=2026-10-18` |
 | Run (epoch) | One execution of a flow; every version records the run that produced it | run `01JD…` |
 | Route | A path from a dataset to a destination: optional transform, sink, mode and priority | `sap.price → zakya` |
 | Delivery | The application of one version to one route. The ledger of deliveries is each route's cursor **and** its dead-letter state. | v42 → `zakya`: applied |
@@ -165,7 +165,7 @@ These hold for every flow. Tests in §16 check each one.
   - `by_fields("store_id", by_day("date", tz))`, which composes schemes;
   - `by_bucket(field, n)`, a hash bucket that adds parallelism while keeping per-key order;
   - a custom `Planner`.
-- **Canonical key.** Each partition has a canonical key such as `store=1509/date=2026-10-18`. The dashboard shows it in business words: "Store 1509 · 18 Oct 2026".
+- **Canonical key.** Each partition has a canonical key such as `store_id=1509/date=2026-10-18`. The dashboard shows it in business words: "Store 1509 · 18 Oct 2026".
 - **Planning:**
   - A scheduled run plans its window (for example today and yesterday in the flow's timezone, plus the lookback).
   - A backfill plans an explicit range, previewed first.

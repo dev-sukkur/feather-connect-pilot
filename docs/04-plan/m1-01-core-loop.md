@@ -14,7 +14,7 @@
 
 - Python ≥ 3.12. The SDK is fully typed: pyright strict on `packages/feather-connect/src`. ruff for lint and format.
 - Coverage ≥ 85% for the SDK core, enforced in CI.
-- `feather_connect` base dependencies are `pyarrow` and `pydantic` only. No Postgres or DBOS imports in this plan.
+- `feather_connect` base dependencies are `pyarrow` and `pydantic` only, plus `tzdata` on Windows. No Postgres or DBOS imports in this plan.
 - Engine task arguments carry ids only, never data, ≤ 64 KB (I8).
 - **Replay rule:** anything in a task body that reads the clock, a database or the network goes through `ctx.step`, and step names are stable across replays.
 - A step that has succeeded is never run again in the same task, whether after a retry or a replay.
