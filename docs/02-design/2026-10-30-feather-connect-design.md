@@ -146,9 +146,10 @@ These hold for every flow. Tests in §16 check each one.
 | `push()` | Events arriving by webhook or CDC, micro-batched (§6.3) | Incomplete | Explicit events | Webhooks, CDC |
 | Custom | Your `Strategy` implementation | Either | Either | Anything else |
 
-- **No-op suppression.** Records whose `row_hash` matches the last known state are dropped from the version, so lookback re-reads don't churn destinations.
+- **No-op suppression.** Records whose `row_hash` matches the last known state are dropped from the version, so lookback re-reads don't churn destinations. The last known state comes from record state when `keep_state=True`, and otherwise from the row hashes of versions sealed within the lookback window.
+- **Empty-read guard.** A complete read that returns no rows would delete the whole slice, so it fails unless the dataset sets `allow_empty=True`. A transient empty API response must not wipe a destination.
 - **Reconcile.** Any incremental dataset can schedule a periodic `snapshot_diff` over recent partitions, for example `reconcile=fc.reconcile(every="7d", partitions="last 90 days")`. This catches hard deletes and back-dated rows that change stamps miss.
-- **Partition hash snapshots.** `snapshot_diff` keeps one compact snapshot per partition: a 64-bit key hash and a row hash per record, stored as a Parquet chunk in the spool. The diff is an anti-join between the new snapshot and the previous one inside the worker (Arrow or DuckDB). A 100-million-row stampless table therefore costs 16 bytes of state per row, plus the changed rows. Spike S4 measured 16.5 bytes per row, and 0.34 s to diff 1 million rows.
+- **Partition hash snapshots.** `snapshot_diff` keeps one compact snapshot per partition: each record's key and a 64-bit row hash, stored as a Parquet chunk in the spool. The key is needed to emit delete records. The diff is an anti-join between the new snapshot and the previous one inside the worker. A 100-million-row stampless table therefore costs 8 bytes of hash per row plus its compressed key, plus the changed rows. Spike S4 measured 16.5 bytes per row with a 64-bit key hash in place of the key, and 0.34 s to diff 1 million rows.
 - **Run-level delete reconciliation (I10).** A run that reads one slice seals its version when the read finishes. When a run reads several slices in full:
   - Each `extract` task stages its version, along with its candidate deletes: keys in the previous snapshot and missing from the new one.
   - When the last slice finishes, a `seal_run` task compares the candidates with every new snapshot of the run. A candidate found in another slice is a move, so it is dropped as a delete and the upsert records `moved_from`.
@@ -179,6 +180,8 @@ These hold for every flow. Tests in §16 check each one.
 | `append` | Every record is appended with `_fc_key`, `_fc_op`, `_fc_version`, `_fc_run`, `_fc_extracted_at` and `_fc_partition` columns, so full history is kept | Bronze and history tables |
 | `replace_partition` | Atomically replace the destination's slice | Complete versions; a transactional destination |
 | `side_effect` | Business operations (post a sale, create an order). `apply` must be idempotent through an idempotency key or a content-keyed duplicate guard. `compensate` reverses. | The sink implements both; an optional approval policy |
+
+A `snapshot_diff` dataset with a `replace_partition` route also stores the whole slice, in chunks of kind `full`, because its version otherwise holds only the changes.
 
 **Approvals.** A route may declare an approval policy: always, per environment, or a predicate per record. Records that need approval go to a hold, and the rest of the version proceeds. Approved records are applied in order. Rejected records are marked skipped, with the reason.
 
@@ -505,6 +508,10 @@ A run that reads several slices in full seals through `seal_run` instead, after 
 | `reconcile` | Scheduled `snapshot_diff` over a range of partitions | as `extract` | `run_id + partition` |
 | `remote` | Stands in for a task that an on-prem agent executes (§6.9) | as the wrapped task | as the wrapped task |
 
+**Read once for `by_stamp`.** A `by_stamp` dataset reads once per run, from its watermark, and seals one incomplete version per partition it touched. Its `extract` task uses the partition name `*`.
+
+**Restarts.** A version's id is derived from its run, dataset and partition. An `extract` that restarts without a source checkpoint rewrites its chunks from the start, under the same id, and removes any left over.
+
 **Step size.** Steps are kept to about 5 minutes or less, with checkpoints inside long reads, so a crash or deploy loses little work.
 
 **Task shape.** All of these run as one engine task with a stable sequence of steps. Flow code (transforms, connectors) runs inside steps, so changing a flow never changes the step sequence (§6.12).
@@ -597,7 +604,7 @@ class PermanentError(Exception):
 class RetryPolicy:
     max_attempts: int = 6
     first_delay: timedelta = timedelta(seconds=10)
-    max_delay: timedelta = timedelta(minutes=10)  # exponential backoff with full jitter
+    max_delay: timedelta = timedelta(minutes=10)  # exponential backoff with equal jitter: half to all of the delay
 
 
 @dataclass(frozen=True)
@@ -617,7 +624,7 @@ class TaskContext(Protocol):
     task_ref: str
     attempt: int
 
-    def step(self, name: str, fn: Callable[[], T]) -> T: ...  # runs once; a replay returns the saved result
+    def step(self, name: str, fn: Callable[[], T]) -> T: ...  # once it succeeds, a retry or replay returns the saved result
     def sleep(self, duration: timedelta) -> None: ...
     def wait_signal(self, key: str, timeout: timedelta) -> Mapping[str, Any] | None: ...
 
@@ -801,8 +808,10 @@ All tables live in schema `feather`, and every table carries `tenant_id`. DBOS k
 
 - **Partitioning.** Postgres native declarative partitioning, with no extensions:
   - daily partitions for `spool_chunk` and `inbox`;
-  - monthly partitions for `version`, `delivery_attempt`, `task`, `task_log`, `quarantine` and `audit`.
-- **Retention job.** It creates future partitions ahead of time and drops expired ones. Dropping is cheap and creates no vacuum debt.
+  - monthly partitions for `delivery_attempt`, `task_log` and `audit`.
+  - `version`, `task` and `quarantine` stay plain tables, because they need ids that are unique across partitions. Their retention uses batched deletes.
+  - Snapshot chunks live in a plain table, `spool_snapshot`, because the latest one must outlive any day partition.
+- **Retention job.** It creates future partitions ahead of time and drops expired ones. Dropping is cheap and creates no vacuum debt. A day that still holds a version with an open delivery is kept, and the job reports why.
 - **Indexes.** Partial indexes cover work that isn't finished, for example `delivery (tenant_id, route, partition) WHERE status <> 'applied'`.
 - **Hot tables** such as `delivery` and `budget_window` get autovacuum settings tuned for frequent updates.
 
@@ -830,7 +839,7 @@ class Source(Protocol):                    # pull sources
 class PushSource(Protocol):                # webhook / CDC sources
     spec: ClassVar[fc.ConnectorSpec]
     def verify(self, ctx: fc.Context, request: fc.InboundRequest) -> None: ...  # raises on a bad signature
-    def receive(self, ctx: fc.Context, request: fc.InboundRequest) -> list[fc.Record]: ...
+    def receive(self, ctx: fc.Context, request: fc.InboundRequest) -> list[Mapping[str, Any] | fc.Deleted]: ...  # the runtime derives keys and hashes
 
 
 class Sink(Protocol):
