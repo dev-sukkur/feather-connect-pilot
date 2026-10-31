@@ -7,8 +7,8 @@ and a second pass over the `full` chunks keeps the rows that changed.
 
 import hashlib
 import math
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Container, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, cast
@@ -28,7 +28,8 @@ from feather_connect.storage import spool as spool_settings
 from feather_connect.storage.port import StateRow, Version, VersionDraft
 from feather_connect.storage.spool import records_to_table, snapshot_table, table_to_records
 
-_KEY, _HASH = "_fc_key", "_fc_row_hash"
+_KEY, _OP, _HASH, _MOVED = "_fc_key", "_fc_op", "_fc_row_hash", "_fc_moved_from"
+_MOVES_SCHEMA = pa.schema([pa.field(_KEY, pa.string()), pa.field(_MOVED, pa.string())])
 _ALL_PARTITIONS = "*"
 _MISSING_KEY = "<missing>"  # how the quarantine names a record that has no key
 _RESERVED_PREFIX = "_fc_"  # the spool's own columns
@@ -413,11 +414,112 @@ def run_extract(
     return versions if stage_only else finalize_versions(dataset, versions, routes, deps)
 
 
-def _check_empty_read(dataset: Dataset, version: Version, deps: RuntimeDeps) -> None:
-    """Refuse to let an empty read wipe a slice. A transient empty response must not empty a destination."""
-    if dataset.allow_empty or not version.complete:
-        return
+@dataclass(frozen=True)
+class _Reconciled:
+    """What the run's slices together say about one staged version.
+
+    `candidates` are its delete candidates as staged, `deletes` those that remain real, `changes` its other records,
+    without payloads, and `moves` the partition that each key moving into it came from.
+    """
+
+    version: Version
+    candidates: Mapping[str, int]
+    deletes: Mapping[str, int]
+    changes: Sequence[Record]
+    moves: Mapping[str, str]
+
+
+def _candidates_of(version: Version, deps: RuntimeDeps) -> dict[str, int]:
     if not deps.spool.list_chunks(version.version_id, "candidates"):
+        return {}
+    return dict(_pairs(deps.spool.get_chunk(version.version_id, 0, "candidates")))
+
+
+def _changes_of(version: Version, candidates: Mapping[str, int], deps: RuntimeDeps) -> list[Record]:
+    """Return the records of the version's data chunks, without payloads and without an earlier attempt's deletes."""
+    changes: list[Record] = []
+    for chunk in deps.spool.list_chunks(version.version_id):
+        table = deps.spool.get_chunk(version.version_id, chunk.chunk_no)
+        keys = cast("list[str]", table.column(_KEY).to_pylist())
+        ops = cast("list[Op]", table.column(_OP).to_pylist())
+        hashes = cast("list[int]", table.column(_HASH).to_pylist())
+        changes += [
+            Record(key, op, {}, hash_)
+            for key, op, hash_ in zip(keys, ops, hashes, strict=True)
+            if key not in candidates
+        ]
+    return changes
+
+
+def _holders(versions: Sequence[Version], keys: Container[str], deps: RuntimeDeps) -> dict[str, str]:
+    """Return, for each of `keys` in a new snapshot, the id of the first of `versions` whose snapshot holds it."""
+    holders: dict[str, str] = {}
+    for version in versions:
+        for chunk in deps.spool.list_chunks(version.version_id, "snapshot"):
+            for key, _ in _pairs(deps.spool.get_chunk(version.version_id, chunk.chunk_no, "snapshot")):
+                if key in keys:
+                    holders.setdefault(key, version.version_id)
+    return holders
+
+
+def _by_partition(versions: Iterable[Version]) -> list[Version]:
+    return sorted(versions, key=lambda version: version.partition)
+
+
+def _reconcile(
+    dataset: Dataset, versions: Sequence[Version], staged: Sequence[Version], deps: RuntimeDeps
+) -> list[_Reconciled]:
+    """Tell the real deletes from the moves, across all of `versions`, without changing anything (I10).
+
+    It works only from what stays as it is until sealing, so a repeat after a crash decides the same. Going through
+    the versions by partition settles a key that several of them claim the same way each time.
+    """
+    ordered = _by_partition(staged)
+    candidates = {v.version_id: _candidates_of(v, deps) for v in ordered}
+    changes: dict[str, list[Record]] = {}
+    for version in ordered:
+        needed = dataset.keep_state or candidates[version.version_id]
+        changes[version.version_id] = (
+            _changes_of(version, candidates[version.version_id], deps) if needed else []
+        )
+    wanted = {key for found in candidates.values() for key in found}
+    holders = _holders(_by_partition(versions), wanted, deps)
+    upserted = {r.key for found in changes.values() for r in found if r.op == "upsert"}
+    state = deps.store.state.get_many(dataset.name, wanted | upserted) if dataset.keep_state else {}
+
+    moves: dict[str, dict[str, str]] = {v.version_id: {} for v in ordered}
+    deletes: dict[str, dict[str, int]] = {v.version_id: {} for v in ordered}
+    for version in ordered:
+        for key, hash_ in candidates[version.version_id].items():
+            row = state.get(key)
+            if (
+                key in holders
+            ):  # a holder that is sealed already can't take a move, so `setdefault` on the outer too
+                moves.setdefault(holders[key], {}).setdefault(key, version.partition)
+            elif row is None or row.partition == version.partition:
+                deletes[version.version_id][key] = hash_
+    for (
+        version
+    ) in ordered:  # record state knows where a key last was, so it goes over what an old snapshot says
+        for record in changes[version.version_id]:
+            row = state.get(record.key)
+            if record.op == "upsert" and row is not None and row.partition != version.partition:
+                moves[version.version_id][record.key] = row.partition
+    return [
+        _Reconciled(
+            v, candidates[v.version_id], deletes[v.version_id], changes[v.version_id], moves[v.version_id]
+        )
+        for v in ordered
+    ]
+
+
+def _check_empty_read(dataset: Dataset, found: _Reconciled, deps: RuntimeDeps) -> None:
+    """Refuse to let an empty read wipe a slice. A transient empty response must not empty a destination.
+
+    A slice that is empty because its records moved to other slices wipes nothing, so only real deletes count.
+    """
+    version = found.version
+    if dataset.allow_empty or not version.complete or not found.deletes:
         return
     if sum(chunk.rows for chunk in deps.spool.list_chunks(version.version_id, "snapshot")) == 0:
         raise ExtractFailed(
@@ -426,55 +528,104 @@ def _check_empty_read(dataset: Dataset, version: Version, deps: RuntimeDeps) -> 
         )
 
 
-def _write_implied_deletes(version: Version, deps: RuntimeDeps) -> None:
-    """Turn a version's delete candidates into delete records at the end of its last data chunk.
+def _write_implied_deletes(found: _Reconciled, deps: RuntimeDeps) -> None:
+    """Write a version's real deletes at the end of its last data chunk, in place of what an earlier attempt wrote.
 
-    The last chunk is written whole, in one step, and the candidates go only after it, so that this can be repeated.
+    The last chunk is written whole, in one step, so that this can be repeated. A chunk left with nothing is removed:
+    it held only the deletes of an earlier attempt.
     """
-    version_id = version.version_id
-    candidates = deps.spool.list_chunks(version_id, "candidates")
-    if not candidates:
-        return
-    deletes = dict(_pairs(deps.spool.get_chunk(version_id, 0, "candidates")))
+    version_id = found.version.version_id
     chunks = deps.spool.list_chunks(version_id)
     last = chunks[-1].chunk_no if chunks else 0
     existing = table_to_records(deps.spool.get_chunk(version_id, last)) if chunks else []
-    records = [r for r in existing if r.key not in deletes]
-    records += [Record(key, "delete", {}, hash_) for key, hash_ in deletes.items()]
-    deps.spool.put_chunk(version_id, last, "data", records_to_table(records))
-    deps.spool.delete_chunks(version_id, "candidates")
+    records = [r for r in existing if r.key not in found.candidates]
+    if not found.deletes and len(records) == len(existing):
+        return
+    records += [Record(key, "delete", {}, hash_) for key, hash_ in found.deletes.items()]
+    if records:
+        deps.spool.put_chunk(version_id, last, "data", records_to_table(records))
+    else:
+        deps.spool.delete_chunks(version_id, "data", last)
+
+
+def _write_decision(found: _Reconciled, deps: RuntimeDeps) -> None:
+    """Write what `_reconcile` decided over what an earlier attempt wrote, and correct the staged version to match."""
+    version = found.version
+    if found.moves:
+        rows = [{_KEY: key, _MOVED: partition} for key, partition in found.moves.items()]
+        deps.spool.put_chunk(version.version_id, 0, "moves", pa.Table.from_pylist(rows, schema=_MOVES_SCHEMA))
+    else:
+        deps.spool.delete_chunks(version.version_id, "moves")
+    if found.candidates:
+        _write_implied_deletes(found, deps)
+        deps.store.versions.stage(
+            replace(
+                version,
+                upserts=sum(r.op == "upsert" for r in found.changes),
+                deletes=sum(r.op == "delete" for r in found.changes) + len(found.deletes),
+                content_hash=_content_hash(found.changes, found.deletes),
+            )
+        )
+
+
+def _keys_with_newer_state(
+    dataset: Dataset, version: Version, keys: Iterable[str], deps: RuntimeDeps
+) -> set[str]:
+    """Return the keys whose record state comes from a version sealed after `version`.
+
+    A repeat of a finalize, however late, must not take these back.
+    """
+    rows = deps.store.state.get_many(dataset.name, keys)
+    later: set[str] = set()
+    for version_id in {row.last_version for row in rows.values()} - {version.version_id}:
+        try:
+            seal_seq = deps.store.versions.get(version_id).seal_seq
+        except KeyError:
+            continue
+        if seal_seq is not None and version.seal_seq is not None and seal_seq > version.seal_seq:
+            later.add(version_id)
+    return {key for key, row in rows.items() if row.last_version in later}
 
 
 def _update_state(dataset: Dataset, version: Version, deps: RuntimeDeps) -> None:
     for chunk in deps.spool.list_chunks(version.version_id):
         records = table_to_records(deps.spool.get_chunk(version.version_id, chunk.chunk_no))
+        newer = _keys_with_newer_state(dataset, version, [r.key for r in records], deps)
+        current = [r for r in records if r.key not in newer]
         deps.store.state.put_many(
             dataset.name,
             (
                 StateRow(r.key, version.partition, r.row_hash, r.payload, version.version_id)
-                for r in records
+                for r in current
                 if r.op == "upsert"
             ),
         )
-        deps.store.state.delete_many(dataset.name, (r.key for r in records if r.op == "delete"))
+        deps.store.state.delete_many(dataset.name, (r.key for r in current if r.op == "delete"))
 
 
 def finalize_versions(
     dataset: Dataset, versions: Sequence[Version], routes: Sequence[RouteSpec], deps: RuntimeDeps
 ) -> list[Version]:
-    """Decide the implied deletes of staged versions and seal them all together, with a delivery per route.
+    """Decide the implied deletes and moves of staged versions and seal them all together, with a delivery per route.
 
-    Raises `ExtractFailed`, with nothing sealed, when a complete read came back empty and the dataset doesn't allow
-    it. Versions that are already sealed stay as they are, so this can be repeated. Record state is updated after
+    A delete candidate that another of `versions` holds in its new snapshot is a move, and with `keep_state` so is one
+    whose record state is in another partition. A move is written to the `moves` chunk of the version that received it.
+
+    Raises `ExtractFailed`, with nothing sealed, when a complete read came back empty and would really delete records,
+    unless the dataset allows it. Versions that are already sealed stay as they are, so this can be repeated: all that
+    comes before sealing is worked out from the candidates, which go only after it. Record state is updated after
     sealing, so that a crash in between can't hide a change from the next read of an unsealed version.
     """
-    staged = [version for version in versions if version.status == "staged"]
-    for version in staged:
-        _check_empty_read(dataset, version, deps)
-    for version in staged:
-        _write_implied_deletes(version, deps)
-    sealed = deps.store.versions.seal([v.version_id for v in versions], [route.name for route in routes])
+    current = [deps.store.versions.get(version.version_id) for version in versions]
+    decisions = _reconcile(dataset, current, [v for v in current if v.status == "staged"], deps)
+    for found in decisions:
+        _check_empty_read(dataset, found, deps)
+    for found in decisions:
+        _write_decision(found, deps)
+    sealed = deps.store.versions.seal([v.version_id for v in current], [route.name for route in routes])
     if dataset.keep_state:
         for version in sealed:
             _update_state(dataset, version, deps)
+    for version in sealed:
+        deps.spool.delete_chunks(version.version_id, "candidates")
     return sealed
