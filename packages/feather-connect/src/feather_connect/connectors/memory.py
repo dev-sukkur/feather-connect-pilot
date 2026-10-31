@@ -24,7 +24,7 @@ from feather_connect.core.errors import PermanentError, RecordRejected
 from feather_connect.core.strategies import read_stamp
 
 
-def _changed_since(row: Mapping[str, Any], req: ReadRequest) -> bool:
+def changed_since(row: Mapping[str, Any], req: ReadRequest) -> bool:
     """Return whether the row's stamp is `req.since` or later. A row without a stamp never is.
 
     A read that sets no `since` or no `stamp_field` takes every row. So does a stamp that can't be compared with
@@ -70,7 +70,7 @@ class Source(connector.Source):
 
     def read(self, ctx: Context, req: ReadRequest) -> Iterator[list[dict[str, Any]]]:
         """Yield the matching rows as a single batch, or nothing if none match. A read never resumes."""
-        rows = [row for row in self._rows if req.contains(row) and _changed_since(row, req)]
+        rows = [row for row in self._rows if req.contains(row) and changed_since(row, req)]
         if rows:
             yield rows
 
