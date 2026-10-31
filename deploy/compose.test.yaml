@@ -1,0 +1,22 @@
+# Postgres 17 for the tests that carry the `postgres` marker.
+#   docker compose -f deploy/compose.test.yaml up -d
+# They read FEATHER_TEST_DATABASE_URL, which defaults to the URL below.
+name: feather-test
+services:
+  postgres:
+    image: postgres:17
+    ports:
+      - "127.0.0.1:25433:5432"
+    environment:
+      POSTGRES_USER: feather
+      POSTGRES_PASSWORD: feather
+      POSTGRES_DB: feather_test
+    # Throwaway data: keep it in memory, and trade durability for speed.
+    tmpfs:
+      - /var/lib/postgresql/data
+    command: ["postgres", "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U feather -d feather_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

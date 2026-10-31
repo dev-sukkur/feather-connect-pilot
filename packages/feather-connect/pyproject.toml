@@ -11,6 +11,12 @@ dependencies = [
     "tzdata; sys_platform == 'win32'",
 ]
 
+[project.optional-dependencies]
+postgres = [
+    "alembic",
+    "psycopg[binary,pool]",
+]
+
 [build-system]
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"

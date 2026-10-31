@@ -41,4 +41,5 @@ strict = ["packages/feather-connect/src"]
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
+markers = ["postgres: needs the test Postgres of deploy/compose.test.yaml"]
 timeout = 120
