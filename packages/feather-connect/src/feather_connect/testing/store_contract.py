@@ -343,6 +343,15 @@ class StoreContract:
         page = store.runs.list_runs(limit=2)
         assert [r.run_id for r in store.runs.list_runs(cursor=page[-1].run_id)] == [first]
 
+    def test_starting_a_task_again_keeps_its_row(self, store: Store):
+        rid = store.runs.create_run("f", "manual", "ann", {})
+        other = store.runs.create_run("f", "manual", "ann", {})
+        first = store.runs.start_task(rid, "apply", "ref")
+        store.runs.finish_task(first, "failed", "bad")
+        assert store.runs.start_task(rid, "apply", "ref") == first
+        assert [(t.task_id, t.status) for t in store.runs.list_tasks(rid)] == [(first, "failed")]
+        assert store.runs.start_task(other, "apply", "ref") != first
+
     def test_tasks_and_logs(self, store: Store, clock: FrozenClock):
         rid = store.runs.create_run("f", "manual", "ann", {})
         t1 = store.runs.start_task(

@@ -445,3 +445,77 @@ def test_two_flows_cannot_share_a_route_name() -> None:
 
     with pytest.raises(ValueError, match="route"):
         Runtime([flow("f", "d"), flow("g", "e")], MemoryStore(), MemorySpool(), LocalEngine())
+
+
+def two_versions(*, fail_first: bool = False) -> tuple[Harness, str, str, str, str]:
+    h = Harness()
+    if fail_first:
+        h.a.fail_next(PermanentError("bad"))
+    run1 = h.run()
+    h.source.load([{"id": 1, "v": "new"}])
+    run2 = h.run()
+    return h, run1, run2, h.version_of(run1), h.version_of(run2)
+
+
+def test_replay_waits_for_a_newer_open_delivery() -> None:
+    h, _, _, v1, v2 = two_versions()
+    h.rt.replay("a", v2, actor="op")  # the newest may replay, and now it is open
+    with pytest.raises(InvalidTransition, match=v2):
+        h.rt.replay("a", v1, actor="op")
+    assert h.delivery("a", v1) == "applied"
+    h.engine.run_until_idle()
+
+    # Drained, the older one replays, and a failure of it strands nothing.
+    h.a.fail_next(PermanentError("boom"))
+    h.rt.replay("a", v1, actor="op")
+    h.engine.run_until_idle()
+    assert (h.delivery("a", v1), h.delivery("a", v2)) == ("failed", "applied")
+    h.rt.retry("a", v1, actor="op")
+    h.engine.run_until_idle()
+    assert (h.delivery("a", v1), h.delivery("a", v2)) == ("applied", "applied")
+
+
+def test_replay_ignores_an_open_delivery_of_another_partition_or_route() -> None:
+    h = Harness(by_day(), rows=on(DAY_17, DAY_18))
+    h.a.fail_next(PermanentError("bad"))
+    run17 = h.run(partitions=[DAY_17])
+    h.run(partitions=[DAY_18])
+    v18 = h.version_of(h.store.runs.list_runs(limit=1)[0].run_id, DAY_18)
+    h.rt.replay("a", v18, actor="op")
+    h.rt.replay("b", h.version_of(run17, DAY_17), actor="op")
+    h.engine.run_until_idle()
+    assert h.delivery("a", v18) == "applied"
+
+
+def test_submit_apply_keeps_the_key_of_a_delivery_that_is_not_next() -> None:
+    h, _, run2, v1, v2 = two_versions(fail_first=True)
+    before = len(h.tasks_named("feather.apply"))
+    rows = len(h.store.runs.list_tasks(run2))
+    h.rt.submit_apply("a", v2)  # as a sweeper would
+    assert len(h.tasks_named("feather.apply")) == before
+    assert len(h.store.runs.list_tasks(run2)) == rows
+    h.engine.run_until_idle()
+    assert h.delivery("a", v2) == "pending"
+
+    h.rt.retry("a", v1, actor="op")
+    h.engine.run_until_idle()
+    assert (h.delivery("a", v1), h.delivery("a", v2)) == ("applied", "applied")
+    assert h.status(run2) == "succeeded"
+
+
+@pytest.mark.parametrize(
+    ("step", "missing"),
+    [("plan", "flow"), ("extract", "flow"), ("seal", "flow"), ("target", "route")],
+)
+def test_a_task_whose_flow_a_deploy_removed_fails_its_row(step: str, missing: str) -> None:
+    h = Harness(by_day(), rows=on(DAY_17, DAY_18))
+    h.engine.crash_before(step)
+    run = h.rt.start_run("f")
+    h.engine.run_until_idle()
+    deployed = Runtime([], h.store, MemorySpool(), h.engine, code_sha="new", clock=h.clock)
+    h.engine.register(deployed.tasks())
+    h.engine.recover()
+    h.engine.run_until_idle()
+    assert {row.status for row in h.store.runs.list_tasks(run)} <= {"succeeded", "failed"}
+    assert h.status(run) == "failed"
+    assert f"no {missing} is named" in (h.reason(run) or "")

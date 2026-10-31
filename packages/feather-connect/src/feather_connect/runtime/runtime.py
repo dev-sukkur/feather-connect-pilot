@@ -24,7 +24,14 @@ from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import ExtractFailed, run_extract
 from feather_connect.runtime.plan import run_plan
 from feather_connect.runtime.seal import run_seal
-from feather_connect.storage.port import CLOSED, Delivery, DeliveryStatus, InvalidTransition, Store
+from feather_connect.storage.port import (
+    CLOSED,
+    Delivery,
+    DeliveryStatus,
+    InvalidTransition,
+    Store,
+    delivery_cursor,
+)
 from feather_connect.storage.spool import Spool
 
 _TENANT = "default"
@@ -134,8 +141,19 @@ class Runtime:
         self._reopen(route, version_id, "pending", actor, reason)
 
     def replay(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
-        """Send an applied delivery back to be applied again, as a new task."""
+        """Send an applied delivery back to be applied again, as a new task.
+
+        Raises `InvalidTransition` while a newer delivery of the route's partition is open: a task of that delivery
+        could find the replay failed in front of it and end, using up its key. Replay once the stream has drained.
+        """
         self._require(route, version_id, "applied", "replay")
+        delivery = self._deps.store.ledger.get(route, version_id)
+        newer = self._newer_open(delivery)
+        if newer is not None:
+            raise InvalidTransition(
+                f"version {version_id} can't replay on route {route!r} while newer version {newer.version_id} is "
+                f"{newer.status} in partition {delivery.partition!r}: replay once that has drained"
+            )
         self._reopen(route, version_id, "pending", actor, reason)
 
     def skip(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
@@ -143,11 +161,17 @@ class Runtime:
         self._reopen(route, version_id, "skipped", actor, reason)
 
     def submit_apply(self, route: str, version_id: str) -> None:
-        """Submit the delivery's task. Doing so again in the same state of the delivery changes nothing."""
+        """Give the delivery a row, and submit its task if it is next in its stream.
+
+        One that isn't next waits for the delivery ahead of it to submit it, since its task would end blocked and use
+        up its key. Doing this again in the same state of the delivery changes nothing.
+        """
         delivery = self._deps.store.ledger.get(route, version_id)
         run_id = self._deps.store.versions.get(version_id).run_id
         self._open_apply_row(delivery, run_id)
-        self._engine.submit(self._apply_call(delivery, run_id))
+        next_up = self._next_of(delivery)
+        if next_up is not None and next_up.version_id == version_id:
+            self._engine.submit(self._apply_call(delivery, run_id))
 
     def submit_seal(self, flow: str, dataset: str, run_id: str) -> None:
         """Submit the task that seals the run's slices of `dataset`."""
@@ -184,8 +208,7 @@ class Runtime:
                 deps.store.runs.finish_task(row.task_id, "cancelled", row.error)
         if to == "pending":
             deps.store.runs.set_run_status(run_id, "running")
-            self._open_apply_row(delivery, run_id)
-            self._submit_if_next(delivery)
+            self.submit_apply(route, version_id)
         else:
             self._submit_next(delivery)
             self._settle_run(run_id)
@@ -193,9 +216,10 @@ class Runtime:
     # The tasks.
 
     def _plan_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
-        run_id, flow = args["run_id"], self.flow(args["flow"])
+        run_id = args["run_id"]
 
         def body() -> None:
+            flow = self.flow(args["flow"])
             ctx.step("begin", lambda: self._deps.store.runs.set_run_status(run_id, "running"))
             planned = ctx.step("plan", lambda: run_plan(flow, run_id, self._deps))
             ctx.step("submit_extracts", lambda: self._submit_extracts(flow.name, run_id, planned))
@@ -205,10 +229,10 @@ class Runtime:
 
     def _extract_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
         run_id, partition = args["run_id"], args["partition"]
-        flow, dataset = self.flow(args["flow"]), self.dataset(args["dataset"])
         versions = self._deps.store.versions
 
         def body() -> None:
+            flow, dataset = self.flow(args["flow"]), self.dataset(args["dataset"])
             sliced = ctx.step("sliced", lambda: bool(versions.slices_for_run(run_id, dataset.name)))
             ids = ctx.step("extract", lambda: self._extract(flow, dataset, run_id, partition, sliced))
             if not sliced:
@@ -221,9 +245,9 @@ class Runtime:
 
     def _seal_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
         run_id = args["run_id"]
-        flow, dataset = self.flow(args["flow"]), self.dataset(args["dataset"])
 
         def body() -> None:
+            flow, dataset = self.flow(args["flow"]), self.dataset(args["dataset"])
             ids = ctx.step("seal", lambda: self._seal(flow, dataset, run_id))
             ctx.step("submit_applies", lambda: self._submit_applies(flow, run_id, ids))
             self._finish_step(ctx, run_id)
@@ -232,9 +256,9 @@ class Runtime:
 
     def _apply_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
         run_id, version_id = args["run_id"], args["version_id"]
-        route, dataset = self.route(args["route"]), self.dataset(args["dataset"])
 
         def body() -> None:
+            route, dataset = self.route(args["route"]), self.dataset(args["dataset"])
             run_apply(ctx, dataset, route, version_id, self._deps)
             ctx.step("finish", lambda: self._finish_apply(ctx.task_ref, run_id, route.name, version_id))
 
@@ -295,18 +319,26 @@ class Runtime:
                 )
 
     def _submit_applies(self, flow: Flow, run_id: str, version_ids: Sequence[str]) -> None:
-        """Give the run a row for each new delivery, then submit those that are next in line."""
+        """Give the run a row for each new delivery, before any of them is submitted and can end the run."""
         ledger = self._deps.store.ledger
         deliveries = [ledger.get(route.name, v) for v in version_ids for route in flow.routes]
         for delivery in deliveries:
             self._open_apply_row(delivery, run_id)
         for delivery in deliveries:
-            self._submit_if_next(delivery)
-
-    def _submit_if_next(self, delivery: Delivery) -> None:
-        next_up = self._next_of(delivery)
-        if next_up is not None and next_up.version_id == delivery.version_id:
             self.submit_apply(delivery.route, delivery.version_id)
+
+    def _newer_open(self, delivery: Delivery) -> Delivery | None:
+        """Return the first open delivery sealed after `delivery` in its route's partition, of any dataset."""
+        ledger = self._deps.store.ledger
+        page = ledger.list_deliveries(route=delivery.route, partition=delivery.partition)
+        while page:
+            for other in page:
+                if other.seal_seq > delivery.seal_seq and other.status not in CLOSED:
+                    return other
+            page = ledger.list_deliveries(
+                route=delivery.route, partition=delivery.partition, cursor=delivery_cursor(page[-1])
+            )
+        return None
 
     def _submit_next(self, delivery: Delivery) -> None:
         """Submit what comes next in the delivery's stream, unless that is blocked."""
@@ -370,10 +402,10 @@ class Runtime:
         partition: str | None,
         route: str | None = None,
     ) -> None:
-        """Add the task's row to the run, unless a repeat of the step or an earlier one has done it."""
-        runs = self._deps.store.runs
-        if all(existing.ref != ref for existing in runs.list_tasks(run_id)):
-            runs.start_task(run_id, kind, ref, dataset, partition, route, code_sha=self._deps.code_sha)
+        """Add the task's row to the run. `start_task` keeps a repeat from adding a second one."""
+        self._deps.store.runs.start_task(
+            run_id, kind, ref, dataset, partition, route, code_sha=self._deps.code_sha
+        )
 
     def _apply_call(self, delivery: Delivery, run_id: str) -> TaskCall:
         return TaskCall(

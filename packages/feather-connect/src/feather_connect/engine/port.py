@@ -61,7 +61,10 @@ class TaskCall:
 
 
 class TaskContext(Protocol):
-    """What a task body may use. Everything here survives a worker restart."""
+    """What a task body may use. Everything here survives a worker restart.
+
+    `task_ref` equals the idempotency key of the task's call, and the runtime relies on that to find the task's row.
+    """
 
     task_ref: str
     attempt: int

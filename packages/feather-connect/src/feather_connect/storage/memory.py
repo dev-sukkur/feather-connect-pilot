@@ -112,6 +112,9 @@ class _Runs(RunJournal):
         code_sha: str | None = None,
     ) -> str:
         with self._d.lock:
+            for existing in self._d.tasks.values():
+                if existing.run_id == run_id and existing.ref == ref:
+                    return existing.task_id
             task_id = new_id()
             self._d.tasks[task_id] = TaskRow(
                 task_id,
