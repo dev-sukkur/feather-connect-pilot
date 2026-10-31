@@ -1,0 +1,391 @@
+"""The runtime: flows, store and engine wired into tasks, and the ways to start and steer a run.
+
+A task's arguments are ids (I8), and all it reads or does outside itself happens in `ctx.step`. Each task has a row in
+the run's journal from before it is submitted, so a run is over once none of its rows is running. The row is found by
+`ctx.task_ref`, which is the task's idempotency key.
+
+An `apply` task is submitted only for the oldest open delivery of its stream, and each one that ends submits the next.
+A task submitted any earlier could find itself blocked and end, and its key would then be used up for good. Until
+then a waiting delivery has a row but no task, which keeps its run going while an older version blocks it.
+"""
+
+import logging
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Any
+
+from feather_connect.clock import Clock, SystemClock
+from feather_connect.core.context import Context
+from feather_connect.core.dataset import Dataset
+from feather_connect.core.errors import PermanentError
+from feather_connect.core.flow import Flow, RouteSpec
+from feather_connect.engine.port import Engine, TaskCall, TaskContext, TaskFn
+from feather_connect.runtime.apply import oldest_open, run_apply
+from feather_connect.runtime.deps import RuntimeDeps
+from feather_connect.runtime.extract import ExtractFailed, run_extract
+from feather_connect.runtime.plan import run_plan
+from feather_connect.runtime.seal import run_seal
+from feather_connect.storage.port import CLOSED, Delivery, DeliveryStatus, InvalidTransition, Store
+from feather_connect.storage.spool import Spool
+
+_TENANT = "default"
+_UTC = "UTC"
+
+
+def _apply_key(delivery: Delivery) -> str:
+    """Return the key of the delivery's task: the same state gets the same task, and a retry or a replay a new one."""
+    return f"apply:{delivery.route}:{delivery.version_id}:{delivery.replays}:{delivery.retries}"
+
+
+class Runtime:
+    """Runs `flows` on `engine`. Register `tasks()` with whatever executes the tasks.
+
+    `code_sha` identifies the running code. `make_context` gives the context to call a connector with, given the name
+    of its connection, and by default holds no settings. `clock` defaults to the system clock.
+    """
+
+    def __init__(
+        self,
+        flows: Iterable[Flow],
+        store: Store,
+        spool: Spool,
+        engine: Engine,
+        *,
+        code_sha: str = "dev",
+        clock: Clock | None = None,
+        make_context: Callable[[str], Context] | None = None,
+    ) -> None:
+        self._engine = engine
+        self._clock: Clock = SystemClock() if clock is None else clock
+        self._deps = RuntimeDeps(store, spool, self._clock, code_sha, make_context or self._default_context)
+        self._flows: dict[str, Flow] = {}
+        self._datasets: dict[str, Dataset] = {}
+        self._routes: dict[str, RouteSpec] = {}
+        for flow in flows:
+            self._add(self._flows, "flow", flow.name, flow)
+            for dataset in flow.datasets:
+                self._add(self._datasets, "dataset", dataset.name, dataset)
+            for route in flow.routes:
+                self._add(self._routes, "route", route.name, route)
+
+    @staticmethod
+    def _add[T](found: dict[str, T], kind: str, name: str, value: T) -> None:
+        """Index `value` by name. The store knows these by name alone, so a name can mean only one thing."""
+        if found.setdefault(name, value) is not value:
+            raise ValueError(f"two different things are the {kind} named {name!r}: name them apart")
+
+    def _default_context(self, connection: str) -> Context:
+        return Context({}, logging.getLogger(connection), self._clock.now(), _UTC)
+
+    def flow(self, name: str) -> Flow:
+        """Return the flow called `name`. Raises `KeyError` if there is none, as `dataset` and `route` do."""
+        return self._find(self._flows, "flow", name)
+
+    def dataset(self, name: str) -> Dataset:
+        return self._find(self._datasets, "dataset", name)
+
+    def route(self, name: str) -> RouteSpec:
+        return self._find(self._routes, "route", name)
+
+    @staticmethod
+    def _find[T](found: Mapping[str, T], kind: str, name: str) -> T:
+        if name not in found:
+            raise KeyError(f"no {kind} is named {name!r}")
+        return found[name]
+
+    def tasks(self) -> Mapping[str, TaskFn]:
+        return {
+            "feather.plan": self._plan_task,
+            "feather.extract": self._extract_task,
+            "feather.seal_run": self._seal_task,
+            "feather.apply": self._apply_task,
+        }
+
+    # What starts and steers runs.
+
+    def start_run(
+        self,
+        flow: str,
+        *,
+        trigger: str = "manual",
+        actor: str = "system",
+        partitions: Sequence[str] | None = None,
+        reason: str | None = None,
+    ) -> str:
+        """Create a run and submit its plan. `partitions` overrides what would be planned, for a re-run of a slice."""
+        self.flow(flow)
+        params: dict[str, Any] = {} if partitions is None else {"partitions": list(partitions)}
+        run_id = self._deps.store.runs.create_run(flow, trigger, actor, params, reason=reason)
+        self._submit(
+            TaskCall(
+                "feather.plan",
+                {"run_id": run_id, "flow": flow},
+                f"plan:{run_id}",
+                f"plan:{_TENANT}:{flow}",
+                retry=self._deps.retry,
+            ),
+            run_id,
+            "plan",
+        )
+        return run_id
+
+    def retry(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
+        """Send a failed delivery back to be tried again, as a new task."""
+        self._require(route, version_id, "failed", "retry")
+        self._reopen(route, version_id, "pending", actor, reason)
+
+    def replay(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
+        """Send an applied delivery back to be applied again, as a new task."""
+        self._require(route, version_id, "applied", "replay")
+        self._reopen(route, version_id, "pending", actor, reason)
+
+    def skip(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
+        """Give up on a failed delivery, so that the versions behind it can go ahead."""
+        self._reopen(route, version_id, "skipped", actor, reason)
+
+    def submit_apply(self, route: str, version_id: str) -> None:
+        """Submit the delivery's task. Doing so again in the same state of the delivery changes nothing."""
+        delivery = self._deps.store.ledger.get(route, version_id)
+        run_id = self._deps.store.versions.get(version_id).run_id
+        self._open_apply_row(delivery, run_id)
+        self._engine.submit(self._apply_call(delivery, run_id))
+
+    def submit_seal(self, flow: str, dataset: str, run_id: str) -> None:
+        """Submit the task that seals the run's slices of `dataset`."""
+        self._submit(
+            TaskCall(
+                "feather.seal_run",
+                {"run_id": run_id, "flow": flow, "dataset": dataset},
+                f"seal:{run_id}:{dataset}",
+                f"seal:{_TENANT}:{dataset}",
+                retry=self._deps.retry,
+            ),
+            run_id,
+            "seal_run",
+            dataset,
+        )
+
+    def _require(self, route: str, version_id: str, status: DeliveryStatus, action: str) -> None:
+        """Keep a retry from passing for a replay, or the other way round: the ledger allows both moves to pending."""
+        current = self._deps.store.ledger.get(route, version_id).status
+        if current != status:
+            raise InvalidTransition(f"only a {status} delivery can {action}, and this one is {current}")
+
+    def _reopen(
+        self, route: str, version_id: str, to: DeliveryStatus, actor: str, reason: str | None
+    ) -> None:
+        """Move a delivery as an operator asked, and have the run answer for what follows instead of what failed."""
+        deps = self._deps
+        delivery = deps.store.ledger.transition(
+            route, version_id, to, actor=actor, reason=reason, code_sha=deps.code_sha
+        )
+        run_id = deps.store.versions.get(version_id).run_id
+        for row in deps.store.runs.list_tasks(run_id):
+            if row.status == "failed" and row.ref.startswith(f"apply:{route}:{version_id}:"):
+                deps.store.runs.finish_task(row.task_id, "cancelled", row.error)
+        if to == "pending":
+            deps.store.runs.set_run_status(run_id, "running")
+            self._open_apply_row(delivery, run_id)
+            self._submit_if_next(delivery)
+        else:
+            self._submit_next(delivery)
+            self._settle_run(run_id)
+
+    # The tasks.
+
+    def _plan_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
+        run_id, flow = args["run_id"], self.flow(args["flow"])
+
+        def body() -> None:
+            ctx.step("begin", lambda: self._deps.store.runs.set_run_status(run_id, "running"))
+            planned = ctx.step("plan", lambda: run_plan(flow, run_id, self._deps))
+            ctx.step("submit_extracts", lambda: self._submit_extracts(flow.name, run_id, planned))
+            self._finish_step(ctx, run_id)
+
+        self._tracked(ctx, run_id, body)
+
+    def _extract_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
+        run_id, partition = args["run_id"], args["partition"]
+        flow, dataset = self.flow(args["flow"]), self.dataset(args["dataset"])
+        versions = self._deps.store.versions
+
+        def body() -> None:
+            sliced = ctx.step("sliced", lambda: bool(versions.slices_for_run(run_id, dataset.name)))
+            ids = ctx.step("extract", lambda: self._extract(flow, dataset, run_id, partition, sliced))
+            if not sliced:
+                ctx.step("submit_applies", lambda: self._submit_applies(flow, run_id, ids))
+            elif ctx.step("finish_slice", lambda: versions.finish_slice(run_id, dataset.name, partition)):
+                ctx.step("submit_seal", lambda: self.submit_seal(flow.name, dataset.name, run_id))
+            self._finish_step(ctx, run_id)
+
+        self._tracked(ctx, run_id, body)
+
+    def _seal_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
+        run_id = args["run_id"]
+        flow, dataset = self.flow(args["flow"]), self.dataset(args["dataset"])
+
+        def body() -> None:
+            ids = ctx.step("seal", lambda: self._seal(flow, dataset, run_id))
+            ctx.step("submit_applies", lambda: self._submit_applies(flow, run_id, ids))
+            self._finish_step(ctx, run_id)
+
+        self._tracked(ctx, run_id, body)
+
+    def _apply_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
+        run_id, version_id = args["run_id"], args["version_id"]
+        route, dataset = self.route(args["route"]), self.dataset(args["dataset"])
+
+        def body() -> None:
+            run_apply(ctx, dataset, route, version_id, self._deps)
+            ctx.step("finish", lambda: self._finish_apply(ctx.task_ref, run_id, route.name, version_id))
+
+        self._tracked(ctx, run_id, body)
+
+    def _tracked(self, ctx: TaskContext, run_id: str, body: Callable[[], None]) -> None:
+        """Run a task's body, and answer for it in the journal if it is about to end in failure."""
+        try:
+            body()
+        except PermanentError as error:
+            self._fail_step(ctx, run_id, error)
+            raise
+        except Exception as error:
+            if ctx.attempt >= self._deps.retry.max_attempts:
+                self._fail_step(ctx, run_id, error)
+            raise
+
+    def _finish_step(self, ctx: TaskContext, run_id: str) -> None:
+        ctx.step("finish", lambda: self._finish_task(ctx.task_ref, run_id, "succeeded"))
+
+    def _fail_step(self, ctx: TaskContext, run_id: str, error: Exception) -> None:
+        message = str(error)
+        ctx.step("failed", lambda: self._finish_task(ctx.task_ref, run_id, "failed", message))
+
+    # What the steps do.
+
+    def _extract(self, flow: Flow, dataset: Dataset, run_id: str, partition: str, sliced: bool) -> list[str]:
+        try:
+            versions = run_extract(
+                dataset, run_id, partition, routes=flow.routes, stage_only=sliced, deps=self._deps
+            )
+        except ExtractFailed as error:  # the source would say the same again, so a retry can't help
+            raise PermanentError(str(error)) from error
+        return [] if sliced else [version.version_id for version in versions]
+
+    def _seal(self, flow: Flow, dataset: Dataset, run_id: str) -> list[str]:
+        try:
+            versions = run_seal(dataset, run_id, routes=flow.routes, deps=self._deps)
+        except ExtractFailed as error:
+            raise PermanentError(str(error)) from error
+        return [version.version_id for version in versions]
+
+    def _submit_extracts(self, flow: str, run_id: str, planned: Mapping[str, Sequence[str]]) -> None:
+        for dataset, partitions in planned.items():
+            for partition in partitions:
+                self._submit(
+                    TaskCall(
+                        "feather.extract",
+                        {"run_id": run_id, "flow": flow, "dataset": dataset, "partition": partition},
+                        f"extract:{run_id}:{dataset}:{partition}",
+                        f"extract:{_TENANT}:{dataset}:{partition}",
+                        retry=self._deps.retry,
+                    ),
+                    run_id,
+                    "extract",
+                    dataset,
+                    partition,
+                )
+
+    def _submit_applies(self, flow: Flow, run_id: str, version_ids: Sequence[str]) -> None:
+        """Give the run a row for each new delivery, then submit those that are next in line."""
+        ledger = self._deps.store.ledger
+        deliveries = [ledger.get(route.name, v) for v in version_ids for route in flow.routes]
+        for delivery in deliveries:
+            self._open_apply_row(delivery, run_id)
+        for delivery in deliveries:
+            self._submit_if_next(delivery)
+
+    def _submit_if_next(self, delivery: Delivery) -> None:
+        next_up = self._next_of(delivery)
+        if next_up is not None and next_up.version_id == delivery.version_id:
+            self.submit_apply(delivery.route, delivery.version_id)
+
+    def _submit_next(self, delivery: Delivery) -> None:
+        """Submit what comes next in the delivery's stream, unless that is blocked."""
+        next_up = self._next_of(delivery)
+        if next_up is not None and next_up.status == "pending":
+            self.submit_apply(next_up.route, next_up.version_id)
+
+    def _next_of(self, delivery: Delivery) -> Delivery | None:
+        return oldest_open(delivery.route, delivery.dataset, delivery.partition, self._deps)
+
+    def _finish_apply(self, ref: str, run_id: str, route: str, version_id: str) -> None:
+        """End an apply task by how its delivery stands: `run_apply` ends well even when the delivery failed."""
+        delivery = self._deps.store.ledger.get(route, version_id)
+        self._submit_next(delivery)
+        if delivery.status in CLOSED:
+            self._finish_task(ref, run_id, "succeeded")
+            return
+        why = delivery.last_error or f"it is still {delivery.status}, behind an older version"
+        self._finish_task(ref, run_id, "failed", f"route {route!r}, version {version_id}: {why}")
+
+    def _finish_task(self, ref: str, run_id: str, status: str, error: str | None = None) -> None:
+        runs = self._deps.store.runs
+        task_id = next(row.task_id for row in runs.list_tasks(run_id) if row.ref == ref)
+        runs.finish_task(task_id, status, error)
+        self._settle_run(run_id)
+
+    def _settle_run(self, run_id: str) -> None:
+        """Finish the run if none of its tasks is still running. It failed for the first reason any of them did."""
+        runs = self._deps.store.runs
+        rows = runs.list_tasks(run_id)
+        if any(row.status == "running" for row in rows):
+            return
+        failed = next((row for row in rows if row.status == "failed"), None)
+        if failed is None:
+            runs.set_run_status(run_id, "succeeded")
+        else:
+            runs.set_run_status(run_id, "failed", failed.error)
+
+    def _submit(
+        self,
+        call: TaskCall,
+        run_id: str,
+        kind: str,
+        dataset: str | None = None,
+        partition: str | None = None,
+    ) -> None:
+        self._open_row(run_id, kind, call.idempotency_key, dataset, partition)
+        self._engine.submit(call)
+
+    def _open_apply_row(self, delivery: Delivery, run_id: str) -> None:
+        self._open_row(
+            run_id, "apply", _apply_key(delivery), delivery.dataset, delivery.partition, delivery.route
+        )
+
+    def _open_row(
+        self,
+        run_id: str,
+        kind: str,
+        ref: str,
+        dataset: str | None,
+        partition: str | None,
+        route: str | None = None,
+    ) -> None:
+        """Add the task's row to the run, unless a repeat of the step or an earlier one has done it."""
+        runs = self._deps.store.runs
+        if all(existing.ref != ref for existing in runs.list_tasks(run_id)):
+            runs.start_task(run_id, kind, ref, dataset, partition, route, code_sha=self._deps.code_sha)
+
+    def _apply_call(self, delivery: Delivery, run_id: str) -> TaskCall:
+        return TaskCall(
+            "feather.apply",
+            {
+                "run_id": run_id,
+                "dataset": delivery.dataset,
+                "partition": delivery.partition,
+                "route": delivery.route,
+                "version_id": delivery.version_id,
+            },
+            _apply_key(delivery),
+            f"apply:{_TENANT}:{delivery.route}:{delivery.partition}",
+            retry=self._deps.retry,
+        )

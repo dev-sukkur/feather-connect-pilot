@@ -58,7 +58,7 @@ class _Counts:
     rejected: int = 0
 
 
-def _oldest_open(route: str, dataset: str, partition: str, deps: RuntimeDeps) -> Delivery | None:
+def oldest_open(route: str, dataset: str, partition: str, deps: RuntimeDeps) -> Delivery | None:
     """Return the delivery next in line for one dataset. A route can carry several, and I2 orders each on its own."""
     ledger = deps.store.ledger
     oldest = ledger.oldest_open(route, partition)
@@ -500,7 +500,7 @@ def run_apply(
         raise PermanentError(f"version {version_id} is not sealed, so it can't be applied")
     for n in count():
         delivery = ctx.step(
-            f"next:{n}", lambda: _oldest_open(route.name, dataset.name, target.partition, deps)
+            f"next:{n}", lambda: oldest_open(route.name, dataset.name, target.partition, deps)
         )
         if delivery is None or delivery.seal_seq > target.seal_seq:
             return
