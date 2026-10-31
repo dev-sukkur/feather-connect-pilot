@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Runs</h1>
+<form class="filters" method="get" action="/runs">
+  <p><label for="f-flow">Flow</label><br>
+    <select id="f-flow" name="flow">
+      <option value="">Any</option>
+      {% for name in flows %}<option value="{{ name }}"{% if name == chosen.flow %} selected{% endif %}>{{ name }}</option>{% endfor %}
+    </select></p>
+  <p><label for="f-status">Status</label><br>
+    <select id="f-status" name="status">
+      <option value="">Any</option>
+      {% for s in statuses %}<option value="{{ s }}"{% if s == chosen.status %} selected{% endif %}>{{ s | capitalize }}</option>{% endfor %}
+    </select></p>
+  <p><button type="submit">Filter</button>
+    {% if chosen.flow or chosen.status %}<a class="button" href="/runs">Clear</a>{% endif %}</p>
+</form>
+{% include "_runs_table.html" %}
+{% endblock %}

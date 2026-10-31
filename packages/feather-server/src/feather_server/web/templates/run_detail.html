@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% set run = detail.run %}
+{% block content %}
+<h1>Run <code>{{ run.run_id[:8] }}</code> of {% if flow_known %}<a href="/flows/{{ run.flow | urlencode }}">{{ run.flow }}</a>{% else %}{{ run.flow }}{% endif %}</h1>
+<p><a href="/runs">&larr; All runs</a></p>
+{% if notice %}<p class="notice notice-{{ notice[0] }}" role="{{ 'alert' if notice[0] == 'bad' else 'status' }}">{{ notice[1] }}</p>{% endif %}
+
+<section aria-labelledby="h-inputs">
+  <h2 id="h-inputs">Inputs</h2>
+  <dl class="facts">
+    <dt>Id</dt><dd><code>{{ run.run_id }}</code></dd>
+    <dt>Started by</dt><dd>{{ run.trigger }} · {{ run.actor }}</dd>
+    <dt>Started</dt><dd>{{ m.time_ago(run.created_at) }}</dd>
+    <dt>Partitions</dt><dd>{% if run.params.get("partitions") %}{% for key in run.params["partitions"] %}{% if first_dataset %}{{ m.partition_label(first_dataset, key) }}{% else %}<code>{{ key }}</code>{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}<span class="muted">as planned when it started</span>{% endif %}</dd>
+    {% if run.params.get("max_concurrent") %}<dt>Slices at a time</dt><dd>{{ run.params["max_concurrent"] }}</dd>{% endif %}
+    <dt>Reason</dt><dd>{% if run.reason %}{{ run.reason }}{% else %}<span class="muted">none</span>{% endif %}</dd>
+  </dl>
+</section>
+
+{% if confirm_cancel %}
+<section class="confirm" aria-labelledby="confirm-title">
+  <h2 id="confirm-title">Cancel this run?</h2>
+  <p>Its queued and running tasks stop. Versions that were already sealed still reach their routes.</p>
+  <form method="post" action="/runs/{{ run.run_id | urlencode }}/cancel">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="confirm" value="yes">
+    <p><label for="cancel-reason">Reason (kept in the audit log)</label><br><input id="cancel-reason" name="reason" type="text" maxlength="500"></p>
+    <p><button type="submit" class="danger">Cancel the run</button> <a class="button" href="/runs/{{ run.run_id | urlencode }}">Keep it running</a></p>
+  </form>
+</section>
+{% endif %}
+
+<section aria-labelledby="h-actions">
+  <h2 id="h-actions">Actions</h2>
+  <div class="actions">
+    {% if active and not confirm_cancel %}
+    <form method="post" action="/runs/{{ run.run_id | urlencode }}/cancel">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="danger">Cancel&hellip;</button>
+    </form>
+    {% endif %}
+    {% if flow_known %}
+    <form method="post" action="/runs/{{ run.run_id | urlencode }}/rerun">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <p><label for="rerun-partitions">Partitions (blank: the same as this run)</label><br>
+        <input id="rerun-partitions" name="partitions" type="text" maxlength="5000" value="{{ form.partitions }}" placeholder="date=2026-10-17, date=2026-10-18"></p>
+      <p><label for="rerun-reason">Reason (optional)</label><br><input id="rerun-reason" name="reason" type="text" maxlength="500"></p>
+      <button type="submit" class="primary">Run again</button>
+    </form>
+    {% endif %}
+  </div>
+</section>
+
+{% include "_run_live.html" %}
+{% endblock %}

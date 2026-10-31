@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Task log</h1>
+<p>{% if run %}<a href="/runs/{{ run | urlencode }}">&larr; Back to the run</a>{% else %}<a href="/runs">&larr; All runs</a>{% endif %}</p>
+{% if lines %}
+<p class="muted">Lines {{ first }} to {{ first + lines | length - 1 }} of {{ total }}.</p>
+<pre class="log" tabindex="0">{% for line in lines %}{{ line }}
+{% endfor %}</pre>
+{% if next_offset is not none %}<nav class="pager" aria-label="Pages"><a rel="next" href="{{ url(offset=next_offset | string) }}">Next page &rarr;</a></nav>{% endif %}
+{% else %}
+<p class="empty">No log lines.</p>
+{% endif %}
+{% endblock %}

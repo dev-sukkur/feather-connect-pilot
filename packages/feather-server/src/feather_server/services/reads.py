@@ -144,6 +144,9 @@ class RunDetail:
     run: Run
     tasks: tuple[TaskRow, ...]
     versions: tuple[Version, ...]
+    deliveries: tuple[
+        Delivery, ...
+    ] = ()  # of the run's versions on each route of its flow, with their attempts
 
 
 @dataclass(frozen=True)
@@ -331,10 +334,19 @@ class Reads:
         """Raises `KeyError` for an unknown run."""
         run = self._store.runs.get_run(run_id)
         versions: list[Version] = []
+        deliveries: list[Delivery] = []
         if run.flow in {f.name for f in self._rt.flows()}:
-            for dataset in self._rt.flow(run.flow).datasets:
+            flow = self._rt.flow(run.flow)
+            for dataset in flow.datasets:
                 versions.extend(self._store.versions.sealed_for_run(run_id, dataset.name))
-        return RunDetail(run, tuple(self._store.runs.list_tasks(run_id)), tuple(versions))
+            for version in versions:
+                for route in flow.routes:
+                    try:
+                        deliveries.append(self._store.ledger.get(route.name, version.version_id))
+                    except KeyError:  # not delivered to this route (yet)
+                        pass
+        tasks = sorted(self._store.runs.list_tasks(run_id), key=lambda t: (t.started_at, t.task_id))
+        return RunDetail(run, tuple(tasks), tuple(versions), tuple(deliveries))
 
     def task_logs(self, task_id: str) -> list[str]:
         return self._store.runs.task_logs(task_id)

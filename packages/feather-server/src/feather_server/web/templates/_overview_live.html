@@ -65,7 +65,7 @@
       <tbody>
       {% for run in runs %}
         <tr>
-          <th scope="row"><code>{{ run.run_id[:8] }}</code></th>
+          <th scope="row"><a href="/runs/{{ run.run_id | urlencode }}"><code>{{ run.run_id[:8] }}</code></a></th>
           <td><a href="/flows/{{ run.flow | urlencode }}">{{ run.flow }}</a></td>
           <td>{{ run.trigger }} · {{ run.actor }}</td>
           <td>{{ m.status_badge(run.status) }}</td>

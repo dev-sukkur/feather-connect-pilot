@@ -3,13 +3,14 @@ decides anything the service layer does not.
 """
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote, urlencode
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
@@ -27,6 +28,7 @@ TEMPLATES = Path(__file__).parent / "templates"
 NAV: list[tuple[str, str]] = [
     ("Overview", "/"),
     ("Flows", "/flows"),
+    ("Runs", "/runs"),
 ]  # (label, path): a page that exists adds itself here
 _RECENT_RUNS = 8
 _FAILURE_GROUPS = 10
@@ -516,3 +518,149 @@ def replay_confirm(
     except (KeyError, ValueError) as error:
         return _grid_page(request, actor, dataset, status=409, notice=("bad", str(error)))
     return RedirectResponse(_partitions_url(dataset, replayed=str(len(moved))), status_code=303)
+
+
+# Runs and tasks.
+
+_RUNS_PAGE = 50
+_LOG_PAGE = 200
+_ACTIVE = ("queued", "running")
+_RUN_NOTICES = {"cancelled": "The run is cancelled."}
+
+
+@router.get("/runs", response_class=HTMLResponse)
+def runs_list(
+    request: Request,
+    actor: CurrentActor,
+    flow: str = "",
+    status: str = "",
+    cursor: str = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = _RUNS_PAGE,
+) -> HTMLResponse:
+    found = reads(request).runs(flow=flow or None, status=status or None, limit=limit, cursor=cursor or None)
+    flows = reads(request).flows()
+    return render(
+        request,
+        "runs.html",
+        fragment="_runs_table.html",
+        title="Runs",
+        actor=actor,
+        runs=found,
+        flows=sorted(f.name for f in flows),
+        statuses=["queued", "running", "succeeded", "failed", "cancelled", "skipped"],
+        chosen={"flow": flow, "status": status},
+        next_cursor=found[-1].run_id if len(found) == limit else None,
+    )
+
+
+def _run_page(
+    request: Request,
+    actor: Actor,
+    run_id: str,
+    *,
+    status: int = 200,
+    notice: tuple[str, str] | None = None,
+    confirm_cancel: bool = False,
+    form: dict[str, str] | None = None,
+) -> HTMLResponse:
+    try:
+        detail = reads(request).run_detail(run_id)
+    except KeyError:
+        return _not_found(request, f"No run with the id {run_id!r}.")
+    done = _RUN_NOTICES.get(request.query_params.get("done", ""))
+    if notice is None and done:
+        notice = ("ok", done)
+    flow = next((f for f in request.app.state.feather.runtime.flows() if f.name == detail.run.flow), None)
+    return render(
+        request,
+        "run_detail.html",
+        fragment="_run_live.html",
+        status=status,
+        title=f"Run {run_id[:8]}",
+        actor=actor,
+        detail=detail,
+        active=detail.run.status in _ACTIVE,
+        notice=notice,
+        confirm_cancel=confirm_cancel,
+        form=form or {},
+        flow_known=flow is not None,
+        first_dataset=flow.datasets[0].name if flow and flow.datasets else None,
+    )
+
+
+@router.get("/runs/{run_id}", response_class=HTMLResponse)
+def run_detail(request: Request, actor: CurrentActor, run_id: str) -> HTMLResponse:
+    return _run_page(request, actor, run_id)
+
+
+@router.get("/tasks/{task_id}/logs", response_class=HTMLResponse)
+def task_logs(
+    request: Request,
+    actor: CurrentActor,
+    task_id: str,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    run: str = "",
+) -> HTMLResponse:
+    lines = reads(request).task_logs(task_id)
+    page = lines[offset : offset + _LOG_PAGE]
+    return render(
+        request,
+        "task_logs.html",
+        title="Task log",
+        actor=actor,
+        task_id=task_id,
+        run=run,
+        lines=page,
+        first=offset + 1,
+        total=len(lines),
+        next_offset=offset + _LOG_PAGE if offset + _LOG_PAGE < len(lines) else None,
+    )
+
+
+@router.post("/runs/{run_id}/cancel", dependencies=[Depends(require_csrf)])
+def cancel_run(
+    request: Request,
+    actor: CurrentActor,
+    run_id: str,
+    confirm: Annotated[str, Form()] = "",
+    reason: Reason = "",
+) -> Response:
+    try:
+        run = reads(request).run_detail(run_id).run
+    except KeyError:
+        return _not_found(request, f"No run with the id {run_id!r}.")
+    if run.status not in _ACTIVE:
+        return _run_page(request, actor, run_id, status=409, notice=("bad", "The run is already over."))
+    if confirm != "yes":  # the first step only asks
+        return _run_page(request, actor, run_id, confirm_cancel=True)
+    actions(request).cancel_run(actor, run_id, reason=_reason(reason))
+    return RedirectResponse(f"/runs/{quote(run_id, safe='')}?done=cancelled", status_code=303)
+
+
+@router.post("/runs/{run_id}/rerun", dependencies=[Depends(require_csrf)])
+def rerun_run(
+    request: Request,
+    actor: CurrentActor,
+    run_id: str,
+    partitions: Annotated[str, Form(max_length=5000)] = "",
+    reason: Reason = "",
+) -> Response:
+    try:
+        run = reads(request).run_detail(run_id).run
+    except KeyError:
+        return _not_found(request, f"No run with the id {run_id!r}.")
+    given = [p for p in re.split(r"[,\s]+", partitions) if p]
+    chosen = given or run.params.get("partitions")  # no new inputs: the run's own
+    slices = run.params.get("max_concurrent")
+    form = {"partitions": partitions}
+    try:
+        new_id = actions(request).run_flow(
+            actor, run.flow, reason=_reason(reason), partitions=chosen, max_concurrent=slices
+        )
+    except KeyError:
+        return _not_found(request, f"No flow named {run.flow!r}.")
+    except FlowPaused as error:
+        return _run_page(request, actor, run_id, status=409, notice=("bad", str(error)), form=form)
+    except ValueError as error:
+        return _run_page(request, actor, run_id, status=422, notice=("bad", str(error)), form=form)
+    return RedirectResponse(f"/runs/{quote(new_id, safe='')}", status_code=303)

@@ -230,14 +230,36 @@ class Actions:
 
     # Runs.
 
-    def run_flow(self, actor: Actor, flow: str, *, reason: str | None = None) -> str:
-        """Start a run of the flow now. Raises `FlowPaused` for a paused flow and `KeyError` for an unknown one."""
+    def run_flow(
+        self,
+        actor: Actor,
+        flow: str,
+        *,
+        reason: str | None = None,
+        partitions: Sequence[str] | None = None,
+        max_concurrent: int | None = None,
+    ) -> str:
+        """Start a run of the flow now, of `partitions` if they are given (as a re-run with new inputs does). Raises
+        `FlowPaused` for a paused flow, `KeyError` for an unknown one and `ValueError` for a partition that is not one
+        of the flow's."""
+        found = self._rt.flow(flow)
+        chosen = None if partitions is None else list(dict.fromkeys(partitions))
+        if chosen is not None:
+            for dataset in found.datasets:
+                self._check_partitions(dataset, chosen)
         return self._do(
             actor,
             "run_flow",
             f"flow:{flow}",
-            {"reason": reason},
-            lambda: self._rt.start_run(flow, trigger="manual", actor=actor.name, reason=reason),
+            {"reason": reason, **({} if chosen is None else {"partitions": chosen})},
+            lambda: self._rt.start_run(
+                flow,
+                trigger="manual",
+                actor=actor.name,
+                partitions=chosen,
+                reason=reason,
+                max_concurrent=max_concurrent,
+            ),
             lambda run_id: f"ok: run {run_id}",
         )
 
