@@ -311,6 +311,15 @@ class StoreContract:
         with pytest.raises(KeyError):
             store.versions.finish_slice("r1", "d", "other")
 
+    def test_slices_for_run_lists_what_was_registered_finished_or_not(self, store: Store):
+        store.versions.register_slices("r1", "d", ["p1", "p2"])
+        store.versions.register_slices("r1", "e", ["p3"])
+        store.versions.finish_slice("r1", "d", "p1")
+        store.versions.register_slices("r1", "d", ["p2"])  # a replay
+        assert sorted(store.versions.slices_for_run("r1", "d")) == ["p1", "p2"]
+        assert store.versions.slices_for_run("r1", "e") == ["p3"]
+        assert store.versions.slices_for_run("r2", "d") == []
+
     # the run journal
 
     def test_skipped_tick_is_recorded(self, store: Store):  # I6

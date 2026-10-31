@@ -4,6 +4,7 @@ from collections.abc import Sequence
 
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.flow import RouteSpec
+from feather_connect.ids import stable_id
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import finalize_versions
 from feather_connect.storage.port import Version
@@ -18,4 +19,8 @@ def run_seal(
     """
     store = deps.store.versions
     versions = [*store.sealed_for_run(run_id, dataset.name), *store.staged_for_run(run_id, dataset.name)]
-    return finalize_versions(dataset, versions, routes, deps)
+    sealed = finalize_versions(dataset, versions, routes, deps)
+    # A slice with no version keeps the keys it turned down until here, since nothing else will clear them.
+    for partition in store.slices_for_run(run_id, dataset.name):
+        deps.spool.delete_chunks(stable_id(run_id, dataset.name, partition), "rejected")
+    return sealed

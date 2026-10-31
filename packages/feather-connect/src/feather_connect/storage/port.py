@@ -251,6 +251,10 @@ class VersionStore(Protocol):
         """Mark a slice done. True when every registered slice of the run's dataset is done. Safe to repeat."""
         ...
 
+    def slices_for_run(self, run_id: str, dataset: str) -> list[str]:
+        """The partitions given to `register_slices` for the run's dataset, finished or not, each once."""
+        ...
+
     def staged_for_run(self, run_id: str, dataset: str) -> list[Version]: ...
     def sealed_for_run(self, run_id: str, dataset: str) -> list[Version]:
         """All of the run's sealed versions of the dataset, in seal order."""

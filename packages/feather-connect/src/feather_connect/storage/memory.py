@@ -245,6 +245,10 @@ class _Versions(VersionStore):
             slices[partition] = True
             return all(slices.values())
 
+    def slices_for_run(self, run_id: str, dataset: str) -> list[str]:
+        with self._d.lock:
+            return list(self._d.slices.get((run_id, dataset), {}))
+
     def staged_for_run(self, run_id: str, dataset: str) -> list[Version]:
         with self._d.lock:
             return [

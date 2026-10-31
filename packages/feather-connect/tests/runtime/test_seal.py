@@ -2,12 +2,14 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+import pyarrow as pa
 import pytest
 
 import feather_connect as fc
 from feather_connect.clock import FrozenClock
 from feather_connect.connectors.memory import Sink, Source
 from feather_connect.core.context import Context
+from feather_connect.ids import stable_id
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import ExtractFailed, run_extract
 from feather_connect.runtime.seal import run_seal
@@ -192,6 +194,92 @@ def test_a_key_in_two_old_slices_moves_once_and_leaves_no_delete():
     vs = run_slices(ds, "r3", {DAY_18: [], DAY_19: on(DAY_19, 2), DAY_20: on(DAY_20, 1)})
     assert not [r for v in vs for r in all_records(v) if r.op == "delete"]
     assert moves_of(version_for(vs, DAY_20)) == {"1": DAY_18}
+
+
+def test_a_key_held_by_an_unchanged_slice_of_the_run_is_not_a_delete():  # I10
+    ds = day_dataset()
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2)})
+    run_slices(ds, "r2", {DAY_19: on(DAY_19, 1)})
+    vs = run_slices(ds, "r3", {DAY_18: on(DAY_18, 2), DAY_19: on(DAY_19, 1)})
+    assert [v.partition for v in vs] == [
+        DAY_18
+    ]  # day 19 read as unchanged, so nothing can take a move notice
+    assert (all_records(vs[0]), vs[0].deletes, moves_of(vs[0])) == ([], 0, {})
+
+
+def test_a_slice_emptied_by_a_key_an_unchanged_slice_holds_passes_the_guard():
+    ds = day_dataset()
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1)})
+    run_slices(ds, "r2", {DAY_19: on(DAY_19, 1)})
+    vs = run_slices(ds, "r3", {DAY_18: [], DAY_19: on(DAY_19, 1)})
+    assert [(v.partition, v.deletes) for v in vs] == [(DAY_18, 0)]
+
+
+def test_a_key_unchanged_slice_does_not_hold_is_still_a_delete():
+    ds = day_dataset()
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2), DAY_19: on(DAY_19, 3)})
+    vs = run_slices(ds, "r2", {DAY_18: on(DAY_18, 2), DAY_19: on(DAY_19, 3)})
+    assert [(r.key, r.op) for r in all_records(vs[0])] == [("1", "delete")]
+
+
+def test_a_record_back_in_an_unchanged_slice_is_not_a_delete_with_keep_state():
+    ds = day_dataset(keep_state=True)
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1)})
+    run_slices(ds, "r2", {DAY_19: on(DAY_19, 1, 2)})
+    vs = run_slices(ds, "r3", {DAY_18: on(DAY_18, 1), DAY_19: on(DAY_19, 2)})
+    assert ("1", "delete") not in [(r.key, r.op) for v in vs for r in all_records(v)]
+    assert "1" in DEPS.store.state.get_many("d", ["1"])
+
+
+def strict_dataset() -> Any:
+    fields = [pa.field("id", pa.int64()), pa.field("date", pa.string()), pa.field("x", pa.int64())]
+    return day_dataset(schema=pa.schema(fields))
+
+
+def rejected_chunks(run, partition):
+    return DEPS.spool.list_chunks(stable_id(run, "d", partition), "rejected")
+
+
+def test_a_record_rejected_in_the_slice_it_moved_to_is_not_a_delete():
+    ds = strict_dataset()
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2, x=1)})
+    vs = run_slices(
+        ds, "r2", {DAY_18: on(DAY_18, 2, x=1), DAY_19: on(DAY_19, 1, x="bad") + on(DAY_19, 3, x=1)}
+    )
+    assert ("1", "delete") not in [(r.key, r.op) for v in vs for r in all_records(v)]
+    assert version_for(vs, DAY_18).deletes == 0
+    assert [q.key for q in DEPS.store.quarantine.list_open()] == ["1"]
+    assert rejected_chunks("r2", DAY_19) == []
+
+
+def test_rejected_keys_survive_the_discard_of_a_no_op_slice_and_go_once_sealed():
+    ds = strict_dataset()
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2, x=1)})
+    staged = stage_slices(ds, "r2", {DAY_18: on(DAY_18, 2, x=1), DAY_19: on(DAY_19, 1, x="bad")})
+    assert [v.partition for v in staged] == [DAY_18]
+    assert rejected_chunks("r2", DAY_19)[0].rows == 1
+    vs = run_seal(ds, "r2", routes=ROUTES, deps=DEPS)
+    assert (all_records(vs[0]), vs[0].deletes) == ([], 0)
+    assert rejected_chunks("r2", DAY_19) == []
+
+
+def test_rejected_keys_outlast_a_crash_before_sealing(monkeypatch):
+    ds = strict_dataset()
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2, x=1)})
+    stage_slices(ds, "r2", {DAY_18: on(DAY_18, 2, x=1), DAY_19: on(DAY_19, 1, x="bad")})
+    with monkeypatch.context() as patch:
+        patch.setattr(DEPS.store.versions, "seal", _raise)
+        with pytest.raises(OSError):
+            run_seal(ds, "r2", routes=ROUTES, deps=DEPS)
+    assert rejected_chunks("r2", DAY_19)[0].rows == 1
+    assert run_seal(ds, "r2", routes=ROUTES, deps=DEPS)[0].deletes == 0
+
+
+def test_a_read_that_seals_at_once_leaves_no_rejected_keys_behind():
+    ds = strict_dataset()
+    ds.source.load(on(DAY_18, 1, x="bad"))
+    assert run_extract(ds, "r1", DAY_18, routes=ROUTES, stage_only=False, deps=DEPS) == []
+    assert rejected_chunks("r1", DAY_18) == []
 
 
 def test_a_crash_before_sealing_changes_nothing_on_the_repeat(monkeypatch):

@@ -17,7 +17,7 @@ import pyarrow as pa
 
 from feather_connect.core.records import Op, Record
 
-ChunkKind = Literal["data", "snapshot", "full", "candidates", "moves"]
+ChunkKind = Literal["data", "snapshot", "full", "candidates", "moves", "rejected"]
 
 # How many records go into one chunk.
 CHUNK_ROWS = 50_000
