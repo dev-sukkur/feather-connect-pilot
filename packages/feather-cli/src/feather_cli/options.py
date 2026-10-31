@@ -15,3 +15,9 @@ ProjectDir = Annotated[
         "--project", envvar="FEATHER_PROJECT", help="The project directory, which holds feather.yaml."
     ),
 ]
+DatabaseUrl = Annotated[
+    str | None,
+    typer.Option(
+        "--database-url", envvar="FEATHER_DATABASE_URL", help="The Postgres URL.", show_default=False
+    ),
+]

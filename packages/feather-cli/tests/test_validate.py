@@ -108,7 +108,7 @@ def test_project_option_names_the_directory(cli, make_project, tmp_path):
     assert r.exit_code == 0 and json.loads(r.stdout)["ok"] is True
 
 
-COMMANDS = ["validate"]
+COMMANDS = ["validate", "server", "worker"]
 
 
 def test_help_lists_every_command(cli):
