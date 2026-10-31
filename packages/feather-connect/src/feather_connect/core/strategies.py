@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import timedelta
-from typing import Protocol
+from datetime import UTC, datetime, timedelta
+from typing import Any, Protocol
 
 import pyarrow as pa
 
@@ -77,8 +77,9 @@ class ByStamp(Strategy):
     A row that is read again and hasn't changed is dropped, and a version never implies deletes: a row is
     deleted only when its `deleted_field`, a flag that a soft-deleting source sets, says so.
 
-    Stamps are dates, datetimes or numbers, all of one kind across the dataset's life. A record whose stamp is
-    anything else is turned down, because a watermark of the wrong kind would block every later read.
+    Stamps are dates, datetimes, numbers or ISO-8601 text, all of one kind across the dataset's life. Text counts as
+    the datetime it spells (see `read_stamp`), and the payload keeps it as read. A record whose stamp is anything
+    else is turned down, because a watermark of the wrong kind would block every later read.
     """
 
     field: str
@@ -122,6 +123,21 @@ class _Push(Strategy):
 
     def diff(self, new: pa.Table, old: pa.Table | None) -> Diff:
         return Diff(_changed(new, old), _no_keys())
+
+
+def read_stamp(value: Any) -> Any:
+    """Return a change stamp as the value to compare it by.
+
+    Text that `datetime.fromisoformat` accepts, a trailing `Z` included, becomes that datetime, and without an
+    offset it is taken to be UTC. Anything else, other text included, comes back as it is.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return moment.replace(tzinfo=UTC) if moment.utcoffset() is None else moment
 
 
 def parse_duration(text: str) -> timedelta:

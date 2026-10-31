@@ -21,17 +21,22 @@ from feather_connect.core.connector import (
 )
 from feather_connect.core.context import Context
 from feather_connect.core.errors import PermanentError, RecordRejected
+from feather_connect.core.strategies import read_stamp
 
 
 def _changed_since(row: Mapping[str, Any], req: ReadRequest) -> bool:
     """Return whether the row's stamp is `req.since` or later. A row without a stamp never is.
 
-    A read that sets no `since` or no `stamp_field` takes every row.
+    A read that sets no `since` or no `stamp_field` takes every row. So does a stamp that can't be compared with
+    `since`: it is the runtime that turns such a record down.
     """
     if req.since is None or req.stamp_field is None:
         return True
-    stamp = row.get(req.stamp_field)
-    return stamp is not None and stamp >= req.since
+    stamp = read_stamp(row.get(req.stamp_field))
+    try:
+        return stamp is not None and stamp >= read_stamp(req.since)
+    except TypeError:
+        return True
 
 
 class Source(connector.Source):

@@ -264,6 +264,46 @@ def test_the_first_acceptable_stamp_sets_the_kind_across_slices():
     assert [q.key for q in DEPS.store.quarantine.list_open()] == ["3"]
 
 
+def test_iso_text_stamps_with_a_z_work_from_one_read_to_the_next():
+    source = RecordingSource()
+    ds = dataset(fc.strategy.by_stamp("u", lookback="2h"), source=source)
+    row = {"id": 1, "u": "2026-10-18T10:00:00Z"}
+    v = extract(ds, [row], partition="*")[0]
+    assert v.watermark == T0  # the parsed datetime
+    assert recs(v)[0]["u"] == "2026-10-18T10:00:00Z"  # the payload stays as read
+    assert extract(ds, [row], run="r2", partition="*") == []
+    assert source.requests[1].since == T0 - timedelta(hours=2)
+    assert DEPS.store.quarantine.list_open() == []
+
+
+def test_iso_text_without_an_offset_is_read_as_utc():
+    v = extract(dataset(fc.strategy.by_stamp("u")), [{"id": 1, "u": "2026-10-18T10:00:00"}], partition="*")[0]
+    assert v.watermark == T0
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [{"id": 1, "u": T0}, {"id": 2, "u": "2026-10-18T11:00:00+00:00"}],
+        [{"id": 1, "u": "2026-10-18T10:00:00Z"}, {"id": 2, "u": T1}],
+    ],
+)
+def test_datetimes_and_iso_text_mix_in_one_read(rows):
+    v = extract(dataset(fc.strategy.by_stamp("u")), rows, partition="*")[0]
+    assert v.watermark == T1 and v.upserts == 2
+    assert DEPS.store.quarantine.list_open() == []
+
+
+def test_a_non_date_string_is_quarantined_when_text_stamps_are_fine():
+    ds = dataset(fc.strategy.by_stamp("u"))
+    rows = [{"id": 1, "u": "not a date"}, {"id": 2, "u": "2026-10-18T10:00:00Z"}]
+    v = extract(ds, rows, partition="*")[0]
+    assert [r.key for r in recs(v)] == ["2"] and v.watermark == T0
+    assert [q.key for q in DEPS.store.quarantine.list_open()] == ["1"]
+    assert extract(ds, [{"id": 3, "u": "not a date"}], run="r2", partition="*") == []
+    assert sorted(q.key for q in DEPS.store.quarantine.list_open()) == ["1", "3"]
+
+
 def test_a_record_turned_down_for_other_reasons_does_not_set_the_stamp_kind():
     ds = dataset(fc.strategy.by_stamp("u"))
     v = extract(ds, [{"id": None, "u": 5}, {"id": 1, "u": T0}], partition="*")[0]

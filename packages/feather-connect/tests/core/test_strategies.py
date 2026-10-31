@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pyarrow as pa
 import pytest
@@ -137,3 +137,21 @@ def test_parse_duration_reads_whole_numbers_with_units(text, expected):
 def test_parse_duration_rejects_anything_else(text):
     with pytest.raises(ValueError, match="duration"):
         fc.strategy.parse_duration(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("2026-10-18T10:00:00Z", datetime(2026, 10, 18, 10, tzinfo=UTC)),
+        ("2026-10-18T15:30:00+05:30", datetime(2026, 10, 18, 15, 30, tzinfo=timezone(timedelta(hours=5.5)))),
+        ("2026-10-18T10:00:00", datetime(2026, 10, 18, 10, tzinfo=UTC)),  # no offset is read as UTC
+        ("2026-10-18", datetime(2026, 10, 18, tzinfo=UTC)),
+    ],
+)
+def test_read_stamp_reads_iso_text_as_a_datetime(text, expected):
+    assert fc.strategy.read_stamp(text) == expected
+
+
+@pytest.mark.parametrize("value", ["soon", "", 5, None, datetime(2026, 10, 18)])
+def test_read_stamp_leaves_anything_else_as_it_is(value):
+    assert fc.strategy.read_stamp(value) == value

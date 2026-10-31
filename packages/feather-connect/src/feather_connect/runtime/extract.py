@@ -21,7 +21,7 @@ from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import MissingKeyError, PartitionError
 from feather_connect.core.flow import RouteSpec
 from feather_connect.core.records import Op, Record, canonical_json, make_key, row_hash
-from feather_connect.core.strategies import ByStamp
+from feather_connect.core.strategies import ByStamp, read_stamp
 from feather_connect.ids import stable_id
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.storage import spool as spool_settings
@@ -111,13 +111,13 @@ class _Read:
             self.flush()
 
     def _accepted_stamp(self, row: Mapping[str, Any]) -> Any:
-        """Return the row's change stamp, or None if it has none. Raises if it can't count towards a watermark.
+        """Return the row's stamp as it compares, or None if it has none. Raises if it can't count to a watermark.
 
         Only stamps of the dataset's kind are comparable with its watermark, and a sealed watermark can't be taken
         back. So each stamp is checked, not just compared with the others of its slice.
         """
         strategy = self._dataset.strategy
-        stamp = row.get(strategy.field) if isinstance(strategy, ByStamp) else None
+        stamp = read_stamp(row.get(strategy.field)) if isinstance(strategy, ByStamp) else None
         if stamp is None:
             return None
         kind = _stamp_kind(stamp)
@@ -185,7 +185,7 @@ def _stamp_kind(stamp: Any) -> str:
         return "number"
     if isinstance(stamp, float | Decimal) and math.isfinite(stamp):
         return "number"
-    raise TypeError(f"change stamp {stamp!r} is not a date, a datetime or a finite number")
+    raise TypeError(f"change stamp {stamp!r} is not a date, a datetime, ISO-8601 text or a finite number")
 
 
 def _rows_of(batch: Any) -> list[dict[str, Any]]:

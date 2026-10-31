@@ -101,6 +101,22 @@ def test_source_since_includes_the_boundary_and_skips_rows_without_a_stamp():
     assert [r["id"] for b in s.read(CTX, req) for r in b] == [2]
 
 
+def test_source_compares_iso_text_stamps_as_datetimes():
+    source = memory.Source(
+        rows=[{"id": 1, "u": "2026-10-18T09:00:00Z"}, {"id": 2, "u": "2026-10-18T15:30:00+05:30"}]
+    )
+    since = datetime(2026, 10, 18, 9, 30, tzinfo=UTC)
+    req = ReadRequest("*", none(), since=since, stamp_field="u")
+    assert [r["id"] for b in source.read(CTX, req) for r in b] == [2]
+
+
+def test_source_lets_through_a_stamp_it_cannot_compare():
+    source = memory.Source(rows=[{"id": 1, "u": "soon"}])
+    since = datetime(2026, 10, 18, tzinfo=UTC)
+    req = ReadRequest("*", none(), since=since, stamp_field="u")
+    assert [r["id"] for b in source.read(CTX, req) for r in b] == [1]
+
+
 def test_source_discover_lists_one_stream_with_the_fields_of_its_rows():
     s = memory.Source(rows=[{"id": 1, "name": None}, {"id": 2, "name": "x", "price": 1.5}])
     [stream] = s.discover(CTX)
