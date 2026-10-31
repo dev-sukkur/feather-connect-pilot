@@ -560,6 +560,54 @@ class WorkerRegistry(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class Override:
+    """An operator's setting on `target` (`flow:name` or `route:name`) that stands over the code. In M1 the only `key`
+    is `paused`."""
+
+    target: str
+    key: str
+    value: Any
+    reason: str | None
+    created_by: str
+    created_at: datetime
+    expires_at: datetime | None
+
+
+class OverrideStore(Protocol):
+    """Settings made at run time. One that has expired is gone: nothing reads it, though it may still be stored."""
+
+    def set(
+        self,
+        target: str,
+        key: str,
+        value: Any,
+        *,
+        actor: str,
+        reason: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> None:
+        """Set the override, replacing one that is there."""
+        ...
+
+    def get(self, target: str, key: str) -> Any | None:
+        """The value, or None when there is none or it has expired."""
+        ...
+
+    def list_all(self) -> list[Override]:
+        """The overrides in force, by target and key."""
+        ...
+
+    def clear(self, target: str, key: str, *, actor: str, reason: str | None = None) -> None:
+        """Remove the override. Nothing happens when there is none."""
+        ...
+
+
+def is_paused(overrides: OverrideStore, target: str) -> bool:
+    """Whether `target` (`flow:name` or `route:name`) is paused now."""
+    return bool(overrides.get(target, "paused"))
+
+
 class ScheduleStore(Protocol):
     """When each trigger of each flow was last handled, so that a restart neither fires a tick twice nor loses it."""
 
@@ -583,3 +631,4 @@ class Store:
     catalog: CatalogStore
     workers: WorkerRegistry
     schedules: ScheduleStore
+    overrides: OverrideStore

@@ -25,7 +25,7 @@ from feather_connect.core.transforms import apply_map, is_batch_map
 from feather_connect.engine.port import RetryPolicy, TaskContext
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import NOT_DELIVERED
-from feather_connect.storage.port import CLOSED, Delivery, DeliveryStatus, Version, delivery_cursor
+from feather_connect.storage.port import CLOSED, Delivery, DeliveryStatus, Version, delivery_cursor, is_paused
 from feather_connect.storage.spool import ChunkKind, table_to_records
 
 log = logging.getLogger(__name__)
@@ -491,7 +491,8 @@ def run_apply(
 ) -> None:
     """Bring `route` up to `version_id` in the version's partition, oldest open delivery first (I2).
 
-    A failed or held delivery blocks its partition, and the task ends there. A permanent error fails the delivery, and
+    A failed or held delivery blocks its partition, and the task ends there. So does a paused route, before it
+    starts the next delivery, and leaves that delivery as it is. A permanent error fails the delivery, and
     the task still ends well, so that other partitions carry on. Any other error goes to the engine to retry, up to
     `deps.retry.max_attempts` tries for each delivery, after which it fails the delivery too.
     """
@@ -507,5 +508,8 @@ def run_apply(
         if delivery.status in ("failed", "held"):
             log.info("route %s, version %s: blocked by %s", route.name, version_id, delivery.version_id)
             return
+        if ctx.step(f"paused:{n}", lambda: is_paused(deps.store.overrides, f"route:{route.name}")):
+            log.info("route %s, version %s: the route is paused", route.name, version_id)
+            return  # the delivery stays as it is; `resume_route` or the sweeper submits it again
         if not _deliver(ctx, dataset, route, delivery, deps):
             return

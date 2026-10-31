@@ -22,6 +22,8 @@ from feather_connect.storage.port import (
     FlowRow,
     Grant,
     Ledger,
+    Override,
+    OverrideStore,
     Priority,
     QuarantineRow,
     QuarantineStore,
@@ -73,6 +75,7 @@ class _Data:
     routes: list[RouteRow] = field(default_factory=list[RouteRow])
     retired: set[str] = field(default_factory=set[str])  # names of flows, and of routes, that are retired
     workers: dict[str, WorkerRow] = field(default_factory=dict[str, WorkerRow])
+    overrides: dict[tuple[str, str], Override] = field(default_factory=dict[tuple[str, str], Override])
     ticks: dict[tuple[str, str], datetime] = field(default_factory=dict[tuple[str, str], datetime])
 
 
@@ -732,6 +735,42 @@ class _Schedules(ScheduleStore):
             self._d.ticks[(flow, trigger_id)] = at
 
 
+class _Overrides(OverrideStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def set(
+        self,
+        target: str,
+        key: str,
+        value: Any,
+        *,
+        actor: str,
+        reason: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> None:
+        with self._d.lock:
+            self._d.overrides[(target, key)] = Override(
+                target, key, copy.deepcopy(value), reason, actor, self._d.clock.now(), expires_at
+            )
+
+    def get(self, target: str, key: str) -> Any | None:
+        with self._d.lock:
+            found = self._d.overrides.get((target, key))
+            return None if found is None or self._expired(found) else copy.deepcopy(found.value)
+
+    def list_all(self) -> list[Override]:
+        with self._d.lock:
+            return [o for _, o in sorted(self._d.overrides.items()) if not self._expired(o)]
+
+    def clear(self, target: str, key: str, *, actor: str, reason: str | None = None) -> None:
+        with self._d.lock:
+            self._d.overrides.pop((target, key), None)
+
+    def _expired(self, override: Override) -> bool:
+        return override.expires_at is not None and override.expires_at <= self._d.clock.now()
+
+
 class MemoryStore(Store):
     """A `Store` that keeps everything in memory. `clock` defaults to the system clock."""
 
@@ -747,4 +786,5 @@ class MemoryStore(Store):
             catalog=_Catalog(data),
             workers=_Workers(data),
             schedules=_Schedules(data),
+            overrides=_Overrides(data),
         )

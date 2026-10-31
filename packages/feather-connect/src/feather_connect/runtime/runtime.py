@@ -12,6 +12,7 @@ then a waiting delivery has a row but no task, which keeps its run going while a
 import logging
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 from feather_connect.clock import Clock, SystemClock
@@ -35,12 +36,14 @@ from feather_connect.storage.port import (
     Run,
     Store,
     delivery_cursor,
+    is_paused,
 )
 from feather_connect.storage.spool import Spool
 
 _TENANT = "default"
 _UTC = "UTC"
 _ACTIVE = ("queued", "running")
+_PAUSED = "route paused"  # why a task ended without delivering: the key of its successor ends in `#n`
 _MANY = 10_000
 
 
@@ -51,6 +54,10 @@ def _no_config(connection: str) -> Mapping[str, Any]:
 def _apply_key(delivery: Delivery) -> str:
     """Return the key of the delivery's task: the same state gets the same task, and a retry or a replay a new one."""
     return f"apply:{delivery.route}:{delivery.version_id}:{delivery.replays}:{delivery.retries}"
+
+
+class FlowPaused(Exception):
+    """A run was asked for on a flow that is paused. The message says why, as far as the pause says."""
 
 
 def _step_through_deferrals[T](ctx: TaskContext, name: str, fn: Callable[[], T]) -> T:
@@ -176,6 +183,67 @@ class Runtime:
 
     # What starts and steers runs.
 
+    def is_flow_paused(self, flow: str) -> bool:
+        """Whether the flow is paused now: its ticks are skipped and a run is refused."""
+        return is_paused(self._deps.store.overrides, f"flow:{flow}")
+
+    def is_route_paused(self, route: str) -> bool:
+        """Whether the route is paused now: its deliveries wait, and extraction goes on."""
+        return is_paused(self._deps.store.overrides, f"route:{route}")
+
+    def pause_flow(
+        self, flow: str, *, actor: str, reason: str | None = None, expires_at: datetime | None = None
+    ) -> None:
+        """Pause the flow until `resume_flow`, or until `expires_at`. Raises `KeyError` if there is no such flow."""
+        self.flow(flow)
+        self._deps.store.overrides.set(
+            f"flow:{flow}", "paused", True, actor=actor, reason=reason, expires_at=expires_at
+        )
+
+    def resume_flow(self, flow: str, *, actor: str, reason: str | None = None) -> None:
+        """Lift the flow's pause. Ticks skipped while it lasted are not made up."""
+        self.flow(flow)
+        self._deps.store.overrides.clear(f"flow:{flow}", "paused", actor=actor, reason=reason)
+
+    def pause_route(
+        self, route: str, *, actor: str, reason: str | None = None, expires_at: datetime | None = None
+    ) -> None:
+        """Hold the route's deliveries until `resume_route`, or until `expires_at`, when the sweeper picks them up.
+
+        Extraction and the other routes go on, and sealed versions pile up for the route in order (I2, I5).
+        """
+        self.route(route)
+        self._deps.store.overrides.set(
+            f"route:{route}", "paused", True, actor=actor, reason=reason, expires_at=expires_at
+        )
+
+    def resume_route(self, route: str, *, actor: str, reason: str | None = None) -> None:
+        """Lift the route's pause and submit the oldest open delivery of each of its streams, which apply the backlog
+        in seal order."""
+        self.route(route)
+        self._deps.store.overrides.clear(f"route:{route}", "paused", actor=actor, reason=reason)
+        ledger = self._deps.store.ledger
+        streams: set[tuple[str, str]] = set()
+        page = ledger.list_deliveries(route=route, status="pending")
+        while page:
+            for delivery in page:
+                if (delivery.dataset, delivery.partition) in streams:
+                    continue
+                streams.add((delivery.dataset, delivery.partition))
+                next_up = self._next_of(delivery)
+                if next_up is not None and next_up.status == "pending":
+                    self.submit_apply(next_up.route, next_up.version_id)
+            page = ledger.list_deliveries(route=route, status="pending", cursor=delivery_cursor(page[-1]))
+
+    def _pause_note(self, target: str) -> str:
+        found = next(
+            (o for o in self._deps.store.overrides.list_all() if (o.target, o.key) == (target, "paused")),
+            None,
+        )
+        if found is None:
+            return ""
+        return f" by {found.created_by}" + (f": {found.reason}" if found.reason else "")
+
     def start_run(
         self,
         flow: str,
@@ -187,6 +255,8 @@ class Runtime:
     ) -> str:
         """Create a run and submit its plan. `partitions` overrides what would be planned, for a re-run of a slice."""
         self.flow(flow)
+        if self.is_flow_paused(flow):
+            raise FlowPaused(f"flow {flow!r} is paused{self._pause_note(f'flow:{flow}')}")
         params: dict[str, Any] = {} if partitions is None else {"partitions": list(partitions)}
         run_id = self._deps.store.runs.create_run(flow, trigger, actor, params, reason=reason)
         self._submit(
@@ -261,7 +331,7 @@ class Runtime:
         run_id = self._deps.store.versions.get(version_id).run_id
         self._open_apply_row(delivery, run_id)
         next_up = self._next_of(delivery)
-        if next_up is not None and next_up.version_id == version_id:
+        if next_up is not None and next_up.version_id == version_id and not self.is_route_paused(route):
             self._engine.submit(self._apply_call(delivery, run_id))
 
     def submit_seal(self, flow: str, dataset: str, run_id: str) -> None:
@@ -432,6 +502,18 @@ class Runtime:
             )
         return None
 
+    def _apply_ref(self, delivery: Delivery, run_id: str) -> str:
+        """Return the key of the delivery's next apply task: `_apply_key`, and `#n` after it once `n` tasks of it ended
+        because the route was paused, since an engine runs a key only once."""
+        base = _apply_key(delivery)
+        rows = self._deps.store.runs.list_tasks(run_id)
+        held = sum(
+            1
+            for r in rows
+            if r.status == "cancelled" and r.error == _PAUSED and r.ref.partition("#")[0] == base
+        )
+        return f"{base}#{held}" if held else base
+
     def _submit_next(self, delivery: Delivery) -> None:
         """Submit what comes next in the delivery's stream, unless that is blocked."""
         next_up = self._next_of(delivery)
@@ -448,8 +530,18 @@ class Runtime:
         if delivery.status in CLOSED:
             self._finish_task(ref, run_id, "succeeded")
             return
+        if delivery.status == "pending" and self.is_route_paused(route):
+            self._hold(ref, run_id, delivery)
+            return
         why = delivery.last_error or f"it is still {delivery.status}, behind an older version"
         self._finish_task(ref, run_id, "failed", f"route {route!r}, version {version_id}: {why}")
+
+    def _hold(self, ref: str, run_id: str, delivery: Delivery) -> None:
+        """End a task that found its route paused, and give its delivery a row to wait under, so that the run stays going."""
+        runs = self._deps.store.runs
+        task_id = next(row.task_id for row in runs.list_tasks(run_id) if row.ref == ref)
+        runs.finish_task(task_id, "cancelled", _PAUSED)
+        self._open_apply_row(delivery, run_id)
 
     def _finish_task(self, ref: str, run_id: str, status: str, error: str | None = None) -> None:
         runs = self._deps.store.runs
@@ -484,7 +576,12 @@ class Runtime:
 
     def _open_apply_row(self, delivery: Delivery, run_id: str) -> None:
         self._open_row(
-            run_id, "apply", _apply_key(delivery), delivery.dataset, delivery.partition, delivery.route
+            run_id,
+            "apply",
+            self._apply_ref(delivery, run_id),
+            delivery.dataset,
+            delivery.partition,
+            delivery.route,
         )
 
     def _open_row(
@@ -511,7 +608,7 @@ class Runtime:
                 "route": delivery.route,
                 "version_id": delivery.version_id,
             },
-            _apply_key(delivery),
+            self._apply_ref(delivery, run_id),
             f"apply:{_TENANT}:{delivery.route}:{delivery.partition}",
             retry=self._deps.retry,
         )

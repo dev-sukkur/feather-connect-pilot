@@ -133,6 +133,8 @@ def _fire(runtime: Runtime, flow: Flow, tid: str, due_at: datetime) -> TickResul
     """Start the run for one due tick, or record why it is not started."""
     if not flow.enabled:
         return _skip(runtime, flow, tid, due_at, "disabled")
+    if runtime.is_flow_paused(flow.name):
+        return _skip(runtime, flow, tid, due_at, "paused")
     active = runtime.active_runs(flow.name)
     if active and flow.overlap == "skip":
         return _skip(runtime, flow, tid, due_at, "overlap")

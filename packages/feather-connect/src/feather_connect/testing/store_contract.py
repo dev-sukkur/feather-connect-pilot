@@ -761,6 +761,34 @@ class StoreContract(SpoolContract):
         assert store.schedules.last_tick("f", "cron:x") == T0 + timedelta(hours=1)
         assert store.schedules.last_tick("g", "every:60s") is None
 
+    def test_overrides_are_set_read_listed_and_cleared(self, store: Store, clock: FrozenClock):
+        assert store.overrides.get("flow:f", "paused") is None and store.overrides.list_all() == []
+        store.overrides.set("flow:f", "paused", True, actor="ann", reason="maintenance")
+        store.overrides.set("route:a", "paused", {"until": "later"}, actor="bob")
+        assert store.overrides.get("flow:f", "paused") is True
+        assert store.overrides.get("route:a", "paused") == {"until": "later"}
+        found = store.overrides.list_all()
+        assert [(o.target, o.key, o.reason, o.created_by, o.created_at, o.expires_at) for o in found] == [
+            ("flow:f", "paused", "maintenance", "ann", T0, None),
+            ("route:a", "paused", None, "bob", T0, None),
+        ]
+        store.overrides.set("flow:f", "paused", False, actor="cy")  # setting again replaces
+        assert store.overrides.get("flow:f", "paused") is False
+        assert (
+            store.overrides.list_all()[0].created_by == "cy" and store.overrides.list_all()[0].reason is None
+        )
+        store.overrides.clear("flow:f", "paused", actor="ann", reason="done")
+        store.overrides.clear("flow:f", "paused", actor="ann")  # clearing what is not there is fine
+        assert store.overrides.get("flow:f", "paused") is None
+        assert [o.target for o in store.overrides.list_all()] == ["route:a"]
+
+    def test_an_expired_override_is_gone(self, store: Store, clock: FrozenClock):
+        store.overrides.set("route:a", "paused", True, actor="ann", expires_at=T0 + timedelta(hours=1))
+        clock.advance(timedelta(minutes=59))
+        assert store.overrides.get("route:a", "paused") is True and len(store.overrides.list_all()) == 1
+        clock.advance(timedelta(minutes=1))
+        assert store.overrides.get("route:a", "paused") is None and store.overrides.list_all() == []
+
     # retention queries
 
     def test_pending_older_than_lists_only_pending_deliveries_past_the_age(

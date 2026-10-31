@@ -149,6 +149,7 @@ class World:
             catalog=base.catalog,
             workers=base.workers,
             schedules=base.schedules,
+            overrides=base.overrides,
         )
         self.store.budgets.define(spec)
         self.engine = LocalEngine(self.clock)

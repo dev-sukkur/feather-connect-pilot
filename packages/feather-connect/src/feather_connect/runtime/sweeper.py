@@ -52,6 +52,8 @@ def sweep_once(
         recovered += engine.recover_worker(worker_id)
     deliveries: list[tuple[str, str]] = []
     for delivery in store.ledger.pending_older_than(pending_after, now=now):
+        if runtime.is_route_paused(delivery.route):  # held on purpose, and picked up when the pause ends
+            continue
         try:
             runtime.submit_apply(delivery.route, delivery.version_id)
         except Exception:

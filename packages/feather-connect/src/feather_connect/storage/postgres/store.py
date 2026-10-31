@@ -29,6 +29,8 @@ from feather_connect.storage.port import (
     FlowRow,
     Grant,
     Ledger,
+    Override,
+    OverrideStore,
     Priority,
     QuarantineRow,
     QuarantineStore,
@@ -1195,6 +1197,68 @@ class _Schedules(ScheduleStore):
             )
 
 
+class _Overrides(OverrideStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def set(
+        self,
+        target: str,
+        key: str,
+        value: Any,
+        *,
+        actor: str,
+        reason: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> None:
+        with self._db.tx() as conn:
+            conn.execute(
+                """insert into feather.override (tenant_id, target, key, value, reason, created_by, created_at,
+                                                 expires_at)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s)
+                   on conflict (tenant_id, target, key) do update
+                   set value = excluded.value, reason = excluded.reason, created_by = excluded.created_by,
+                       created_at = excluded.created_at, expires_at = excluded.expires_at""",
+                (self._db.tenant, target, key, _json(value), reason, actor, self._db.clock.now(), expires_at),
+            )
+
+    def get(self, target: str, key: str) -> Any | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select value from feather.override
+                   where tenant_id = %s and target = %s and key = %s and (expires_at is null or expires_at > %s)""",
+                (self._db.tenant, target, key, self._db.clock.now()),
+            ).fetchone()
+        return None if row is None else _unjson(row["value"])
+
+    def list_all(self) -> list[Override]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.override
+                   where tenant_id = %s and (expires_at is null or expires_at > %s) order by target, key""",
+                (self._db.tenant, self._db.clock.now()),
+            ).fetchall()
+        return [
+            Override(
+                r["target"],
+                r["key"],
+                _unjson(r["value"]),
+                r["reason"],
+                r["created_by"],
+                r["created_at"],
+                r["expires_at"],
+            )
+            for r in rows
+        ]
+
+    def clear(self, target: str, key: str, *, actor: str, reason: str | None = None) -> None:
+        with self._db.tx() as conn:
+            conn.execute(
+                "delete from feather.override where tenant_id = %s and target = %s and key = %s",
+                (self._db.tenant, target, key),
+            )
+
+
 class PostgresStore(Store):
     """A `Store` that keeps everything in Postgres, for one tenant. `clock` defaults to the system clock."""
 
@@ -1210,4 +1274,5 @@ class PostgresStore(Store):
             catalog=_Catalog(db),
             workers=_Workers(db),
             schedules=_Schedules(db),
+            overrides=_Overrides(db),
         )
