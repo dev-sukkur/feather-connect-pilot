@@ -9,6 +9,10 @@ dependencies = [
     "feather-engine-dbos",
     "fastapi",
     "uvicorn",
+    "argon2-cffi",
+    "itsdangerous",
+    "python-multipart",
+    "jinja2",
 ]
 
 [tool.uv.sources]

@@ -21,11 +21,14 @@ from feather_connect.ids import new_id
 from feather_connect.storage.port import (
     CLOSED,
     Attempt,
+    AuditRow,
+    AuditStore,
     BudgetSpec,
     BudgetStore,
     CatalogStore,
     Delivery,
     DeliveryStatus,
+    DuplicateUser,
     FlowRow,
     Grant,
     Ledger,
@@ -42,6 +45,9 @@ from feather_connect.storage.port import (
     StateRow,
     Store,
     TaskRow,
+    TokenRow,
+    UserRow,
+    UserStore,
     Version,
     VersionDraft,
     VersionSealed,
@@ -1259,6 +1265,124 @@ class _Overrides(OverrideStore):
             )
 
 
+class _Users(UserStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def create_user(self, username: str, password_hash: str) -> str:
+        user_id = new_id()
+        try:
+            with self._db.tx() as conn:
+                conn.execute(
+                    """insert into feather.app_user (tenant_id, user_id, username, password_hash, created_at)
+                       values (%s, %s, %s, %s, %s)""",
+                    (self._db.tenant, user_id, username, password_hash, self._db.clock.now()),
+                )
+        except psycopg.errors.UniqueViolation:
+            raise DuplicateUser(username) from None
+        return user_id
+
+    def get_user(self, username: str) -> UserRow | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                "select * from feather.app_user where tenant_id = %s and username = %s",
+                (self._db.tenant, username),
+            ).fetchone()
+        if row is None:
+            return None
+        return UserRow(row["user_id"], row["username"], row["password_hash"], row["created_at"])
+
+    def create_token(self, name: str, token_hash: str, expires_at: datetime | None) -> str:
+        token_id = new_id()
+        with self._db.tx() as conn:
+            conn.execute(
+                """insert into feather.api_token (tenant_id, token_id, name, token_hash, created_at, expires_at)
+                   values (%s, %s, %s, %s, %s, %s)""",
+                (self._db.tenant, token_id, name, token_hash, self._db.clock.now(), expires_at),
+            )
+        return token_id
+
+    def find_token(self, token_hash: str) -> TokenRow | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                "select * from feather.api_token where tenant_id = %s and token_hash = %s",
+                (self._db.tenant, token_hash),
+            ).fetchone()
+        if row is None:
+            return None
+        return TokenRow(
+            row["token_id"],
+            row["name"],
+            row["token_hash"],
+            row["created_at"],
+            row["expires_at"],
+            row["revoked_at"],
+        )
+
+    def revoke_token(self, token_id: str) -> None:
+        with self._db.tx() as conn:
+            conn.execute(
+                """update feather.api_token set revoked_at = %s
+                   where tenant_id = %s and token_id = %s and revoked_at is null""",
+                (self._db.clock.now(), self._db.tenant, token_id),
+            )
+
+
+class _Audit(AuditStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def record(
+        self,
+        actor_type: str,
+        actor: str,
+        action: str,
+        target: str | None,
+        request: Mapping[str, Any],
+        result: str,
+    ) -> str:
+        audit_id = new_id()
+        with self._db.tx() as conn:
+            conn.execute(
+                """insert into feather.audit (tenant_id, audit_id, at, actor_type, actor, action, target, request,
+                                              result)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    self._db.tenant,
+                    audit_id,
+                    self._db.clock.now(),
+                    actor_type,
+                    actor,
+                    action,
+                    target,
+                    _json(dict(request)),
+                    result,
+                ),
+            )
+        return audit_id
+
+    def list_audit(self, limit: int = 100, cursor: str | None = None) -> list[AuditRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.audit where tenant_id = %s and (%s::text is null or audit_id < %s)
+                   order by audit_id desc limit %s""",
+                (self._db.tenant, cursor, cursor, limit),
+            ).fetchall()
+        return [
+            AuditRow(
+                r["audit_id"],
+                r["at"],
+                r["actor_type"],
+                r["actor"],
+                r["action"],
+                r["target"],
+                _unjson(r["request"]),
+                r["result"],
+            )
+            for r in rows
+        ]
+
+
 class PostgresStore(Store):
     """A `Store` that keeps everything in Postgres, for one tenant. `clock` defaults to the system clock."""
 
@@ -1275,4 +1399,6 @@ class PostgresStore(Store):
             workers=_Workers(db),
             schedules=_Schedules(db),
             overrides=_Overrides(db),
+            users=_Users(db),
+            audit=_Audit(db),
         )

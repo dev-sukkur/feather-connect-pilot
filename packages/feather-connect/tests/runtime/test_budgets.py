@@ -150,6 +150,8 @@ class World:
             workers=base.workers,
             schedules=base.schedules,
             overrides=base.overrides,
+            users=base.users,
+            audit=base.audit,
         )
         self.store.budgets.define(spec)
         self.engine = LocalEngine(self.clock)

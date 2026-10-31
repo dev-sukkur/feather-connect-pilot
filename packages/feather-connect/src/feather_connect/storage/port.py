@@ -619,6 +619,83 @@ class ScheduleStore(Protocol):
 
 
 @dataclass(frozen=True)
+class UserRow:
+    user_id: str
+    username: str
+    password_hash: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class TokenRow:
+    """An API token as stored: the SHA-256 of the secret (hex), never the secret itself."""
+
+    token_id: str
+    name: str
+    token_hash: str
+    created_at: datetime
+    expires_at: datetime | None
+    revoked_at: datetime | None
+
+
+class DuplicateUser(Exception):
+    """A user with that name exists already."""
+
+
+class UserStore(Protocol):
+    """Local users and the API tokens they and automation use."""
+
+    def create_user(self, username: str, password_hash: str) -> str:
+        """Add the user and return the id. Raises `DuplicateUser` when the name is taken."""
+        ...
+
+    def get_user(self, username: str) -> UserRow | None: ...
+    def create_token(self, name: str, token_hash: str, expires_at: datetime | None) -> str:
+        """Add the token, known by the SHA-256 of its secret, and return its id."""
+        ...
+
+    def find_token(self, token_hash: str) -> TokenRow | None:
+        """The token with that hash, expired or revoked or not: the caller judges that."""
+        ...
+
+    def revoke_token(self, token_id: str) -> None:
+        """Revoke the token, from now. Revoking one twice, or one that isn't there, changes nothing."""
+        ...
+
+
+@dataclass(frozen=True)
+class AuditRow:
+    audit_id: str
+    at: datetime
+    actor_type: str  # human, token or system
+    actor: str
+    action: str
+    target: str | None
+    request: Mapping[str, Any]  # what was asked, with the reason
+    result: str
+
+
+class AuditStore(Protocol):
+    """Who did what. Rows are only added."""
+
+    def record(
+        self,
+        actor_type: str,
+        actor: str,
+        action: str,
+        target: str | None,
+        request: Mapping[str, Any],
+        result: str,
+    ) -> str:
+        """Add a row, stamped now, and return its id."""
+        ...
+
+    def list_audit(self, limit: int = 100, cursor: str | None = None) -> list[AuditRow]:
+        """Newest first. `cursor` is the `audit_id` of the last row of the previous page."""
+        ...
+
+
+@dataclass(frozen=True)
 class Store:
     """The ports together. A backend provides one of these."""
 
@@ -632,3 +709,5 @@ class Store:
     workers: WorkerRegistry
     schedules: ScheduleStore
     overrides: OverrideStore
+    users: UserStore
+    audit: AuditStore

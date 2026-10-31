@@ -14,11 +14,14 @@ from feather_connect.ids import new_id
 from feather_connect.storage.port import (
     CLOSED,
     Attempt,
+    AuditRow,
+    AuditStore,
     BudgetSpec,
     BudgetStore,
     CatalogStore,
     Delivery,
     DeliveryStatus,
+    DuplicateUser,
     FlowRow,
     Grant,
     Ledger,
@@ -35,6 +38,9 @@ from feather_connect.storage.port import (
     StateRow,
     Store,
     TaskRow,
+    TokenRow,
+    UserRow,
+    UserStore,
     Version,
     VersionDraft,
     VersionSealed,
@@ -77,6 +83,9 @@ class _Data:
     workers: dict[str, WorkerRow] = field(default_factory=dict[str, WorkerRow])
     overrides: dict[tuple[str, str], Override] = field(default_factory=dict[tuple[str, str], Override])
     ticks: dict[tuple[str, str], datetime] = field(default_factory=dict[tuple[str, str], datetime])
+    users: dict[str, UserRow] = field(default_factory=dict[str, UserRow])  # by username
+    tokens: dict[str, TokenRow] = field(default_factory=dict[str, TokenRow])  # by token id
+    audit: list[AuditRow] = field(default_factory=list[AuditRow])
 
 
 class _Runs(RunJournal):
@@ -771,6 +780,80 @@ class _Overrides(OverrideStore):
         return override.expires_at is not None and override.expires_at <= self._d.clock.now()
 
 
+class _Users(UserStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def create_user(self, username: str, password_hash: str) -> str:
+        with self._d.lock:
+            if username in self._d.users:
+                raise DuplicateUser(username)
+            user_id = new_id()
+            self._d.users[username] = UserRow(user_id, username, password_hash, self._d.clock.now())
+            return user_id
+
+    def get_user(self, username: str) -> UserRow | None:
+        with self._d.lock:
+            return self._d.users.get(username)
+
+    def create_token(self, name: str, token_hash: str, expires_at: datetime | None) -> str:
+        with self._d.lock:
+            if any(t.token_hash == token_hash for t in self._d.tokens.values()):
+                raise ValueError("a token with that hash exists")
+            token_id = new_id()
+            self._d.tokens[token_id] = TokenRow(
+                token_id, name, token_hash, self._d.clock.now(), expires_at, None
+            )
+            return token_id
+
+    def find_token(self, token_hash: str) -> TokenRow | None:
+        with self._d.lock:
+            return next((t for t in self._d.tokens.values() if t.token_hash == token_hash), None)
+
+    def revoke_token(self, token_id: str) -> None:
+        with self._d.lock:
+            found = self._d.tokens.get(token_id)
+            if found is not None and found.revoked_at is None:
+                self._d.tokens[token_id] = replace(found, revoked_at=self._d.clock.now())
+
+
+class _Audit(AuditStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def record(
+        self,
+        actor_type: str,
+        actor: str,
+        action: str,
+        target: str | None,
+        request: Mapping[str, Any],
+        result: str,
+    ) -> str:
+        with self._d.lock:
+            audit_id = new_id()
+            self._d.audit.append(
+                AuditRow(
+                    audit_id,
+                    self._d.clock.now(),
+                    actor_type,
+                    actor,
+                    action,
+                    target,
+                    copy.deepcopy(dict(request)),
+                    result,
+                )
+            )
+            return audit_id
+
+    def list_audit(self, limit: int = 100, cursor: str | None = None) -> list[AuditRow]:
+        with self._d.lock:
+            rows = sorted(self._d.audit, key=lambda r: r.audit_id, reverse=True)
+        if cursor is not None:
+            rows = [r for r in rows if r.audit_id < cursor]
+        return rows[:limit]
+
+
 class MemoryStore(Store):
     """A `Store` that keeps everything in memory. `clock` defaults to the system clock."""
 
@@ -787,4 +870,6 @@ class MemoryStore(Store):
             workers=_Workers(data),
             schedules=_Schedules(data),
             overrides=_Overrides(data),
+            users=_Users(data),
+            audit=_Audit(data),
         )

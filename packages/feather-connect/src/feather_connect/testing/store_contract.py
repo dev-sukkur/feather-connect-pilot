@@ -20,9 +20,11 @@ from feather_connect.storage.port import (
     TRANSITIONS,
     BudgetSpec,
     DeliveryStatus,
+    DuplicateUser,
     InvalidTransition,
     StateRow,
     Store,
+    TokenRow,
     VersionDraft,
     VersionSealed,
     delivery_cursor,
@@ -788,6 +790,65 @@ class StoreContract(SpoolContract):
         assert store.overrides.get("route:a", "paused") is True and len(store.overrides.list_all()) == 1
         clock.advance(timedelta(minutes=1))
         assert store.overrides.get("route:a", "paused") is None and store.overrides.list_all() == []
+
+    # users, tokens and the audit log
+
+    def test_users_are_created_and_found_by_name(self, store: Store, clock: FrozenClock):
+        assert store.users.get_user("op") is None
+        user_id = store.users.create_user("op", "hash-1")
+        found = store.users.get_user("op")
+        assert found is not None and (found.user_id, found.username, found.password_hash) == (
+            user_id,
+            "op",
+            "hash-1",
+        )
+        assert found.created_at == T0
+        assert store.users.get_user("OP") is None and store.users.get_user("other") is None
+        with pytest.raises(DuplicateUser):
+            store.users.create_user("op", "hash-2")
+
+    def test_tokens_are_found_by_hash_and_revoked_once(self, store: Store, clock: FrozenClock):
+        assert store.users.find_token("h1") is None
+        expiry = T0 + timedelta(days=1)
+        token_id = store.users.create_token("ci", "h1", expiry)
+        other = store.users.create_token("forever", "h2", None)
+        found = store.users.find_token("h1")
+        assert found == TokenRow(token_id, "ci", "h1", T0, expiry, None)
+        clock.advance(timedelta(hours=1))
+        store.users.revoke_token(token_id)
+        clock.advance(timedelta(hours=1))
+        store.users.revoke_token(token_id)  # the first revocation stands
+        store.users.revoke_token("no-such-token")
+        revoked = store.users.find_token("h1")
+        assert revoked is not None and revoked.revoked_at == T0 + timedelta(hours=1)
+        untouched = store.users.find_token("h2")
+        assert untouched is not None and untouched.token_id == other and untouched.revoked_at is None
+
+    def test_audit_rows_list_newest_first_with_a_cursor(self, store: Store, clock: FrozenClock):
+        ids: list[str] = []
+        for n in range(5):
+            ids.append(
+                store.audit.record("human", "ann", f"act{n}", f"flow:f{n}", {"reason": "r", "n": n}, "ok")
+            )
+            clock.advance(timedelta(seconds=1))
+        rows = store.audit.list_audit()
+        assert [r.audit_id for r in rows] == ids[::-1]
+        first = rows[0]
+        assert (first.actor_type, first.actor, first.action, first.target, first.result) == (
+            "human",
+            "ann",
+            "act4",
+            "flow:f4",
+            "ok",
+        )
+        assert first.request == {"reason": "r", "n": 4} and first.at == T0 + timedelta(seconds=4)
+        page = store.audit.list_audit(limit=2)
+        assert [r.audit_id for r in page] == ids[:2:-1]
+        rest = store.audit.list_audit(limit=10, cursor=page[-1].audit_id)
+        assert [r.audit_id for r in rest] == ids[2::-1]
+        assert store.audit.list_audit(cursor=ids[0]) == []
+        store.audit.record("system", "scheduler", "tick", None, {}, "failed: x")
+        assert store.audit.list_audit(limit=1)[0].target is None
 
     # retention queries
 

@@ -20,6 +20,7 @@ from feather_connect.storage.port import Store
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import at_head, migrate
 from feather_connect.storage.spool import Spool
+from feather_server import auth
 from feather_server.loops import LoopRunner, default_loops
 from feather_server.settings import Settings
 
@@ -107,6 +108,7 @@ def create_app(
 
     app = FastAPI(title="Feather Connect", lifespan=lifespan)
     app.state.feather = state
+    auth.install(app, state)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
