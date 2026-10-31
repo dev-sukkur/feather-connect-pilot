@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from feather_connect.core.errors import PermanentError
+from feather_connect.runtime.budgets import BudgetHandle
 
 
 @dataclass(eq=False)  # a context is a handle that remembers a checkpoint, not a value to compare
@@ -22,7 +23,7 @@ class Context:
     log: logging.Logger
     now: datetime
     tz: str
-    budget: Any | None = None
+    budget: BudgetHandle | None = None
     http: Any | None = None
     _checkpoint: str | None = field(default=None, init=False, repr=False)
 

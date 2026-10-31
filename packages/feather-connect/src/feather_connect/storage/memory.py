@@ -1,8 +1,11 @@
 """The store in memory, for tests and the in-process engine. It passes the same `StoreContract` as any backend."""
 
+import math
 import threading
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
+from fractions import Fraction
 from typing import Any
 
 from feather_connect.clock import Clock, SystemClock
@@ -10,9 +13,13 @@ from feather_connect.ids import new_id
 from feather_connect.storage.port import (
     CLOSED,
     Attempt,
+    BudgetSpec,
+    BudgetStore,
     Delivery,
     DeliveryStatus,
+    Grant,
     Ledger,
+    Priority,
     QuarantineRow,
     QuarantineStore,
     RecordStateStore,
@@ -25,6 +32,7 @@ from feather_connect.storage.port import (
     VersionDraft,
     VersionSealed,
     VersionStore,
+    WindowUsage,
     check_transition,
 )
 
@@ -454,6 +462,75 @@ class _Quarantine(QuarantineStore):
             ]
 
 
+@dataclass
+class _Bucket:
+    """The tokens left in one window, as of `at`."""
+
+    tokens: Fraction
+    at: datetime
+
+
+class _Budgets(BudgetStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+        self._specs: dict[str, BudgetSpec] = {}
+        self._buckets: dict[str, list[_Bucket]] = {}
+
+    def define(self, spec: BudgetSpec) -> None:
+        with self._d.lock:
+            if self._specs.get(spec.name) == spec:
+                return
+            now = self._d.clock.now()
+            self._specs[spec.name] = spec
+            self._buckets[spec.name] = [_Bucket(Fraction(w.units), now) for w in spec.windows]
+
+    def _refilled(self, name: str) -> tuple[BudgetSpec, list[_Bucket]]:
+        """Bring the buckets of the budget up to now, and return them."""
+        spec, buckets = self._specs[name], self._buckets[name]
+        now = self._d.clock.now()
+        for window, bucket in zip(spec.windows, buckets, strict=True):
+            earned = (
+                Fraction(window.units)
+                * Fraction((now - bucket.at) // timedelta(microseconds=1), 1_000_000)
+                / window.seconds
+            )
+            bucket.tokens = min(Fraction(window.units), bucket.tokens + earned)
+            bucket.at = now
+        return spec, buckets
+
+    def acquire(self, name: str, units: int, priority: Priority = "normal") -> Grant:
+        with self._d.lock:
+            spec, buckets = self._refilled(name)
+            kept = (
+                Fraction(spec.reserve.get("high", 0.0)).limit_denominator()
+                if priority == "low"
+                else Fraction(0)
+            )
+            wait = Fraction(0)
+            for window, bucket in zip(spec.windows, buckets, strict=True):
+                held_back = window.units * kept
+                if units > window.units - held_back:
+                    raise ValueError(
+                        f"{units} units are more than {priority} requests can ever take from {name!r}"
+                    )
+                short = units + held_back - bucket.tokens
+                if short > 0:
+                    wait = max(wait, short * window.seconds / window.units)
+            if wait > 0:
+                return Grant(False, timedelta(microseconds=math.ceil(wait * 1_000_000)))
+            for bucket in buckets:
+                bucket.tokens -= units
+            return Grant(True)
+
+    def usage(self, name: str) -> list[WindowUsage]:
+        with self._d.lock:
+            spec, buckets = self._refilled(name)
+            return [
+                WindowUsage(window, float(window.units - bucket.tokens))
+                for window, bucket in zip(spec.windows, buckets, strict=True)
+            ]
+
+
 class MemoryStore(Store):
     """A `Store` that keeps everything in memory. `clock` defaults to the system clock."""
 
@@ -465,4 +542,5 @@ class MemoryStore(Store):
             ledger=_Ledger(data),
             state=_State(data),
             quarantine=_Quarantine(data),
+            budgets=_Budgets(data),
         )

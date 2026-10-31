@@ -17,6 +17,7 @@ from feather_connect.core.records import Record, row_hash
 from feather_connect.storage.port import (
     CLOSED,
     TRANSITIONS,
+    BudgetSpec,
     DeliveryStatus,
     InvalidTransition,
     StateRow,
@@ -24,6 +25,7 @@ from feather_connect.storage.port import (
     VersionDraft,
     VersionSealed,
     delivery_cursor,
+    parse_limits,
 )
 from feather_connect.storage.spool import Spool, records_to_table, snapshot_table, table_to_records
 
@@ -51,6 +53,70 @@ def upserts(*pairs: tuple[str, dict[str, Any]]) -> list[Record]:
 
 
 class StoreContract:
+    # budgets
+
+    def test_budget_never_exceeds_any_window(self, store: Store, clock: FrozenClock):
+        store.budgets.define(BudgetSpec("z", parse_limits(["10/minute", "12/day"])))
+        assert sum(store.budgets.acquire("z", 1).granted for _ in range(20)) == 10
+        clock.advance(timedelta(minutes=1))
+        assert sum(store.budgets.acquire("z", 1).granted for _ in range(20)) == 2  # the day window bites
+
+    def test_low_priority_leaves_the_reserve_for_high(self, store: Store):
+        store.budgets.define(BudgetSpec("z", parse_limits(["10/minute"]), reserve={"high": 0.6}))
+        assert sum(store.budgets.acquire("z", 1, "low").granted for _ in range(10)) == 4
+        assert sum(store.budgets.acquire("z", 1, "high").granted for _ in range(10)) == 6
+
+    def test_normal_priority_may_use_the_whole_window(self, store: Store):
+        store.budgets.define(BudgetSpec("z", parse_limits(["10/minute"]), reserve={"high": 0.6}))
+        assert sum(store.budgets.acquire("z", 1, "normal").granted for _ in range(20)) == 10
+
+    def test_refused_grant_says_how_long_to_wait(self, store: Store, clock: FrozenClock):
+        store.budgets.define(BudgetSpec("z", parse_limits(["10/minute"])))
+        assert store.budgets.acquire("z", 10).granted
+        refused = store.budgets.acquire("z", 1)
+        assert not refused.granted and refused.wait == timedelta(seconds=6)
+        clock.advance(refused.wait)
+        assert store.budgets.acquire("z", 1).granted
+
+    def test_the_wait_is_for_the_slowest_window(self, store: Store):
+        store.budgets.define(BudgetSpec("z", parse_limits(["10/minute", "2/day"])))
+        assert store.budgets.acquire("z", 2).granted
+        assert store.budgets.acquire("z", 1).wait > timedelta(hours=11)
+
+    def test_acquire_is_all_or_nothing_across_windows(self, store: Store):
+        store.budgets.define(BudgetSpec("z", parse_limits(["10/minute", "3/day"])))
+        assert store.budgets.acquire("z", 2).granted
+        assert not store.budgets.acquire(
+            "z", 2
+        ).granted  # the day window has one left, so the minute window is spared
+        assert [u.used for u in store.budgets.usage("z")] == [2, 2]
+        assert store.budgets.acquire("z", 1).granted
+
+    def test_usage_reports_units_in_use_after_refill(self, store: Store, clock: FrozenClock):
+        store.budgets.define(BudgetSpec("z", parse_limits(["10/minute"])))
+        store.budgets.acquire("z", 6)
+        assert [u.used for u in store.budgets.usage("z")] == [6]
+        clock.advance(timedelta(seconds=30))
+        assert [u.used for u in store.budgets.usage("z")] == [1]
+
+    def test_defining_a_budget_again_keeps_its_use_unless_the_spec_changed(self, store: Store):
+        spec = BudgetSpec("z", parse_limits(["10/minute"]))
+        store.budgets.define(spec)
+        store.budgets.acquire("z", 7)
+        store.budgets.define(spec)
+        assert [u.used for u in store.budgets.usage("z")] == [7]
+        store.budgets.define(BudgetSpec("z", parse_limits(["20/minute"])))
+        assert [u.used for u in store.budgets.usage("z")] == [0]
+
+    def test_an_unknown_budget_or_an_impossible_request_is_an_error(self, store: Store):
+        with pytest.raises(KeyError):
+            store.budgets.acquire("nobody", 1)
+        store.budgets.define(BudgetSpec("z", parse_limits(["10/minute"]), reserve={"high": 0.6}))
+        with pytest.raises(ValueError):
+            store.budgets.acquire("z", 11)
+        with pytest.raises(ValueError):
+            store.budgets.acquire("z", 5, "low")  # low may take 4 of a window at most
+
     # versions and the ledger
 
     def test_seal_creates_one_pending_delivery_per_route(self, store: Store):

@@ -5,10 +5,11 @@ dataclasses so that they pickle, which the engine needs for step results.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Any, Literal, Protocol
 
+Priority = Literal["low", "normal", "high"]
 VersionStatus = Literal["staged", "sealed"]
 DeliveryStatus = Literal["pending", "running", "applied", "failed", "held", "skipped", "compensated"]
 QuarantineStatus = Literal["open", "superseded"]
@@ -364,6 +365,72 @@ class QuarantineStore(Protocol):
 
 
 @dataclass(frozen=True)
+class Window:
+    """A limit of `units` per `seconds`."""
+
+    units: int
+    seconds: int
+
+
+@dataclass(frozen=True)
+class BudgetSpec:
+    """A named rate budget: it is used up when any of its windows is. `reserve` maps a priority to the share of
+    each window kept for it: `{"high": 0.6}` leaves 60% of every window to `high` requests alone."""
+
+    name: str
+    windows: tuple[Window, ...]
+    reserve: Mapping[str, float] = field(default_factory=dict[str, float])
+
+
+@dataclass(frozen=True)
+class Grant:
+    """The answer to an `acquire`. When it is refused, `wait` is how long until the same request would be granted."""
+
+    granted: bool
+    wait: timedelta = timedelta(0)
+
+
+@dataclass(frozen=True)
+class WindowUsage:
+    """How many units of `window` are in use now, after refill."""
+
+    window: Window
+    used: float
+
+
+_PERIODS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
+
+
+def parse_limits(limits: Sequence[str]) -> tuple[Window, ...]:
+    """Read limits such as `"90/minute"` into windows. Raises `ValueError` for one that isn't of that form."""
+    windows: list[Window] = []
+    for limit in limits:
+        count, _, period = limit.partition("/")
+        if not count.strip().isdigit() or int(count) < 1 or period.strip() not in _PERIODS:
+            raise ValueError(f"{limit!r} is not a limit: write it as units/period, such as '90/minute'")
+        windows.append(Window(int(count), _PERIODS[period.strip()]))
+    return tuple(windows)
+
+
+class BudgetStore(Protocol):
+    """Shared rate budgets. Each window refills continuously, as a token bucket, by the store's clock."""
+
+    def define(self, spec: BudgetSpec) -> None:
+        """Create the budget, full. Defining it again with the same spec changes nothing; with another, starts afresh."""
+        ...
+
+    def acquire(self, name: str, units: int, priority: Priority = "normal") -> Grant:
+        """Take `units` from every window of the budget, or from none of them.
+
+        `low` may use only `1 - reserve["high"]` of each window. Raises `KeyError` for an undefined budget, and
+        `ValueError` when the request could never be granted, because it is more than a window can hold.
+        """
+        ...
+
+    def usage(self, name: str) -> list[WindowUsage]: ...
+
+
+@dataclass(frozen=True)
 class Store:
     """The ports together. A backend provides one of these."""
 
@@ -372,3 +439,4 @@ class Store:
     ledger: Ledger
     state: RecordStateStore
     quarantine: QuarantineStore
+    budgets: BudgetStore

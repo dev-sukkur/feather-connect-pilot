@@ -9,10 +9,11 @@ import pyarrow as pa
 
 from feather_connect.core.connector import RouteMode, Sink
 from feather_connect.core.context import Context
-from feather_connect.core.dataset import Dataset, Priority
+from feather_connect.core.dataset import Dataset
 from feather_connect.core.partitions import none
 from feather_connect.core.records import Record
 from feather_connect.core.triggers import OnEvent, Trigger
+from feather_connect.storage.port import Priority
 
 Overlap = Literal["queue", "skip", "cancel_previous"]
 CatchUp = Literal["latest", "each"]

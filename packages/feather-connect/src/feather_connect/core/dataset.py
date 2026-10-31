@@ -11,8 +11,8 @@ from pydantic import BaseModel
 from feather_connect.core.connector import PushSource, Source
 from feather_connect.core.partitions import PartitionScheme, none
 from feather_connect.core.strategies import Strategy
+from feather_connect.storage.port import Priority
 
-Priority = Literal["low", "normal", "high"]
 OnRecordError = Literal["quarantine", "fail"]
 
 

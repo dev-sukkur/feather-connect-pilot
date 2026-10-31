@@ -10,6 +10,7 @@ then a waiting delivery has a row but no task, which keeps its run going while a
 """
 
 import logging
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
@@ -20,6 +21,7 @@ from feather_connect.core.errors import PermanentError
 from feather_connect.core.flow import Flow, RouteSpec
 from feather_connect.engine.port import Engine, TaskCall, TaskContext, TaskFn
 from feather_connect.runtime.apply import oldest_open, run_apply
+from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import ExtractFailed, run_extract
 from feather_connect.runtime.plan import run_plan
@@ -29,6 +31,7 @@ from feather_connect.storage.port import (
     Delivery,
     DeliveryStatus,
     InvalidTransition,
+    Priority,
     Store,
     delivery_cursor,
 )
@@ -48,6 +51,9 @@ class Runtime:
 
     `code_sha` identifies the running code. `make_context` gives the context to call a connector with, given the name
     of its connection, and by default holds no settings. `clock` defaults to the system clock.
+
+    `budgets` maps a connection to the budget its calls are metered by, and the default context gives such a connection
+    a `BudgetHandle` at the priority of its datasets and routes. `sleep` is how a handle spends a short wait.
     """
 
     def __init__(
@@ -60,6 +66,8 @@ class Runtime:
         code_sha: str = "dev",
         clock: Clock | None = None,
         make_context: Callable[[str], Context] | None = None,
+        budgets: Mapping[str, str] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._engine = engine
         self._clock: Clock = SystemClock() if clock is None else clock
@@ -73,6 +81,9 @@ class Runtime:
                 self._add(self._datasets, "dataset", dataset.name, dataset)
             for route in flow.routes:
                 self._add(self._routes, "route", route.name, route)
+        self._budgets = dict(budgets or {})
+        self._sleep = sleep
+        self._priorities = self._connection_priorities()
 
     @staticmethod
     def _add[T](found: dict[str, T], kind: str, name: str, value: T) -> None:
@@ -80,8 +91,25 @@ class Runtime:
         if found.setdefault(name, value) is not value:
             raise ValueError(f"two different things are the {kind} named {name!r}: name them apart")
 
+    def _connection_priorities(self) -> dict[str, Priority]:
+        """Return the priority of each budgeted connection's work. One connection can't do work of two priorities."""
+        found: dict[str, Priority] = {}
+        uses: list[tuple[str, Priority]] = []
+        uses.extend((d.source.connection, d.priority) for d in self._datasets.values())
+        uses.extend((r.sink.connection, r.priority) for r in self._routes.values())
+        for connection, priority in uses:
+            if connection in self._budgets and found.setdefault(connection, priority) != priority:
+                raise ValueError(
+                    f"connection {connection!r} is used at two priorities: give each its own connection"
+                )
+        return found
+
     def _default_context(self, connection: str) -> Context:
-        return Context({}, logging.getLogger(connection), self._clock.now(), _UTC)
+        handle = None
+        if connection in self._budgets:
+            priority = self._priorities.get(connection, "normal")
+            handle = BudgetHandle(self._deps.store.budgets, self._budgets[connection], priority, self._sleep)
+        return Context({}, logging.getLogger(connection), self._clock.now(), _UTC, budget=handle)
 
     def flow(self, name: str) -> Flow:
         """Return the flow called `name`. Raises `KeyError` if there is none, as `dataset` and `route` do."""
