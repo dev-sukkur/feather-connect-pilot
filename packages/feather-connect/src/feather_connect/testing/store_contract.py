@@ -1,8 +1,8 @@
 """The contract every store and spool backend must pass.
 
 A backend's test module subclasses `StoreContract` and defines the fixtures `store`, `spool` and `clock`.
-`clock` is the `FrozenClock` that `store` was built with, so tests can check the times it records. A backend
-with only a spool subclasses `SpoolContract`, which needs just `spool`.
+`clock` is the `FrozenClock` that `store` and `spool` were built with, so tests can check the times they
+record. A backend with only a spool subclasses `SpoolContract`, which needs `spool` and `clock`.
 """
 
 import pickle
@@ -196,6 +196,31 @@ class SpoolContract:
         assert spool.list_chunks("v1") == [] and spool.list_chunks("v1", "snapshot") == []
         assert len(spool.list_chunks("v2")) == 1
         spool.delete_version("v1")  # nothing left to delete is not an error
+
+    def test_chunks_live_on_the_day_of_their_versions_first_write(self, spool: Spool, clock: FrozenClock):
+        spool.put_chunk("v1", 0, "data", records_to_table(upserts(("a", {"x": 1}))))
+        spool.put_chunk("v1", 0, "snapshot", snapshot_table([("a", 1)]))
+        clock.advance(timedelta(days=2))
+        spool.put_chunk(
+            "v1", 1, "data", records_to_table(upserts(("b", {"x": 1})))
+        )  # a rewrite stays on day 1
+        spool.put_chunk("v2", 0, "data", records_to_table(upserts(("c", {"x": 1}))))
+        assert spool.days() == [T0.date(), clock.now().date()]
+        assert spool.versions_on(T0.date()) == ["v1"] and spool.versions_on(clock.now().date()) == ["v2"]
+        assert spool.snapshot_versions() == ["v1"]
+
+    def test_dropping_a_day_keeps_snapshots_and_other_days(self, spool: Spool, clock: FrozenClock):
+        spool.put_chunk("v1", 0, "data", records_to_table(upserts(("a", {"x": 1}))))
+        spool.put_chunk("v1", 0, "snapshot", snapshot_table([("a", 1)]))
+        clock.advance(timedelta(days=1))
+        spool.put_chunk("v2", 0, "data", records_to_table(upserts(("b", {"x": 1}))))
+        spool.drop_day(T0.date())
+        assert spool.list_chunks("v1") == [] and len(spool.list_chunks("v1", "snapshot")) == 1
+        assert len(spool.list_chunks("v2")) == 1 and spool.days() == [clock.now().date()]
+        spool.drop_day(T0.date())  # a day with nothing on it is not an error
+        spool.ensure_partitions(2)
+        spool.put_chunk("v3", 0, "data", records_to_table(upserts(("c", {"x": 1}))))
+        assert len(spool.list_chunks("v3")) == 1
 
 
 class StoreContract(SpoolContract):
@@ -725,6 +750,112 @@ class StoreContract(SpoolContract):
         assert store.workers.list_workers()[0].state == "alive"
         with pytest.raises(KeyError):
             store.workers.mark("nobody", "dead")
+
+    # retention queries
+
+    def test_pending_older_than_lists_only_pending_deliveries_past_the_age(
+        self, store: Store, clock: FrozenClock
+    ):
+        seal(store, "v1", ["a"])
+        clock.advance(timedelta(minutes=2))
+        seal(store, "v2", ["a"], part="q")
+        seal(store, "v3", ["a"], part="r")
+        store.ledger.transition("a", "v3", "running", actor="t")
+        clock.advance(timedelta(seconds=30))
+        assert [d.version_id for d in store.ledger.pending_older_than(timedelta(minutes=1))] == ["v1"]
+        assert [d.version_id for d in store.ledger.pending_older_than(timedelta(seconds=10))] == ["v1", "v2"]
+        later = clock.now() + timedelta(minutes=5)
+        assert len(store.ledger.pending_older_than(timedelta(minutes=1), now=later)) == 2
+
+    def test_open_versions_are_those_with_a_delivery_that_is_not_closed(self, store: Store):
+        for vid, part in (("v1", "p"), ("v2", "q"), ("v3", "r")):
+            seal(store, vid, ["a", "b"], part=part)
+        for route in ("a", "b"):
+            store.ledger.transition(route, "v1", "running", actor="t")
+            store.ledger.transition(route, "v1", "applied", actor="t")
+        store.ledger.transition("a", "v2", "running", actor="t")
+        store.ledger.transition("a", "v2", "applied", actor="t")
+        assert store.ledger.open_versions(["v1", "v2", "v3", "nope"]) == {"v2", "v3"}
+
+    def test_closed_deliveries_are_deleted_with_their_attempts_once_old_enough(
+        self, store: Store, clock: FrozenClock
+    ):
+        seal(store, "v1", ["a"])
+        store.ledger.transition("a", "v1", "running", actor="t")
+        store.ledger.transition("a", "v1", "applied", actor="t")
+        clock.advance(timedelta(days=10))
+        seal(store, "v2", ["a"], part="q")
+        store.ledger.transition("a", "v2", "running", actor="t")
+        store.ledger.transition("a", "v2", "applied", actor="t")
+        seal(store, "v3", ["a"], part="r")  # pending, so not deleted whatever its age
+        assert store.ledger.delete_closed_before(T0 + timedelta(days=5)) == 1
+        with pytest.raises(KeyError):
+            store.ledger.get("a", "v1")
+        assert store.ledger.get("a", "v2").status == "applied"
+        assert store.ledger.delete_closed_before(clock.now() + timedelta(days=30)) == 1
+        assert store.ledger.get("a", "v3").status == "pending"
+
+    def test_runs_ready_to_seal_have_every_slice_done_and_a_staged_version(self, store: Store):
+        store.versions.register_slices("r1", "d", ["p", "q"])
+        store.versions.stage(draft("v1", run="r1", part="p"))
+        store.versions.finish_slice("r1", "d", "p")
+        assert store.versions.runs_ready_to_seal() == []  # q is not done
+        store.versions.finish_slice("r1", "d", "q")
+        assert store.versions.runs_ready_to_seal() == [("r1", "d")]
+        store.versions.stage(draft("v9", run="r2", part="p"))  # a run with no slices is not one
+        assert store.versions.runs_ready_to_seal() == [("r1", "d")]
+        store.versions.seal(["v1"], ["a"])
+        assert store.versions.runs_ready_to_seal() == []
+
+    def test_get_many_leaves_out_unknown_versions(self, store: Store):
+        store.versions.stage(draft("v1"))
+        store.versions.stage(draft("v2", part="q"))
+        got = store.versions.get_many(["v2", "nope", "v1"])
+        assert sorted(v.version_id for v in got) == ["v1", "v2"]
+        assert store.versions.get_many([]) == []
+
+    def test_old_manifests_are_listed_unless_newest_of_their_partition_or_delivered(
+        self, store: Store, clock: FrozenClock
+    ):
+        seal(store, "v1", [])
+        seal(store, "v2", [])  # the newest of partition p
+        seal(store, "v3", ["a"], part="q")  # delivered
+        seal(store, "v4", [], part="r")  # the only one of its partition
+        clock.advance(timedelta(days=1))
+        assert store.versions.sealed_before(T0) == []  # sealed at T0, not before
+        assert [v.version_id for v in store.versions.sealed_before(clock.now())] == ["v1"]
+        assert store.versions.delete_many(["v1", "nope"]) == 1
+        assert store.versions.sealed_before(clock.now()) == []
+        with pytest.raises(KeyError):
+            store.versions.get("v1")
+
+    def test_old_runs_are_deleted_with_their_tasks_and_logs_unless_going_or_open(
+        self, store: Store, clock: FrozenClock
+    ):
+        done = store.runs.create_run("f", "manual", "t", {})
+        store.runs.set_run_status(done, "succeeded")
+        task = store.runs.start_task(done, "plan", "plan:1")
+        store.runs.log(task, "info", "hello")
+        going = store.runs.create_run("f", "manual", "t", {})
+        store.runs.set_run_status(going, "running")
+        held = store.runs.create_run("f", "manual", "t", {})
+        store.runs.set_run_status(held, "failed")
+        seal(store, "v1", ["a"], run=held)
+        recent_at = clock.now() + timedelta(days=100)
+        clock.advance(timedelta(days=200))
+        recent = store.runs.create_run("f", "manual", "t", {})
+        assert store.runs.delete_runs_before(recent_at) == 1
+        assert {r.run_id for r in store.runs.list_runs()} == {going, held, recent}
+        assert store.runs.list_tasks(done) == []
+
+    def test_old_log_lines_are_deleted(self, store: Store, clock: FrozenClock):
+        run = store.runs.create_run("f", "manual", "t", {})
+        task = store.runs.start_task(run, "plan", "plan:1")
+        store.runs.log(task, "info", "old")
+        clock.advance(timedelta(days=40))
+        store.runs.log(task, "info", "new")
+        assert store.runs.delete_logs_before(T0 + timedelta(days=30)) == 1
+        assert store.runs.task_logs(task) == ["info: new"]
 
 
 def flow_spec(name: str, routes: list[str], owner: str | None = None) -> dict[str, Any]:

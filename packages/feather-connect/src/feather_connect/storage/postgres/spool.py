@@ -38,6 +38,30 @@ class PostgresSpool(Spool):
         for offset in range(days_ahead + 1):
             self._ensure_day(today + timedelta(days=offset))
 
+    def days(self) -> list[date]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "select distinct day from feather.spool_version where tenant_id = %s order by day",
+                (self._tenant,),
+            ).fetchall()
+        return [r["day"] for r in rows]
+
+    def versions_on(self, day: date) -> list[str]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "select version_id from feather.spool_version where tenant_id = %s and day = %s order by version_id",
+                (self._tenant, day),
+            ).fetchall()
+        return [r["version_id"] for r in rows]
+
+    def snapshot_versions(self) -> list[str]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "select distinct version_id from feather.spool_snapshot where tenant_id = %s order by version_id",
+                (self._tenant,),
+            ).fetchall()
+        return [r["version_id"] for r in rows]
+
     def drop_day(self, day: date) -> None:
         """Drop the day's partition with the chunks in it, for every tenant. Snapshots stay."""
         with self._pool.connection() as conn:

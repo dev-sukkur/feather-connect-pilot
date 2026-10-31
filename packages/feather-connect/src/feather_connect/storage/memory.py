@@ -52,13 +52,14 @@ class _Data:
     lock: threading.RLock = field(default_factory=threading.RLock)
     runs: dict[str, Run] = field(default_factory=dict[str, Run])
     tasks: dict[str, TaskRow] = field(default_factory=dict[str, TaskRow])
-    logs: dict[str, list[str]] = field(default_factory=dict[str, list[str]])
+    logs: dict[str, list[tuple[datetime, str]]] = field(default_factory=dict[str, list[tuple[datetime, str]]])
     versions: dict[str, Version] = field(default_factory=dict[str, Version])
     seal_seq: int = 0
     slices: dict[tuple[str, str], dict[str, bool]] = field(
         default_factory=dict[tuple[str, str], dict[str, bool]]
     )
     deliveries: dict[tuple[str, str], Delivery] = field(default_factory=dict[tuple[str, str], Delivery])
+    changed: dict[tuple[str, str], datetime] = field(default_factory=dict[tuple[str, str], datetime])
     attempts: dict[tuple[str, str], list[Attempt]] = field(
         default_factory=dict[tuple[str, str], list[Attempt]]
     )
@@ -166,11 +167,43 @@ class _Runs(RunJournal):
 
     def log(self, task_id: str, level: str, message: str) -> None:
         with self._d.lock:
-            self._d.logs[task_id].append(f"{level}: {message}")
+            self._d.logs[task_id].append((self._d.clock.now(), f"{level}: {message}"))
 
     def task_logs(self, task_id: str) -> list[str]:
         with self._d.lock:
-            return list(self._d.logs[task_id])
+            return [line for _, line in self._d.logs[task_id]]
+
+    def delete_runs_before(self, cutoff: datetime) -> int:
+        with self._d.lock:
+            open_runs = {
+                self._d.versions[v].run_id
+                for (_, v), d in self._d.deliveries.items()
+                if d.status not in CLOSED and v in self._d.versions
+            }
+            gone = {
+                r.run_id
+                for r in self._d.runs.values()
+                if r.updated_at < cutoff
+                and r.status not in ("queued", "running")
+                and r.run_id not in open_runs
+            }
+            for task_id in [t.task_id for t in self._d.tasks.values() if t.run_id in gone]:
+                del self._d.tasks[task_id]
+                del self._d.logs[task_id]
+            for key in [k for k in self._d.slices if k[0] in gone]:
+                del self._d.slices[key]
+            for run_id in gone:
+                del self._d.runs[run_id]
+            return len(gone)
+
+    def delete_logs_before(self, cutoff: datetime) -> int:
+        with self._d.lock:
+            removed = 0
+            for task_id, lines in self._d.logs.items():
+                kept = [(at, line) for at, line in lines if at >= cutoff]
+                removed += len(lines) - len(kept)
+                self._d.logs[task_id] = kept
+            return removed
 
 
 class _Versions(VersionStore):
@@ -207,6 +240,7 @@ class _Versions(VersionStore):
                             route, version_id, version.dataset, version.partition, self._d.seal_seq, "pending"
                         )
                         self._d.attempts[(route, version_id)] = []
+                        self._d.changed[(route, version_id)] = self._d.clock.now()
                 sealed.append(version)
             return sealed
 
@@ -294,6 +328,44 @@ class _Versions(VersionStore):
             ]
         return found[::-1][:limit]  # newest staged first
 
+    def get_many(self, version_ids: Iterable[str]) -> list[Version]:
+        with self._d.lock:
+            return [self._d.versions[v] for v in dict.fromkeys(version_ids) if v in self._d.versions]
+
+    def runs_ready_to_seal(self) -> list[tuple[str, str]]:
+        with self._d.lock:
+            staged = {(v.run_id, v.dataset) for v in self._d.versions.values() if v.status == "staged"}
+            return sorted(
+                key for key, slices in self._d.slices.items() if key in staged and all(slices.values())
+            )
+
+    def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:
+        with self._d.lock:
+            newest = {(v.dataset, v.partition): v.version_id for v in self._sealed_all()}
+            delivered = {version_id for _, version_id in self._d.deliveries}
+            old = [
+                v
+                for v in self._sealed_all()
+                if v.sealed_at is not None
+                and v.sealed_at < cutoff
+                and newest[(v.dataset, v.partition)] != v.version_id
+                and v.version_id not in delivered
+            ]
+        return old[:limit]
+
+    def delete_many(self, version_ids: Iterable[str]) -> int:
+        with self._d.lock:
+            found = [v for v in dict.fromkeys(version_ids) if v in self._d.versions]
+            for version_id in found:
+                del self._d.versions[version_id]
+            return len(found)
+
+    def _sealed_all(self) -> list[Version]:
+        """Every sealed version, oldest first."""
+        return sorted(
+            (v for v in self._d.versions.values() if v.status == "sealed"), key=lambda v: v.seal_seq or 0
+        )
+
 
 class _Ledger(Ledger):
     def __init__(self, data: _Data) -> None:
@@ -340,6 +412,7 @@ class _Ledger(Ledger):
                 retries=current.retries + (current.status == "failed" and to == "pending"),
             )
             self._d.deliveries[(route, version_id)] = updated
+            self._d.changed[(route, version_id)] = self._d.clock.now()
             self._d.attempts[(route, version_id)].append(
                 Attempt(
                     route,
@@ -388,6 +461,32 @@ class _Ledger(Ledger):
     def all_applied(self) -> bool:
         with self._d.lock:
             return all(d.status == "applied" for d in self._d.deliveries.values())
+
+    def pending_older_than(self, age: timedelta, *, now: datetime | None = None) -> list[Delivery]:
+        cutoff = (self._d.clock.now() if now is None else now) - age
+        with self._d.lock:
+            found = [
+                d
+                for key, d in self._d.deliveries.items()
+                if d.status == "pending" and self._d.changed[key] < cutoff
+            ]
+        return sorted(found, key=lambda d: (d.seal_seq, d.route))
+
+    def open_versions(self, version_ids: Iterable[str]) -> set[str]:
+        wanted = set(version_ids)
+        with self._d.lock:
+            return {v for (_, v), d in self._d.deliveries.items() if v in wanted and d.status not in CLOSED}
+
+    def delete_closed_before(self, cutoff: datetime) -> int:
+        with self._d.lock:
+            gone = [
+                k for k, d in self._d.deliveries.items() if d.status in CLOSED and self._d.changed[k] < cutoff
+            ]
+            for key in gone:
+                del self._d.deliveries[key]
+                del self._d.attempts[key]
+                del self._d.changed[key]
+            return len(gone)
 
 
 class _State(RecordStateStore):

@@ -309,6 +309,43 @@ class _Runs(RunJournal):
             ).fetchall()
         return [f"{r['level']}: {r['message']}" for r in rows]
 
+    def delete_runs_before(self, cutoff: datetime) -> int:
+        with self._db.tx() as conn:
+            gone = [
+                r["run_id"]
+                for r in conn.execute(
+                    """select run_id from feather.run r
+                       where tenant_id = %(tenant)s and updated_at < %(cutoff)s
+                         and status not in ('queued', 'running')
+                         and not exists (
+                             select 1 from feather.version v join feather.delivery d
+                               on d.tenant_id = v.tenant_id and d.version_id = v.version_id
+                             where v.tenant_id = r.tenant_id and v.run_id = r.run_id
+                               and d.status <> 'applied' and d.status <> all(%(closed)s))""",
+                    {"tenant": self._db.tenant, "cutoff": cutoff, "closed": sorted(CLOSED)},
+                ).fetchall()
+            ]
+            if gone:
+                params = (self._db.tenant, gone)
+                conn.execute(
+                    """delete from feather.task_log where tenant_id = %s and task_id in
+                       (select task_id from feather.task where tenant_id = %s and run_id = any(%s))""",
+                    (self._db.tenant, self._db.tenant, gone),
+                )
+                conn.execute("delete from feather.task where tenant_id = %s and run_id = any(%s)", params)
+                conn.execute(
+                    "delete from feather.run_slice where tenant_id = %s and run_id = any(%s)", params
+                )
+                conn.execute("delete from feather.run where tenant_id = %s and run_id = any(%s)", params)
+        return len(gone)
+
+    def delete_logs_before(self, cutoff: datetime) -> int:
+        with self._db.tx() as conn:
+            done = conn.execute(
+                "delete from feather.task_log where tenant_id = %s and at < %s", (self._db.tenant, cutoff)
+            )
+        return done.rowcount
+
 
 class _Versions(VersionStore):
     def __init__(self, db: _Db) -> None:
@@ -518,6 +555,52 @@ class _Versions(VersionStore):
             ).fetchall()
         return [_version(r) for r in rows]
 
+    def get_many(self, version_ids: Iterable[str]) -> list[Version]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                "select * from feather.version where tenant_id = %s and version_id = any(%s)",
+                (self._db.tenant, list(version_ids)),
+            ).fetchall()
+        return [_version(r) for r in rows]
+
+    def runs_ready_to_seal(self) -> list[tuple[str, str]]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select distinct v.run_id, v.dataset from feather.version v
+                   where v.tenant_id = %(tenant)s and v.status = 'staged'
+                     and exists (select 1 from feather.run_slice s
+                                 where s.tenant_id = v.tenant_id and s.run_id = v.run_id and s.dataset = v.dataset)
+                     and not exists (select 1 from feather.run_slice s
+                                     where s.tenant_id = v.tenant_id and s.run_id = v.run_id
+                                       and s.dataset = v.dataset and not s.done)
+                   order by v.run_id, v.dataset""",
+                {"tenant": self._db.tenant},
+            ).fetchall()
+        return [(r["run_id"], r["dataset"]) for r in rows]
+
+    def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.version v
+                   where v.tenant_id = %(tenant)s and v.status = 'sealed' and v.sealed_at < %(cutoff)s
+                     and v.seal_seq < (select max(n.seal_seq) from feather.version n
+                                       where n.tenant_id = v.tenant_id and n.dataset = v.dataset
+                                         and n.partition = v.partition and n.status = 'sealed')
+                     and not exists (select 1 from feather.delivery d
+                                     where d.tenant_id = v.tenant_id and d.version_id = v.version_id)
+                   order by v.seal_seq limit %(limit)s""",
+                {"tenant": self._db.tenant, "cutoff": cutoff, "limit": limit},
+            ).fetchall()
+        return [_version(r) for r in rows]
+
+    def delete_many(self, version_ids: Iterable[str]) -> int:
+        with self._db.tx() as conn:
+            done = conn.execute(
+                "delete from feather.version where tenant_id = %s and version_id = any(%s)",
+                (self._db.tenant, list(version_ids)),
+            )
+        return done.rowcount
+
 
 class _Ledger(Ledger):
     def __init__(self, db: _Db) -> None:
@@ -686,6 +769,39 @@ class _Ledger(Ledger):
             ).fetchone()
         assert row is not None
         return row["ok"]
+
+    def pending_older_than(self, age: timedelta, *, now: datetime | None = None) -> list[Delivery]:
+        cutoff = (self._db.clock.now() if now is None else now) - age
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.delivery
+                   where tenant_id = %s and status = 'pending' and updated_at < %s order by seal_seq, route""",
+                (self._db.tenant, cutoff),
+            ).fetchall()
+        return [_delivery(r) for r in rows]
+
+    def open_versions(self, version_ids: Iterable[str]) -> set[str]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select distinct version_id from feather.delivery
+                   where tenant_id = %s and version_id = any(%s) and status <> 'applied' and status <> all(%s)""",
+                (self._db.tenant, list(version_ids), sorted(CLOSED)),
+            ).fetchall()
+        return {r["version_id"] for r in rows}
+
+    def delete_closed_before(self, cutoff: datetime) -> int:
+        with self._db.tx() as conn:
+            gone = conn.execute(
+                """delete from feather.delivery where tenant_id = %s and status = any(%s) and updated_at < %s
+                   returning route, version_id""",
+                (self._db.tenant, sorted(CLOSED), cutoff),
+            ).fetchall()
+            conn.execute(
+                """delete from feather.delivery_attempt a using unnest(%s::text[], %s::text[]) as g(route, version_id)
+                   where a.tenant_id = %s and a.route = g.route and a.version_id = g.version_id""",
+                ([r["route"] for r in gone], [r["version_id"] for r in gone], self._db.tenant),
+            )
+        return len(gone)
 
 
 class _State(RecordStateStore):

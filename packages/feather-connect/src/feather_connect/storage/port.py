@@ -217,6 +217,17 @@ class RunJournal(Protocol):
         """The task's log lines in order, each as `level: message`."""
         ...
 
+    def delete_runs_before(self, cutoff: datetime) -> int:
+        """Delete the runs last changed before `cutoff`, with their tasks, logs and slices; return how many.
+
+        A run that is still going, or whose versions have a delivery that isn't closed, is kept.
+        """
+        ...
+
+    def delete_logs_before(self, cutoff: datetime) -> int:
+        """Delete the task log lines written before `cutoff`; return how many."""
+        ...
+
 
 class VersionStore(Protocol):
     """Versions, from staging to sealing, and the slices of a run."""
@@ -275,6 +286,28 @@ class VersionStore(Protocol):
         """Newest first."""
         ...
 
+    def get_many(self, version_ids: Iterable[str]) -> list[Version]:
+        """The versions that exist, in no particular order; an unknown id is left out."""
+        ...
+
+    def runs_ready_to_seal(self) -> list[tuple[str, str]]:
+        """The `(run_id, dataset)` pairs whose slices are all finished and that still have a staged version.
+
+        Their seal task has not run to the end: it was never submitted, or it was lost.
+        """
+        ...
+
+    def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:
+        """Sealed versions sealed before `cutoff` that retention may forget, oldest first.
+
+        Not the newest sealed version of its (dataset, partition), and none that still has a delivery.
+        """
+        ...
+
+    def delete_many(self, version_ids: Iterable[str]) -> int:
+        """Delete the sealed versions' manifests, which `sealed_before` listed; return how many existed."""
+        ...
+
 
 class Ledger(Protocol):
     """One delivery per (route, version), moved only along the transitions of design section 6.5."""
@@ -318,6 +351,24 @@ class Ledger(Protocol):
 
     def all_applied(self) -> bool:
         """True when every delivery is applied, which includes there being none."""
+        ...
+
+    def pending_older_than(self, age: timedelta, *, now: datetime | None = None) -> list[Delivery]:
+        """The pending deliveries that last changed more than `age` before `now` (the store's clock by default).
+
+        In seal order. A delivery that is pending has nothing running it, or a task waiting out a retry delay.
+        """
+        ...
+
+    def open_versions(self, version_ids: Iterable[str]) -> set[str]:
+        """Those of `version_ids` with a delivery that isn't applied, skipped or compensated."""
+        ...
+
+    def delete_closed_before(self, cutoff: datetime) -> int:
+        """Delete the applied, skipped and compensated deliveries last changed before `cutoff`, with their attempts.
+
+        Return how many deliveries went.
+        """
         ...
 
 

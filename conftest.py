@@ -9,6 +9,8 @@ from urllib.parse import urlsplit
 import psycopg
 import pytest
 from psycopg import sql
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import ConnectionPool
 
 DEFAULT_URL = "postgresql://feather:feather@127.0.0.1:25433/feather_test"
 
@@ -32,3 +34,32 @@ def pg_url() -> Iterator[str]:
             yield urlsplit(admin_url)._replace(path=f"/{name}").geturl()
         finally:
             admin.execute(sql.SQL("drop database if exists {} with (force)").format(sql.Identifier(name)))
+
+
+@pytest.fixture(scope="session")
+def pool(pg_url: str) -> Iterator[ConnectionPool[psycopg.Connection[DictRow]]]:
+    """A pool on the migrated test database, for the stores and the server."""
+    from feather_connect.storage.postgres.migrate import migrate
+
+    migrate(pg_url)
+    with ConnectionPool[psycopg.Connection[DictRow]](
+        pg_url, min_size=1, max_size=12, kwargs={"row_factory": dict_row}, open=True
+    ) as connection_pool:
+        yield connection_pool
+
+
+@pytest.fixture
+def pg(
+    pg_url: str, pool: ConnectionPool[psycopg.Connection[DictRow]]
+) -> Iterator[psycopg.Connection[DictRow]]:
+    """An autocommit connection to the migrated database, which is emptied first."""
+    with psycopg.Connection[DictRow].connect(pg_url, autocommit=True, row_factory=dict_row) as conn:
+        tables = conn.execute(
+            """select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+               where n.nspname = 'feather' and c.relkind in ('r', 'p') and not c.relispartition
+                 and c.relname <> 'alembic_version'"""
+        ).fetchall()
+        names = sql.SQL(", ").join(sql.Identifier("feather", t["relname"]) for t in tables)
+        conn.execute(sql.SQL("truncate {} restart identity cascade").format(names))
+        conn.execute("alter sequence feather.seal_seq restart")
+        yield conn

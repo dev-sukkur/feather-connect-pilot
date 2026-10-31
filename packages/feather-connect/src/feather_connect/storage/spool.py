@@ -15,6 +15,7 @@ from typing import Any, Literal, Protocol, cast
 
 import pyarrow as pa
 
+from feather_connect.clock import Clock, SystemClock
 from feather_connect.core.records import Op, Record
 
 ChunkKind = Literal["data", "snapshot", "full", "candidates", "moves", "rejected", "settled"]
@@ -61,17 +62,46 @@ class Spool(Protocol):
         """Drop every chunk of the version, of every kind."""
         ...
 
+    # Retention (design 7.3). The chunks of a version live on the day of its first write, whatever kind they are
+    # except a snapshot, which outlives the day.
+
+    def days(self) -> list[date]:
+        """The days that hold chunks, oldest first."""
+        ...
+
+    def versions_on(self, day: date) -> list[str]:
+        """The versions whose chunks live on `day`."""
+        ...
+
+    def snapshot_versions(self) -> list[str]:
+        """The versions that have a snapshot chunk."""
+        ...
+
+    def drop_day(self, day: date) -> None:
+        """Drop the day's chunks, but not the snapshots."""
+        ...
+
+    def ensure_partitions(self, days_ahead: int = 7) -> None:
+        """Make room for writes from today to `days_ahead` days on, for a backend that needs it."""
+        ...
+
 
 class MemorySpool:
     """A spool in memory, for tests and the in-process engine."""
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Clock | None = None) -> None:
         self._lock = threading.Lock()
+        self._clock = clock or SystemClock()
         self._chunks: dict[tuple[str, ChunkKind, int], pa.Table] = {}
+        self._day_of: dict[
+            str, date
+        ] = {}  # the day of a version's first write of a chunk that is not a snapshot
 
     def put_chunk(self, version_id: str, chunk_no: int, kind: ChunkKind, table: pa.Table) -> ChunkRef:
         with self._lock:
             self._chunks[(version_id, kind, chunk_no)] = table
+            if kind != "snapshot":
+                self._day_of.setdefault(version_id, self._clock.now().date())
         return ChunkRef(version_id, chunk_no, kind, table.num_rows, table.nbytes)
 
     def get_chunk(self, version_id: str, chunk_no: int, kind: ChunkKind = "data") -> pa.Table:
@@ -97,6 +127,30 @@ class MemorySpool:
         with self._lock:
             for key in [k for k in self._chunks if k[0] == version_id]:
                 del self._chunks[key]
+            self._day_of.pop(version_id, None)
+
+    def days(self) -> list[date]:
+        with self._lock:
+            return sorted(set(self._day_of.values()))
+
+    def versions_on(self, day: date) -> list[str]:
+        with self._lock:
+            return sorted(v for v, d in self._day_of.items() if d == day)
+
+    def snapshot_versions(self) -> list[str]:
+        with self._lock:
+            return sorted({v for v, kind, _ in self._chunks if kind == "snapshot"})
+
+    def drop_day(self, day: date) -> None:
+        with self._lock:
+            gone = {v for v, d in self._day_of.items() if d == day}
+            for key in [k for k in self._chunks if k[0] in gone and k[1] != "snapshot"]:
+                del self._chunks[key]
+            for version_id in gone:
+                del self._day_of[version_id]
+
+    def ensure_partitions(self, days_ahead: int = 7) -> None:
+        """Memory needs no partitions."""
 
 
 def encode_json_value(value: Any) -> Any:
