@@ -13,9 +13,31 @@ M1 is too large for one plan, so it is split into six. Each one ends with softwa
 | [5. Control plane](m1-05-control-plane.md) | Auth, service layer, JSON API, HTML dashboard | Monitor and act on flows from the dashboard | 2, 3 | 11 |
 | [6. CLI and M1 exit](m1-06-cli-exit.md) | `feather` CLI, `feather dev`, Compose, demo, hard-case suite | Run the whole demo in under 5 minutes, and pass the M1 exit criteria | 2–5 | 9 |
 
-**Order.** Do 1, then 2. After that, 3 and 4 can run side by side, and 5 follows 3. Plan 6 closes the milestone.
+**Order.** See [Build order](#build-order-changed-31-oct-2026): the plans below are no longer built in sequence.
 
 **Later plans depend on earlier code.** The interfaces between plans are fixed here, but details may shift during the build. Re-read a plan's **Consumes** lines against the real code before you start it.
+
+## Build order (changed 31 Oct 2026)
+
+The sponsor wants a dashboard running on Postgres as soon as possible, to run things and watch them live. So the remaining tasks run in the stages below instead of plan by plan. The plan files still hold each task's details; `2.3` means Plan 2, Task 3. The M1 scope and exit criteria don't change, only the order. Each stage gets one review, at its end.
+
+| Stage | Result | Tasks |
+|---|---|---|
+| 1. Core loop | **Done.** Flows run in memory | Plan 1 |
+| 2. Runnable dashboard | `feather dev` starts Postgres, the server, a worker and a demo. You sign in, watch runs arrive live, and retry, replay, pause and re-run from the browser | 2.1–2.6, 2.8, 2.9, 3.1, 3.2, 3.6, 5.1, 5.2, 5.3, 5.5–5.10, 6.1 (without `describe`), 6.5, 6.7, plus the demo task below |
+| 3. Reliability and live events | Crash safety is proved, and webhooks reach destinations in seconds | 2.7, 2.10, 3.3, 3.4, 3.5, 3.7 |
+| 4. Connectors | Real integrations from templates | 4.1–4.9 |
+| 5. API, packaging and M1 exit | JSON API, the rest of the CLI, Compose, and the M1 exit report | 5.4, 5.11, 6.1 (`describe`), 6.2, 6.3, 6.4, 6.6, 6.8, 6.9 |
+
+**Stage 2 demo task (new).** Create `examples/demo/`, used in place of `templates/fan-out-demo` until Stage 4. One flow reads a `simulation.Source` on `every("10s")` with a small fault rate, and delivers to two `simulation.Sink` routes, so the dashboard shows steady runs, occasional retries and failures with no external system. Test: load the project, run it on `LocalEngine`, and assert both routes receive rows.
+
+**Changes this order needs:**
+- Task 6.7 uses this demo, and doesn't need Plan 4.
+- Task 5.3's and the pages' Postgres queries run against the store from Stage 2.
+- Task 2.9's sweeper runs on the loops from Task 3.1, so build 3.1 right after 2.9.
+- The `sealer` loop in Task 3.1 is added in Stage 3 with Task 3.4.
+- Stage 2 also fixes a known gap: extraction must wait durably on `BudgetDeferred`, as delivery does.
+- Until Stage 3 proves it, Stage 2 isn't claimed to be crash-safe.
 
 ## M1 exit criteria
 
