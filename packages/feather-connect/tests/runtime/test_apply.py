@@ -741,12 +741,39 @@ def test_a_row_turned_down_at_extraction_fails_a_replace_and_a_newer_version_rec
     assert route.sink.rows == [{"id": 1, "n": 9}, {"id": 2, "n": 3}]
 
 
-def test_a_version_of_only_turned_down_rows_fails_a_replace():
+def test_a_key_never_delivered_does_not_fail_a_replace():
+    ds = dataset(fc.strategy.snapshot_diff(), schema=Strict)
+    route = replace_route()
+    v1, v2 = seal_versions(
+        ds,
+        [
+            [{"id": 1, "n": 1}, {"id": 2, "n": "bad"}],
+            [{"id": 1, "n": 1}, {"id": 2, "n": 2}],
+        ],
+        route,
+    )
+    apply(ds, route, v1)
+    assert status("r", v1) == "applied" and route.sink.rows == [{"id": 1, "n": 1}]
+    assert [q.key for q in QUARANTINE.list_open()] == ["2"]
+    apply(ds, route, v2)  # the row is fixed, and arrives
+    assert route.sink.rows == [{"id": 1, "n": 1}, {"id": 2, "n": 2}]
+
+
+def test_a_slice_of_only_keys_never_delivered_replaces_with_nothing():
     ds = dataset(fc.strategy.snapshot_diff(), schema=Strict)
     route = replace_route()
     [v1] = seal_versions(ds, [[{"id": 1, "n": "bad"}]], route)
     apply(ds, route, v1)
-    assert status("r", v1) == "failed" and route.sink.calls == []
+    assert status("r", v1) == "applied" and route.sink.rows == []
+    assert [(list(c.records), c.is_first, c.is_last) for c in route.sink.calls] == [([], True, True)]
+
+
+def test_a_key_never_delivered_does_not_keep_a_slice_from_being_cleared():
+    ds = dataset(fc.strategy.snapshot_diff(), schema=Strict, allow_empty=True)
+    route = replace_route()
+    v1, v2 = seal_versions(ds, [[{"id": 1, "n": 1}], [{"id": 2, "n": "bad"}]], route)
+    apply(ds, route, v2)
+    assert status("r", v1) == status("r", v2) == "applied" and route.sink.rows == []
 
 
 def test_a_row_turned_down_at_extraction_does_not_fail_an_upsert_route():

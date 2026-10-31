@@ -23,6 +23,7 @@ from feather_connect.core.records import Op, Record, canonical_json, decode_key
 from feather_connect.core.transforms import apply_map, is_batch_map
 from feather_connect.engine.port import RetryPolicy, TaskContext
 from feather_connect.runtime.deps import RuntimeDeps
+from feather_connect.runtime.extract import NOT_DELIVERED
 from feather_connect.storage.port import CLOSED, Delivery, DeliveryStatus, Version, delivery_cursor
 from feather_connect.storage.spool import ChunkKind, table_to_records
 
@@ -92,16 +93,22 @@ def _chunk_keys(version_id: str, chunk_no: int, kind: ChunkKind, deps: RuntimeDe
 def _plan_of(route: RouteSpec, version: Version, deps: RuntimeDeps) -> _Plan:
     """Work out what the delivery sends. A `replace_partition` route gets the whole slice, and the others the changes.
 
-    A complete version with no `full` chunks and an empty snapshot says that the slice is now empty, because of deletes
-    or moves, which the sink has to hear. Raises `PermanentError` if the snapshot holds keys that the `full` chunks
-    don't, since their rows were turned down at extraction and a replace would silently drop those records.
+    A complete version with no `full` chunks, whose snapshot holds nothing that reached the destination, says that the
+    slice is now empty there, because of deletes or moves, which the sink has to hear. Raises `PermanentError` if the
+    snapshot holds delivered keys that the `full` chunks don't, since their rows were turned down at extraction and a
+    replace would silently drop those records. A key that was never delivered can't be dropped, so it doesn't count.
     """
     version_id = version.version_id
     if route.mode != "replace_partition":
         return _Plan("data", tuple(chunk.chunk_no for chunk in deps.spool.list_chunks(version_id)))
     chunks = tuple(chunk.chunk_no for chunk in deps.spool.list_chunks(version_id, "full"))
     snapshots = deps.spool.list_chunks(version_id, "snapshot")
-    held = {key for chunk in snapshots for key in _chunk_keys(version_id, chunk.chunk_no, "snapshot", deps)}
+    held: set[str] = set()
+    for chunk in snapshots:
+        table = deps.spool.get_chunk(version_id, chunk.chunk_no, "snapshot")
+        keys = cast("list[str]", table.column(_KEY).to_pylist())
+        hashes = cast("list[int]", table.column(_HASH).to_pylist())
+        held.update(key for key, hash_ in zip(keys, hashes, strict=True) if hash_ != NOT_DELIVERED)
     for chunk_no in chunks:
         held.difference_update(_chunk_keys(version_id, chunk_no, "full", deps))
     if held:

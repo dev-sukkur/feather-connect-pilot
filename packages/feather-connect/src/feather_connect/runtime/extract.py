@@ -35,7 +35,7 @@ _ALL_PARTITIONS = "*"
 _MISSING_KEY = "<missing>"  # how the quarantine names a record that has no key
 _RESERVED_PREFIX = "_fc_"  # the spool's own columns
 # The hash a snapshot holds for a key whose row was turned down before it ever reached the slice.
-_NOT_DELIVERED = 0
+NOT_DELIVERED = 0
 
 # What a bad record can raise. Validation and Arrow errors are `ValueError`s or `TypeError`s, or Arrow's own.
 _RECORD_ERRORS = (MissingKeyError, PartitionError, pa.ArrowException, TypeError, ValueError)
@@ -343,10 +343,10 @@ def _stage_slice(
     old_hashes = dict(_pairs(old)) if old is not None else {}
     returned = _moved_here(dataset, target.partition, new.keys(), deps)
     # A record that was turned down is still in the source: it keeps its last known state, and isn't a delete. One
-    # with no known state here is held as `_NOT_DELIVERED`, so that a fixed row upserts and a dropped key is deleted.
+    # with no known state here is held as `NOT_DELIVERED`, so that a fixed row upserts and a dropped key is deleted.
     held = read.rejected - new.keys() if strategy.complete else set[str]()
     for key in held:
-        new[key] = old_hashes.get(key, _NOT_DELIVERED)
+        new[key] = old_hashes.get(key, NOT_DELIVERED)
     diff = strategy.diff(snapshot_table(new.items()), old)
     upsert_keys = set(cast("list[str]", diff.upsert_keys.to_pylist())) - held | returned
     changes = _write_changes(read, target, upsert_keys, deps)
@@ -535,7 +535,7 @@ def _home_hashes(
         state[key].partition
         for found in candidates
         for key, hash_ in found.items()
-        if hash_ == _NOT_DELIVERED and key in state
+        if hash_ == NOT_DELIVERED and key in state
     }
     snapshots = {home: _last_snapshot(dataset, home, deps) for home in homes}
     return {home: dict(_pairs(table)) if table is not None else {} for home, table in snapshots.items()}
@@ -580,7 +580,7 @@ def _reconcile(
                 continue
             elif row is None or row.partition == version.partition:
                 deletes[version.version_id][key] = hash_
-            elif hash_ == _NOT_DELIVERED and not home_hashes[row.partition].get(key):
+            elif hash_ == NOT_DELIVERED and not home_hashes[row.partition].get(key):
                 # The key never lived here, and where the state row says it lives has no delivered copy: that row is
                 # left over from before the rejection, so the record really is gone.
                 deletes[version.version_id][key] = hash_
