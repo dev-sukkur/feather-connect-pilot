@@ -34,6 +34,9 @@ _REJECTED_SCHEMA = pa.schema([pa.field(_KEY, pa.string())])
 _ALL_PARTITIONS = "*"
 _MISSING_KEY = "<missing>"  # how the quarantine names a record that has no key
 _RESERVED_PREFIX = "_fc_"  # the spool's own columns
+_NOT_DELIVERED = (
+    0  # the hash a snapshot holds for a key whose row was turned down before it ever reached the slice
+)
 
 # What a bad record can raise. Validation and Arrow errors are `ValueError`s or `TypeError`s, or Arrow's own.
 _RECORD_ERRORS = (MissingKeyError, PartitionError, pa.ArrowException, TypeError, ValueError)
@@ -313,6 +316,18 @@ def _discard(version_id: str, deps: RuntimeDeps) -> None:
     deps.spool.delete_version(version_id)
 
 
+def _moved_here(dataset: Dataset, partition: str, keys: Iterable[str], deps: RuntimeDeps) -> set[str]:
+    """Return the keys read in `partition` whose record state names another one, which must upsert even if unchanged.
+
+    A row that returns to a partition can match that partition's old snapshot exactly, yet the destination and record
+    state hold the row from where it was since. Only `keep_state` can tell.
+    """
+    if not dataset.keep_state:
+        return set()
+    rows = deps.store.state.get_many(dataset.name, keys)
+    return {key for key, row in rows.items() if row.partition != partition}
+
+
 def _stage_slice(
     dataset: Dataset,
     run_id: str,
@@ -327,15 +342,18 @@ def _stage_slice(
     strategy = dataset.strategy
     old = _old_snapshot(dataset, target.partition, new, since, deps)
     old_hashes = dict(_pairs(old)) if old is not None else {}
-    if strategy.complete:
-        # A record that was turned down is still in the source: it keeps its last known state, and isn't a delete.
-        for key in read.rejected - new.keys():
-            if key in old_hashes:
-                new[key] = old_hashes[key]
+    returned = _moved_here(dataset, target.partition, new.keys(), deps)
+    # A record that was turned down is still in the source: it keeps its last known state, and isn't a delete. One
+    # with no known state here is held as `_NOT_DELIVERED`, so that a fixed row upserts and a dropped key is deleted.
+    held = read.rejected - new.keys() if strategy.complete else set[str]()
+    for key in held:
+        new[key] = old_hashes.get(key, _NOT_DELIVERED)
     diff = strategy.diff(snapshot_table(new.items()), old)
-    changes = _write_changes(read, target, set(cast("list[str]", diff.upsert_keys.to_pylist())), deps)
+    upsert_keys = set(cast("list[str]", diff.upsert_keys.to_pylist())) - held | returned
+    changes = _write_changes(read, target, upsert_keys, deps)
     deletes = {key: old_hashes.get(key, 0) for key in cast("list[str]", diff.delete_keys.to_pylist())}
-    if not changes and not deletes:
+    # A newly held key must reach the snapshot even with no records, or nothing would remember it.
+    if not changes and not deletes and held <= old_hashes.keys():
         _discard(target.version_id, deps)
         return None
     if strategy.complete:
@@ -457,15 +475,27 @@ def _changes_of(version: Version, candidates: Mapping[str, int], deps: RuntimeDe
     return changes
 
 
+def _rejected_keys(version_id: str, deps: RuntimeDeps) -> set[str]:
+    keys: set[str] = set()
+    for chunk in deps.spool.list_chunks(version_id, "rejected"):
+        table = deps.spool.get_chunk(version_id, chunk.chunk_no, "rejected")
+        keys.update(cast("list[str]", table.column(_KEY).to_pylist()))
+    return keys
+
+
 def _holders(versions: Sequence[Version], keys: set[str], deps: RuntimeDeps) -> dict[str, str]:
-    """Return, for each of `keys` in a new snapshot, the id of the first of `versions` whose snapshot holds it."""
+    """Return, for each of `keys` in a new snapshot, the id of the first of `versions` whose snapshot holds it.
+
+    A key that a version only holds because its row was turned down doesn't count: it has no record to take a move.
+    """
     holders: dict[str, str] = {}
     if not keys:
         return holders
     for version in versions:
+        rejected = _rejected_keys(version.version_id, deps)
         for chunk in deps.spool.list_chunks(version.version_id, "snapshot"):
             for key, _ in _pairs(deps.spool.get_chunk(version.version_id, chunk.chunk_no, "snapshot")):
-                if key in keys:
+                if key in keys and key not in rejected:
                     holders.setdefault(key, version.version_id)
     return holders
 
@@ -485,10 +515,7 @@ def _held_without_a_version(
     with_version = {version.partition for version in versions}
     held: set[str] = set()
     for partition in registered | with_version:
-        version_id = stable_id(run_id, dataset.name, partition)
-        for chunk in deps.spool.list_chunks(version_id, "rejected"):
-            table = deps.spool.get_chunk(version_id, chunk.chunk_no, "rejected")
-            held.update(keys.intersection(cast("list[str]", table.column(_KEY).to_pylist())))
+        held |= keys & _rejected_keys(stable_id(run_id, dataset.name, partition), deps)
     for partition in registered - with_version:
         old = _last_snapshot(dataset, partition, deps)
         if old is not None:
@@ -530,7 +557,10 @@ def _reconcile(
             if key in holders:
                 # A holder that is sealed already can't take a move, so it may have no entry yet.
                 moves.setdefault(holders[key], {}).setdefault(key, version.partition)
-            elif key not in held and (row is None or row.partition == version.partition):
+            elif key not in held and (
+                # A key held as not delivered never lived here, so state elsewhere doesn't make its going a move.
+                hash_ == _NOT_DELIVERED or row is None or row.partition == version.partition
+            ):
                 deletes[version.version_id][key] = hash_
     # Record state knows where a key last was, so it goes over what an old snapshot says.
     for version in ordered:

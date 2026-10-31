@@ -231,9 +231,37 @@ def test_a_record_back_in_an_unchanged_slice_is_not_a_delete_with_keep_state():
     assert "1" in DEPS.store.state.get_many("d", ["1"])
 
 
-def strict_dataset() -> Any:
+def test_a_byte_identical_return_reaches_the_destination_and_record_state():
+    ds = day_dataset(keep_state=True)
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1)})
+    run_slices(ds, "r2", {DAY_19: on(DAY_19, 1, 2)})
+    vs = run_slices(ds, "r3", {DAY_18: on(DAY_18, 1), DAY_19: on(DAY_19, 2)})
+    back = version_for(vs, DAY_18)
+    assert [(r.key, r.op, r["date"]) for r in all_records(back)] == [("1", "upsert", "2026-10-18")]
+    assert moves_of(back) == {"1": DAY_19}
+    row = DEPS.store.state.get_many("d", ["1"])["1"]
+    assert (row.partition, row.last_version) == (DAY_18, back.version_id)
+
+
+def test_a_later_delete_after_a_byte_identical_return_is_emitted():
+    ds = day_dataset(keep_state=True, allow_empty=True)
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1)})
+    run_slices(ds, "r2", {DAY_19: on(DAY_19, 1, 2)})
+    run_slices(ds, "r3", {DAY_18: on(DAY_18, 1), DAY_19: on(DAY_19, 2)})
+    vs = run_slices(ds, "r4", {DAY_18: [], DAY_19: on(DAY_19, 2)})
+    assert [(r.key, r.op) for v in vs for r in all_records(v)] == [("1", "delete")]
+    assert DEPS.store.state.get_many("d", ["1"]) == {}
+
+
+def test_an_unchanged_slice_stays_a_no_op_with_keep_state():
+    ds = day_dataset(keep_state=True)
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1)})
+    assert run_slices(ds, "r2", {DAY_18: on(DAY_18, 1)}) == []
+
+
+def strict_dataset(**kw) -> Any:
     fields = [pa.field("id", pa.int64()), pa.field("date", pa.string()), pa.field("x", pa.int64())]
-    return day_dataset(schema=pa.schema(fields))
+    return day_dataset(schema=pa.schema(fields), **kw)
 
 
 def rejected_chunks(run, partition):
@@ -250,11 +278,52 @@ def test_a_record_rejected_in_the_slice_it_moved_to_is_not_a_delete():
     assert version_for(vs, DAY_18).deletes == 0
     assert [q.key for q in DEPS.store.quarantine.list_open()] == ["1"]
     assert rejected_chunks("r2", DAY_19) == []
+    # It has no record in the receiving version, so that version takes no move notice for it.
+    assert [r.key for r in all_records(version_for(vs, DAY_19))] == ["3"]
+    assert moves_of(version_for(vs, DAY_19)) == {}
+
+
+def moved_into_rejection(**kw) -> Any:
+    """Key 1 goes from day 18 to day 19, where its row is turned down, and day 19 has nothing else."""
+    ds = strict_dataset(**kw)
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2, x=1)})
+    vs = run_slices(ds, "r2", {DAY_18: on(DAY_18, 2, x=1), DAY_19: on(DAY_19, 1, x="bad")})
+    received = version_for(vs, DAY_19)
+    assert (received.upserts, received.deletes, all_records(received)) == (0, 0, [])
+    return ds
+
+
+@pytest.mark.parametrize("keep_state", [False, True])
+def test_a_delete_follows_when_the_source_drops_a_key_it_turned_down(keep_state):
+    ds = moved_into_rejection(keep_state=keep_state, allow_empty=True)
+    vs = run_slices(ds, "r3", {DAY_18: on(DAY_18, 2, x=1), DAY_19: []})
+    assert [(r.key, r.op) for v in vs for r in all_records(v)] == [("1", "delete")]
+
+
+@pytest.mark.parametrize("keep_state", [False, True])
+def test_a_fixed_row_upserts_after_being_turned_down(keep_state):
+    ds = moved_into_rejection(keep_state=keep_state)
+    vs = run_slices(ds, "r3", {DAY_18: on(DAY_18, 2, x=1), DAY_19: on(DAY_19, 1, x=1)})
+    assert [(r.key, r.op) for v in vs for r in all_records(v)] == [("1", "upsert")]
+
+
+def test_a_key_still_turned_down_stays_quiet():
+    ds = moved_into_rejection()
+    assert run_slices(ds, "r3", {DAY_18: on(DAY_18, 2, x=1), DAY_19: on(DAY_19, 1, x="bad")}) == []
+
+
+def test_a_key_turned_down_in_one_slice_can_still_move_to_another():
+    ds = strict_dataset()
+    run_slices(ds, "r1", {DAY_20: on(DAY_20, 1, 2, x=1)})
+    slices = {DAY_18: on(DAY_18, 1, x="bad"), DAY_19: on(DAY_19, 1, x=1), DAY_20: on(DAY_20, 2, x=1)}
+    vs = run_slices(ds, "r2", slices)
+    assert moves_of(version_for(vs, DAY_19)) == {"1": DAY_20}
+    assert moves_of(version_for(vs, DAY_18)) == {}
 
 
 def test_rejected_keys_survive_the_discard_of_a_no_op_slice_and_go_once_sealed():
     ds = strict_dataset()
-    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2, x=1)})
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2, x=1), DAY_19: on(DAY_19, 1, x=1)})
     staged = stage_slices(ds, "r2", {DAY_18: on(DAY_18, 2, x=1), DAY_19: on(DAY_19, 1, x="bad")})
     assert [v.partition for v in staged] == [DAY_18]
     assert rejected_chunks("r2", DAY_19)[0].rows == 1
@@ -278,7 +347,8 @@ def test_rejected_keys_outlast_a_crash_before_sealing(monkeypatch):
 def test_a_read_that_seals_at_once_leaves_no_rejected_keys_behind():
     ds = strict_dataset()
     ds.source.load(on(DAY_18, 1, x="bad"))
-    assert run_extract(ds, "r1", DAY_18, routes=ROUTES, stage_only=False, deps=DEPS) == []
+    v = run_extract(ds, "r1", DAY_18, routes=ROUTES, stage_only=False, deps=DEPS)[0]
+    assert all_records(v) == []
     assert rejected_chunks("r1", DAY_18) == []
 
 
