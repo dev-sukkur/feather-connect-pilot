@@ -19,6 +19,7 @@ __all__ = [
     "TaskCall",
     "TaskContext",
     "TaskFn",
+    "WorkerHandle",
     "WorkerRuntime",
 ]
 
@@ -88,9 +89,19 @@ class Engine(Protocol):
     def health(self) -> Mapping[str, Any]: ...
 
 
+class WorkerHandle(Protocol):
+    """A running worker."""
+
+    def stop(self) -> None:
+        """Stop taking new tasks and wait a limited time for the ones that are running to end."""
+        ...
+
+
 class WorkerRuntime(Protocol):
     """The worker side: executes registered tasks until stopped."""
 
     def run(
         self, tasks: Mapping[str, TaskFn], worker_id: str, labels: Mapping[str, str], slots: int
-    ) -> None: ...
+    ) -> WorkerHandle:
+        """Start executing `tasks` and return at once. The worker runs until the handle is stopped."""
+        ...
