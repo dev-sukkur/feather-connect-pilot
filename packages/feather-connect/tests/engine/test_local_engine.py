@@ -1,14 +1,15 @@
+import threading
 from datetime import UTC, datetime, timedelta
-from itertools import pairwise
+from itertools import count, pairwise
 from typing import Any
 
 import pytest
 
 from feather_connect.clock import FrozenClock
 from feather_connect.core import errors
-from feather_connect.core.errors import PermanentError, TransientError
+from feather_connect.core.errors import BudgetDeferred, PermanentError, TransientError
 from feather_connect.engine import port
-from feather_connect.engine.local import LocalEngine
+from feather_connect.engine.local import LocalEngine, NotDurableError
 from feather_connect.engine.port import RetryPolicy, TaskCall
 
 START = datetime(2026, 10, 18, 9, 0, tzinfo=UTC)
@@ -16,6 +17,18 @@ START = datetime(2026, 10, 18, 9, 0, tzinfo=UTC)
 
 def call(key: str, args: dict[str, Any] | None = None, task: str = "t", **fields: Any) -> TaskCall:
     return TaskCall(task, args or {}, idempotency_key=key, **fields)
+
+
+class Unpicklable(Exception):
+    """An exception that holds a lock, so it can't be pickled."""
+
+    def __init__(self):
+        super().__init__("boom")
+        self.lock = threading.Lock()
+
+
+def raise_unpicklable():
+    raise Unpicklable
 
 
 def test_same_idempotency_key_runs_once():
@@ -163,7 +176,7 @@ def test_a_step_that_failed_runs_again_on_retry():
     assert tries == [1, 2] and e.status("k") == "succeeded"
 
 
-def test_a_sleep_that_ended_is_not_repeated_on_retry():
+def test_a_retry_walks_the_body_afresh_and_sleeps_again():
     clock = FrozenClock(START)
 
     def body(ctx, args):
@@ -176,7 +189,54 @@ def test_a_sleep_that_ended_is_not_repeated_on_retry():
     e.submit(call("k"))
     e.run_until_idle()
     assert e.status("k") == "succeeded"
-    assert clock.now() - START == timedelta(hours=1, seconds=10)  # the hour once, then the first retry delay
+    # Each attempt sleeps anew, as on a durable engine: the hour twice, and the first retry delay between.
+    assert clock.now() - START == timedelta(hours=2, seconds=10)
+
+
+def test_a_retry_needs_a_new_signal():
+    # The remote-task shape: wait for one signal, then a step that fails once.
+    clock = FrozenClock(START)
+    uses = []
+
+    def use(payload):
+        uses.append(payload)
+        if len(uses) == 1:
+            raise TransientError("busy")
+
+    def body(ctx, args):
+        payload = ctx.wait_signal("done", timedelta(hours=1))
+        if payload is None:
+            raise RuntimeError("timed out")
+        ctx.step("use", lambda: use(payload))
+
+    e = LocalEngine(clock)
+    e.register({"t": body})
+    e.submit(call("k", retry=RetryPolicy(max_attempts=2)))
+    e.signal("k", "done", {"ok": True})  # one signal, which the first attempt uses up
+    e.run_until_idle()
+    assert uses == [{"ok": True}]
+    assert e.status("k") == "failed"  # the second attempt waited for another signal, and none came
+    assert clock.now() - START == timedelta(hours=1, seconds=10)
+
+
+def test_a_retry_can_take_another_path():
+    got = []
+
+    def body(ctx, args):
+        if ctx.attempt == 1:
+            ctx.sleep(timedelta(hours=1))
+            raise TransientError("busy")
+        payload = ctx.wait_signal("go", timedelta(minutes=10))
+        ctx.step("record", lambda: got.append(payload))
+
+    e = LocalEngine()
+    e.register({"t": body})
+    e.submit(call("k"))
+    e.signal("k", "go", {"n": 1})
+    e.run_until_idle()
+    # The sleep of the first attempt doesn't stand in the way of the wait of the second.
+    assert got == [{"n": 1}]
+    assert e.status("k") == "succeeded"
 
 
 def test_crash_then_recover_replays_saved_steps():
@@ -213,6 +273,108 @@ def test_a_crashed_task_holds_its_key_until_recovered():
     e.recover()
     e.run_until_idle()
     assert log == ["first", "second"]
+
+
+def test_a_failure_the_body_caught_is_replayed_without_running_the_step_again():
+    calls = []
+    seen = []
+
+    def probe():
+        calls.append(1)
+        if len(calls) == 1:
+            raise TransientError("the first call fails")
+        return "real"
+
+    def body(ctx, args):
+        try:
+            outcome = ctx.step("probe", probe)
+        except TransientError:
+            outcome = "fallback"
+        ctx.sleep(timedelta(hours=1))  # the replay after this sleep meets the same failure again
+        ctx.step("finish", lambda: seen.append(outcome))
+
+    e = LocalEngine()
+    e.register({"t": body})
+    e.submit(call("k"))
+    e.run_until_idle()
+    assert len(calls) == 1  # the replay raised the saved error: the step was not run to see if it fails again
+    assert seen == ["fallback"]
+
+
+def test_a_step_tried_again_after_each_deferral_waits_once_per_deferral():
+    # Task 10's shape: catch BudgetDeferred, sleep as long as it asks, then try the same step again.
+    clock = FrozenClock(START)
+    deferred = set()
+    tries = []
+    applied = []
+
+    def sink(n):
+        tries.append(n)
+        if n not in deferred:  # every chunk is deferred the first time it is tried
+            deferred.add(n)
+            raise BudgetDeferred(timedelta(hours=1), "vendor")
+        applied.append((n, clock.now() - START))
+
+    def body(ctx, args):
+        for n in range(3):
+            while True:
+                try:
+                    ctx.step(f"chunk:{n}", lambda n=n: sink(n))
+                    break
+                except BudgetDeferred as deferral:
+                    ctx.sleep(deferral.wait)
+
+    e = LocalEngine(clock)
+    e.register({"t": body})
+    e.submit(call("k"))
+    e.run_until_idle()
+    assert e.status("k") == "succeeded"
+    assert applied == [(0, timedelta(hours=1)), (1, timedelta(hours=2)), (2, timedelta(hours=3))]
+    assert tries == [0, 0, 1, 1, 2, 2]  # a replay doesn't try a chunk again on its way to the next sleep
+
+
+def test_a_body_that_takes_another_path_on_a_replay_is_refused():
+    clock = FrozenClock(START)
+
+    def body(ctx, args):
+        if clock.now() == START:  # reading the clock outside a step breaks the replay rule
+            ctx.sleep(timedelta(hours=1))
+        ctx.wait_signal("go", timedelta(minutes=10))
+
+    e = LocalEngine(clock)
+    e.register({"t": body})
+    e.submit(call("k"))
+    with pytest.raises(NotDurableError, match="waited for the signal 'go', where before it slept"):
+        e.run_until_idle()
+    assert e.status("k") == "failed"
+
+
+def test_a_step_whose_name_changes_between_runs_is_refused():
+    names = count()
+
+    def body(ctx, args):
+        ctx.step(f"work:{next(names)}", lambda: None)  # a new name on every run breaks the replay rule
+        ctx.sleep(timedelta(minutes=1))
+
+    e = LocalEngine()
+    e.register({"t": body})
+    e.submit(call("k"))
+    with pytest.raises(NotDurableError, match="ran step 'work:1', where before it ran step 'work:0'"):
+        e.run_until_idle()
+
+
+def test_a_step_called_inside_a_step_is_an_ordinary_call():
+    runs = []
+
+    def body(ctx, args):
+        ctx.step("outer", lambda: ctx.step("inner", lambda: runs.append("inner")))
+        ctx.sleep(timedelta(minutes=1))  # the replay after this sleep has to get past the outer step
+
+    e = LocalEngine()
+    e.register({"t": body})
+    e.submit(call("k"))
+    e.run_until_idle()
+    assert runs == ["inner"] and e.status("k") == "succeeded"
 
 
 def test_sleep_parks_the_task_and_others_run():
@@ -260,7 +422,11 @@ def test_signal_wakes_a_waiter_and_timeout_returns_none():
 
     def waiter(ctx, args):
         payload = ctx.wait_signal("go", timedelta(minutes=10))
-        woke[args["name"]] = (payload, clock.now() - START)
+
+        def record():  # reads the clock and writes, so it goes in a step
+            woke[args["name"]] = (payload, clock.now() - START)
+
+        ctx.step("record", record)
 
     def sender(ctx, args):
         ctx.step("send", lambda: e.signal("signalled", "go", {"n": 1}))
@@ -292,6 +458,91 @@ def test_a_signal_sent_before_the_wait_is_kept_in_order():
     e.signal("k", "other", {"n": 9})  # another key: this task never waits for it
     e.run_until_idle()
     assert got == [{"n": 1}, {"n": 2}, None]  # the third wait finds nothing and times out
+
+
+def test_a_mutated_step_result_is_not_seen_on_replay():
+    seen = []
+
+    def body(ctx, args):
+        rows = ctx.step("load", lambda: [1])
+        seen.append(list(rows))  # a probe of what each run sees, so it stays outside the steps
+        rows.append(2)
+        ctx.sleep(timedelta(minutes=1))
+
+    e = LocalEngine()
+    e.register({"t": body})
+    e.submit(call("k"))
+    e.run_until_idle()
+    assert seen == [[1], [1]]  # the replay gets what the step returned, not what the body did to it
+
+
+def test_a_step_result_that_cannot_be_pickled_fails_loudly():
+    def body(ctx, args):
+        ctx.step("open", threading.Lock)
+
+    e = LocalEngine()
+    e.register({"t": body})
+    e.submit(call("k"))
+    with pytest.raises(NotDurableError, match="the value step 'open' returned can't be pickled"):
+        e.run_until_idle()
+    assert e.status("k") == "failed"  # a retry could not help: it is not left to the retry policy
+
+
+def test_a_step_error_that_cannot_be_pickled_fails_loudly():
+    def body(ctx, args):
+        ctx.step("boom", raise_unpicklable)
+
+    e = LocalEngine()
+    e.register({"t": body})
+    e.submit(call("k"))
+    with pytest.raises(NotDurableError, match="the error step 'boom' raised can't be pickled"):
+        e.run_until_idle()
+
+
+def test_task_args_are_copied_at_submit_and_for_every_run():
+    seen = []
+    args = {"ids": [1]}
+
+    def body(ctx, a):
+        seen.append(list(a["ids"]))  # a probe of what each run sees, so it stays outside the steps
+        a["ids"].append(9)
+        ctx.sleep(timedelta(minutes=1))
+
+    e = LocalEngine()
+    e.register({"t": body})
+    e.submit(call("k", args))
+    args["ids"].append(2)  # a change by the caller after the submit doesn't reach the task
+    e.run_until_idle()
+    assert seen == [[1], [1]]  # and a change by one run doesn't reach the next
+
+
+def test_signal_payloads_are_copied_when_sent_and_for_every_run():
+    seen = []
+    payload = {"ids": [1]}
+
+    def body(ctx, args):
+        received = ctx.wait_signal("go", timedelta(minutes=1))
+        seen.append(list(received["ids"]))  # a probe of what each run sees, so it stays outside the steps
+        received["ids"].append(9)
+        ctx.sleep(timedelta(minutes=1))
+
+    e = LocalEngine()
+    e.register({"t": body})
+    e.submit(call("k"))
+    e.signal("k", "go", payload)
+    payload["ids"].append(2)  # a change by the sender after the signal doesn't reach the task
+    e.run_until_idle()
+    assert seen == [[1], [1]]  # and a change by one run doesn't reach the next
+
+
+def test_args_and_payloads_that_cannot_be_pickled_are_refused():
+    e = LocalEngine()
+    with pytest.raises(NotDurableError, match="the args of task 't' can't be pickled"):
+        e.submit(call("bad", {"lock": threading.Lock()}))
+    e.submit(call("k"))
+    with pytest.raises(NotDurableError, match="payload of the signal 'go' sent to task 'k' can't be pickled"):
+        e.signal("k", "go", {"lock": threading.Lock()})
+    assert [c.idempotency_key for c in e.submitted()] == ["k"]  # the refused task was not queued
 
 
 def test_cancel_stops_a_queued_task():
