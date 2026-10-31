@@ -82,9 +82,14 @@ def run_worker(
     slots: int = 8,
     labels: Mapping[str, str] | None = None,
     poll_s: float = 0.5,
+    stop: threading.Event | None = None,
 ) -> int:
     """Run a worker until it is told to stop, and return the exit code. `worker_id` defaults to
-    `FEATHER_WORKER_ID`, then the host name."""
+    `FEATHER_WORKER_ID`, then the host name.
+
+    It stops on SIGTERM, SIGINT or SIGBREAK, or, when `stop` is given, when that event is set: a caller that runs
+    the worker in a thread (`feather dev`) passes one, and no signal handler is installed.
+    """
     from feather_engine_dbos import DbosEngine, DbosWorkerRuntime
 
     configure_logging(os.environ.get("FEATHER_LOG_LEVEL", "INFO"))
@@ -109,14 +114,15 @@ def run_worker(
         timezone=str(project.settings["timezone"]),
     )
 
-    told_to_stop = threading.Event()
+    told_to_stop = threading.Event() if stop is None else stop
 
     def on_signal(signum: int, frame: FrameType | None) -> None:
         told_to_stop.set()
 
-    for name in ("SIGTERM", "SIGINT", "SIGBREAK"):  # SIGBREAK is CTRL_BREAK_EVENT, on Windows only
-        if (number := getattr(signal, name, None)) is not None:
-            signal.signal(number, on_signal)
+    if stop is None:
+        for name in ("SIGTERM", "SIGINT", "SIGBREAK"):  # SIGBREAK is CTRL_BREAK_EVENT, on Windows only
+            if (number := getattr(signal, name, None)) is not None:
+                signal.signal(number, on_signal)
 
     store.workers.heartbeat(worker_id, labels, project.code_sha, slots)
     handle = DbosWorkerRuntime(database_url, poll_s=poll_s, drain_s=DRAIN_S).run(

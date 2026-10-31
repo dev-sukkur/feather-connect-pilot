@@ -8,7 +8,9 @@ dependencies = [
     "feather-connect[postgres]",
     "feather-engine-dbos",
     "feather-server",
+    "httpx",
     "typer",
+    "watchfiles",
 ]
 
 [project.scripts]
