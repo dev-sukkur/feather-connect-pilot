@@ -2,24 +2,31 @@
 decides anything the service layer does not.
 """
 
+import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlencode
+from typing import Annotated, Any
+from urllib.parse import quote, urlencode
 
-from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, Form, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
+from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.storage.port import Run
-from feather_server.auth import CurrentActor, csrf_token
+from feather_server.auth import Actor, CurrentActor, csrf_token, require_csrf
 from feather_server.services.actions import Actions
+from feather_server.services.previews import Preview, PreviewError, PreviewExpired, PreviewInvalid
 from feather_server.services.reads import FlowSummary, Reads
 from feather_server.web.charts import meter, sparkline
+from feather_server.web.flow_graph import flow_graph
 
 TEMPLATES = Path(__file__).parent / "templates"
-NAV: list[tuple[str, str]] = [("Overview", "/")]  # (label, path): a page that exists adds itself here
+NAV: list[tuple[str, str]] = [
+    ("Overview", "/"),
+    ("Flows", "/flows"),
+]  # (label, path): a page that exists adds itself here
 _RECENT_RUNS = 8
 _FAILURE_GROUPS = 10
 
@@ -51,8 +58,13 @@ def stamp(moment: datetime) -> str:
     return moment.strftime("%d %b %Y %H:%M UTC")
 
 
-templates.env.filters.update({"ago": ago, "span": span, "stamp": stamp})
-templates.env.globals.update({"meter": meter, "sparkline": sparkline})
+def show(value: Any) -> str:
+    """A configuration value as text. A secret is already `***` by the time it gets here."""
+    return value if isinstance(value, str) else json.dumps(value, default=str)
+
+
+templates.env.filters.update({"ago": ago, "span": span, "stamp": stamp, "show": show})
+templates.env.globals.update({"meter": meter, "sparkline": sparkline, "flow_graph": flow_graph})
 
 
 def reads(request: Request) -> Reads:
@@ -150,3 +162,172 @@ def overview(request: Request, actor: CurrentActor) -> HTMLResponse:
         durations=finished,
         workers_alive=len(alive),
     )
+
+
+# Flows.
+
+Reason = Annotated[str, Form(max_length=500)]
+_NOTICES = {
+    "paused": "The flow is paused. Nothing new will start until you resume it.",
+    "resumed": "The flow is resumed.",
+}
+
+
+def _reason(text: str) -> str | None:
+    return text.strip() or None
+
+
+def _state_of(flow: FlowSummary) -> str:
+    """The one word a flow list filters and badges by."""
+    if not flow.enabled:
+        return "disabled"
+    if flow.paused:
+        return "paused"
+    return flow.last_run.status if flow.last_run else "never"
+
+
+def _not_found(request: Request, what: str) -> HTMLResponse:
+    return render(request, "error.html", status=404, title="Not found", message=what)
+
+
+@router.get("/flows", response_class=HTMLResponse)
+def flows_list(
+    request: Request, actor: CurrentActor, status: str = "", owner: str = "", tag: str = ""
+) -> HTMLResponse:
+    everything = reads(request).flows()
+    shown = [
+        f
+        for f in everything
+        if (not status or _state_of(f) == status)
+        and (not owner or f.owner == owner)
+        and (not tag or tag in f.tags)
+    ]
+    return render(
+        request,
+        "flows.html",
+        fragment="_flows_table.html",
+        title="Flows",
+        actor=actor,
+        flows=shown,
+        state_of=_state_of,
+        statuses=sorted({_state_of(f) for f in everything} | {"failed", "paused", "never"}),
+        owners=sorted({f.owner for f in everything if f.owner}),
+        tags=sorted({t for f in everything for t in f.tags}),
+        chosen={"status": status, "owner": owner, "tag": tag},
+        sha=request.app.state.feather.project.code_sha[:8],
+    )
+
+
+def _flow_page(
+    request: Request,
+    actor: Actor,
+    name: str,
+    *,
+    status: int = 200,
+    notice: tuple[str, str] | None = None,
+    preview: Preview | None = None,
+    form: dict[str, str] | None = None,
+) -> HTMLResponse:
+    try:
+        detail = reads(request).flow_detail(name)
+    except KeyError:
+        return _not_found(request, f"No flow named {name!r}.")
+    state = request.app.state.feather
+    started = request.query_params.get("started")
+    done = _NOTICES.get(request.query_params.get("done", ""))
+    if notice is None and done:
+        notice = ("ok", done)
+    return render(
+        request,
+        "flow_detail.html",
+        fragment="_flow_runs.html",
+        status=status,
+        title=name,
+        actor=actor,
+        detail=detail,
+        notice=notice,
+        started=started,
+        preview=preview,
+        form=form or {},
+        sha=state.project.code_sha[:8],
+        today=state.clock.now().date().isoformat(),
+    )
+
+
+@router.get("/flows/{name}", response_class=HTMLResponse)
+def flow_detail(request: Request, actor: CurrentActor, name: str) -> HTMLResponse:
+    return _flow_page(request, actor, name)
+
+
+def _back(name: str, **query: str) -> RedirectResponse:
+    suffix = f"?{urlencode(query)}" if query else ""
+    return RedirectResponse(f"/flows/{quote(name, safe='')}{suffix}", status_code=303)
+
+
+@router.post("/flows/{name}/run", dependencies=[Depends(require_csrf)])
+def run_flow(request: Request, actor: CurrentActor, name: str, reason: Reason = "") -> Response:
+    try:
+        run_id = actions(request).run_flow(actor, name, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No flow named {name!r}.")
+    except FlowPaused as error:
+        return _flow_page(request, actor, name, status=409, notice=("bad", str(error)))
+    return _back(name, started=run_id)
+
+
+@router.post("/flows/{name}/pause", dependencies=[Depends(require_csrf)])
+def pause_flow(request: Request, actor: CurrentActor, name: str, reason: Reason = "") -> Response:
+    try:
+        actions(request).pause_flow(actor, name, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No flow named {name!r}.")
+    return _back(name, done="paused")
+
+
+@router.post("/flows/{name}/resume", dependencies=[Depends(require_csrf)])
+def resume_flow(request: Request, actor: CurrentActor, name: str, reason: Reason = "") -> Response:
+    try:
+        actions(request).resume_flow(actor, name, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No flow named {name!r}.")
+    return _back(name, done="resumed")
+
+
+@router.post("/flows/{name}/backfill/preview", dependencies=[Depends(require_csrf)])
+def backfill_preview(
+    request: Request,
+    actor: CurrentActor,
+    name: str,
+    start: Annotated[str, Form()] = "",
+    end: Annotated[str, Form()] = "",
+    max_concurrent: Annotated[str, Form()] = "4",
+) -> Response:
+    form = {"start": start, "end": end, "max_concurrent": max_concurrent}
+    try:
+        first, last, slices = date.fromisoformat(start), date.fromisoformat(end), int(max_concurrent)
+    except ValueError:
+        message = "Give the first and the last day as dates, and a whole number of slices at a time."
+        return _flow_page(request, actor, name, status=422, notice=("bad", message), form=form)
+    try:
+        preview = actions(request).preview_backfill(actor, name, start=first, end=last, max_concurrent=slices)
+    except KeyError:
+        return _not_found(request, f"No flow named {name!r}.")
+    except ValueError as error:
+        return _flow_page(request, actor, name, status=422, notice=("bad", str(error)), form=form)
+    return _flow_page(request, actor, name, preview=preview, form=form)
+
+
+@router.post("/flows/{name}/backfill/confirm", dependencies=[Depends(require_csrf)])
+def backfill_confirm(
+    request: Request, actor: CurrentActor, name: str, token: Annotated[str, Form()], reason: Reason = ""
+) -> Response:
+    try:
+        run_id = actions(request).backfill(actor, token, reason=_reason(reason))
+    except PreviewError as error:
+        status = (
+            410 if isinstance(error, PreviewExpired) else 422 if isinstance(error, PreviewInvalid) else 409
+        )
+        return _flow_page(request, actor, name, status=status, notice=("bad", str(error)))
+    except (KeyError, FlowPaused, ValueError) as error:
+        return _flow_page(request, actor, name, status=409, notice=("bad", str(error)))
+    return _back(name, started=run_id)

@@ -35,6 +35,7 @@ STALE_AFTER_RUNS = (
     2  # a dataset is stale when its newest version is older than this many intervals of its flow
 )
 _RECENT_RUNS = 10
+_RECENT_VERSIONS = 15
 _FAILED_RUNS_SHOWN = 100
 
 
@@ -64,6 +65,9 @@ class FlowSummary:
     datasets: tuple[DatasetSummary, ...]
     routes: tuple[RouteSummary, ...]
     last_run: Run | None
+    last_sealed_at: datetime | None = (
+        None  # when any of its datasets last got a version: how fresh the flow is
+    )
 
 
 @dataclass(frozen=True)
@@ -73,6 +77,8 @@ class FlowDetail:
     summary: FlowSummary
     config: tuple[ConfigValue, ...]
     recent_runs: tuple[Run, ...]
+    recent_versions: tuple[Version, ...] = ()
+    code_shas: tuple[str, ...] = ()  # more than one: part of the fleet runs other code than the rest
 
 
 @dataclass(frozen=True)
@@ -207,7 +213,17 @@ class Reads:
                 RouteSummary(r.name, r.sink.connection, self._rt.is_route_paused(r.name)) for r in flow.routes
             ),
             runs[0] if runs else None,
+            self._freshness(flow),
         )
+
+    def _freshness(self, flow: Flow) -> datetime | None:
+        sealed = [
+            v.sealed_at
+            for d in flow.datasets
+            for v in self._store.versions.list_versions(d.name, limit=1)
+            if v.sealed_at is not None
+        ]
+        return max(sealed, default=None)
 
     def flows(self) -> list[FlowSummary]:
         return [self._summary(flow) for flow in self._rt.flows()]
@@ -223,7 +239,18 @@ class Reads:
             if value.path.startswith(prefixes) or value.path == f"flows.{name}"
         )
         recent = self._store.runs.list_runs(flow=name, limit=_RECENT_RUNS)
-        return FlowDetail(self._summary(flow), config, tuple(recent))
+        versions = sorted(
+            (
+                v
+                for d in flow.datasets
+                for v in self._store.versions.list_versions(d.name, limit=_RECENT_VERSIONS)
+            ),
+            key=lambda v: v.seal_seq or 0,
+            reverse=True,
+        )[:_RECENT_VERSIONS]
+        live = {w.code_sha for w in self._store.workers.list_workers() if w.state != "dead"}
+        shas = tuple(sorted(live | {v.code_sha for v in versions}))
+        return FlowDetail(self._summary(flow), config, tuple(recent), tuple(versions), shas)
 
     # Overview.
 

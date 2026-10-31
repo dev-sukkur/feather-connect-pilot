@@ -53,6 +53,7 @@ FLOW_MODULE = """
         deliver=[fc.to(memory.Sink("warehouse")), fc.to(memory.Sink("gofrugal"))],
         triggers=[fc.every("15m")],
         owner="ops",
+        tags=["retail"],
     )
 """
 

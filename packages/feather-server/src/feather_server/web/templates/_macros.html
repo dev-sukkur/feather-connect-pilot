@@ -8,7 +8,8 @@
     "queued": ("…", "Queued", "idle"), "pending": ("…", "Pending", "idle"),
     "held": ("⏸", "Held", "warn"), "paused": ("⏸", "Paused", "warn"), "open": ("!", "Open", "warn"),
     "skipped": ("⤼", "Skipped", "idle"), "cancelled": ("⊘", "Cancelled", "idle"),
-    "superseded": ("⤼", "Superseded", "idle"),
+    "superseded": ("⤼", "Superseded", "idle"), "sealed": ("✓", "Sealed", "ok"), "staged": ("…", "Staged", "idle"),
+    "never": ("○", "Never run", "idle"), "disabled": ("⊘", "Disabled", "idle"),
   } -%}
   {%- set found = known.get(status, ("•", status | capitalize, "idle")) -%}
   <span class="badge badge-{{ status if status in known else 'other' }} tone-{{ found[2] }}"><span class="icon" aria-hidden="true">{{ found[0] }}</span> {{ found[1] }}</span>

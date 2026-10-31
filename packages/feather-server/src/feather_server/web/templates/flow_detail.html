@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% set flow = detail.summary %}
+{% block content %}
+<h1>{{ flow.name }}
+  {% if flow.paused %}{{ m.status_badge("paused") }}{% elif not flow.enabled %}{{ m.status_badge("disabled") }}
+  {% elif flow.last_run %}{{ m.status_badge(flow.last_run.status) }}{% else %}{{ m.status_badge("never") }}{% endif %}</h1>
+<p><a href="/flows">&larr; All flows</a></p>
+
+{% if started %}<p class="notice notice-ok" role="status">Run <a href="/runs/{{ started | urlencode }}"><code>{{ started[:8] }}</code></a> started. It appears in the list below within a few seconds.</p>{% endif %}
+{% if notice %}<p class="notice notice-{{ notice[0] }}" role="{{ 'alert' if notice[0] == 'bad' else 'status' }}">{{ notice[1] }}</p>{% endif %}
+{% if detail.code_shas | length > 1 %}
+<p class="notice notice-warn" role="status">This flow is running on different code versions at once: {% for sha in detail.code_shas %}<code>{{ sha[:8] }}</code>{% if not loop.last %}, {% endif %}{% endfor %}. This is normal during a rollout; if it is not one, a worker is out of date.</p>
+{% endif %}
+
+<dl class="facts">
+  <dt>Owner</dt><dd>{% if flow.owner %}{{ flow.owner }}{% else %}<span class="muted">none</span>{% endif %}</dd>
+  <dt>Tags</dt><dd><span class="tags">{% for tag in flow.tags %}<span class="tag">{{ tag }}</span>{% else %}<span class="muted">none</span>{% endfor %}</span></dd>
+  <dt>Starts</dt><dd>{{ flow.triggers | join(", ") }}</dd>
+  <dt>Code</dt><dd><code>{{ sha }}</code></dd>
+  <dt>Data fresh</dt><dd>{{ m.time_ago(flow.last_sealed_at) }}</dd>
+</dl>
+
+<section aria-labelledby="h-actions">
+  <h2 id="h-actions">Actions</h2>
+  <div class="actions">
+    <form method="post" action="/flows/{{ flow.name | urlencode }}/run">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <p><label for="run-reason">Reason (optional)</label><br><input id="run-reason" name="reason" type="text" maxlength="500"></p>
+      <button type="submit" class="primary"{% if flow.paused or not flow.enabled %} disabled{% endif %}>Run now</button>
+    </form>
+    {% if flow.paused %}
+    <form method="post" action="/flows/{{ flow.name | urlencode }}/resume">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <p><label for="resume-reason">Reason (optional)</label><br><input id="resume-reason" name="reason" type="text" maxlength="500"></p>
+      <button type="submit">Resume</button>
+    </form>
+    {% else %}
+    <form method="post" action="/flows/{{ flow.name | urlencode }}/pause">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <p><label for="pause-reason">Reason (optional)</label><br><input id="pause-reason" name="reason" type="text" maxlength="500"></p>
+      <button type="submit">Pause</button>
+    </form>
+    {% endif %}
+  </div>
+  {% if flow.paused %}<p class="muted">The flow is paused, so it cannot be run until it is resumed.</p>{% endif %}
+</section>
+
+{% if preview %}
+{{ m.confirm_form(preview, "/flows/" ~ (flow.name | urlencode) ~ "/backfill/confirm", "/flows/" ~ (flow.name | urlencode), "Start the backfill") }}
+{% endif %}
+
+<section aria-labelledby="h-graph">
+  <h2 id="h-graph">What it reads and where it delivers</h2>
+  {{ flow_graph(detail) }}
+</section>
+
+{% include "_flow_runs.html" %}
+
+<section aria-labelledby="h-backfill">
+  <h2 id="h-backfill">Backfill</h2>
+  <p class="muted">Read a range of days again. You see what it would touch before anything starts.</p>
+  <form class="filters" method="post" action="/flows/{{ flow.name | urlencode }}/backfill/preview">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p><label for="bf-start">First day</label><br><input id="bf-start" name="start" type="date" value="{{ form.start or today }}" required></p>
+    <p><label for="bf-end">Last day</label><br><input id="bf-end" name="end" type="date" value="{{ form.end or today }}" required></p>
+    <p><label for="bf-slices">Slices at a time</label><br><input id="bf-slices" name="max_concurrent" type="number" min="1" max="64" value="{{ form.max_concurrent or 4 }}" required></p>
+    <p><button type="submit">Preview</button></p>
+  </form>
+</section>
+
+<section aria-labelledby="h-config">
+  <h2 id="h-config">Configuration</h2>
+  <p class="muted">Every value, and the file that set it. Secrets are never shown.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th scope="col">Setting</th><th scope="col">Value</th><th scope="col">Set by</th></tr></thead>
+    <tbody>
+    {% for item in detail.config %}
+      <tr>
+        <th scope="row"><code>{{ item.path }}</code></th>
+        <td>{% if item.value == "***" %}<span class="secret">***</span>{% else %}<code>{{ item.value | show }}</code>{% endif %}</td>
+        <td>{{ item.layer }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endblock %}
