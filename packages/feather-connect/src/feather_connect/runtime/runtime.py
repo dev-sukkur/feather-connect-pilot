@@ -20,7 +20,7 @@ from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import BudgetDeferred, PermanentError
 from feather_connect.core.flow import Flow, RouteSpec
-from feather_connect.engine.port import Engine, TaskCall, TaskContext, TaskFn
+from feather_connect.engine.port import Engine, RetryPolicy, TaskCall, TaskContext, TaskFn
 from feather_connect.logs import bind
 from feather_connect.runtime.apply import oldest_open, run_apply
 from feather_connect.runtime.budgets import BudgetHandle
@@ -36,6 +36,7 @@ from feather_connect.storage.port import (
     Priority,
     Run,
     Store,
+    TaskRow,
     delivery_cursor,
     is_paused,
 )
@@ -273,12 +274,21 @@ class Runtime:
         actor: str = "system",
         partitions: Sequence[str] | None = None,
         reason: str | None = None,
+        max_concurrent: int | None = None,
     ) -> str:
-        """Create a run and submit its plan. `partitions` overrides what would be planned, for a re-run of a slice."""
+        """Create a run and submit its plan. `partitions` overrides what would be planned, for a re-run of a slice.
+
+        `max_concurrent` limits how many of the run's extract tasks are submitted at once, as a backfill needs: the
+        plan submits that many, and each extract that ends submits the next.
+        """
         self.flow(flow)
+        if max_concurrent is not None and max_concurrent < 1:
+            raise ValueError(f"max_concurrent is {max_concurrent}: it must be at least 1")
         if self.is_flow_paused(flow):
             raise FlowPaused(f"flow {flow!r} is paused{self._pause_note(f'flow:{flow}')}")
         params: dict[str, Any] = {} if partitions is None else {"partitions": list(partitions)}
+        if max_concurrent is not None:
+            params["max_concurrent"] = max_concurrent
         run_id = self._deps.store.runs.create_run(flow, trigger, actor, params, reason=reason)
         self._submit(
             TaskCall(
@@ -413,6 +423,9 @@ class Runtime:
         run_id, partition = args["run_id"], args["partition"]
         versions = self._deps.store.versions
 
+        def hand_on() -> None:
+            ctx.step("next_slice", lambda: self._submit_next_slice(ctx.task_ref, run_id))
+
         def body() -> None:
             flow, dataset = self.flow(args["flow"]), self.dataset(args["dataset"])
             sliced = ctx.step("sliced", lambda: bool(versions.slices_for_run(run_id, dataset.name)))
@@ -422,9 +435,10 @@ class Runtime:
                 ctx.step("submit_applies", lambda: self._submit_applies(flow, run_id, ids))
             elif ctx.step("finish_slice", lambda: versions.finish_slice(run_id, dataset.name, partition)):
                 ctx.step("submit_seal", lambda: self.submit_seal(flow.name, dataset.name, run_id))
+            hand_on()
             self._finish_step(ctx, run_id)
 
-        self._tracked(ctx, run_id, body)
+        self._tracked(ctx, run_id, body, on_failure=hand_on)
 
     def _seal_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
         run_id = args["run_id"]
@@ -447,16 +461,29 @@ class Runtime:
 
         self._tracked(ctx, run_id, body)
 
-    def _tracked(self, ctx: TaskContext, run_id: str, body: Callable[[], None]) -> None:
-        """Run a task's body, and answer for it in the journal if it is about to end in failure."""
+    def _tracked(
+        self,
+        ctx: TaskContext,
+        run_id: str,
+        body: Callable[[], None],
+        on_failure: Callable[[], None] | None = None,
+    ) -> None:
+        """Run a task's body, and answer for it in the journal if it is about to end in failure.
+
+        `on_failure` runs once the failure is in the journal, for what the task owes whoever comes after it.
+        """
         try:
             body()
         except PermanentError as error:
             self._fail_step(ctx, run_id, error)
+            if on_failure is not None:
+                on_failure()
             raise
         except Exception as error:
             if ctx.attempt >= self._deps.retry.max_attempts:
                 self._fail_step(ctx, run_id, error)
+                if on_failure is not None:
+                    on_failure()
             raise
 
     def _finish_step(self, ctx: TaskContext, run_id: str) -> None:
@@ -484,22 +511,49 @@ class Runtime:
             raise PermanentError(str(error)) from error
         return [version.version_id for version in versions]
 
+    @staticmethod
+    def _extract_call(flow: str, run_id: str, dataset: str, partition: str, retry: RetryPolicy) -> TaskCall:
+        return TaskCall(
+            "feather.extract",
+            {"run_id": run_id, "flow": flow, "dataset": dataset, "partition": partition},
+            f"extract:{run_id}:{dataset}:{partition}",
+            f"extract:{_TENANT}:{dataset}:{partition}",
+            retry=retry,
+        )
+
     def _submit_extracts(self, flow: str, run_id: str, planned: Mapping[str, Sequence[str]]) -> None:
-        for dataset, partitions in planned.items():
-            for partition in partitions:
-                self._submit(
-                    TaskCall(
-                        "feather.extract",
-                        {"run_id": run_id, "flow": flow, "dataset": dataset, "partition": partition},
-                        f"extract:{run_id}:{dataset}:{partition}",
-                        f"extract:{_TENANT}:{dataset}:{partition}",
-                        retry=self._deps.retry,
-                    ),
-                    run_id,
-                    "extract",
-                    dataset,
-                    partition,
-                )
+        """Open a row for every extract and submit them, or only the first `max_concurrent` of them.
+
+        The rows of the rest are open without a task, as those of waiting deliveries are, which keeps the run going.
+        Extract number `i` submits number `i + max_concurrent` when it ends, so a failed or retried task can neither
+        lose a place nor take two.
+        """
+        limit = self._deps.store.runs.get_run(run_id).params.get("max_concurrent")
+        every = [(dataset, partition) for dataset, partitions in planned.items() for partition in partitions]
+        for place, (dataset, partition) in enumerate(every):
+            call = self._extract_call(flow, run_id, dataset, partition, self._deps.retry)
+            if limit is None or place < limit:
+                self._submit(call, run_id, "extract", dataset, partition)
+            else:
+                self._open_row(run_id, "extract", call.idempotency_key, dataset, partition)
+
+    def _submit_next_slice(self, ref: str, run_id: str) -> None:
+        """Submit the extract that waits for the place of the task `ref`, if the run is limited and still going."""
+        runs = self._deps.store.runs
+        run = runs.get_run(run_id)
+        limit = run.params.get("max_concurrent")
+        if limit is None or run.status not in _ACTIVE:
+            return
+        rows: list[TaskRow] = sorted(
+            (r for r in runs.list_tasks(run_id) if r.kind == "extract"), key=lambda r: r.task_id
+        )
+        place = next(i for i, row in enumerate(rows) if row.ref == ref)
+        if place + int(limit) < len(rows):
+            waiting = rows[place + int(limit)]
+            assert waiting.dataset is not None and waiting.partition is not None
+            self._engine.submit(
+                self._extract_call(run.flow, run_id, waiting.dataset, waiting.partition, self._deps.retry)
+            )
 
     def _submit_applies(self, flow: Flow, run_id: str, version_ids: Sequence[str]) -> None:
         """Give the run a row for each new delivery, before any of them is submitted and can end the run."""

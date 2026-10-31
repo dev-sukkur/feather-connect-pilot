@@ -1,6 +1,7 @@
 """The store in memory, for tests and the in-process engine. It passes the same `StoreContract` as any backend."""
 
 import copy
+import json
 import math
 import threading
 from collections.abc import Iterable, Mapping, Sequence
@@ -22,14 +23,17 @@ from feather_connect.storage.port import (
     Delivery,
     DeliveryStatus,
     DuplicateUser,
+    FailureGroup,
     FlowRow,
     Grant,
     Ledger,
     Override,
     OverrideStore,
+    PartitionRow,
     Priority,
     QuarantineRow,
     QuarantineStore,
+    ReadStore,
     RecordStateStore,
     RouteRow,
     Run,
@@ -50,6 +54,7 @@ from feather_connect.storage.port import (
     WorkerRow,
     WorkerState,
     check_transition,
+    split_error,
 )
 
 
@@ -768,6 +773,25 @@ class _Overrides(OverrideStore):
             found = self._d.overrides.get((target, key))
             return None if found is None or self._expired(found) else copy.deepcopy(found.value)
 
+    def claim(
+        self,
+        target: str,
+        key: str,
+        value: Any,
+        *,
+        actor: str,
+        reason: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> bool:
+        with self._d.lock:
+            held = self._d.overrides.get((target, key))
+            if held is not None and not self._expired(held):
+                return False
+            self._d.overrides[(target, key)] = Override(
+                target, key, copy.deepcopy(value), reason, actor, self._d.clock.now(), expires_at
+            )
+            return True
+
     def list_all(self) -> list[Override]:
         with self._d.lock:
             return [o for _, o in sorted(self._d.overrides.items()) if not self._expired(o)]
@@ -854,6 +878,75 @@ class _Audit(AuditStore):
         return rows[:limit]
 
 
+class _Reads(ReadStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def partition_grid(
+        self, dataset: str, *, since: datetime | None = None, cursor: str | None = None, limit: int = 100
+    ) -> list[PartitionRow]:
+        with self._d.lock:
+            latest: dict[str, Version] = {}
+            for version in self._d.versions.values():
+                if version.dataset != dataset or version.status != "sealed" or version.seal_seq is None:
+                    continue
+                held = latest.get(version.partition)
+                if held is None or (held.seal_seq or 0) < version.seal_seq:
+                    latest[version.partition] = version
+            rows: list[PartitionRow] = []
+            for partition in sorted(latest, reverse=True):
+                version = latest[partition]
+                assert version.seal_seq is not None and version.sealed_at is not None
+                if (cursor is not None and partition >= cursor) or (since and version.sealed_at < since):
+                    continue
+                cells = {
+                    route: d.status
+                    for (route, v), d in sorted(self._d.deliveries.items())
+                    if v == version.version_id
+                }
+                rows.append(
+                    PartitionRow(
+                        dataset,
+                        partition,
+                        version.version_id,
+                        version.seal_seq,
+                        version.sealed_at,
+                        version.upserts,
+                        version.deletes,
+                        cells,
+                    )
+                )
+            return rows[:limit]
+
+    def failure_groups(
+        self, route: str | None = None, *, limit: int = 100, cursor: str | None = None
+    ) -> list[FailureGroup]:
+        with self._d.lock:
+            found: dict[tuple[str, str, str], list[Delivery]] = {}
+            for delivery in self._d.deliveries.values():
+                if delivery.status != "failed" or (route is not None and delivery.route != route):
+                    continue
+                error_class, message = split_error(delivery.last_error)
+                found.setdefault((delivery.route, error_class, message), []).append(delivery)
+        groups = [
+            FailureGroup(
+                r, c, m, len(ds), tuple(d.version_id for d in sorted(ds, key=lambda d: d.seal_seq)[:5])
+            )
+            for (r, c, m), ds in sorted(found.items())
+        ]
+        if cursor is not None:
+            after = tuple(json.loads(cursor))
+            groups = [g for g in groups if (g.route, g.error_class, g.message) > after]
+        return groups[:limit]
+
+    def delivery_counts(self) -> dict[str, int]:
+        with self._d.lock:
+            counts: dict[str, int] = {}
+            for delivery in self._d.deliveries.values():
+                counts[delivery.status] = counts.get(delivery.status, 0) + 1
+            return counts
+
+
 class MemoryStore(Store):
     """A `Store` that keeps everything in memory. `clock` defaults to the system clock."""
 
@@ -872,4 +965,5 @@ class MemoryStore(Store):
             overrides=_Overrides(data),
             users=_Users(data),
             audit=_Audit(data),
+            reads=_Reads(data),
         )

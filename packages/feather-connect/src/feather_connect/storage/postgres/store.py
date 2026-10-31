@@ -29,14 +29,17 @@ from feather_connect.storage.port import (
     Delivery,
     DeliveryStatus,
     DuplicateUser,
+    FailureGroup,
     FlowRow,
     Grant,
     Ledger,
     Override,
     OverrideStore,
+    PartitionRow,
     Priority,
     QuarantineRow,
     QuarantineStore,
+    ReadStore,
     RecordStateStore,
     RouteRow,
     Run,
@@ -58,6 +61,7 @@ from feather_connect.storage.port import (
     WorkerRow,
     WorkerState,
     check_transition,
+    split_error,
 )
 from feather_connect.storage.postgres.support import Pool, ensure_partition
 from feather_connect.storage.spool import decode_json_value, encode_json_value
@@ -1237,6 +1241,30 @@ class _Overrides(OverrideStore):
             ).fetchone()
         return None if row is None else _unjson(row["value"])
 
+    def claim(
+        self,
+        target: str,
+        key: str,
+        value: Any,
+        *,
+        actor: str,
+        reason: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> bool:
+        now = self._db.clock.now()
+        with self._db.tx() as conn:
+            claimed = conn.execute(
+                """insert into feather.override (tenant_id, target, key, value, reason, created_by, created_at,
+                                                 expires_at)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s)
+                   on conflict (tenant_id, target, key) do update
+                   set value = excluded.value, reason = excluded.reason, created_by = excluded.created_by,
+                       created_at = excluded.created_at, expires_at = excluded.expires_at
+                   where feather.override.expires_at is not null and feather.override.expires_at <= %s""",
+                (self._db.tenant, target, key, _json(value), reason, actor, now, expires_at, now),
+            )
+        return claimed.rowcount == 1
+
     def list_all(self) -> list[Override]:
         with self._db.tx() as conn:
             rows = conn.execute(
@@ -1383,6 +1411,85 @@ class _Audit(AuditStore):
         ]
 
 
+class _Reads(ReadStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def partition_grid(
+        self, dataset: str, *, since: datetime | None = None, cursor: str | None = None, limit: int = 100
+    ) -> list[PartitionRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from (
+                       select distinct on (partition) partition, version_id, seal_seq, sealed_at, upserts, deletes
+                       from feather.version
+                       where tenant_id = %(tenant)s and dataset = %(dataset)s and status = 'sealed'
+                       order by partition, seal_seq desc
+                   ) latest
+                   where (%(since)s::timestamptz is null or sealed_at >= %(since)s)
+                     and (%(cursor)s::text is null or partition < %(cursor)s)
+                   order by partition desc limit %(limit)s""",
+                {
+                    "tenant": self._db.tenant,
+                    "dataset": dataset,
+                    "since": since,
+                    "cursor": cursor,
+                    "limit": limit,
+                },
+            ).fetchall()
+            cells: dict[str, dict[str, str]] = {r["version_id"]: {} for r in rows}
+            if rows:
+                found = conn.execute(
+                    """select route, version_id, status from feather.delivery
+                       where tenant_id = %s and version_id = any(%s) order by route""",
+                    (self._db.tenant, list(cells)),
+                ).fetchall()
+                for d in found:
+                    cells[d["version_id"]][d["route"]] = d["status"]
+        return [
+            PartitionRow(
+                dataset,
+                r["partition"],
+                r["version_id"],
+                r["seal_seq"],
+                r["sealed_at"],
+                r["upserts"],
+                r["deletes"],
+                cells[r["version_id"]],
+            )
+            for r in rows
+        ]
+
+    def failure_groups(
+        self, route: str | None = None, *, limit: int = 100, cursor: str | None = None
+    ) -> list[FailureGroup]:
+        # The class is cut out of the message in Python, so the groups are made there, from one row per delivery.
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select route, coalesce(last_error, '') as error, version_id, seal_seq from feather.delivery
+                   where tenant_id = %s and status = 'failed' and (%s::text is null or route = %s)
+                   order by route, seal_seq""",
+                (self._db.tenant, route, route),
+            ).fetchall()
+        found: dict[tuple[str, str, str], list[str]] = {}
+        for r in rows:
+            error_class, message = split_error(r["error"])
+            found.setdefault((r["route"], error_class, message), []).append(r["version_id"])
+        groups = [FailureGroup(r, c, m, len(vs), tuple(vs[:5])) for (r, c, m), vs in sorted(found.items())]
+        if cursor is not None:
+            after = tuple(json.loads(cursor))
+            groups = [g for g in groups if (g.route, g.error_class, g.message) > after]
+        return groups[:limit]
+
+    def delivery_counts(self) -> dict[str, int]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                "select status, count(*) as n from feather.delivery where tenant_id = %s group by status",
+                (self._db.tenant,),
+            ).fetchall()
+        return {r["status"]: r["n"] for r in rows}
+
+
 class PostgresStore(Store):
     """A `Store` that keeps everything in Postgres, for one tenant. `clock` defaults to the system clock."""
 
@@ -1401,4 +1508,5 @@ class PostgresStore(Store):
             overrides=_Overrides(db),
             users=_Users(db),
             audit=_Audit(db),
+            reads=_Reads(db),
         )

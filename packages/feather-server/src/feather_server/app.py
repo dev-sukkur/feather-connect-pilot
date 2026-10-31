@@ -50,6 +50,8 @@ def build_state(settings: Settings) -> AppState:
     store, spool = connect(settings.database_url, clock=clock)
     configure_logging(os.environ.get("FEATHER_LOG_LEVEL", "INFO"), secrets=[settings.secret_key])
     logging.getLogger().addHandler(TaskLogHandler(store))
+    for budget in project.budgets.values():  # the overview reads their use
+        store.budgets.define(budget)
     local = LocalEngine() if settings.engine == "local" else None
     if local is None:
         from feather_engine_dbos import DbosEngine

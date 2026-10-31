@@ -1,0 +1,562 @@
+"""Everything an operator or a token can do. Each action takes the `Actor`, goes to the runtime and writes an audit row.
+
+A mass action takes two steps: `preview_*` says what it would touch and hands out a confirmation token, and the action
+itself takes the token (see `previews`). Previews change nothing and are not audited. Every other call is audited,
+whether it worked or not, with the actor and the reason.
+"""
+
+import logging
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from typing import TYPE_CHECKING, Any, Literal
+from zoneinfo import ZoneInfo
+
+from feather_connect.core.connector import CheckResult
+from feather_connect.core.context import Context
+from feather_connect.core.dataset import Dataset
+from feather_connect.core.errors import PermanentError
+from feather_connect.core.flow import Flow
+from feather_connect.logs import redact, register_secrets
+from feather_connect.project import ProjectError
+from feather_connect.storage.port import Delivery, DeliveryStatus, InvalidTransition, split_error
+from feather_server.auth import Actor
+from feather_server.services.previews import (
+    Impact,
+    Preview,
+    PreviewError,
+    PreviewInvalid,
+    PreviewTokens,
+    fingerprint,
+)
+
+if TYPE_CHECKING:
+    from feather_server.app import AppState
+
+log = logging.getLogger(__name__)
+
+DeliveryAction = Literal["retry", "skip", "replay"]
+MAX_SELECTION = 10_000  # deliveries one confirmation may touch
+MAX_BACKFILL_DAYS = 366
+_PAGE = 500
+_SAMPLES = 5
+_STATUSES: dict[str, tuple[DeliveryStatus, ...]] = {
+    "retry": ("failed",),
+    "skip": ("failed", "held"),
+    "replay": ("applied",),
+}
+_SIMULATED = ("simulation.", "memory.")  # connectors of tests and demos, which connect to nothing
+
+
+@dataclass(frozen=True)
+class DeliverySelection:
+    """Which deliveries a bulk action is about. Every field given narrows the selection; `error` and `error_class` are
+    those of one failure group, and `version_ids` names the versions to take."""
+
+    route: str | None = None
+    dataset: str | None = None
+    partition: str | None = None
+    error: str | None = None
+    error_class: str | None = None
+    version_ids: tuple[str, ...] | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "route": self.route,
+            "dataset": self.dataset,
+            "partition": self.partition,
+            "error": self.error,
+            "error_class": self.error_class,
+            "version_ids": None if self.version_ids is None else list(self.version_ids),
+        }
+
+    @classmethod
+    def from_dict(cls, found: Mapping[str, Any]) -> "DeliverySelection":
+        versions = found.get("version_ids")
+        return cls(
+            found.get("route"),
+            found.get("dataset"),
+            found.get("partition"),
+            found.get("error"),
+            found.get("error_class"),
+            None if versions is None else tuple(versions),
+        )
+
+
+def _label(dataset: Dataset, partition: str) -> str:
+    try:
+        return dataset.partition.label_of(partition)
+    except (ValueError, KeyError):
+        return partition
+
+
+def _date_of(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    return value if isinstance(value, date) else None
+
+
+def backfill_partitions(flow: Flow, start: date, end: date, timezone: str) -> list[str]:
+    """The partitions of `flow` that cover the days from `start` to `end` (both included).
+
+    Each dataset's scheme names its own partitions, so this asks for the ones planned around each day and keeps those
+    whose date limits overlap the range. Every dataset of the flow must come out with the same partitions, because a run
+    reads one list of them.
+    """
+    if start > end:
+        raise ValueError("start must be on or before end")
+    if (end - start).days + 1 > MAX_BACKFILL_DAYS:
+        raise ValueError(f"a backfill covers at most {MAX_BACKFILL_DAYS} days")
+    zone = ZoneInfo(timezone)
+    found: list[set[str]] = []
+    for dataset in flow.datasets:
+        scheme, keys = dataset.partition, set[str]()
+        for offset in range((end - start).days + 3):
+            moment = datetime.combine(start + timedelta(days=offset - 1), time(12), zone)
+            planned = scheme.recent(moment)
+            if planned is None:
+                raise ValueError(
+                    f"dataset {dataset.name!r} can't list its partitions, so it can't be backfilled"
+                )
+            for key in planned:
+                for bound in scheme.bounds(key).values():
+                    low, high = _date_of(bound.low), _date_of(bound.high)
+                    if low is None or high is None:
+                        continue
+                    if (low == high and start <= low <= end) or (low != high and low <= end and high > start):
+                        keys.add(key)
+        if not keys:
+            raise ValueError(
+                f"dataset {dataset.name!r} is not partitioned by date, so it can't be backfilled"
+            )
+        found.append(keys)
+    if any(keys != found[0] for keys in found):
+        raise ValueError("the datasets of this flow are partitioned differently, so it can't be backfilled")
+    return sorted(found[0])
+
+
+class Actions:
+    """The actions of the dashboard and the API, over one `AppState`."""
+
+    def __init__(self, state: "AppState") -> None:
+        self._state = state
+        self._rt = state.runtime
+        self._store = state.store
+        self._tokens = PreviewTokens(state.store, state.settings.secret_key, state.clock)
+
+    # Bookkeeping.
+
+    def _record(
+        self, actor: Actor, action: str, target: str | None, request: Mapping[str, Any], result: str
+    ) -> None:
+        self._store.audit.record(actor.kind, actor.name, action, target, request, result)
+
+    def _do[T](
+        self,
+        actor: Actor,
+        action: str,
+        target: str | None,
+        request: Mapping[str, Any],
+        fn: Callable[[], T],
+        note: Callable[[T], str] = lambda _: "ok",
+    ) -> T:
+        """Do the action and write its audit row: `ok` and what `note` says of the result, or `failed` and why."""
+        try:
+            result = fn()
+        except Exception as error:
+            self._record(actor, action, target, request, f"failed: {redact(str(error))}")
+            raise
+        self._record(actor, action, target, request, note(result))
+        return result
+
+    def _redeem(
+        self,
+        actor: Actor,
+        action: str,
+        token: str,
+        reason: str | None,
+        fingerprint_of: Callable[[Mapping[str, Any]], str],
+    ) -> Mapping[str, Any]:
+        try:
+            return self._tokens.redeem(token, action, actor.name, fingerprint_of)
+        except PreviewError as error:
+            self._record(actor, action, None, {"reason": reason}, f"failed: {error}")
+            raise
+
+    def _dataset_flow(self, name: str) -> tuple[Flow, Dataset]:
+        for flow in self._rt.flows():
+            for dataset in flow.datasets:
+                if dataset.name == name:
+                    return flow, dataset
+        raise KeyError(f"no dataset named {name!r}")
+
+    def _rows(self, dataset: Dataset, partitions: Sequence[str]) -> int | None:
+        """How many records the partitions held when last sealed, or None if any was never."""
+        total = 0
+        for partition in partitions:
+            version = self._store.versions.latest_sealed(dataset.name, partition)
+            if version is None:
+                return None
+            total += version.upserts + version.deletes
+        return total
+
+    def _impact(self, flow: Flow, partitions: Sequence[str]) -> Impact:
+        """What reading `partitions` of every dataset of `flow` would touch."""
+        units: int | None = 0
+        for dataset in flow.datasets:
+            cost = getattr(dataset.source, "spec", None)
+            per_row = None if cost is None else cost.cost.get("read")
+            rows = self._rows(dataset, partitions)
+            units = None if units is None or per_row is None or rows is None else units + rows * per_row
+        first = flow.datasets[0]
+        return Impact(
+            len(partitions),
+            len(partitions) * len(flow.datasets) * len(flow.routes),
+            units,
+            tuple(_label(first, p) for p in partitions[:_SAMPLES]),
+        )
+
+    def _check_partitions(self, dataset: Dataset, partitions: Sequence[str]) -> list[str]:
+        chosen = list(dict.fromkeys(partitions))
+        if not chosen:
+            raise ValueError("choose at least one partition")
+        for partition in chosen:
+            try:
+                dataset.partition.label_of(partition)
+            except (ValueError, KeyError):
+                raise ValueError(f"{partition!r} is not a partition of dataset {dataset.name!r}") from None
+        return chosen
+
+    # Runs.
+
+    def run_flow(self, actor: Actor, flow: str, *, reason: str | None = None) -> str:
+        """Start a run of the flow now. Raises `FlowPaused` for a paused flow and `KeyError` for an unknown one."""
+        return self._do(
+            actor,
+            "run_flow",
+            f"flow:{flow}",
+            {"reason": reason},
+            lambda: self._rt.start_run(flow, trigger="manual", actor=actor.name, reason=reason),
+            lambda run_id: f"ok: run {run_id}",
+        )
+
+    def preview_rerun(self, actor: Actor, dataset: str, partitions: Sequence[str]) -> Preview:
+        """Say what reading these partitions of the dataset again would touch."""
+        flow, found = self._dataset_flow(dataset)
+        chosen = self._check_partitions(found, partitions)
+        selection = {"dataset": dataset, "partitions": chosen}
+        token = self._tokens.issue("rerun", actor.name, selection, self._rerun_print(selection))
+        return Preview(token, "rerun", self._impact(flow, chosen))
+
+    @staticmethod
+    def _rerun_print(selection: Mapping[str, Any]) -> str:
+        return fingerprint("rerun", selection["dataset"], sorted(selection["partitions"]))
+
+    def rerun(self, actor: Actor, token: str, *, reason: str | None = None) -> str:
+        """Read the previewed partitions again, in a run of their flow. Returns the run."""
+        selection = self._redeem(actor, "rerun", token, reason, self._rerun_print)
+        flow, _ = self._dataset_flow(selection["dataset"])
+        return self._do(
+            actor,
+            "rerun",
+            f"dataset:{selection['dataset']}",
+            {"reason": reason, "partitions": selection["partitions"]},
+            lambda: self._rt.start_run(
+                flow.name,
+                trigger="rerun",
+                actor=actor.name,
+                partitions=selection["partitions"],
+                reason=reason,
+            ),
+            lambda run_id: f"ok: run {run_id}",
+        )
+
+    def preview_backfill(
+        self, actor: Actor, flow: str, *, start: date, end: date, max_concurrent: int = 4
+    ) -> Preview:
+        """Say what reading the days from `start` to `end` (both included) would touch, `max_concurrent` slices at a
+        time."""
+        if max_concurrent < 1:
+            raise ValueError(f"max_concurrent is {max_concurrent}: it must be at least 1")
+        found = self._rt.flow(flow)
+        keys = backfill_partitions(found, start, end, str(self._state.project.settings["timezone"]))
+        selection = {
+            "flow": flow,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "max_concurrent": max_concurrent,
+            "partitions": keys,
+        }
+        token = self._tokens.issue("backfill", actor.name, selection, self._backfill_print(selection))
+        return Preview(token, "backfill", self._impact(found, keys))
+
+    @staticmethod
+    def _backfill_print(selection: Mapping[str, Any]) -> str:
+        return fingerprint("backfill", selection)
+
+    def backfill(self, actor: Actor, token: str, *, reason: str | None = None) -> str:
+        """Run the previewed backfill, with the limit it was previewed with. Returns the run."""
+        selection = self._redeem(actor, "backfill", token, reason, self._backfill_print)
+        return self._do(
+            actor,
+            "backfill",
+            f"flow:{selection['flow']}",
+            {
+                "reason": reason,
+                "start": selection["start"],
+                "end": selection["end"],
+                "max_concurrent": selection["max_concurrent"],
+                "partitions": len(selection["partitions"]),
+            },
+            lambda: self._rt.start_run(
+                selection["flow"],
+                trigger="backfill",
+                actor=actor.name,
+                partitions=selection["partitions"],
+                reason=reason,
+                max_concurrent=selection["max_concurrent"],
+            ),
+            lambda run_id: f"ok: run {run_id}",
+        )
+
+    def cancel_run(self, actor: Actor, run_id: str, *, reason: str | None = None) -> None:
+        """Stop the run's queued and running tasks and end it `cancelled`, with the reason."""
+        self._do(
+            actor,
+            "cancel_run",
+            f"run:{run_id}",
+            {"reason": reason},
+            lambda: self._rt.cancel_run(run_id, actor=actor.name, reason=reason),
+        )
+
+    # Deliveries.
+
+    def _resolve(self, action: str, selection: DeliverySelection) -> list[Delivery]:
+        """The deliveries the selection takes now, in seal order."""
+        statuses = _STATUSES.get(action)
+        if statuses is None:
+            raise ValueError(f"unknown action {action!r}: use one of {', '.join(_STATUSES)}")
+        if action == "replay" and not (
+            selection.route or selection.dataset or selection.partition or selection.version_ids
+        ):
+            raise ValueError("replay needs a route, a dataset, a partition or versions to replay")
+        ledger, found = self._store.ledger, []
+        for status in statuses:
+            cursor = None
+            while page := ledger.list_deliveries(
+                route=selection.route,
+                status=status,
+                partition=selection.partition,
+                limit=_PAGE,
+                cursor=cursor,
+            ):
+                for d in page:
+                    error_class, message = split_error(d.last_error)
+                    if (
+                        (selection.dataset is None or d.dataset == selection.dataset)
+                        and (selection.error is None or message == selection.error)
+                        and (selection.error_class is None or error_class == selection.error_class)
+                        and (selection.version_ids is None or d.version_id in selection.version_ids)
+                    ):
+                        found.append(d)
+                if len(found) > MAX_SELECTION:
+                    raise ValueError(f"the selection has more than {MAX_SELECTION} deliveries: narrow it")
+                cursor = f"{page[-1].seal_seq}:{page[-1].route}"
+        return sorted(found, key=lambda d: (d.seal_seq, d.route))
+
+    @staticmethod
+    def _deliveries_print(action: str, found: Sequence[Delivery]) -> str:
+        return fingerprint(
+            action,
+            [
+                (d.route, d.version_id, d.status, d.attempts, d.retries, d.replays, d.last_error)
+                for d in found
+            ],
+        )
+
+    def preview_deliveries(
+        self, actor: Actor, action: DeliveryAction, selection: DeliverySelection
+    ) -> Preview:
+        """Say what retrying, skipping or replaying the selected deliveries would touch."""
+        found = self._resolve(action, selection)
+        if not found:
+            raise ValueError("the selection matches nothing")
+        token = self._tokens.issue(
+            f"{action}_deliveries", actor.name, selection.as_dict(), self._deliveries_print(action, found)
+        )
+        return Preview(token, f"{action}_deliveries", self._delivery_impact(action, found))
+
+    def _delivery_impact(self, action: str, found: Sequence[Delivery]) -> Impact:
+        units: int | None = 0
+        if action != "skip":  # a skipped delivery makes no calls
+            versions = {v.version_id: v for v in self._store.versions.get_many({d.version_id for d in found})}
+            for d in found:
+                cost = self._rt.route(d.route).sink.spec.cost.get("write")
+                version = versions.get(d.version_id)
+                units = (
+                    None
+                    if units is None or cost is None or version is None
+                    else units + (version.upserts + version.deletes) * cost
+                )
+        by_dataset = {d.dataset: self._rt.dataset(d.dataset) for d in found}
+        return Impact(
+            len({(d.dataset, d.partition) for d in found}),
+            len(found),
+            units,
+            tuple(f"{d.route} · {_label(by_dataset[d.dataset], d.partition)}" for d in found[:_SAMPLES]),
+        )
+
+    def apply_deliveries(self, actor: Actor, token: str, *, reason: str | None = None) -> list[str]:
+        """Do the previewed retry, skip or replay. Returns `route:version` for each delivery it moved.
+
+        A delivery the runtime refuses to move is left as it is and named in the audit row; the others go ahead.
+        """
+        confirmed = self._tokens.action_of(token)
+        action = confirmed.removesuffix("_deliveries")
+        if action not in _STATUSES or action == confirmed:
+            raise PreviewInvalid(f"this token confirms {confirmed!r}, not a delivery action")
+        selection = self._redeem(
+            actor,
+            confirmed,
+            token,
+            reason,
+            lambda stored: self._deliveries_print(
+                action, self._resolve(action, DeliverySelection.from_dict(stored))
+            ),
+        )
+        wanted = DeliverySelection.from_dict(selection)
+        found = self._resolve(action, wanted)
+        runtime_call = {"retry": self._rt.retry, "skip": self._rt.skip, "replay": self._rt.replay}[action]
+        refused: list[str] = []
+
+        def move() -> list[str]:
+            moved: list[str] = []
+            for d in found:
+                try:
+                    runtime_call(d.route, d.version_id, actor=actor.name, reason=reason)
+                    moved.append(f"{d.route}:{d.version_id}")
+                except (InvalidTransition, PermanentError) as error:
+                    refused.append(f"{d.route}:{d.version_id}: {error}")
+            return moved
+
+        def note(moved: list[str]) -> str:
+            if not refused:
+                return f"ok: {len(moved)} deliveries"
+            return f"partial: {len(moved)} of {len(found)} deliveries; refused {refused[0]}"
+
+        return self._do(
+            actor,
+            confirmed,
+            f"route:{wanted.route}" if wanted.route else "deliveries",
+            {"reason": reason, "selection": wanted.as_dict(), "count": len(found)},
+            move,
+            note,
+        )
+
+    def dismiss_quarantine(
+        self, actor: Actor, route: str, version_id: str, key: str, *, reason: str | None = None
+    ) -> None:
+        """Close the quarantine entry of the record `key`, and any older one of the same record on the route.
+
+        Raises `LookupError` when the route has no open entry for it from that version or before.
+        """
+
+        def dismiss() -> None:
+            sealed = self._store.versions.get(version_id).seal_seq
+            if sealed is None or not self._store.quarantine.supersede(route, key, sealed + 1):
+                raise LookupError(
+                    f"route {route!r} has no open quarantine entry for {key!r} from {version_id}"
+                )
+
+        self._do(
+            actor,
+            "dismiss_quarantine",
+            f"route:{route}",
+            {"reason": reason, "version_id": version_id, "key": key},
+            dismiss,
+        )
+
+    # Pausing.
+
+    def pause_flow(self, actor: Actor, flow: str, *, reason: str | None = None) -> None:
+        self._do(
+            actor,
+            "pause_flow",
+            f"flow:{flow}",
+            {"reason": reason},
+            lambda: self._rt.pause_flow(flow, actor=actor.name, reason=reason),
+        )
+
+    def resume_flow(self, actor: Actor, flow: str, *, reason: str | None = None) -> None:
+        self._do(
+            actor,
+            "resume_flow",
+            f"flow:{flow}",
+            {"reason": reason},
+            lambda: self._rt.resume_flow(flow, actor=actor.name, reason=reason),
+        )
+
+    def pause_route(self, actor: Actor, route: str, *, reason: str | None = None) -> None:
+        self._do(
+            actor,
+            "pause_route",
+            f"route:{route}",
+            {"reason": reason},
+            lambda: self._rt.pause_route(route, actor=actor.name, reason=reason),
+        )
+
+    def resume_route(self, actor: Actor, route: str, *, reason: str | None = None) -> None:
+        self._do(
+            actor,
+            "resume_route",
+            f"route:{route}",
+            {"reason": reason},
+            lambda: self._rt.resume_route(route, actor=actor.name, reason=reason),
+        )
+
+    # Connections.
+
+    def check_connection(self, actor: Actor, name: str) -> CheckResult:
+        """Test the connection with its connector's own check. A simulated connection has none: it reports ok and says
+        that nothing was checked. Raises `KeyError` for a connection the project doesn't define."""
+        if name not in self._state.project.connections:
+            raise KeyError(f"no connection named {name!r}")
+        result = self._do(
+            actor,
+            "check_connection",
+            f"connection:{name}",
+            {},
+            lambda: self._check(name),
+            lambda found: "ok" if found.ok else f"failed: {found.message}",
+        )
+        return result
+
+    def _check(self, name: str) -> CheckResult:
+        connectors = [d.source for f in self._rt.flows() for d in f.datasets if d.source.connection == name]
+        connectors += [r.sink for f in self._rt.flows() for r in f.routes if r.sink.connection == name]
+        if not connectors:
+            return CheckResult(True, "no flow uses this connection, so nothing was checked")
+        connector = connectors[0]
+        if connector.spec.name.startswith(_SIMULATED):
+            return CheckResult(True, "this is a simulated connection, so nothing was checked")
+        connection = self._state.project.connections[name]
+        try:
+            config = connection.resolve()
+            register_secrets(*(config[key] for key in connection.secret_refs))
+            ctx = Context(
+                config,
+                logging.getLogger(name),
+                self._state.clock.now(),
+                str(self._state.project.settings["timezone"]),
+            )
+            check = getattr(connector, "check", None)
+            if check is None:  # a push source has nothing to call
+                return CheckResult(True, "this connector has no check, so nothing was checked")
+            found = check(ctx)
+        except ProjectError as error:
+            return CheckResult(False, redact(str(error)))
+        except Exception as error:  # noqa: BLE001 - whatever a connector raises is what the check found
+            return CheckResult(False, redact(f"{type(error).__name__}: {error}"))
+        if not isinstance(found, CheckResult):  # pyright: ignore[reportUnnecessaryIsInstance]
+            return CheckResult(True, "this connector has no check, so nothing was checked")
+        return CheckResult(found.ok, redact(found.message))

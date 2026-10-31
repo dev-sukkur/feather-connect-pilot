@@ -152,6 +152,7 @@ class World:
             overrides=base.overrides,
             users=base.users,
             audit=base.audit,
+            reads=base.reads,
         )
         self.store.budgets.define(spec)
         self.engine = LocalEngine(self.clock)

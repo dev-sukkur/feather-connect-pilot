@@ -10,7 +10,9 @@ from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.spool import MemorySpool
 from feather_server.app import AppState
+from feather_server.auth import Actor
 from feather_server.settings import Settings
+from feather_server.testing import SECRET, World, build_world
 
 
 @pytest.fixture
@@ -25,3 +27,19 @@ def state(clock: FrozenClock) -> AppState:
     runtime = Runtime([], store, spool, engine, code_sha="sha", clock=clock)
     project = Project("demo", Path("."), "dev", (), {}, {}, {"timezone": "UTC"}, "sha")
     return AppState(Settings(), project, store, spool, engine, runtime, clock=clock)
+
+
+@pytest.fixture
+def world(tmp_path: Path, clock: FrozenClock, monkeypatch: pytest.MonkeyPatch) -> World:
+    monkeypatch.setenv("WH_TOKEN", SECRET)
+    return build_world(tmp_path, clock)
+
+
+@pytest.fixture
+def ann() -> Actor:
+    return Actor("human", "ann")
+
+
+@pytest.fixture
+def bob() -> Actor:
+    return Actor("token", "bob-ci")

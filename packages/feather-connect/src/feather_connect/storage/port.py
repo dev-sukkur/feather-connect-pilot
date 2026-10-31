@@ -4,6 +4,8 @@ Every backend must pass `feather_connect.testing.store_contract.StoreContract`. 
 dataclasses so that they pickle, which the engine needs for step results.
 """
 
+import json
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -594,6 +596,20 @@ class OverrideStore(Protocol):
         """The value, or None when there is none or it has expired."""
         ...
 
+    def claim(
+        self,
+        target: str,
+        key: str,
+        value: Any,
+        *,
+        actor: str,
+        reason: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> bool:
+        """Set the override only if none is in force, and say whether it was set. Two callers claiming the same
+        target and key at once cannot both win."""
+        ...
+
     def list_all(self) -> list[Override]:
         """The overrides in force, by target and key."""
         ...
@@ -616,6 +632,74 @@ class ScheduleStore(Protocol):
         ...
 
     def set_last_tick(self, flow: str, trigger_id: str, at: datetime) -> None: ...
+
+
+@dataclass(frozen=True)
+class PartitionRow:
+    """A partition of a dataset as its latest sealed version left it: `cells` maps each route to the status of that
+    version's delivery there."""
+
+    dataset: str
+    partition: str
+    version_id: str
+    seal_seq: int
+    sealed_at: datetime
+    upserts: int
+    deletes: int
+    cells: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class FailureGroup:
+    """Failed deliveries of one route that failed with the same error. `versions` holds up to five of them."""
+
+    route: str
+    error_class: str
+    message: str
+    count: int
+    versions: tuple[str, ...]
+
+
+DEFAULT_ERROR_CLASS = (
+    "PermanentError"  # a delivery fails only on a permanent error, which stores its message alone
+)
+_CLASSED = re.compile(r"([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)): (.*)", re.DOTALL)
+
+
+def split_error(error: str | None) -> tuple[str, str]:
+    """Split a delivery's stored error into its class and its message. The class is the name before the first colon
+    when that looks like an exception, and `PermanentError` when it does not."""
+    text = error or ""
+    found = _CLASSED.fullmatch(text)
+    return (found.group(1), found.group(2)) if found else (DEFAULT_ERROR_CLASS, text)
+
+
+def failure_cursor(group: FailureGroup) -> str:
+    """The cursor that continues `ReadStore.failure_groups` after `group`."""
+    return json.dumps([group.route, group.error_class, group.message])
+
+
+class ReadStore(Protocol):
+    """Queries for the dashboard that join the ledger to versions."""
+
+    def partition_grid(
+        self, dataset: str, *, since: datetime | None = None, cursor: str | None = None, limit: int = 100
+    ) -> list[PartitionRow]:
+        """The dataset's partitions that have a sealed version, by partition name, last first. `since` keeps those
+        whose latest version was sealed then or later. `cursor` is the `partition` of the last row of the page
+        before."""
+        ...
+
+    def failure_groups(
+        self, route: str | None = None, *, limit: int = 100, cursor: str | None = None
+    ) -> list[FailureGroup]:
+        """Failed deliveries grouped by route, error class and message, in that order. Pass `failure_cursor(last)`
+        as `cursor` to continue after `last`."""
+        ...
+
+    def delivery_counts(self) -> dict[str, int]:
+        """How many deliveries there are in each status that has any."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -711,3 +795,4 @@ class Store:
     overrides: OverrideStore
     users: UserStore
     audit: AuditStore
+    reads: ReadStore

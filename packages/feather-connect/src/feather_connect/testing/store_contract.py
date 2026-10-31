@@ -28,6 +28,7 @@ from feather_connect.storage.port import (
     VersionDraft,
     VersionSealed,
     delivery_cursor,
+    failure_cursor,
     parse_limits,
 )
 from feather_connect.storage.spool import Spool, records_to_table, snapshot_table, table_to_records
@@ -849,6 +850,102 @@ class StoreContract(SpoolContract):
         assert store.audit.list_audit(cursor=ids[0]) == []
         store.audit.record("system", "scheduler", "tick", None, {}, "failed: x")
         assert store.audit.list_audit(limit=1)[0].target is None
+
+    def test_an_override_can_be_claimed_once(self, store: Store, clock: FrozenClock):
+        soon = T0 + timedelta(hours=1)
+        assert store.overrides.claim("preview", "j1", {"x": 1}, actor="ann", expires_at=soon) is True
+        assert store.overrides.claim("preview", "j1", {"x": 2}, actor="bob", expires_at=soon) is False
+        assert store.overrides.get("preview", "j1") == {"x": 1}
+        assert store.overrides.claim("preview", "j2", True, actor="ann", expires_at=soon) is True
+        store.overrides.set("flow:f", "paused", True, actor="ann")
+        assert store.overrides.claim("flow:f", "paused", False, actor="bob") is False  # a set one is taken
+        assert store.overrides.get("flow:f", "paused") is True
+        clock.advance(timedelta(hours=1))  # an expired one is free again
+        assert store.overrides.claim("preview", "j1", {"x": 3}, actor="cy", expires_at=None) is True
+        assert store.overrides.get("preview", "j1") == {"x": 3}
+
+    # reads
+
+    def test_partition_grid_shows_the_latest_sealed_version_and_each_route_status(
+        self, store: Store, clock: FrozenClock
+    ):
+        seal(store, "v1", ["a", "b"], part="p1", up=3)
+        clock.advance(timedelta(hours=1))
+        seal(store, "v2", ["a", "b"], part="p2", up=5)
+        seal(store, "v3", ["a", "b"], part="p1", up=4, run="r2")
+        store.ledger.transition("a", "v3", "running", actor="t")
+        store.ledger.transition("a", "v3", "applied", actor="t", rows_applied=4)
+        store.versions.stage(draft("v4", part="p3"))  # staged: not part of the grid
+        seal(store, "v5", ["a"], ds="e", part="p9")  # another dataset
+        grid = store.reads.partition_grid("d")
+        assert [r.partition for r in grid] == ["p2", "p1"]
+        p1 = grid[1]
+        assert (p1.version_id, p1.dataset, p1.upserts, p1.deletes, p1.sealed_at) == (
+            "v3",
+            "d",
+            4,
+            0,
+            T0 + timedelta(hours=1),
+        )
+        assert dict(p1.cells) == {"a": "applied", "b": "pending"}
+        assert dict(grid[0].cells) == {"a": "pending", "b": "pending"}
+        assert grid[0].seal_seq > 0 and grid[1].seal_seq > grid[0].seal_seq
+        assert store.reads.partition_grid("nothing") == []
+
+    def test_partition_grid_filters_by_time_and_pages_by_partition(self, store: Store, clock: FrozenClock):
+        seal(store, "v1", ["a"], part="p1")
+        clock.advance(timedelta(hours=2))
+        seal(store, "v2", ["a"], part="p2")
+        seal(store, "v3", ["a"], part="p3")
+        assert [r.partition for r in store.reads.partition_grid("d", since=T0 + timedelta(hours=1))] == [
+            "p3",
+            "p2",
+        ]
+        assert store.reads.partition_grid("d", since=T0 + timedelta(hours=3)) == []
+        first = store.reads.partition_grid("d", limit=2)
+        assert [r.partition for r in first] == ["p3", "p2"]
+        rest = store.reads.partition_grid("d", cursor=first[-1].partition)
+        assert [r.partition for r in rest] == ["p1"]
+
+    def _fail(self, store: Store, route: str, vid: str, error: str):
+        store.ledger.transition(route, vid, "running", actor="t")
+        store.ledger.transition(route, vid, "failed", actor="t", error=error)
+
+    def test_failures_group_by_route_and_message(self, store: Store):
+        for vid, part in (("v1", "p1"), ("v2", "p2"), ("v3", "p3")):
+            seal(store, vid, ["a", "b"], part=part)
+        self._fail(store, "a", "v1", "disk full")
+        self._fail(store, "a", "v2", "disk full")
+        self._fail(store, "a", "v3", "TimeoutError: slow sink")
+        self._fail(store, "b", "v1", "disk full")
+        store.ledger.transition("b", "v2", "running", actor="t")  # running is not a failure
+        groups = store.reads.failure_groups()
+        assert [(g.route, g.error_class, g.message, g.count) for g in groups] == [
+            ("a", "PermanentError", "disk full", 2),
+            ("a", "TimeoutError", "slow sink", 1),
+            ("b", "PermanentError", "disk full", 1),
+        ]
+        assert groups[0].versions == ("v1", "v2") and groups[1].versions == ("v3",)
+        assert [g.message for g in store.reads.failure_groups(route="b")] == ["disk full"]
+        page = store.reads.failure_groups(limit=2)
+        rest = store.reads.failure_groups(cursor=failure_cursor(page[-1]))
+        assert page + rest == groups and len(rest) == 1
+        store.ledger.transition("a", "v1", "pending", actor="op")  # retried: out of the group
+        assert store.reads.failure_groups()[0].count == 1
+
+    def test_failure_samples_are_capped(self, store: Store):
+        for n in range(8):
+            seal(store, f"v{n}", ["a"], part=f"p{n}")
+            self._fail(store, "a", f"v{n}", "same")
+        (group,) = store.reads.failure_groups()
+        assert group.count == 8 and len(group.versions) == 5
+
+    def test_delivery_counts_by_status(self, store: Store):
+        assert store.reads.delivery_counts() == {}
+        seal(store, "v1", ["a", "b"], part="p1")
+        seal(store, "v2", ["a"], part="p2")
+        self._fail(store, "a", "v1", "x")
+        assert store.reads.delivery_counts() == {"pending": 2, "failed": 1}
 
     # retention queries
 
