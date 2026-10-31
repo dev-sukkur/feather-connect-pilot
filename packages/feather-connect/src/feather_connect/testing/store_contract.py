@@ -430,6 +430,24 @@ class StoreContract:
             {"x": [1, None]},
         ]
 
+    def test_empty_objects_round_trip(self, spool: Spool):
+        recs = upserts(("a", {"o": {}}), ("b", {"o": {}, "p": [{}, {"x": 1}]}), ("c", {"o": None}))
+        spool.put_chunk("v1", 0, "data", records_to_table(recs))
+        assert [r.payload for r in table_to_records(spool.get_chunk("v1", 0))] == [
+            {"o": {}, "p": None},
+            {"o": {}, "p": [{}, {"x": 1}]},
+            {"o": None, "p": None},
+        ]
+
+    def test_a_key_one_record_lacks_reads_back_as_none(self, spool: Spool):
+        # Chunks are tabular: a column that any record has exists for every record.
+        recs = upserts(("a", {"x": 1, "y": 2}), ("b", {"x": 3}))
+        spool.put_chunk("v1", 0, "data", records_to_table(recs))
+        assert [r.payload for r in table_to_records(spool.get_chunk("v1", 0))] == [
+            {"x": 1, "y": 2},
+            {"x": 3, "y": None},
+        ]
+
     def test_chunk_columns_are_the_payload_plus_the_fc_columns(self):
         table = records_to_table(upserts(("a", {"x": 1})))
         assert table.column_names == ["x", "_fc_key", "_fc_op", "_fc_row_hash", "_fc_moved_from"]

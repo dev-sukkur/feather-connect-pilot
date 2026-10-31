@@ -133,6 +133,17 @@ def _array(values: Sequence[Any], type_: pa.DataType | None = None) -> "pa.Array
     return array
 
 
+def _has_empty_struct(arrow_type: Any) -> bool:
+    """Whether the type holds a struct with no fields, which Parquet can't write."""
+    if pa.types.is_struct(arrow_type):
+        struct: Any = arrow_type
+        count: int = struct.num_fields
+        return count == 0 or any(_has_empty_struct(struct.field(i).type) for i in range(count))
+    if pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
+        return _has_empty_struct(arrow_type.value_type)
+    return False
+
+
 def _arrow_column(values: list[Any]) -> "pa.Array[Any] | None":
     """Return `values` as an Arrow array that reads back to exactly the same values, or None if none does."""
     present = [v for v in values if v is not None]
@@ -150,6 +161,8 @@ def _arrow_column(values: list[Any]) -> "pa.Array[Any] | None":
     nested = kinds & {dict, list, tuple}
     if (kinds == {Decimal} or nested) and array.to_pylist() != values:
         return None  # for instance structs of different shapes, whose missing fields come back as None
+    if _has_empty_struct(array.type):
+        return None  # an empty object, such as {}, would make the chunk unwritable as Parquet
     return array
 
 
@@ -186,8 +199,8 @@ def records_to_table(records: Sequence[Record]) -> pa.Table:
 def table_to_records(table: pa.Table) -> list[Record]:
     """Return the records of a chunk made by `records_to_table`.
 
-    A column that a record didn't have comes back as None. For a delete record the Nones are dropped, so a
-    delete with no payload reads back with none.
+    Chunks are tabular, so a key that one record lacks and another in the chunk has reads back as None. For a
+    delete record the Nones are dropped, so a delete with no payload reads back with none.
     """
     metadata = table.schema.metadata or {}
     json_columns = set(json.loads(metadata.get(JSON_COLUMNS_KEY.encode(), b"[]")))
