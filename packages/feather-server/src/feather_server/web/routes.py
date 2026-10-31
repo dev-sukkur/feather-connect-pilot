@@ -16,9 +16,9 @@ from fastapi.templating import Jinja2Templates
 
 from feather_connect.core.errors import PermanentError
 from feather_connect.runtime.runtime import FlowPaused
-from feather_connect.storage.port import Run
+from feather_connect.storage.port import DeliveryStatus, Run, delivery_cursor, failure_cursor
 from feather_server.auth import Actor, CurrentActor, csrf_token, require_csrf
-from feather_server.services.actions import Actions, DeliverySelection
+from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.previews import Preview, PreviewError, PreviewExpired, PreviewInvalid
 from feather_server.services.reads import FlowSummary, Reads
 from feather_server.web.charts import meter, sparkline
@@ -29,6 +29,8 @@ NAV: list[tuple[str, str]] = [
     ("Overview", "/"),
     ("Flows", "/flows"),
     ("Runs", "/runs"),
+    ("Failures", "/failures"),
+    ("Quarantine", "/quarantine"),
 ]  # (label, path): a page that exists adds itself here
 _RECENT_RUNS = 8
 _FAILURE_GROUPS = 10
@@ -664,3 +666,245 @@ def rerun_run(
     except ValueError as error:
         return _run_page(request, actor, run_id, status=422, notice=("bad", str(error)), form=form)
     return RedirectResponse(f"/runs/{quote(new_id, safe='')}", status_code=303)
+
+
+# Failures, deliveries and quarantine.
+
+_FAILURES_PAGE = 25
+_DELIVERIES_PAGE = 100
+_QUARANTINE_SHOWN = 200
+_DELIVERY_STATUSES: tuple[DeliveryStatus, ...] = (
+    "pending",
+    "running",
+    "applied",
+    "failed",
+    "held",
+    "skipped",
+    "compensated",
+)
+_DELIVERY_ACTIONS: tuple[DeliveryAction, ...] = ("retry", "skip", "replay")
+
+
+def _deliveries_count(count: int) -> str:
+    return "1 delivery" if count == 1 else f"{count} deliveries"
+
+
+def _page_size(request: Request, default: int, most: int) -> int:
+    try:
+        return min(max(int(request.query_params.get("limit", default)), 1), most)
+    except ValueError:
+        return default
+
+
+def _handled(request: Request, notice: tuple[str, str] | None) -> tuple[str, str] | None:
+    done = request.query_params.get("done", "")
+    if notice is None and done.isdigit():
+        return ("ok", f"{_deliveries_count(int(done))} handled. Retries and replays run in the background.")
+    return notice
+
+
+def _reason_required(request: Request, preview: Preview | None) -> bool:
+    return bool(preview and preview.action == "skip_deliveries" and actions(request).protected)
+
+
+def _failures_page(
+    request: Request,
+    actor: Actor,
+    *,
+    status: int = 200,
+    notice: tuple[str, str] | None = None,
+    preview: Preview | None = None,
+) -> HTMLResponse:
+    route = request.query_params.get("route") or None
+    limit = _page_size(request, _FAILURES_PAGE, 100)
+    views = reads(request).failure_views(route, request.query_params.get("cursor") or None, limit)
+    return render(
+        request,
+        "failures.html",
+        status=status,
+        title="Failures",
+        actor=actor,
+        views=views,
+        route=route or "",
+        routes=sorted({r.name for f in request.app.state.feather.runtime.flows() for r in f.routes}),
+        next_cursor=failure_cursor(views[-1].group) if len(views) == limit else None,
+        notice=_handled(request, notice),
+        preview=preview,
+        reason_required=_reason_required(request, preview),
+    )
+
+
+@router.get("/failures", response_class=HTMLResponse)
+def failures(request: Request, actor: CurrentActor) -> HTMLResponse:
+    return _failures_page(request, actor)
+
+
+def _deliveries_page(
+    request: Request,
+    actor: Actor,
+    route: str,
+    *,
+    status: int = 200,
+    notice: tuple[str, str] | None = None,
+    preview: Preview | None = None,
+) -> HTMLResponse:
+    try:
+        spec = request.app.state.feather.runtime.route(route)
+    except KeyError:
+        return _not_found(request, f"No route named {route!r}.")
+    chosen = request.query_params.get("status", "")
+    if chosen and chosen not in _DELIVERY_STATUSES:
+        return render(
+            request,
+            "error.html",
+            status=422,
+            title="Not a status",
+            message=f"{chosen!r} is not a delivery status: use one of {', '.join(_DELIVERY_STATUSES)}.",
+        )
+    limit = _page_size(request, _DELIVERIES_PAGE, 500)
+    partition = request.query_params.get("partition") or None
+    found = reads(request).deliveries(
+        route,
+        next((s for s in _DELIVERY_STATUSES if s == chosen), None),
+        partition,
+        limit,
+        request.query_params.get("cursor") or None,
+    )
+    return render(
+        request,
+        "deliveries.html",
+        status=status,
+        title=f"{route} deliveries",
+        actor=actor,
+        route=route,
+        destination=spec.sink.connection,
+        deliveries=found,
+        statuses=_DELIVERY_STATUSES,
+        chosen={"status": chosen, "partition": partition or ""},
+        next_cursor=delivery_cursor(found[-1]) if len(found) == limit else None,
+        notice=_handled(request, notice),
+        preview=preview,
+        reason_required=_reason_required(request, preview),
+    )
+
+
+@router.get("/routes/{route}/deliveries", response_class=HTMLResponse)
+def route_deliveries(request: Request, actor: CurrentActor, route: str) -> HTMLResponse:
+    return _deliveries_page(request, actor, route)
+
+
+def _delivery_page(
+    request: Request,
+    actor: Actor,
+    origin: str,
+    route: str,
+    *,
+    status: int = 200,
+    notice: tuple[str, str] | None = None,
+    preview: Preview | None = None,
+) -> HTMLResponse:
+    """The page a delivery action came from: the failures, or the deliveries of one route."""
+    if origin == "deliveries" and route:
+        return _deliveries_page(request, actor, route, status=status, notice=notice, preview=preview)
+    return _failures_page(request, actor, status=status, notice=notice, preview=preview)
+
+
+Origin = Annotated[str, Form(alias="from")]
+
+
+@router.post("/deliveries/preview", dependencies=[Depends(require_csrf)])
+def deliveries_preview(
+    request: Request,
+    actor: CurrentActor,
+    action: Annotated[str, Form()],
+    origin: Origin = "failures",
+    route: Annotated[str, Form()] = "",
+    dataset: Annotated[str | None, Form()] = None,
+    partition: Annotated[str | None, Form()] = None,
+    error: Annotated[str | None, Form()] = None,
+    error_class: Annotated[str | None, Form()] = None,
+    version_id: Annotated[list[str] | None, Form()] = None,
+) -> Response:
+    def refuse(message: str) -> HTMLResponse:
+        return _delivery_page(request, actor, origin, route, status=422, notice=("bad", message))
+
+    chosen: DeliveryAction | None = None
+    for known in _DELIVERY_ACTIONS:
+        if known == action:
+            chosen = known
+    if chosen is None:
+        return refuse(f"Choose one of: {', '.join(_DELIVERY_ACTIONS)}.")
+    if origin == "deliveries" and not version_id:
+        return refuse("Tick at least one delivery first.")
+    selection = DeliverySelection(
+        route or None, dataset, partition, error, error_class, tuple(version_id) if version_id else None
+    )
+    try:
+        preview = actions(request).preview_deliveries(actor, chosen, selection)
+    except (KeyError, ValueError) as problem:
+        return refuse(str(problem))
+    return _delivery_page(request, actor, origin, route, preview=preview)
+
+
+@router.post("/deliveries/confirm", dependencies=[Depends(require_csrf)])
+def deliveries_confirm(
+    request: Request,
+    actor: CurrentActor,
+    token: Annotated[str, Form()],
+    origin: Origin = "failures",
+    route: Annotated[str, Form()] = "",
+    reason: Reason = "",
+) -> Response:
+    try:
+        moved = actions(request).apply_deliveries(actor, token, reason=_reason(reason))
+    except PreviewError as error:
+        return _delivery_page(
+            request, actor, origin, route, status=_preview_status(error), notice=("bad", str(error))
+        )
+    except (KeyError, ValueError) as error:
+        return _delivery_page(request, actor, origin, route, status=422, notice=("bad", str(error)))
+    done = urlencode({"done": len(moved)})
+    if origin == "deliveries" and route:
+        return RedirectResponse(f"/routes/{quote(route, safe='')}/deliveries?{done}", status_code=303)
+    return RedirectResponse(f"/failures?{done}", status_code=303)
+
+
+def _quarantine_page(
+    request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
+) -> HTMLResponse:
+    route = request.query_params.get("route") or None
+    entries = reads(request).quarantine_entries(route)
+    if notice is None and request.query_params.get("dismissed"):
+        notice = ("ok", "The entry is dismissed.")
+    return render(
+        request,
+        "quarantine.html",
+        status=status,
+        title="Quarantine",
+        actor=actor,
+        entries=entries[:_QUARANTINE_SHOWN],
+        total=len(entries),
+        route=route or "",
+        notice=notice,
+    )
+
+
+@router.get("/quarantine", response_class=HTMLResponse)
+def quarantine(request: Request, actor: CurrentActor) -> HTMLResponse:
+    return _quarantine_page(request, actor)
+
+
+@router.post("/quarantine/dismiss", dependencies=[Depends(require_csrf)])
+def quarantine_dismiss(
+    request: Request,
+    actor: CurrentActor,
+    route: Annotated[str, Form()],
+    version_id: Annotated[str, Form()],
+    key: Annotated[str, Form()],
+    reason: Reason = "",
+) -> Response:
+    try:
+        actions(request).dismiss_quarantine(actor, route, version_id, key, reason=_reason(reason))
+    except (LookupError, ValueError) as error:  # LookupError: nothing is open for it now
+        return _quarantine_page(request, actor, status=409, notice=("bad", str(error)))
+    return RedirectResponse("/quarantine?dismissed=1", status_code=303)

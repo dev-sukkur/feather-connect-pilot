@@ -35,7 +35,7 @@
 {%- endmacro %}
 
 {# The second step of a mass action: what it would touch, and a form that confirms it. #}
-{% macro confirm_form(preview, action, cancel, label="Confirm") -%}
+{% macro confirm_form(preview, action, cancel, label="Confirm", reason_required=false, hidden={}) -%}
   <section class="confirm" aria-labelledby="confirm-title">
     <h2 id="confirm-title">Check before you confirm</h2>
     <dl class="impact">
@@ -47,8 +47,9 @@
     <form method="post" action="{{ action }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="token" value="{{ preview.token }}">
-      <p><label for="reason">Reason (kept in the audit log)</label><br>
-        <input id="reason" name="reason" type="text" maxlength="500"></p>
+      {% for field, value in hidden.items() %}<input type="hidden" name="{{ field }}" value="{{ value }}">
+      {% endfor %}<p><label for="reason">Reason {% if reason_required %}(required here, and kept in the audit log){% else %}(kept in the audit log){% endif %}</label><br>
+        <input id="reason" name="reason" type="text" maxlength="500"{% if reason_required %} required{% endif %}></p>
       <p><button type="submit" class="primary">{{ label }}</button>
          <a class="button" href="{{ cancel }}">Cancel</a></p>
     </form>

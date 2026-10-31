@@ -701,6 +701,11 @@ class ReadStore(Protocol):
         """How many deliveries there are in each status that has any."""
         ...
 
+    def waiting(self, route: str, partitions: Sequence[str]) -> dict[tuple[str, str], int]:
+        """For each (dataset, partition) of `partitions` on the route, how many deliveries are pending or held. Those
+        with none are left out."""
+        ...
+
 
 @dataclass(frozen=True)
 class UserRow:

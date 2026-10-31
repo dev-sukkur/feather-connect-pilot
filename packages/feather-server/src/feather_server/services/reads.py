@@ -37,6 +37,7 @@ STALE_AFTER_RUNS = (
 _RECENT_RUNS = 10
 _RECENT_VERSIONS = 15
 _FAILED_RUNS_SHOWN = 100
+_BLOCKED_SHOWN = 2
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,33 @@ class RunDetail:
     deliveries: tuple[
         Delivery, ...
     ] = ()  # of the run's versions on each route of its flow, with their attempts
+
+
+@dataclass(frozen=True)
+class Blocked:
+    """A partition a failed delivery holds up: `waiting` later deliveries of it queue behind the failed one on the
+    route."""
+
+    dataset: str
+    partition: str
+    waiting: int
+
+
+@dataclass(frozen=True)
+class FailureView:
+    """A group of failed deliveries and the partitions it blocks (up to `_BLOCKED_SHOWN` of them)."""
+
+    group: FailureGroup
+    blocked: tuple[Blocked, ...]
+
+
+@dataclass(frozen=True)
+class QuarantineEntry:
+    """An open quarantine row with the dataset and partition it belongs to, found through its version if need be."""
+
+    row: QuarantineRow
+    dataset: str | None
+    partition: str | None
 
 
 @dataclass(frozen=True)
@@ -356,6 +384,34 @@ class Reads:
     ) -> list[FailureGroup]:
         return self._store.reads.failure_groups(route, limit=limit, cursor=cursor)
 
+    def failure_views(
+        self, route: str | None = None, cursor: str | None = None, limit: int = 100
+    ) -> list[FailureView]:
+        """The failure groups, each with the partitions its failed deliveries block."""
+        groups = self.failures_grouped(route, cursor, limit)
+        shown = {v for g in groups for v in g.versions[:_BLOCKED_SHOWN]}
+        found = {v.version_id: v for v in self._store.versions.get_many(shown)}
+        waiting: dict[str, dict[tuple[str, str], int]] = {}
+        for name in {g.route for g in groups}:  # one query a route, not one a group
+            partitions = [
+                found[v].partition
+                for g in groups
+                if g.route == name
+                for v in g.versions[:_BLOCKED_SHOWN]
+                if v in found
+            ]
+            waiting[name] = self._store.reads.waiting(name, partitions)
+        views: list[FailureView] = []
+        for group in groups:
+            blocked: list[Blocked] = []
+            for version_id in group.versions[:_BLOCKED_SHOWN]:
+                failed = found.get(version_id)
+                if failed is not None:
+                    count = waiting[group.route].get((failed.dataset, failed.partition), 0)
+                    blocked.append(Blocked(failed.dataset, failed.partition, count))
+            views.append(FailureView(group, tuple(blocked)))
+        return views
+
     def deliveries(
         self,
         route: str | None = None,
@@ -370,6 +426,20 @@ class Reads:
 
     def quarantine(self, route: str | None = None) -> list[QuarantineRow]:
         return self._store.quarantine.list_open(route)
+
+    def quarantine_entries(self, route: str | None = None) -> list[QuarantineEntry]:
+        """The open quarantine rows with their dataset and partition."""
+        found: list[QuarantineEntry] = []
+        for row in self.quarantine(route):
+            dataset, partition = row.dataset, row.partition
+            if dataset is None and row.version_id is not None:
+                try:
+                    version = self._store.versions.get(row.version_id)
+                    dataset, partition = version.dataset, version.partition
+                except KeyError:
+                    pass
+            found.append(QuarantineEntry(row, dataset, partition))
+        return found
 
     def connections(self) -> list[ConnectionStatus]:
         flows = self._rt.flows()

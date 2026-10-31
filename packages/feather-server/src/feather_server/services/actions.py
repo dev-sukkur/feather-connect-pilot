@@ -145,6 +145,12 @@ class Actions:
         self._store = state.store
         self._tokens = PreviewTokens(state.store, state.settings.secret_key, state.clock)
 
+    @property
+    def protected(self) -> bool:
+        """Whether this is a protected environment (`settings.protected` in the project), where a skip needs a
+        reason."""
+        return bool(self._state.project.settings.get("protected"))
+
     # Bookkeeping.
 
     def _record(
@@ -452,6 +458,8 @@ class Actions:
         action = confirmed.removesuffix("_deliveries")
         if action not in _STATUSES or action == confirmed:
             raise PreviewInvalid(f"this token confirms {confirmed!r}, not a delivery action")
+        if action == "skip" and self.protected and not (reason and reason.strip()):
+            raise ValueError("a reason is required to skip deliveries in a protected environment")
         selection = self._redeem(
             actor,
             confirmed,

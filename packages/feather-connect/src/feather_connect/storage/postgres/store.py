@@ -1489,6 +1489,16 @@ class _Reads(ReadStore):
             ).fetchall()
         return {r["status"]: r["n"] for r in rows}
 
+    def waiting(self, route: str, partitions: Sequence[str]) -> dict[tuple[str, str], int]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select dataset, partition, count(*) as n from feather.delivery
+                   where tenant_id = %s and route = %s and partition = any(%s) and status in ('pending', 'held')
+                   group by dataset, partition""",
+                (self._db.tenant, route, list(partitions)),
+            ).fetchall()
+        return {(r["dataset"], r["partition"]): r["n"] for r in rows}
+
 
 class PostgresStore(Store):
     """A `Store` that keeps everything in Postgres, for one tenant. `clock` defaults to the system clock."""

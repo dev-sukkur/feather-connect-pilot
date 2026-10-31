@@ -948,6 +948,14 @@ class _Reads(ReadStore):
                 counts[delivery.status] = counts.get(delivery.status, 0) + 1
             return counts
 
+    def waiting(self, route: str, partitions: Sequence[str]) -> dict[tuple[str, str], int]:
+        with self._d.lock:
+            found: dict[tuple[str, str], int] = {}
+            for (name, _), d in self._d.deliveries.items():
+                if name == route and d.partition in partitions and d.status in ("pending", "held"):
+                    found[(d.dataset, d.partition)] = found.get((d.dataset, d.partition), 0) + 1
+            return found
+
 
 class MemoryStore(Store):
     """A `Store` that keeps everything in memory. `clock` defaults to the system clock."""
