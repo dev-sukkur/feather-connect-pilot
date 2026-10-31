@@ -1,0 +1,174 @@
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import psycopg
+import pytest
+from psycopg.rows import DictRow
+from psycopg_pool import ConnectionPool
+
+from feather_connect.clock import FrozenClock
+from feather_connect.core.records import Record
+from feather_connect.storage.port import InvalidTransition, Store
+from feather_connect.storage.postgres.connect import connect
+from feather_connect.storage.postgres.spool import PostgresSpool
+from feather_connect.storage.postgres.store import OLDEST_OPEN_SQL, PostgresStore
+from feather_connect.storage.spool import Spool, records_to_table
+from feather_connect.testing.store_contract import T0, StoreContract, draft, seal
+
+pytestmark = pytest.mark.postgres
+
+Pg = psycopg.Connection[DictRow]
+
+
+@pytest.fixture
+def clock() -> FrozenClock:
+    return FrozenClock(T0)
+
+
+@pytest.fixture
+def store(pg: Pg, pool: ConnectionPool[Pg], clock: FrozenClock) -> Store:
+    return PostgresStore(pool, clock)
+
+
+@pytest.fixture
+def spool(pg: Pg, pool: ConnectionPool[Pg], clock: FrozenClock) -> Spool:
+    return PostgresSpool(pool, clock)
+
+
+class TestPostgresStore(StoreContract):
+    pass
+
+
+def in_threads(n: int, fn: Callable[[int], Any]) -> list[Any]:
+    """Run `fn` in `n` threads at once. Each result is the return value, or the exception that was raised."""
+
+    def run(i: int) -> Any:
+        try:
+            return fn(i)
+        except Exception as error:  # noqa: BLE001
+            return error
+
+    with ThreadPoolExecutor(n) as threads:
+        return list(threads.map(run, range(n)))
+
+
+def test_seal_is_one_transaction(store: Store, pg: Pg):
+    pg.execute(
+        """create function feather.fail_on_boom() returns trigger language plpgsql as $body$
+           begin if new.route = 'boom' then raise exception 'boom'; end if; return new; end $body$"""
+    )
+    pg.execute(
+        "create trigger fail_on_boom before insert on feather.delivery for each row"
+        " execute function feather.fail_on_boom()"
+    )
+    try:
+        store.versions.stage(draft())
+        with pytest.raises(psycopg.errors.RaiseException):
+            store.versions.seal(["v1"], ["a", "boom"])  # the second delivery fails
+        assert store.ledger.list_deliveries() == []
+        assert store.versions.get("v1").status == "staged"
+    finally:
+        pg.execute("drop trigger fail_on_boom on feather.delivery")
+        pg.execute("drop function feather.fail_on_boom()")
+
+
+def test_concurrent_seal_assigns_one_sequence(store: Store):
+    store.versions.stage(draft())
+    results = in_threads(8, lambda _: store.versions.seal(["v1"], ["a", "b"])[0].seal_seq)
+    assert len(set(results)) == 1 and isinstance(results[0], int)
+    assert sorted((d.route, d.version_id) for d in store.ledger.list_deliveries()) == [
+        ("a", "v1"),
+        ("b", "v1"),
+    ]
+
+
+def test_concurrent_transition_applies_once(store: Store):  # I3
+    seal(store, "v1", ["a"])
+    store.ledger.transition("a", "v1", "running", actor="t")
+    results = in_threads(
+        8, lambda _: store.ledger.transition("a", "v1", "applied", actor="t", rows_applied=1)
+    )
+    assert sum(isinstance(r, InvalidTransition) for r in results) == 7
+    assert [r.status for r in results if not isinstance(r, Exception)] == ["applied"]
+    assert len(store.ledger.attempts("a", "v1")) == 2  # running, applied
+
+
+def test_concurrent_finish_slice_reports_completion_once(store: Store):
+    store.versions.register_slices("r1", "d", [f"p{i}" for i in range(8)])
+    results = in_threads(8, lambda i: store.versions.finish_slice("r1", "d", f"p{i}"))
+    assert results.count(True) == 1 and results.count(False) == 7
+
+
+def test_tenant_setting_is_set_per_transaction(store: Store, pg: Pg):
+    pg.execute(
+        """create function feather.tenant_to_reason() returns trigger language plpgsql as $body$
+           begin new.reason = current_setting('feather.tenant_id'); return new; end $body$"""
+    )
+    pg.execute(
+        "create trigger tenant_to_reason before insert on feather.run for each row"
+        " execute function feather.tenant_to_reason()"
+    )
+    try:
+        run_id = store.runs.create_run("f", "manual", "ann", {})
+        assert store.runs.get_run(run_id).reason == "default"
+    finally:
+        pg.execute("drop trigger tenant_to_reason on feather.run")
+        pg.execute("drop function feather.tenant_to_reason()")
+
+
+def test_tenants_do_not_see_each_other(pool: ConnectionPool[Pg], pg: Pg, clock: FrozenClock):
+    mine, other = PostgresStore(pool, clock, "mine"), PostgresStore(pool, clock, "other")
+    seal(mine, "v1", ["a"])
+    run_id = mine.runs.create_run("f", "manual", "ann", {})
+    assert other.versions.list_versions("d") == [] and other.ledger.list_deliveries() == []
+    assert other.runs.list_runs() == []
+    with pytest.raises(KeyError):
+        other.runs.get_run(run_id)
+
+
+def test_oldest_open_uses_the_partial_index(store: Store, pg: Pg):
+    pg.execute(
+        """insert into feather.delivery (tenant_id, route, version_id, dataset, partition, seal_seq, status)
+           select 'default', 'a', 'v' || i, 'd', 'p', i, 'applied' from generate_series(1, 10000) i"""
+    )
+    pg.execute(
+        """insert into feather.delivery (tenant_id, route, version_id, dataset, partition, seal_seq, status)
+           values ('default', 'a', 'open', 'd', 'p', 10001, 'pending')"""
+    )
+    pg.execute("analyze feather.delivery")
+    params = {"tenant": "default", "route": "a", "partition": "p", "closed": ["applied", "skipped"]}
+    plan = "\n".join(
+        next(iter(r.values())) for r in pg.execute("explain " + OLDEST_OPEN_SQL, params).fetchall()
+    )
+    assert "delivery_open_idx" in plan
+    oldest = store.ledger.oldest_open("a", "p")
+    assert oldest is not None and oldest.version_id == "open"
+
+
+def test_task_logs_and_attempts_land_in_the_partition_of_their_month(store: Store, clock: FrozenClock):
+    rid = store.runs.create_run("f", "manual", "ann", {})
+    task = store.runs.start_task(rid, "apply", "ref")
+    seal(store, "v1", ["a"])
+    store.runs.log(task, "info", "this month")
+    clock.advance(timedelta(days=70))  # two months on
+    store.runs.log(task, "info", "later")
+    store.ledger.transition("a", "v1", "running", actor="t")
+    assert store.runs.task_logs(task) == ["info: this month", "info: later"]
+    assert store.ledger.attempts("a", "v1")[0].at == T0 + timedelta(days=70)
+
+
+def test_datetime_watermarks_compare_as_datetimes(store: Store):
+    early, late = datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC)
+    seal(store, "v1", ["a"], wm=early)
+    seal(store, "v2", ["a"], wm=late)
+    assert store.versions.latest_watermark("d") == late
+    assert [v.version_id for v in store.versions.since_watermark("d", "p", late)] == ["v2"]
+
+
+def test_connect_opens_a_store_and_a_spool_on_one_pool(pg: Pg, pg_url: str, clock: FrozenClock):
+    store, spool = connect(pg_url, clock=clock, tenant="t1", max_size=2)
+    run_id = store.runs.create_run("f", "manual", "ann", {"x": 1})
+    spool.put_chunk("v1", 0, "data", records_to_table([Record("a", "upsert", {"x": 1}, 1)]))
+    assert store.runs.get_run(run_id).params == {"x": 1} and len(spool.list_chunks("v1")) == 1
