@@ -1,0 +1,221 @@
+<title>Feather Connect Code Guide</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a reviewer's map. One table per code folder, in the order the data flows, with a reading priority on every file. */
+:root {
+  --bg: #f4f6f3; --surface: #ffffff; --ink: #17231d; --ink-2: #47564e; --rule: #d7ded8; --accent: #0f6b50;
+  --high: #b3261e; --mid: #8a5a00; --low: #586a60;
+  --display: "Schibsted Grotesk", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #101612; --surface: #171f1a; --ink: #e6ede8; --ink-2: #abb9b0; --rule: #2a352e; --accent: #5fc9a6;
+  --high: #ff8a80; --mid: #e3b565; --low: #9aaaa0; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #101612; --surface: #171f1a; --ink: #e6ede8; --ink-2: #abb9b0; --rule: #2a352e; --accent: #5fc9a6;
+  --high: #ff8a80; --mid: #e3b565; --low: #9aaaa0; color-scheme: dark }
+body { background: var(--bg); color: var(--ink); font: 400 16px/1.55 var(--display); }
+.wrap { max-width: 70rem; margin-inline: auto; display: grid; gap: 3rem; padding-block: 2.5rem 4rem;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.wrap > *, section > * { min-width: 0; }
+section { display: grid; gap: 1rem; scroll-margin-top: 1rem; }
+h1, h2, h3, p, ul, ol { margin: 0; }
+h1 { font-weight: 800; font-size: clamp(2.2rem, 5vw, 3.2rem); line-height: 1.05; text-wrap: balance; }
+h2 { font-weight: 700; font-size: 1.5rem; line-height: 1.2; text-wrap: balance; }
+h3 { font-weight: 700; font-size: 1.05rem; }
+p { max-width: 46rem; }
+.sub { color: var(--ink-2); }
+ul, ol { padding-left: 1.2rem; display: grid; gap: .35rem; max-width: 50rem; }
+code, .f { font: 500 .84em var(--mono); overflow-wrap: anywhere; }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+nav { display: flex; flex-wrap: wrap; gap: .3rem 1rem; font-size: .92rem; padding-block: .6rem; border-block: 1px solid var(--rule); }
+.scroll { overflow-x: auto; background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; }
+table { width: 100%; min-width: 46rem; border-collapse: collapse; font-size: .9rem; line-height: 1.45; }
+th, td { text-align: left; vertical-align: top; padding: .6rem .8rem; border-bottom: 1px solid var(--rule); }
+tr:last-child td { border-bottom: 0; }
+th { font-size: .78rem; font-weight: 700; color: var(--ink-2); }
+.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.p { font-weight: 700; font-size: .78rem; white-space: nowrap; }
+.high { color: var(--high); } .mid { color: var(--mid); } .low { color: var(--low); }
+.names { display: block; margin-top: .2rem; font: 400 .76rem var(--mono); color: var(--ink-2); overflow-wrap: anywhere; }
+.flow { font: 500 .85rem var(--mono); background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: .9rem 1rem; overflow-x: auto; white-space: pre; }
+.done { color: var(--accent); font-weight: 700; }
+</style>
+
+<div class="wrap">
+<header style="display:grid;gap:.8rem">
+  <h1>Feather Connect Code Guide</h1>
+  <p class="sub">What each folder and file in the core loop does, what to read first, and what is left to build. It describes <code>main</code> at commit <code>1e7d410</code>.</p>
+  <p>The core loop has 34 source files (about 6,200 lines) and 20 test files (about 5,400 lines, 561 tests passing). It runs entirely in memory. Everything lives under <code>packages/feather-connect/</code>.</p>
+  <nav>
+    <a href="#order">Reading order</a><a href="#flow">How a run works</a><a href="#core">core</a><a href="#runtime">runtime</a><a href="#engine">engine</a><a href="#storage">storage</a><a href="#connectors">connectors</a><a href="#testing">testing</a><a href="#top">top-level files</a><a href="#tests">tests</a><a href="#open">Known gaps</a><a href="#remaining">Remaining work</a>
+  </nav>
+</header>
+
+<section id="order">
+  <h2>Suggested reading order</h2>
+  <ol>
+    <li><b>See what a flow author writes:</b> <code>tests/testing/test_harness.py</code>. The test at the end is the design's §5.7 example.</li>
+    <li><b>Learn the model:</b> <code>core/records.py</code>, <code>core/dataset.py</code>, <code>core/flow.py</code>.</li>
+    <li><b>Read the highest-risk code:</b> <code>runtime/extract.py</code>, then <code>runtime/apply.py</code>. A bug here can lose or duplicate data.</li>
+    <li><b>See how it is wired:</b> <code>runtime/runtime.py</code> and <code>engine/port.py</code>.</li>
+    <li><b>Check the guarantees:</b> <code>storage/port.py</code> and <code>tests/runtime/test_seal.py</code>.</li>
+  </ol>
+  <p class="sub">Priority labels: <span class="p high">Read closely</span> can lose or duplicate data. <span class="p mid">Read</span> shapes the public API or later plans. <span class="p low">Skim</span> is small or support code.</p>
+</section>
+
+<section id="flow">
+  <h2>How a run works</h2>
+<div class="flow">start_run            runtime/runtime.py    creates the run record, submits the plan task
+  feather.plan       runtime/plan.py       chooses which partitions to read
+  feather.extract    runtime/extract.py    reads the source, finds changes, writes chunks to the spool
+  feather.seal_run   runtime/seal.py       only for multi-slice runs: decides deletes, seals together
+  feather.apply      runtime/apply.py      delivers each sealed version to each route, in order, through the ledger</div>
+  <p class="sub">Each step runs as an engine task, through the <code>Engine</code> port. Data stays in the spool, and tasks carry ids only.</p>
+</section>
+
+<section id="core">
+  <h2><code>src/feather_connect/core/</code></h2>
+  <p class="sub">The model flow authors and connectors use. It holds no storage or engine code.</p>
+  <div class="scroll"><table>
+    <tr><th>File</th><th class="n">Lines</th><th>What it does</th><th>Priority</th></tr>
+    <tr><td class="f">records.py</td><td class="n">98</td><td>A record, its business key and its content hash.<span class="names">Record, canonical_json, row_hash, make_key, decode_key</span></td><td class="p high">Read closely</td></tr>
+    <tr><td class="f">strategies.py</td><td class="n">180</td><td>How a read becomes upserts and deletes: by_stamp, snapshot_diff, replace, push. Also parses change stamps.<span class="names">Diff, Strategy, ByStamp, read_stamp, parse_duration</span></td><td class="p high">Read closely</td></tr>
+    <tr><td class="f">partitions.py</td><td class="n">305</td><td>Cuts a dataset into slices such as store and day, and names each one.<span class="names">PartitionScheme, Bound, none, by_day, by_month, by_fields, by_bucket</span></td><td class="p mid">Read</td></tr>
+    <tr><td class="f">flow.py</td><td class="n">210</td><td>What a flow reads, where it delivers and what starts it, plus its validation checks.<span class="names">Flow, RouteSpec, to, Problem</span></td><td class="p mid">Read</td></tr>
+    <tr><td class="f">dataset.py</td><td class="n">44</td><td>A named stream of keyed records from one source.<span class="names">Dataset</span></td><td class="p mid">Read</td></tr>
+    <tr><td class="f">connector.py</td><td class="n">186</td><td>The contract every connector implements, and the data passed to it.<span class="names">Source, PushSource, Sink, ConnectorSpec, ReadRequest, ApplyBatch, ApplyResult, Deleted</span></td><td class="p mid">Read</td></tr>
+    <tr><td class="f">transforms.py</td><td class="n">56</td><td>Applies a route's map to a record.<span class="names">apply_map, batch_map, is_batch_map</span></td><td class="p mid">Read</td></tr>
+    <tr><td class="f">errors.py</td><td class="n">46</td><td>Errors whose type decides what the runtime does: retry, fail, wait or quarantine.<span class="names">TransientError, PermanentError, BudgetDeferred, RecordRejected, MissingKeyError, PartitionError</span></td><td class="p mid">Read</td></tr>
+    <tr><td class="f">triggers.py</td><td class="n">66</td><td>What starts a run. These are only declared here; the scheduler comes in Plan 3.<span class="names">cron, every, manual, on_event</span></td><td class="p low">Skim</td></tr>
+    <tr><td class="f">context.py</td><td class="n">47</td><td>What a connector is given when called: settings, logger, time and budget.<span class="names">Context</span></td><td class="p low">Skim</td></tr>
+    <tr><td class="f">__init__.py</td><td class="n">1</td><td>Package marker.</td><td class="p low">Skim</td></tr>
+  </table></div>
+</section>
+
+<section id="runtime">
+  <h2><code>src/feather_connect/runtime/</code></h2>
+  <p class="sub">What the tasks do, from reading a source to delivering versions. Most of the review findings were here.</p>
+  <div class="scroll"><table>
+    <tr><th>File</th><th class="n">Lines</th><th>What it does</th><th>Priority</th></tr>
+    <tr><td class="f">extract.py</td><td class="n">821</td><td>Reads a source, works out what changed, writes chunks and produces versions. Holds delete reconciliation across slices (I10), the empty-read guard and quarantine protection. It's the largest file, and worth splitting.<span class="names">run_extract, finalize_versions, settle_quarantine, ExtractFailed</span></td><td class="p high">Read closely</td></tr>
+    <tr><td class="f">apply.py</td><td class="n">511</td><td>Delivers versions in seal order through the ledger, per chunk, resuming after a crash. Handles retries, quarantine and the replace rules.<span class="names">run_apply, oldest_open</span></td><td class="p high">Read closely</td></tr>
+    <tr><td class="f">runtime.py</td><td class="n">451</td><td>Wires flows, store and engine into tasks. Starts runs and handles retry, skip and replay. One delivery task runs per stream.<span class="names">Runtime</span></td><td class="p high">Read closely</td></tr>
+    <tr><td class="f">seal.py</td><td class="n">24</td><td>Seals all of a multi-slice run's versions together.<span class="names">run_seal</span></td><td class="p mid">Read</td></tr>
+    <tr><td class="f">plan.py</td><td class="n">46</td><td>Chooses which partitions a run reads.<span class="names">run_plan</span></td><td class="p mid">Read</td></tr>
+    <tr><td class="f">budgets.py</td><td class="n">43</td><td>Meters calls against a shared budget, and waits when it runs out. Task 14 wasn't independently reviewed.<span class="names">BudgetHandle</span></td><td class="p mid">Read</td></tr>
+    <tr><td class="f">deps.py</td><td class="n">27</td><td>What tasks need from outside: store, spool, clock, retry policy.<span class="names">RuntimeDeps</span></td><td class="p low">Skim</td></tr>
+    <tr><td class="f">__init__.py</td><td class="n">1</td><td>Package marker.</td><td class="p low">Skim</td></tr>
+  </table></div>
+</section>
+
+<section id="engine">
+  <h2><code>src/feather_connect/engine/</code></h2>
+  <p class="sub">How work is submitted and run. DBOS plugs in behind this port in Plan 2.</p>
+  <div class="scroll"><table>
+    <tr><th>File</th><th class="n">Lines</th><th>What it does</th><th>Priority</th></tr>
+    <tr><td class="f">port.py</td><td class="n">96</td><td>The interface between the runtime and any engine.<span class="names">Engine, WorkerRuntime, TaskCall, TaskContext, RetryPolicy</span></td><td class="p mid">Read</td></tr>
+    <tr><td class="f">local.py</td><td class="n">446</td><td>The in-process test engine. It mimics a durable engine's replay, and raises if a task body breaks the replay rules. It isn't durable, so it's never for production.<span class="names">LocalEngine, NotDurableError</span></td><td class="p mid">Read</td></tr>
+    <tr><td class="f">__init__.py</td><td class="n">1</td><td>Package marker.</td><td class="p low">Skim</td></tr>
+  </table></div>
+</section>
+
+<section id="storage">
+  <h2><code>src/feather_connect/storage/</code></h2>
+  <p class="sub">The run journal, versions, delivery ledger, record state, quarantine, budgets and spool. Only memory versions exist so far. Postgres comes in Plan 2.</p>
+  <div class="scroll"><table>
+    <tr><th>File</th><th class="n">Lines</th><th>What it does</th><th>Priority</th></tr>
+    <tr><td class="f">port.py</td><td class="n">442</td><td>The store interfaces and the table of legal delivery state changes.<span class="names">RunJournal, VersionStore, Ledger, RecordStateStore, QuarantineStore, BudgetStore, Version, Delivery, check_transition</span></td><td class="p high">Read closely</td></tr>
+    <tr><td class="f">spool.py</td><td class="n">236</td><td>Where a version's data lives, and how records convert to Arrow chunks.<span class="names">Spool, MemorySpool, records_to_table, table_to_records, snapshot_table</span></td><td class="p mid">Read</td></tr>
+    <tr><td class="f">memory.py</td><td class="n">546</td><td>The in-memory store used by tests and local runs.<span class="names">MemoryStore</span></td><td class="p low">Skim</td></tr>
+    <tr><td class="f">__init__.py</td><td class="n">1</td><td>Package marker.</td><td class="p low">Skim</td></tr>
+  </table></div>
+</section>
+
+<section id="connectors">
+  <h2><code>src/feather_connect/connectors/</code></h2>
+  <p class="sub">The two connectors that ship with the core. This folder has no <code>__init__.py</code> on purpose, because other packages will install connectors into it.</p>
+  <div class="scroll"><table>
+    <tr><th>File</th><th class="n">Lines</th><th>What it does</th><th>Priority</th></tr>
+    <tr><td class="f">memory.py</td><td class="n">147</td><td>A source that serves given rows and a sink that keeps what it receives.<span class="names">Source, Sink, changed_since</span></td><td class="p low">Skim</td></tr>
+    <tr><td class="f">simulation.py</td><td class="n">231</td><td>Repeatable fake data with injected faults: duplicates, late rows, deletes, 429s and timeouts.<span class="names">Source, Sink, Faults, seq, choice, date_in, amount, name</span></td><td class="p low">Skim</td></tr>
+  </table></div>
+</section>
+
+<section id="testing">
+  <h2><code>src/feather_connect/testing/</code></h2>
+  <p class="sub">Test support that ships with the SDK.</p>
+  <div class="scroll"><table>
+    <tr><th>File</th><th class="n">Lines</th><th>What it does</th><th>Priority</th></tr>
+    <tr><td class="f">harness.py</td><td class="n">97</td><td>Runs a flow on in-memory connectors, so flow authors can test without real systems.<span class="names">FlowHarness</span></td><td class="p mid">Read</td></tr>
+    <tr><td class="f">store_contract.py</td><td class="n">649</td><td>Tests every store must pass. Plan 2's Postgres store reuses them unchanged.<span class="names">StoreContract</span></td><td class="p mid">Read</td></tr>
+    <tr><td class="f">__init__.py</td><td class="n">5</td><td>Exports FlowHarness.</td><td class="p low">Skim</td></tr>
+  </table></div>
+</section>
+
+<section id="top">
+  <h2>Top-level files</h2>
+  <div class="scroll"><table>
+    <tr><th>File</th><th class="n">Lines</th><th>What it does</th><th>Priority</th></tr>
+    <tr><td class="f">src/feather_connect/__init__.py</td><td class="n">38</td><td>The public API: everything <code>import feather_connect as fc</code> exposes.</td><td class="p mid">Read</td></tr>
+    <tr><td class="f">src/feather_connect/clock.py</td><td class="n">33</td><td>Time sources, so tests can control time.<span class="names">Clock, SystemClock, FrozenClock</span></td><td class="p low">Skim</td></tr>
+    <tr><td class="f">src/feather_connect/ids.py</td><td class="n">45</td><td>New ids, and ids that come out the same every time.<span class="names">new_id, stable_id</span></td><td class="p low">Skim</td></tr>
+    <tr><td class="f">pyproject.toml (root and package)</td><td class="n"></td><td>The uv workspace, dependencies, and ruff, pyright and pytest settings.</td><td class="p low">Skim</td></tr>
+    <tr><td class="f">.github/workflows/ci.yml</td><td class="n"></td><td>Checks for Linux and Windows. It has never run, because nothing is pushed.</td><td class="p low">Skim</td></tr>
+  </table></div>
+</section>
+
+<section id="tests">
+  <h2><code>tests/</code></h2>
+  <p class="sub">The test functions double as a behaviour spec, so their names are worth scanning. Parameterised tests are why the 561 passing cases exceed the function counts here.</p>
+  <div class="scroll"><table>
+    <tr><th>Folder and file</th><th class="n">Lines</th><th class="n">Test functions</th><th>Covers</th></tr>
+    <tr><td class="f">runtime/test_apply.py</td><td class="n">1,088</td><td class="n">74</td><td>Delivery order, crashes, retries, quarantine, replace rules</td></tr>
+    <tr><td class="f">runtime/test_extract.py</td><td class="n">648</td><td class="n">59</td><td>Strategies, stamps, bad rows, the empty-read guard, restarts</td></tr>
+    <tr><td class="f">runtime/test_seal.py</td><td class="n">635</td><td class="n">53</td><td>Moves, I10 and when a record may be deleted</td></tr>
+    <tr><td class="f">runtime/test_runtime.py</td><td class="n">521</td><td class="n">33</td><td>Whole runs, task arguments, retry, skip and replay</td></tr>
+    <tr><td class="f">runtime/test_budgets.py</td><td class="n">222</td><td class="n">8</td><td>Sharing a budget, reserves and waits</td></tr>
+    <tr><td class="f">engine/test_local_engine.py</td><td class="n">710</td><td class="n">39</td><td>Replay, retries, sleeps, signals and crashes</td></tr>
+    <tr><td class="f">core/ (6 files)</td><td class="n">867</td><td class="n">102</td><td>Flows, partitions, strategies, records, connector types, context, errors</td></tr>
+    <tr><td class="f">connectors/ (2 files)</td><td class="n">432</td><td class="n">39</td><td>In-memory and simulation connectors</td></tr>
+    <tr><td class="f">testing/test_harness.py</td><td class="n">119</td><td class="n">4</td><td>The design's §5.7 example</td></tr>
+    <tr><td class="f">storage/test_memory_store.py</td><td class="n">43</td><td class="n">2</td><td>Runs StoreContract against the memory store</td></tr>
+    <tr><td class="f">test_clock, test_ids, test_smoke</td><td class="n">113</td><td class="n">15</td><td>Time, ids and the package itself</td></tr>
+  </table></div>
+</section>
+
+<section id="open">
+  <h2>Known gaps in the core loop</h2>
+  <ul>
+    <li><b>Skipped reviews:</b> Task 14 (<code>budgets.py</code> and its store code) and the overall core-loop review haven't run, to save tokens.</li>
+    <li><b>Budget wait in extraction:</b> a metered source that stays out of budget for 60 s or more fails its extract task. Delivery waits correctly. Stage 2 fixes this.</li>
+    <li><b>Moves without <code>keep_state</code>:</b> a record moving between slices read in separate runs can be deleted at the destination. <code>Flow.validate</code> warns about this.</li>
+    <li><b>Multi-chunk replace:</b> a sink rejection partway through can leave the destination partial. The delivery fails and says so.</li>
+    <li><b>Source with a key in two slices:</b> with <code>keep_state</code>, it re-sends every run. M2 must guard this before side-effect routes.</li>
+    <li><b>CI:</b> it has never run.</li>
+  </ul>
+  <p class="sub">Smaller deferred items are in the local ledger, <code>.superpowers/sdd/m1-01-core-loop/progress.md</code>.</p>
+</section>
+
+<section id="remaining">
+  <h2>Remaining work</h2>
+  <p>The remaining work now runs in stages, so a dashboard you can run on Postgres comes first. The M1 scope and exit criteria are unchanged. Stage 1 is <span class="done">done</span>, and each remaining stage gets one review at its end. Task details are in <code>docs/04-plan/</code>, where <code>2.3</code> means Plan 2, Task 3.</p>
+  <div class="scroll"><table>
+    <tr><th>Stage</th><th class="n">Tasks</th><th>What gets built</th><th>What you can do afterwards</th></tr>
+    <tr><td><b>1. Core loop</b> <span class="done">Done</span></td><td class="n">14</td><td>SDK, data model, runtime and test harness, in memory</td><td>Write a flow and test it with no database</td></tr>
+    <tr><td><b>2. Runnable dashboard</b> (next)</td><td class="n">24</td><td>Postgres schema, store, spool and budgets; project and secrets loader; DBOS engine; worker and sweeper; server, scheduler, pause and resume; logs, sign-in and service layer; HTML dashboard (overview, flows, partition grid, runs, failures, connections); CLI basics, <code>feather dev</code> and a simulated demo. Also makes extraction wait when a budget runs out.<span class="names">2.1–2.6, 2.8, 2.9, 3.1, 3.2, 3.6, 5.1–5.3, 5.5–5.10, 6.1, 6.5, 6.7, demo task</span></td><td>Start everything with one command, watch runs live, and retry, replay, pause and re-run from the browser. Simulated data only, and crash safety isn't proven yet</td></tr>
+    <tr><td><b>3. Reliability and live events</b></td><td class="n">6</td><td>Engine conformance suite, crash and speed tests, webhook endpoint and inbox, sealer, pollers, latency tests<span class="names">2.7, 2.10, 3.3, 3.4, 3.5, 3.7</span></td><td>Kill -9 a worker with nothing lost or duplicated, and get webhooks to destinations in seconds</td></tr>
+    <tr><td><b>4. Connectors</b></td><td class="n">9</td><td>Conformance kit, shared HTTP client, Postgres, S3, REST, GraphQL, webhook and HTTP, DuckDB and MotherDuck, five templates<span class="names">4.1–4.9</span></td><td>Run real integrations from templates</td></tr>
+    <tr><td><b>5. API, packaging and M1 exit</b></td><td class="n">9</td><td>JSON API, browser and accessibility tests, the rest of the CLI and scaffolding, images and Compose, full demo, hard-case tests, exit report<span class="names">5.4, 5.11, 6.1 (describe), 6.2–6.4, 6.6, 6.8, 6.9</span></td><td>Run the full demo in under 5 minutes, and prove the M1 exit criteria</td></tr>
+  </table></div>
+  <h3>Also pending</h3>
+  <ul>
+    <li><b>Your review:</b> the code, the design, the plan, and ADR-0004 (still proposed).</li>
+    <li><b>Your actions:</b> ask GoFrugal for API docs and a sandbox. Choose the GitHub organisation and PyPI name. Name the maintainers. Confirm 14-day spool retention.</li>
+    <li><b>After M1:</b> M2 adds business connectors (SAP, Zakya, Magento, GoFrugal), on-prem agents, approvals, RBAC, MCP and alerts. M3 adds multi-tenancy, SSO and the v1.0 release.</li>
+  </ul>
+  <p class="sub">Cost note: Stage 1 reviewed every task, and that used a lot of tokens. The remaining stages get one review each, which costs less but catches problems later. Stage 2 is still a big piece of work at 24 tasks.</p>
+</section>
+</div>
