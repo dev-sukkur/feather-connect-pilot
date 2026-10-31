@@ -20,7 +20,7 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pyright
-      - run: uv run pytest packages/feather-connect/tests -m "not postgres"
+      - run: uv run pytest packages/feather-connect/tests tests/demo -m "not postgres"
 
   # The tests marked `postgres` need a server, which only Linux runners can host. This job runs every test
   # and holds the coverage gate.

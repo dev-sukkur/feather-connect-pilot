@@ -1,0 +1,9 @@
+# The demo project: a simulated shop feeds orders to two destinations, with no external system.
+# `feather dev` loads it; `feather validate --project examples/demo` checks it.
+name: demo
+modules: [flows.orders]
+settings: {timezone: UTC}
+connections:
+  shop: {connector: simulation.source}
+  warehouse: {connector: simulation.sink}
+  archive: {connector: simulation.sink}
