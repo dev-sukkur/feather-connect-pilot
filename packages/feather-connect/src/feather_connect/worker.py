@@ -22,6 +22,7 @@ from types import FrameType
 from typing import Any
 
 from feather_connect.core.errors import PermanentError
+from feather_connect.logs import TaskLogHandler, configure_logging, register_secrets
 from feather_connect.project import Project, ProjectError, load_project
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.port import Store
@@ -63,10 +64,13 @@ def _heartbeats(
 
 
 def _config_of(project: Project, connection: str) -> Mapping[str, Any]:
+    config = project.connections[connection]
     try:
-        return project.connections[connection].resolve()
+        resolved = config.resolve()
     except ProjectError as error:  # no retry brings back a secret that isn't set
         raise PermanentError(f"connection {connection!r}: {error}") from None
+    register_secrets(*(resolved[key] for key in config.secret_refs))  # so that no log line can show one
+    return resolved
 
 
 def run_worker(
@@ -83,12 +87,14 @@ def run_worker(
     `FEATHER_WORKER_ID`, then the host name."""
     from feather_engine_dbos import DbosEngine, DbosWorkerRuntime
 
+    configure_logging(os.environ.get("FEATHER_LOG_LEVEL", "INFO"))
     worker_id = worker_id or os.environ.get("FEATHER_WORKER_ID") or socket.gethostname()
     labels = dict(labels or {})
     project = load_project(project_root, env)
     _check_connections(project)
     migrate(database_url)
     store, spool = connect(database_url)
+    logging.getLogger().addHandler(TaskLogHandler(store))
     store.catalog.sync(project.name, project.code_sha, {f.name: f.spec_dict() for f in project.flows})
     for budget in project.budgets.values():
         store.budgets.define(budget)

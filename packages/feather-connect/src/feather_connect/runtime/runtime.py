@@ -21,6 +21,7 @@ from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import BudgetDeferred, PermanentError
 from feather_connect.core.flow import Flow, RouteSpec
 from feather_connect.engine.port import Engine, TaskCall, TaskContext, TaskFn
+from feather_connect.logs import bind
 from feather_connect.runtime.apply import oldest_open, run_apply
 from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.deps import RuntimeDeps
@@ -175,11 +176,31 @@ class Runtime:
 
     def tasks(self) -> Mapping[str, TaskFn]:
         return {
-            "feather.plan": self._plan_task,
-            "feather.extract": self._extract_task,
-            "feather.seal_run": self._seal_task,
-            "feather.apply": self._apply_task,
+            "feather.plan": self._logged(self._plan_task),
+            "feather.extract": self._logged(self._extract_task),
+            "feather.seal_run": self._logged(self._seal_task),
+            "feather.apply": self._logged(self._apply_task),
         }
+
+    def _logged(self, task: TaskFn) -> TaskFn:
+        """Wrap a task so that everything it logs carries the ids of its run and its journal row."""
+
+        def run(ctx: TaskContext, args: Mapping[str, Any]) -> Mapping[str, Any] | None:
+            run_id = args["run_id"]
+            row = next((r for r in self._deps.store.runs.list_tasks(run_id) if r.ref == ctx.task_ref), None)
+            with bind(
+                tenant=_TENANT,
+                flow=args.get("flow"),
+                run=run_id,
+                task=row.task_id if row else None,
+                dataset=args.get("dataset"),
+                partition=args.get("partition"),
+                version=args.get("version_id"),
+                route=args.get("route"),
+            ):
+                return task(ctx, args)
+
+        return run
 
     # What starts and steers runs.
 

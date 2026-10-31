@@ -172,11 +172,11 @@ class _Runs(RunJournal):
 
     def log(self, task_id: str, level: str, message: str) -> None:
         with self._d.lock:
-            self._d.logs[task_id].append((self._d.clock.now(), f"{level}: {message}"))
+            self._d.logs.setdefault(task_id, []).append((self._d.clock.now(), f"{level}: {message}"))
 
     def task_logs(self, task_id: str) -> list[str]:
         with self._d.lock:
-            return [line for _, line in self._d.logs[task_id]]
+            return [line for _, line in self._d.logs.get(task_id, [])]
 
     def delete_runs_before(self, cutoff: datetime) -> int:
         with self._d.lock:

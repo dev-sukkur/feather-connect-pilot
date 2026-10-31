@@ -1,5 +1,7 @@
 """The server application: health endpoints now, and the loops that run for as long as it does."""
 
+import logging
+import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -11,6 +13,7 @@ from fastapi import FastAPI, Response
 from feather_connect.clock import Clock, SystemClock
 from feather_connect.engine.local import LocalEngine
 from feather_connect.engine.port import Engine
+from feather_connect.logs import TaskLogHandler, configure_logging
 from feather_connect.project import Project, load_project
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.port import Store
@@ -44,6 +47,8 @@ def build_state(settings: Settings) -> AppState:
     migrate(settings.database_url)
     clock = SystemClock()
     store, spool = connect(settings.database_url, clock=clock)
+    configure_logging(os.environ.get("FEATHER_LOG_LEVEL", "INFO"), secrets=[settings.secret_key])
+    logging.getLogger().addHandler(TaskLogHandler(store))
     local = LocalEngine() if settings.engine == "local" else None
     if local is None:
         from feather_engine_dbos import DbosEngine
