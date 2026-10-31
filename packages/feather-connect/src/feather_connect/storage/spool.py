@@ -99,7 +99,7 @@ class MemorySpool:
                 del self._chunks[key]
 
 
-def _encode(value: Any) -> Any:
+def encode_json_value(value: Any) -> Any:
     """The `default` for `json.dumps`: tag the types that JSON can't hold."""
     if isinstance(value, datetime):  # before date, because a datetime is also a date
         return {_TAG: "datetime", "v": value.isoformat()}
@@ -112,8 +112,8 @@ def _encode(value: Any) -> Any:
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-def _decode(obj: dict[str, Any]) -> Any:
-    """The `object_hook` for `json.loads`: undo `_encode`."""
+def decode_json_value(obj: dict[str, Any]) -> Any:
+    """The `object_hook` for `json.loads`: undo `encode_json_value`."""
     match obj.get(_TAG):
         case "datetime":
             return datetime.fromisoformat(obj["v"])
@@ -183,7 +183,7 @@ def records_to_table(records: Sequence[Record]) -> pa.Table:
         if array is None:
             json_columns.append(name)
             array = _array(
-                [None if v is None else json.dumps(v, default=_encode) for v in values], pa.string()
+                [None if v is None else json.dumps(v, default=encode_json_value) for v in values], pa.string()
             )
         arrays.append(array)
     arrays += [
@@ -210,7 +210,7 @@ def table_to_records(table: pa.Table) -> list[Record]:
             continue
         values: list[Any] = table.column(name).to_pylist()
         if name in json_columns:
-            values = [None if v is None else json.loads(v, object_hook=_decode) for v in values]
+            values = [None if v is None else json.loads(v, object_hook=decode_json_value) for v in values]
         columns[name] = values
     keys = cast("list[str]", table.column(_KEY).to_pylist())
     ops = cast("list[Op]", table.column(_OP).to_pylist())
