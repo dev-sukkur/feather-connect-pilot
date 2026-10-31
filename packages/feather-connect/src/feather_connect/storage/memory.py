@@ -895,6 +895,8 @@ class _Reads(ReadStore):
                     latest[version.partition] = version
             rows: list[PartitionRow] = []
             for partition in sorted(latest, reverse=True):
+                if len(rows) >= limit:  # the cells are the costly part: build them for the page only
+                    break
                 version = latest[partition]
                 assert version.seal_seq is not None and version.sealed_at is not None
                 if (cursor is not None and partition >= cursor) or (since and version.sealed_at < since):
@@ -916,7 +918,7 @@ class _Reads(ReadStore):
                         cells,
                     )
                 )
-            return rows[:limit]
+            return rows
 
     def failure_groups(
         self, route: str | None = None, *, limit: int = 100, cursor: str | None = None

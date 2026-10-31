@@ -12,7 +12,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Literal, cast, overload
 
 import pyarrow as pa
 from pydantic import BaseModel
@@ -23,7 +23,7 @@ from feather_connect.core.errors import MissingKeyError, PartitionError
 from feather_connect.core.flow import RouteSpec
 from feather_connect.core.records import Op, Record, canonical_json, make_key, row_hash
 from feather_connect.core.strategies import ByStamp, read_stamp
-from feather_connect.ids import stable_id
+from feather_connect.ids import new_id, stable_id
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.storage import spool as spool_settings
 from feather_connect.storage.port import StateRow, Version, VersionDraft
@@ -66,8 +66,16 @@ class _Read:
     """
 
     def __init__(
-        self, dataset: Dataset, run_id: str, partition: str | None, stamp_kind: str | None, deps: RuntimeDeps
+        self,
+        dataset: Dataset,
+        run_id: str,
+        partition: str | None,
+        stamp_kind: str | None,
+        deps: RuntimeDeps,
+        *,
+        dry_run: bool = False,
     ) -> None:
+        self._dry_run = dry_run  # a dry run turns no record down in the store: the quarantine is left alone
         self._dataset = dataset
         self._run_id = run_id
         self._partition = partition  # None when each row's partition comes from the row
@@ -142,6 +150,8 @@ class _Read:
             ) from error
         if key is not None:
             self.rejected.add(key)
+        if self._dry_run:
+            return
         version_id = None if partition is None else self._version_id(partition)
         self._deps.store.quarantine.add(None, version_id, name, str(error), self._dataset.name, partition)
 
@@ -329,17 +339,21 @@ def _moved_here(dataset: Dataset, partition: str, keys: Iterable[str], deps: Run
     return {key for key, row in rows.items() if row.partition != partition}
 
 
-def _stage_slice(
-    dataset: Dataset,
-    run_id: str,
-    read: _Read,
-    target: _Slice,
-    new: dict[str, int],
-    since: Any,
-    keep_full: bool,
-    deps: RuntimeDeps,
-) -> Version | None:
-    """Compare a slice with what was known, write its chunks and stage its version, if there is anything to say."""
+@dataclass(frozen=True)
+class _Comparison:
+    """What a slice says against what was known: the records that changed (as written to its `data` chunks), the keys
+    that disappeared with the hash each had, the keys held back because they were turned down, and the old hashes."""
+
+    changes: list[Record]
+    deletes: dict[str, int]
+    held: set[str]
+    old_hashes: dict[str, int]
+
+
+def _compare(
+    dataset: Dataset, read: _Read, target: _Slice, new: dict[str, int], since: Any, deps: RuntimeDeps
+) -> _Comparison:
+    """Compare the slice with what was known and write its changed rows as `data` chunks."""
     strategy = dataset.strategy
     old = _old_snapshot(dataset, target.partition, new, since, deps)
     old_hashes = dict(_pairs(old)) if old is not None else {}
@@ -353,6 +367,23 @@ def _stage_slice(
     upsert_keys = set(cast("list[str]", diff.upsert_keys.to_pylist())) - held | returned
     changes = _write_changes(read, target, upsert_keys, deps)
     deletes = {key: old_hashes.get(key, 0) for key in cast("list[str]", diff.delete_keys.to_pylist())}
+    return _Comparison(changes, deletes, held, old_hashes)
+
+
+def _stage_slice(
+    dataset: Dataset,
+    run_id: str,
+    read: _Read,
+    target: _Slice,
+    new: dict[str, int],
+    since: Any,
+    keep_full: bool,
+    deps: RuntimeDeps,
+) -> Version | None:
+    """Compare a slice with what was known, write its chunks and stage its version, if there is anything to say."""
+    strategy = dataset.strategy
+    found = _compare(dataset, read, target, new, since, deps)
+    changes, deletes, held, old_hashes = found.changes, found.deletes, found.held, found.old_hashes
     # A newly held key must reach the snapshot even with no records, or nothing would remember it.
     if not changes and not deletes and held <= old_hashes.keys():
         _discard(target.version_id, deps)
@@ -394,6 +425,46 @@ def _sealed_earlier(dataset: Dataset, run_id: str, partition: str | None, deps: 
     return [version] if version.status == "sealed" else []
 
 
+@dataclass(frozen=True)
+class VerifyResult:
+    """What reading a partition again would change: the records that would upsert and the ones that would delete."""
+
+    upserts: int
+    deletes: int
+
+
+def _verify(dataset: Dataset, partition: str, deps: RuntimeDeps) -> VerifyResult:
+    """Read the partition as `run_extract` would and count what differs from the last sealed version, writing nothing
+    that stays: its chunks go to a scratch id that is cleared at the end, and no version, quarantine entry or state
+    is stored."""
+    strategy = dataset.strategy
+    by_stamp = strategy if isinstance(strategy, ByStamp) else None
+    watermark = None if by_stamp is None else deps.store.versions.latest_watermark(dataset.name)
+    since = None if by_stamp is None else _read_since(dataset, by_stamp, watermark)
+    stamp_kind = None if watermark is None else _stamp_kind(watermark)
+    read = _Read(
+        dataset, f"verify-{new_id()}", None if by_stamp else partition, stamp_kind, deps, dry_run=True
+    )
+    upserts = deletes = 0
+    try:
+        _read_source(dataset, read, since, deps, _ALL_PARTITIONS if by_stamp else partition)
+        for name, target in read.slices.items():
+            new = {key: hash_ for key, (slice_name, hash_) in read.latest.items() if slice_name == name}
+            found = _compare(dataset, read, target, new, since, deps)
+            if strategy.complete:
+                # A complete strategy delivers its whole slice, so what changed is read off the hashes instead.
+                upserts += sum(found.old_hashes.get(key) != hash_ for key, hash_ in new.items())
+                deletes += len(found.old_hashes.keys() - new.keys())
+            else:
+                upserts += sum(r.op == "upsert" for r in found.changes)
+                deletes += sum(r.op == "delete" for r in found.changes) + len(found.deletes)
+    finally:
+        for target in read.slices.values():
+            deps.spool.delete_version(target.version_id)
+    return VerifyResult(upserts, deletes)
+
+
+@overload
 def run_extract(
     dataset: Dataset,
     run_id: str,
@@ -402,14 +473,44 @@ def run_extract(
     routes: Sequence[RouteSpec],
     stage_only: bool,
     deps: RuntimeDeps,
-) -> list[Version]:
+    dry_run: Literal[False] = False,
+) -> list[Version]: ...
+
+
+@overload
+def run_extract(
+    dataset: Dataset,
+    run_id: str,
+    partition: str,
+    *,
+    routes: Sequence[RouteSpec],
+    stage_only: bool,
+    deps: RuntimeDeps,
+    dry_run: Literal[True],
+) -> VerifyResult: ...
+
+
+def run_extract(
+    dataset: Dataset,
+    run_id: str,
+    partition: str,
+    *,
+    routes: Sequence[RouteSpec],
+    stage_only: bool,
+    deps: RuntimeDeps,
+    dry_run: bool = False,
+) -> list[Version] | VerifyResult:
     """Read one partition of a dataset and return the versions it produced, or an empty list if nothing changed.
+
+    With `dry_run` it only reads: it returns what would change as a `VerifyResult` and writes nothing that stays.
 
     A `by_stamp` dataset always reads across partitions (`*`), whatever `partition` says, and produces a version
     for each partition it touched. With `stage_only` the versions wait for `finalize_versions`, otherwise they are
     finalized here. Calling this again with the same arguments starts again and replaces what the last attempt left,
     unless that attempt got as far as sealing: sealed versions never change (I1), and are returned as they are.
     """
+    if dry_run:
+        return _verify(dataset, partition, deps)
     strategy = dataset.strategy
     by_stamp = strategy if isinstance(strategy, ByStamp) else None
     versions = _sealed_earlier(dataset, run_id, None if by_stamp else partition, deps)

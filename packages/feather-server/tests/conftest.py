@@ -13,9 +13,9 @@ from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.spool import MemorySpool
 from feather_server.app import AppState, create_app
-from feather_server.auth import Actor, hash_password
+from feather_server.auth import Actor
 from feather_server.settings import Settings
-from feather_server.testing import SECRET, World, build_world
+from feather_server.testing import SECRET, World, build_world, sign_in
 
 
 @pytest.fixture
@@ -50,9 +50,6 @@ def bob() -> Actor:
     return Actor("token", "bob-ci")
 
 
-PASSWORD = "correct horse battery staple"
-
-
 @pytest.fixture
 def store(world: World) -> MemoryStore:
     return world.store
@@ -60,15 +57,8 @@ def store(world: World) -> MemoryStore:
 
 @pytest.fixture
 def client(world: World) -> TestClient:
-    """A browser signed in as `op` to the dashboard of the world. Redirects are not followed."""
-    world.store.users.create_user("op", hash_password(PASSWORD))
-    app = create_app(state=world.state, loops=lambda s: [])
-    browser = TestClient(app, base_url="http://localhost:8000", follow_redirects=False)
-    login_page = browser.get("/login").text
-    match = re.search(r'name="csrf_token" value="([^"]+)"', login_page)
-    assert match
-    browser.post("/login", data={"username": "op", "password": PASSWORD, "csrf_token": match.group(1)})
-    return browser
+    """A browser signed in as `op` to the dashboard of the world."""
+    return sign_in(create_app(state=world.state, loops=lambda s: []))
 
 
 @pytest.fixture

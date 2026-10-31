@@ -102,6 +102,7 @@ input[type="text"], input[type="password"], input[type="date"], input[type="numb
   max-width: 100%;
 }
 label { font-weight: 600; font-size: 0.9rem; }
+label.plain { font-weight: inherit; font-size: inherit; }
 fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 1rem; margin: 1rem 0; }
 legend { font-weight: 600; padding: 0 0.4rem; }
 .filters { display: flex; flex-wrap: wrap; align-items: end; gap: 0.75rem 1rem; margin: 1rem 0; }

@@ -19,6 +19,7 @@ from feather_connect.core.errors import PermanentError
 from feather_connect.core.flow import Flow
 from feather_connect.logs import redact, register_secrets
 from feather_connect.project import ProjectError
+from feather_connect.runtime.extract import VerifyResult
 from feather_connect.storage.port import Delivery, DeliveryStatus, InvalidTransition, split_error
 from feather_server.auth import Actor
 from feather_server.services.previews import (
@@ -327,6 +328,20 @@ class Actions:
             f"run:{run_id}",
             {"reason": reason},
             lambda: self._rt.cancel_run(run_id, actor=actor.name, reason=reason),
+        )
+
+    def verify_partition(self, actor: Actor, dataset: str, partition: str) -> VerifyResult:
+        """Read the partition from its source and report what differs from the last sealed version. It changes
+        nothing, but it does call the source, and that costs budget like any read."""
+        _, found = self._dataset_flow(dataset)
+        (chosen,) = self._check_partitions(found, [partition])
+        return self._do(
+            actor,
+            "verify_partition",
+            f"dataset:{dataset}",
+            {"partition": chosen},
+            lambda: self._rt.verify_partition(dataset, chosen),
+            lambda r: f"ok: {r.upserts} upserts and {r.deletes} deletes differ",
         )
 
     # Deliveries.

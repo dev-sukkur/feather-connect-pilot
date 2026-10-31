@@ -25,7 +25,7 @@ from feather_connect.logs import bind
 from feather_connect.runtime.apply import oldest_open, run_apply
 from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.deps import RuntimeDeps
-from feather_connect.runtime.extract import ExtractFailed, run_extract
+from feather_connect.runtime.extract import ExtractFailed, VerifyResult, run_extract
 from feather_connect.runtime.plan import run_plan
 from feather_connect.runtime.seal import run_seal
 from feather_connect.storage.port import (
@@ -302,6 +302,19 @@ class Runtime:
             "plan",
         )
         return run_id
+
+    def verify_partition(self, dataset: str, partition: str) -> VerifyResult:
+        """Read the partition from its source and say what differs from the last sealed version, changing nothing.
+
+        Raises `KeyError` for an unknown dataset and `PermanentError` when the source can't be read as a run would.
+        """
+        found = self.dataset(dataset)
+        try:
+            return run_extract(
+                found, "verify", partition, routes=(), stage_only=False, deps=self._deps, dry_run=True
+            )
+        except ExtractFailed as error:
+            raise PermanentError(str(error)) from error
 
     def active_runs(self, flow: str) -> list[Run]:
         """Return the flow's runs that are queued or running, oldest first."""

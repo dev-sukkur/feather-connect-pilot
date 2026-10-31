@@ -53,6 +53,7 @@
 <section aria-labelledby="h-graph">
   <h2 id="h-graph">What it reads and where it delivers</h2>
   {{ flow_graph(detail) }}
+  <p>Partitions: {% for dataset in flow.datasets %}<a href="/datasets/{{ dataset.name | urlencode }}/partitions">{{ dataset.name }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>
 </section>
 
 {% include "_flow_runs.html" %}

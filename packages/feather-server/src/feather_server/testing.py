@@ -5,10 +5,14 @@ The project is loaded from `root` for real, so its configuration has layers, and
 reference that resolves to `SECRET` when the environment variable `WH_TOKEN` is set to it.
 """
 
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from feather_connect.clock import FrozenClock
 from feather_connect.connectors.memory import Sink
@@ -18,11 +22,13 @@ from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.spool import MemorySpool
 from feather_server.app import AppState
+from feather_server.auth import hash_password
 from feather_server.services.actions import Actions
 from feather_server.services.reads import Reads
 from feather_server.settings import Settings
 
 SECRET = "s3cret-warehouse-token"
+PASSWORD = "correct horse battery staple"
 
 FLOW_MODULE = """
     import feather_connect as fc
@@ -141,3 +147,14 @@ def build_world(root: Path, clock: FrozenClock) -> World:
         clock=clock,
     )
     return World(state, engine, clock, Actions(state), Reads(state))
+
+
+def sign_in(app: FastAPI, username: str = "op") -> TestClient:
+    """A browser signed in to `app` as a new user. Redirects are not followed, as a test wants to see them."""
+    state: AppState = app.state.feather
+    state.store.users.create_user(username, hash_password(PASSWORD))
+    browser = TestClient(app, base_url="http://localhost:8000", follow_redirects=False)
+    found = re.search(r'name="csrf_token" value="([^"]+)"', browser.get("/login").text)
+    assert found
+    browser.post("/login", data={"username": username, "password": PASSWORD, "csrf_token": found.group(1)})
+    return browser

@@ -4,7 +4,7 @@ decides anything the service layer does not.
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote, urlencode
@@ -13,10 +13,11 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
+from feather_connect.core.errors import PermanentError
 from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.storage.port import Run
 from feather_server.auth import Actor, CurrentActor, csrf_token, require_csrf
-from feather_server.services.actions import Actions
+from feather_server.services.actions import Actions, DeliverySelection
 from feather_server.services.previews import Preview, PreviewError, PreviewExpired, PreviewInvalid
 from feather_server.services.reads import FlowSummary, Reads
 from feather_server.web.charts import meter, sparkline
@@ -331,3 +332,187 @@ def backfill_confirm(
     except (KeyError, FlowPaused, ValueError) as error:
         return _flow_page(request, actor, name, status=409, notice=("bad", str(error)))
     return _back(name, started=run_id)
+
+
+# The partition grid.
+
+_GRID_PAGE = 100
+
+
+def _preview_status(error: PreviewError) -> int:
+    """The status of a refused confirmation: expired is gone, a token that is not ours is unprocessable, and one that
+    was used or has gone stale conflicts with how things stand now."""
+    if isinstance(error, PreviewExpired):
+        return 410
+    return 422 if isinstance(error, PreviewInvalid) else 409
+
+
+def _flow_of(request: Request, dataset: str) -> str:
+    """The flow that reads the dataset. Raises `KeyError` for an unknown dataset."""
+    for flow in request.app.state.feather.runtime.flows():
+        if any(d.name == dataset for d in flow.datasets):
+            return flow.name
+    raise KeyError(dataset)
+
+
+def _grid_page(
+    request: Request,
+    actor: Actor,
+    dataset: str,
+    *,
+    status: int = 200,
+    notice: tuple[str, str] | None = None,
+    preview: Preview | None = None,
+    confirm_action: str = "",
+    confirm_label: str = "Confirm",
+) -> HTMLResponse:
+    since_text = request.query_params.get("since", "")
+    try:
+        since = datetime.combine(date.fromisoformat(since_text), time.min, UTC) if since_text else None
+    except ValueError:
+        return render(
+            request,
+            "error.html",
+            status=422,
+            title="Not a date",
+            message="Give 'since' as a date, such as 2026-10-18.",
+        )
+    try:
+        grid = reads(request).partition_grid(
+            dataset, since=since, cursor=request.query_params.get("cursor") or None, limit=_GRID_PAGE
+        )
+        flow = _flow_of(request, dataset)
+    except KeyError:
+        return _not_found(request, f"No dataset named {dataset!r}.")
+    return render(
+        request,
+        "partitions.html",
+        status=status,
+        title=f"{dataset} partitions",
+        actor=actor,
+        grid=grid,
+        flow=flow,
+        notice=notice,
+        preview=preview,
+        confirm_action=confirm_action,
+        confirm_label=confirm_label,
+        since=since_text,
+        replayed=request.query_params.get("replayed", ""),
+    )
+
+
+@router.get("/datasets/{dataset}/partitions", response_class=HTMLResponse)
+def partitions(request: Request, actor: CurrentActor, dataset: str) -> HTMLResponse:
+    return _grid_page(request, actor, dataset)
+
+
+def _partitions_url(dataset: str, **query: str) -> str:
+    suffix = f"?{urlencode(query)}" if query else ""
+    return f"/datasets/{quote(dataset, safe='')}/partitions{suffix}"
+
+
+@router.post("/datasets/{dataset}/partitions/rerun/preview", dependencies=[Depends(require_csrf)])
+def rerun_preview(
+    request: Request, actor: CurrentActor, dataset: str, partition: Annotated[list[str] | None, Form()] = None
+) -> Response:
+    try:
+        preview = actions(request).preview_rerun(actor, dataset, partition or [])
+    except KeyError:
+        return _not_found(request, f"No dataset named {dataset!r}.")
+    except ValueError as error:
+        return _grid_page(request, actor, dataset, status=422, notice=("bad", str(error)))
+    action = f"/datasets/{quote(dataset, safe='')}/partitions/rerun/confirm"
+    return _grid_page(
+        request, actor, dataset, preview=preview, confirm_action=action, confirm_label="Read them again"
+    )
+
+
+@router.post("/datasets/{dataset}/partitions/rerun/confirm", dependencies=[Depends(require_csrf)])
+def rerun_confirm(
+    request: Request, actor: CurrentActor, dataset: str, token: Annotated[str, Form()], reason: Reason = ""
+) -> Response:
+    try:
+        run_id = actions(request).rerun(actor, token, reason=_reason(reason))
+        flow = _flow_of(request, dataset)
+    except PreviewError as error:
+        return _grid_page(request, actor, dataset, status=_preview_status(error), notice=("bad", str(error)))
+    except (KeyError, FlowPaused, ValueError) as error:
+        return _grid_page(request, actor, dataset, status=409, notice=("bad", str(error)))
+    return _back(flow, started=run_id)
+
+
+@router.post("/datasets/{dataset}/partitions/{partition:path}/verify", dependencies=[Depends(require_csrf)])
+def verify_partition(request: Request, actor: CurrentActor, dataset: str, partition: str) -> Response:
+    try:
+        found = actions(request).verify_partition(actor, dataset, partition)
+    except KeyError:
+        return _not_found(request, f"No dataset named {dataset!r}.")
+    except (ValueError, PermanentError) as error:
+        return _grid_page(request, actor, dataset, status=422, notice=("bad", str(error)))
+    label = request.app.state.feather.runtime.dataset(dataset).partition.label_of(partition)
+    if not (found.upserts or found.deletes):
+        return _grid_page(
+            request, actor, dataset, notice=("ok", f"{label} matches its source. Nothing was changed.")
+        )
+    return _grid_page(
+        request,
+        actor,
+        dataset,
+        notice=(
+            "warn",
+            (
+                f"{label} differs from its source: {found.upserts} records would be added or changed and "
+                f"{found.deletes} deleted. Nothing was changed."
+            ),
+        ),
+    )
+
+
+@router.post(
+    "/routes/{route}/partitions/{partition:path}/replay/preview", dependencies=[Depends(require_csrf)]
+)
+def replay_preview(
+    request: Request,
+    actor: CurrentActor,
+    route: str,
+    partition: str,
+    dataset: Annotated[str, Form()],
+) -> Response:
+    try:
+        preview = actions(request).preview_deliveries(
+            actor, "replay", DeliverySelection(route=route, dataset=dataset, partition=partition)
+        )
+    except KeyError:
+        return _not_found(request, f"No dataset named {dataset!r}.")
+    except ValueError as error:
+        return _grid_page(request, actor, dataset, status=422, notice=("bad", str(error)))
+    action = f"/routes/{quote(route, safe='')}/partitions/{quote(partition, safe='/')}/replay/confirm"
+    return _grid_page(
+        request,
+        actor,
+        dataset,
+        preview=preview,
+        confirm_action=action + "?" + urlencode({"dataset": dataset}),
+        confirm_label=f"Replay to {route}",
+    )
+
+
+@router.post(
+    "/routes/{route}/partitions/{partition:path}/replay/confirm", dependencies=[Depends(require_csrf)]
+)
+def replay_confirm(
+    request: Request,
+    actor: CurrentActor,
+    route: str,
+    partition: str,
+    dataset: str,
+    token: Annotated[str, Form()],
+    reason: Reason = "",
+) -> Response:
+    try:
+        moved = actions(request).apply_deliveries(actor, token, reason=_reason(reason))
+    except PreviewError as error:
+        return _grid_page(request, actor, dataset, status=_preview_status(error), notice=("bad", str(error)))
+    except (KeyError, ValueError) as error:
+        return _grid_page(request, actor, dataset, status=409, notice=("bad", str(error)))
+    return RedirectResponse(_partitions_url(dataset, replayed=str(len(moved))), status_code=303)
