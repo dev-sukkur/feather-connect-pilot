@@ -330,10 +330,14 @@ def test_a_stale_placeholder_does_not_delete_a_record_that_lives_elsewhere():
     assert DEPS.store.state.get_many("d", ["1"])["1"].partition == DAY_18
 
 
-def test_a_placeholder_is_deleted_when_the_state_row_is_left_over_from_before_the_rejection():
+def test_a_moved_key_turned_down_is_deleted_when_its_old_slice_is_read_without_it():
     ds = moved_into_rejection(keep_state=True, allow_empty=True)
     assert DEPS.store.state.get_many("d", ["1"])["1"].partition == DAY_18
-    vs = run_slices(ds, "r3", {DAY_19: []})  # day 18's snapshot no longer holds the key
+    vs = run_slices(
+        ds, "r3", {DAY_19: []}
+    )  # day 18's snapshot still holds the key, and that read can't speak for it
+    assert [(r.key, r.op) for v in vs for r in all_records(v)] == []
+    vs = run_slices(ds, "r4", {DAY_18: on(DAY_18, 2, x=1)})
     assert [(r.key, r.op) for v in vs for r in all_records(v)] == [("1", "delete")]
     assert DEPS.store.state.get_many("d", ["1"]) == {}
 

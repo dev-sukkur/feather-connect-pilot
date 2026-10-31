@@ -6,9 +6,10 @@ after a crash or a retry can't apply it twice. A replay of a delivery has a new 
 """
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import timedelta
+from functools import partial
 from itertools import count
 from typing import Any, cast
 
@@ -132,9 +133,36 @@ def _tries(delivery: Delivery, deps: RuntimeDeps) -> int:
     return tries
 
 
+def _counting_a_try[T](delivery: Delivery, deps: RuntimeDeps, fn: Callable[[], T]) -> T:
+    """Run part of a delivery.
+
+    A budget deferral says nothing against the delivery. Any other error but a permanent one marks the delivery
+    pending to be tried again, until the delivery has used up its tries, which makes the error permanent.
+    """
+    try:
+        return fn()
+    except (PermanentError, BudgetDeferred):
+        raise
+    except Exception as error:
+        tries = _tries(delivery, deps)
+        if tries >= deps.retry.max_attempts:
+            raise PermanentError(f"still failing after {tries} attempts: {error}") from error
+        deps.store.ledger.transition(
+            delivery.route,
+            delivery.version_id,
+            "pending",
+            actor=_ACTOR,
+            reason="retryable error",
+            error=str(error),
+            code_sha=deps.code_sha,
+        )
+        raise
+
+
 def _start(route: RouteSpec, delivery: Delivery, deps: RuntimeDeps) -> _Plan:
     _resume(delivery, "apply started", deps)
-    return _plan_of(route, deps.store.versions.get(delivery.version_id), deps)
+    version_id = delivery.version_id
+    return _counting_a_try(delivery, deps, lambda: _plan_of(route, deps.store.versions.get(version_id), deps))
 
 
 def _key_text(key: Key) -> str:
@@ -167,31 +195,25 @@ class _ChunkSender:
         self._moves: dict[str, str] | None = None
 
     def send(self, chunk_no: int) -> _Counts:
-        """Send one chunk.
+        """Send one chunk."""
+        _resume(self._delivery, "apply retried", self._deps)
+        return _counting_a_try(self._delivery, self._deps, lambda: self._send(chunk_no))
 
-        A budget deferral says nothing against the delivery. Any other error but a permanent one marks the delivery
-        pending to be tried again, until the delivery has used up its tries, which makes the error permanent.
+    def check_maps(self) -> None:
+        """Run the map over every chunk and keep nothing, so that a bad record fails a replace before the first send.
+
+        A replace can't leave a record out, and transforms are pure, so this says how the sends would go.
         """
-        delivery = self._delivery
-        _resume(delivery, "apply retried", self._deps)
-        try:
-            return self._send(chunk_no)
-        except (PermanentError, BudgetDeferred):
-            raise
-        except Exception as error:
-            tries = _tries(delivery, self._deps)
-            if tries >= self._deps.retry.max_attempts:
-                raise PermanentError(f"still failing after {tries} attempts: {error}") from error
-            self._deps.store.ledger.transition(
-                delivery.route,
-                delivery.version_id,
-                "pending",
-                actor=_ACTOR,
-                reason="retryable error",
-                error=str(error),
-                code_sha=self._deps.code_sha,
-            )
-            raise
+        _resume(self._delivery, "apply retried", self._deps)
+        _counting_a_try(self._delivery, self._deps, self._map_all_chunks)
+
+    def _map_all_chunks(self) -> None:
+        if self._route.map is None or self._plan.clears:
+            return
+        version = self._deps.store.versions.get(self._delivery.version_id)
+        context = self._deps.make_context(self._route.sink.connection)
+        for chunk_no in self._plan.chunks:
+            self._records(version, chunk_no, context)
 
     def _send(self, chunk_no: int) -> _Counts:
         route, delivery, plan = self._route, self._delivery, self._plan
@@ -275,7 +297,12 @@ class _ChunkSender:
             payloads = apply_map(self._route, replace(record, moved_from=moved_from), context)
         except _CLASSIFIED:
             raise
-        except Exception as error:  # noqa: BLE001 - a map may raise anything, and that speaks of this record
+        except Exception as error:  # a map may raise anything, and that speaks of this record
+            if self._route.mode == "replace_partition":
+                raise PermanentError(
+                    f"the map of route {self._route.name!r} failed on record {record.key}, "
+                    f"which replacing the slice can't leave out: {error}"
+                ) from error
             self._reject(record.key, str(error))
             return None
         return [self._apply_record(version, record.key, "upsert", p, moved_from) for p in payloads]
@@ -343,7 +370,7 @@ class _ChunkSender:
         return ApplyRecord(decode_key(key, self._dataset.key), op, payload, moved_from)
 
     def _reject(self, key: str, message: str) -> None:
-        """Quarantine a record, unless the dataset says to fail or the route's whole-slice replace would lose it."""
+        """Quarantine a record, unless the dataset says to fail or the route replaces whole slices."""
         name = self._route.name
         if self._dataset.on_record_error == "fail":
             raise PermanentError(
@@ -351,7 +378,8 @@ class _ChunkSender:
             )
         if self._route.mode == "replace_partition":
             raise PermanentError(
-                f"route {name!r}: record {key} was rejected, and replacing the slice would drop it: {message}"
+                f"route {name!r}: the sink rejected record {key} and has already applied its batch, "
+                f"so the destination may hold a partial slice: {message}"
             )
         self._deps.store.quarantine.add(name, self._delivery.version_id, key, message)
 
@@ -413,10 +441,8 @@ def _finish(
         _supersede(delivery, plan, deps)
 
 
-def _send_durably(
-    ctx: TaskContext, name: str, sender: _ChunkSender, chunk_no: int, retry: RetryPolicy
-) -> _Counts:
-    """Run a chunk's step, and sleep off a budget deferral before running it again.
+def _step_durably[T](ctx: TaskContext, name: str, fn: Callable[[], T], retry: RetryPolicy) -> T:
+    """Run a step, and sleep off a budget deferral before running it again.
 
     An error for the engine to retry goes to the engine. On the task's last attempt the engine won't, while a delivery
     can still have tries left, since a task can catch up on several. So the task sleeps and tries again itself.
@@ -424,7 +450,7 @@ def _send_durably(
     last_attempt = ctx.attempt >= retry.max_attempts
     while True:
         try:
-            return ctx.step(name, lambda: sender.send(chunk_no))
+            return ctx.step(name, fn)
         except PermanentError:
             raise
         except BudgetDeferred as deferred:
@@ -444,11 +470,14 @@ def _deliver(
     version_id = delivery.version_id
     totals: list[_Counts] = []
     try:
-        plan = ctx.step(f"start:{version_id}", lambda: _start(route, delivery, deps))
+        start = partial(_start, route, delivery, deps)
+        plan = _step_durably(ctx, f"start:{version_id}", start, deps.retry)
         sender = _ChunkSender(dataset, route, delivery, plan, deps)
+        if route.mode == "replace_partition":
+            _step_durably(ctx, f"maps:{version_id}", sender.check_maps, deps.retry)
         for chunk_no in plan.chunks:
-            name = f"chunk:{version_id}:{chunk_no}"
-            totals.append(_send_durably(ctx, name, sender, chunk_no, deps.retry))
+            send = partial(sender.send, chunk_no)
+            totals.append(_step_durably(ctx, f"chunk:{version_id}:{chunk_no}", send, deps.retry))
     except PermanentError as error:
         message = str(error)
         ctx.step(f"fail:{version_id}", lambda: _fail(delivery, message, deps))

@@ -593,3 +593,56 @@ def test_extract_never_calls_a_sink():  # I5
     ds.source.load(ROWS)
     run_extract(ds, "r1", "_", routes=[fc.to(sink)], stage_only=False, deps=DEPS)
     assert sink.calls == []
+
+
+class _StrictInSlice(BaseModel):
+    id: int
+    n: int
+    s: str
+
+
+def _moved_and_turned_down(second_rows):
+    ds = dataset(
+        fc.strategy.snapshot_diff(),
+        schema=_StrictInSlice,
+        keep_state=True,
+        partition=fc.partition.by_fields("s"),
+    )
+    routes = route_specs(("a",))
+    ds.source.load([{"id": 1, "s": "a", "n": 1}])
+    v1 = run_extract(ds, "r1", "s=a", routes=routes, stage_only=False, deps=DEPS)[0]
+    ds.source.load(second_rows)
+    staged = [
+        version
+        for partition in ("s=a", "s=b")
+        for version in run_extract(ds, "r2", partition, routes=routes, stage_only=True, deps=DEPS)
+    ]
+    return ds, routes, v1, staged
+
+
+def _snapshot_of(version_id) -> dict[Any, Any]:
+    table = DEPS.spool.get_chunk(version_id, 0, "snapshot")
+    return dict(
+        zip(table.column("_fc_key").to_pylist(), table.column("_fc_row_hash").to_pylist(), strict=True)
+    )
+
+
+def test_a_key_that_moved_and_was_turned_down_stays_in_its_old_slice_snapshot():
+    ds, routes, v1, staged = _moved_and_turned_down([{"id": 1, "s": "b", "n": "bad"}])
+    sealed = {v.partition: v for v in finalize_versions(ds, staged, routes, DEPS)}
+    old_hash = _snapshot_of(v1.version_id)["1"]
+    assert _snapshot_of(sealed["s=a"].version_id) == {"1": old_hash}
+    assert sealed["s=a"].deletes == 0
+    assert _snapshot_of(sealed["s=b"].version_id) == {"1": 0}
+
+
+def test_repeating_a_finalize_keeps_the_same_decision_for_a_turned_down_move():
+    ds, routes, v1, staged = _moved_and_turned_down([{"id": 1, "s": "b", "n": "bad"}])
+    a = next(v for v in staged if v.partition == "s=a")
+    # A first attempt that got as far as writing its decision, then died before sealing.
+    DEPS.spool.put_chunk(
+        a.version_id, 0, "snapshot", spool.snapshot_table(_snapshot_of(v1.version_id).items())
+    )
+    sealed = {v.partition: v for v in finalize_versions(ds, staged, routes, DEPS)}
+    assert DEPS.spool.list_chunks(sealed["s=a"].version_id, "moves") == []
+    assert sealed["s=a"].deletes == 0 and list(_snapshot_of(sealed["s=a"].version_id)) == ["1"]

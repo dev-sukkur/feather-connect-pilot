@@ -444,7 +444,10 @@ class _Reconciled:
     """What the run's slices together say about one staged version.
 
     `candidates` are its delete candidates as staged, `deletes` those that remain real, `changes` its other records,
-    without payloads, and `moves` the partition that each key moving into it came from.
+    without payloads, and `moves` the partition that each key moving into it came from. `kept` are the candidates that
+    stay in its snapshot, with their old hashes: their rows moved to another slice and were turned down there, so the
+    destination still has them here, and a replace of this slice must not lose them. `kept_before` says that all of
+    them were kept by an earlier version too, because the slices that turned them down have nothing new to say.
     """
 
     version: Version
@@ -452,6 +455,8 @@ class _Reconciled:
     deletes: Mapping[str, int]
     changes: Sequence[Record]
     moves: Mapping[str, str]
+    kept: Mapping[str, int]
+    kept_before: bool
 
 
 def _candidates_of(version: Version, deps: RuntimeDeps) -> dict[str, int]:
@@ -484,16 +489,22 @@ def _rejected_keys(version_id: str, deps: RuntimeDeps) -> set[str]:
     return keys
 
 
-def _holders(versions: Sequence[Version], keys: set[str], deps: RuntimeDeps) -> dict[str, str]:
+def _holders(
+    versions: Sequence[Version],
+    keys: set[str],
+    candidates: Mapping[str, Mapping[str, int]],
+    deps: RuntimeDeps,
+) -> dict[str, str]:
     """Return, for each of `keys` in a new snapshot, the id of the first of `versions` whose snapshot holds it.
 
     A key that a version only holds because its row was turned down doesn't count: it has no record to take a move.
+    Nor does one it has as a candidate: an earlier attempt kept that in its snapshot, for its old slice's sake.
     """
     holders: dict[str, str] = {}
     if not keys:
         return holders
     for version in versions:
-        rejected = _rejected_keys(version.version_id, deps)
+        rejected = _rejected_keys(version.version_id, deps) | candidates.get(version.version_id, {}).keys()
         for chunk in deps.spool.list_chunks(version.version_id, "snapshot"):
             for key, _ in _pairs(deps.spool.get_chunk(version.version_id, chunk.chunk_no, "snapshot")):
                 if key in keys and key not in rejected:
@@ -503,25 +514,29 @@ def _holders(versions: Sequence[Version], keys: set[str], deps: RuntimeDeps) -> 
 
 def _held_without_a_version(
     dataset: Dataset, versions: Sequence[Version], keys: set[str], deps: RuntimeDeps
-) -> set[str]:
+) -> tuple[set[str], set[str], set[str]]:
     """Return those of `keys` that the source still has in a slice of the run, with no version to take a move.
 
-    These are the keys a slice turned down, and the keys of a registered slice with no version, which read as
-    unchanged and so still holds what its last snapshot does. Neither is a delete.
+    The first set is the keys a slice turned down. The second is the keys of a registered slice with no version, which
+    read as unchanged and so still holds what its last snapshot does: a key it holds only as a placeholder isn't one.
+    Neither is a delete. The third is those of the first turned down by a slice with no version: old news.
     """
     if not keys:
-        return set()
+        return set(), set(), set()
     run_id = versions[0].run_id
     registered = set(deps.store.versions.slices_for_run(run_id, dataset.name))
     with_version = {version.partition for version in versions}
-    held: set[str] = set()
+    turned_down: set[str] = set()
+    unchanged: set[str] = set()
     for partition in registered | with_version:
-        held |= keys & _rejected_keys(stable_id(run_id, dataset.name, partition), deps)
+        turned_down |= keys & _rejected_keys(stable_id(run_id, dataset.name, partition), deps)
+    repeated: set[str] = set()
     for partition in registered - with_version:
+        repeated |= keys & _rejected_keys(stable_id(run_id, dataset.name, partition), deps)
         old = _last_snapshot(dataset, partition, deps)
         if old is not None:
-            held.update(key for key, _ in _pairs(old) if key in keys)
-    return held
+            unchanged.update(key for key, hash_ in _pairs(old) if key in keys and hash_ != NOT_DELIVERED)
+    return turned_down, unchanged, repeated
 
 
 def _home_hashes(
@@ -562,21 +577,33 @@ def _reconcile(
             _changes_of(version, candidates[version.version_id], deps) if needed else []
         )
     wanted = {key for found in candidates.values() for key in found}
-    holders = _holders(_by_partition(versions), wanted, deps)
-    held = _held_without_a_version(dataset, versions, wanted - holders.keys(), deps)
+    holders = _holders(_by_partition(versions), wanted, candidates, deps)
+    turned_down, unchanged, repeated = _held_without_a_version(
+        dataset, versions, wanted - holders.keys(), deps
+    )
     upserted = {r.key for found in changes.values() for r in found if r.op == "upsert"}
     state = deps.store.state.get_many(dataset.name, wanted | upserted) if dataset.keep_state else {}
     home_hashes = _home_hashes(dataset, candidates.values(), state, deps)
 
     moves: dict[str, dict[str, str]] = {v.version_id: {} for v in ordered}
     deletes: dict[str, dict[str, int]] = {v.version_id: {} for v in ordered}
+    kept: dict[str, dict[str, int]] = {v.version_id: {} for v in ordered}
+    # A placeholder says nothing about a key that another slice's snapshot has as really delivered: that slice decides.
+    delivered = {
+        key for found in candidates.values() for key, hash_ in found.items() if hash_ != NOT_DELIVERED
+    }
     for version in ordered:
         for key, hash_ in candidates[version.version_id].items():
             row = state.get(key)
             if key in holders:
                 # A holder that is sealed already can't take a move, so it may have no entry yet.
                 moves.setdefault(holders[key], {}).setdefault(key, version.partition)
-            elif key in held:
+            elif key in unchanged:
+                continue
+            elif key in turned_down:
+                if hash_ != NOT_DELIVERED:
+                    kept[version.version_id][key] = hash_
+            elif hash_ == NOT_DELIVERED and key in delivered:
                 continue
             elif row is None or row.partition == version.partition:
                 deletes[version.version_id][key] = hash_
@@ -592,7 +619,13 @@ def _reconcile(
                 moves[version.version_id][record.key] = row.partition
     return [
         _Reconciled(
-            v, candidates[v.version_id], deletes[v.version_id], changes[v.version_id], moves[v.version_id]
+            v,
+            candidates[v.version_id],
+            deletes[v.version_id],
+            changes[v.version_id],
+            moves[v.version_id],
+            kept[v.version_id],
+            kept[v.version_id].keys() <= repeated,
         )
         for v in ordered
     ]
@@ -635,6 +668,21 @@ def _write_implied_deletes(found: _Reconciled, deps: RuntimeDeps) -> None:
         deps.spool.delete_chunks(version_id, "data", last)
 
 
+def _new_snapshot(found: _Reconciled, deps: RuntimeDeps) -> dict[str, int]:
+    return {**dict(_pairs(deps.spool.get_chunk(found.version.version_id, 0, "snapshot"))), **found.kept}
+
+
+def _says_nothing(dataset: Dataset, found: _Reconciled, deps: RuntimeDeps) -> bool:
+    """Return whether a version turns out to repeat what its partition's last snapshot says.
+
+    Its only candidates are keys it keeps again, because their rows are still turned down in another slice.
+    """
+    if found.changes or found.deletes or found.moves or not found.kept or not found.kept_before:
+        return False
+    old = _last_snapshot(dataset, found.version.partition, deps)
+    return old is not None and dict(_pairs(old)) == _new_snapshot(found, deps)
+
+
 def _write_decision(found: _Reconciled, deps: RuntimeDeps) -> None:
     """Write what `_reconcile` decided over what an earlier attempt wrote, and correct the staged version to match."""
     version = found.version
@@ -643,6 +691,10 @@ def _write_decision(found: _Reconciled, deps: RuntimeDeps) -> None:
         deps.spool.put_chunk(version.version_id, 0, "moves", pa.Table.from_pylist(rows, schema=_MOVES_SCHEMA))
     else:
         deps.spool.delete_chunks(version.version_id, "moves")
+    if found.kept:
+        deps.spool.put_chunk(
+            version.version_id, 0, "snapshot", snapshot_table(_new_snapshot(found, deps).items())
+        )
     if found.candidates:
         _write_implied_deletes(found, deps)
         deps.store.versions.stage(
@@ -707,13 +759,20 @@ def finalize_versions(
     decisions = _reconcile(dataset, current, [v for v in current if v.status == "staged"], deps)
     for found in decisions:
         _check_empty_read(dataset, found, deps)
+    # What says nothing goes only after sealing, so that a repeat decides the same from the same chunks.
+    silent = {f.version.version_id for f in decisions if _says_nothing(dataset, f, deps)}
     for found in decisions:
-        _write_decision(found, deps)
-    sealed = deps.store.versions.seal([v.version_id for v in current], [route.name for route in routes])
+        if found.version.version_id not in silent:
+            _write_decision(found, deps)
+    sealed = deps.store.versions.seal(
+        [v.version_id for v in current if v.version_id not in silent], [route.name for route in routes]
+    )
     if dataset.keep_state:
         for version in sealed:
             _update_state(dataset, version, deps)
     for version in sealed:
         deps.spool.delete_chunks(version.version_id, "candidates")
         deps.spool.delete_chunks(version.version_id, "rejected")
+    for version_id in silent:
+        _discard(version_id, deps)
     return sealed

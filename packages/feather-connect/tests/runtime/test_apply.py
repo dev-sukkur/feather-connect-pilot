@@ -807,7 +807,9 @@ def test_a_sink_rejection_fails_a_replace():
     [v1] = seal_versions(ds, [ROWS], route)
     route.sink.reject("2", "bad sku")
     apply(ds, route, v1)
-    assert status("r", v1) == "failed" and "bad sku" in LEDGER.get("r", v1).last_error
+    error = LEDGER.get("r", v1).last_error
+    assert status("r", v1) == "failed" and "bad sku" in error
+    assert "partial" in error and "already applied" in error and "would drop" not in error
     assert QUARANTINE.list_open() == []
 
 
@@ -969,3 +971,123 @@ def test_a_confirm_later_result_fails_the_delivery():
     [v1] = seal_versions(ds, [ROWS], route)
     apply(ds, route, v1)
     assert status("r", v1) == "failed" and "M2" in LEDGER.get("r", v1).last_error
+
+
+def broken_spool(kind):
+    spool_: Any = DEPS.spool
+    real = spool_.get_chunk
+    failures = []
+
+    def get_chunk(version_id, chunk_no, wanted: Any = "data"):
+        if wanted == kind and (limit := failures[0] if failures else None) != 0:
+            if limit is not None:
+                failures[0] -= 1
+            raise OSError("spool down")
+        return real(version_id, chunk_no, wanted)
+
+    spool_.get_chunk = get_chunk
+    return failures
+
+
+def test_an_error_while_planning_counts_as_a_try_and_fails_the_delivery():
+    ds = dataset()
+    route = replace_route()
+    [v1] = seal_versions(ds, [ROWS], route)
+    broken_spool("snapshot")
+    ref = apply(ds, route, v1)
+    delivery = LEDGER.get("r", v1)
+    assert (ENGINE.status(ref), delivery.status, delivery.attempts) == ("succeeded", "failed", 6)
+    assert "spool down" in delivery.last_error and route.sink.calls == []
+
+
+def test_an_error_while_planning_can_recover():
+    ds = dataset()
+    route = replace_route()
+    [v1] = seal_versions(ds, [ROWS], route)
+    broken_spool("snapshot").append(1)
+    apply(ds, route, v1)
+    delivery = LEDGER.get("r", v1)
+    assert (delivery.status, delivery.attempts) == ("applied", 2)
+    assert statuses("r", v1) == ["running", "pending", "running", "applied"]
+
+
+def moved_and_turned_down(first_rows, second_rows, route):
+    """Deliver `first_rows`, all in `s=a`, then seal a run over both slices. Return the sealed versions by partition."""
+    ds = dataset(
+        fc.strategy.snapshot_diff(),
+        schema=StrictInSlice,
+        keep_state=True,
+        partition=fc.partition.by_fields("s"),
+    )
+    v1 = seal(ds, first_rows, route, run="r1", partition="s=a")[0].version_id
+    apply(ds, route, v1)
+    ds.source.load(second_rows)
+    staged = [
+        version
+        for partition in ("s=a", "s=b")
+        for version in run_extract(ds, "r2", partition, routes=[route], stage_only=True, deps=DEPS)
+    ]
+    sealed = finalize_versions(ds, staged, [route], DEPS)
+    return ds, {version.partition: version.version_id for version in sealed}
+
+
+class StrictInSlice(BaseModel):
+    id: int
+    n: int
+    s: str
+
+
+def test_a_delivered_key_that_moved_and_was_turned_down_fails_the_clear():
+    route = replace_route()
+    live = [{"id": 1, "s": "a", "n": 1}]
+    ds, versions = moved_and_turned_down(live, [{"id": 1, "s": "b", "n": "bad"}], route)
+    apply(ds, route, versions["s=a"])
+    assert status("r", versions["s=a"]) == "failed"
+    assert "first keys: 1" in LEDGER.get("r", versions["s=a"]).last_error
+    assert route.sink.rows == live
+
+
+def test_a_delivered_key_that_moved_and_was_turned_down_fails_the_replace_of_the_rest():
+    route = replace_route()
+    live = [{"id": 1, "s": "a", "n": 1}, {"id": 2, "s": "a", "n": 2}]
+    second = [{"id": 1, "s": "b", "n": "bad"}, {"id": 2, "s": "a", "n": 3}]
+    ds, versions = moved_and_turned_down(live, second, route)
+    apply(ds, route, versions["s=a"])
+    assert status("r", versions["s=a"]) == "failed" and route.sink.rows == live
+
+
+def test_a_map_error_in_a_later_chunk_fails_a_replace_before_anything_is_sent(monkeypatch):
+    monkeypatch.setattr(spool, "CHUNK_ROWS", 2)
+    plain = replace_route()
+    ds = dataset(fc.strategy.snapshot_diff())
+    rows = [{"id": i} for i in range(1, 5)]
+    [v1] = seal_versions(ds, [rows], plain)
+    apply(ds, plain, v1)
+    assert len(plain.sink.calls) == 2
+
+    def boom(r, c):
+        if r["id"] == 4:
+            raise ValueError("no price")
+        return dict(r)
+
+    route = fc.to(plain.sink, name="r", map=boom, mode="replace_partition")
+    v2 = seal(ds, [{"id": i, "v": 1} for i in range(1, 5)], route, run="r2")[0].version_id
+    apply(ds, route, v2)
+    assert status("r", v2) == "failed" and "no price" in LEDGER.get("r", v2).last_error
+    assert len(plain.sink.calls) == 2 and plain.sink.rows == rows
+
+
+def test_a_batch_map_error_in_a_later_chunk_fails_a_replace_before_anything_is_sent(monkeypatch):
+    monkeypatch.setattr(spool, "CHUNK_ROWS", 1)
+
+    @fc.batch_map
+    def boom(table, ctx):
+        if table.column("id").to_pylist() == [2]:
+            raise ValueError("bad batch")
+        return table
+
+    ds = dataset()
+    route = route_to(map=boom, mode="replace_partition")
+    [v1] = seal_versions(ds, [ROWS], route)
+    apply(ds, route, v1)
+    assert status("r", v1) == "failed" and route.sink.calls == []
