@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+<h1>Connections</h1>
+<p class="muted">The systems flows read from and deliver to. A check asks the connector to reach its system; it waits at most {{ timeout }} seconds. Secrets are never shown: only the names of the settings that hold them.</p>
+{% if notice %}<p class="notice notice-{{ notice[0] }}" role="{{ 'alert' if notice[0] == 'bad' else 'status' }}">{{ notice[1] }}</p>{% endif %}
+
+{% if connections %}
+<div class="table-wrap"><table>
+  <caption class="sr-only">Connections of the project</caption>
+  <thead><tr><th scope="col">Connection</th><th scope="col">Connector</th><th scope="col">Site</th><th scope="col">Budget</th><th scope="col">Used by</th><th scope="col">Secret settings</th><th scope="col">Last check</th><th scope="col">Check</th></tr></thead>
+  <tbody>
+  {% for c in connections %}
+    <tr id="connection-{{ c.name }}">
+      <th scope="row">{{ c.name }}</th>
+      <td><code>{{ c.connector }}</code></td>
+      <td>{% if c.site %}{{ c.site }}{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td>{% if c.budget %}{{ c.budget }}{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td>{% for f in c.flows %}<a href="/flows/{{ f | urlencode }}">{{ f }}</a>{% if not loop.last %}, {% endif %}{% else %}<span class="muted">no flow</span>{% endfor %}</td>
+      <td>{% for name in c.credentials %}<code>{{ name }}</code> <span class="secret">***</span>{% if not loop.last %}, {% endif %}{% else %}<span class="muted">none</span>{% endfor %}</td>
+      <td>
+        {% if c.last_check_at %}
+          {% if c.last_check_ok %}<span class="badge tone-ok"><span class="icon" aria-hidden="true">✓</span> OK</span>{% else %}<span class="badge tone-bad"><span class="icon" aria-hidden="true">✕</span> Failed</span>{% endif %}
+          {{ m.time_ago(c.last_check_at) }}
+          {% if c.last_check_message %}<div class="error-text">{{ c.last_check_message }}</div>{% endif %}
+        {% else %}
+          <span class="badge tone-idle"><span class="icon" aria-hidden="true">○</span> Never checked</span>
+        {% endif %}
+      </td>
+      <td>
+        <form method="post" action="/connections/{{ c.name | urlencode }}/check">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit">Check now</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% else %}
+<p class="empty">The project defines no connections.</p>
+{% endif %}
+{% endblock %}

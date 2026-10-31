@@ -187,6 +187,9 @@ class ConnectionStatus:
     budget: str | None
     credentials: tuple[str, ...]
     flows: tuple[str, ...]
+    last_check_at: datetime | None = None
+    last_check_ok: bool | None = None
+    last_check_message: str | None = None  # already redacted when it was stored
 
 
 def _describe(trigger: Trigger) -> str:
@@ -450,6 +453,7 @@ class Reads:
                 for f in flows
                 if name in {d.source.connection for d in f.datasets} | {r.sink.connection for r in f.routes}
             )
+            last = self._store.overrides.get(f"connection:{name}", "last_check") or {}
             found.append(
                 ConnectionStatus(
                     name,
@@ -458,6 +462,9 @@ class Reads:
                     connection.budget,
                     tuple(sorted(connection.secret_refs)),
                     using,
+                    datetime.fromisoformat(last["at"]) if last else None,
+                    last.get("ok"),
+                    last.get("message"),
                 )
             )
         return found

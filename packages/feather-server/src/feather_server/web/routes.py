@@ -18,6 +18,7 @@ from feather_connect.core.errors import PermanentError
 from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.storage.port import DeliveryStatus, Run, delivery_cursor, failure_cursor
 from feather_server.auth import Actor, CurrentActor, csrf_token, require_csrf
+from feather_server.services import actions as action_limits
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.previews import Preview, PreviewError, PreviewExpired, PreviewInvalid
 from feather_server.services.reads import FlowSummary, Reads
@@ -31,6 +32,7 @@ NAV: list[tuple[str, str]] = [
     ("Runs", "/runs"),
     ("Failures", "/failures"),
     ("Quarantine", "/quarantine"),
+    ("Connections", "/connections"),
 ]  # (label, path): a page that exists adds itself here
 _RECENT_RUNS = 8
 _FAILURE_GROUPS = 10
@@ -908,3 +910,28 @@ def quarantine_dismiss(
     except (LookupError, ValueError) as error:  # LookupError: nothing is open for it now
         return _quarantine_page(request, actor, status=409, notice=("bad", str(error)))
     return RedirectResponse("/quarantine?dismissed=1", status_code=303)
+
+
+# Connections.
+
+
+@router.get("/connections", response_class=HTMLResponse)
+def connections(request: Request, actor: CurrentActor) -> HTMLResponse:
+    return render(
+        request,
+        "connections.html",
+        title="Connections",
+        actor=actor,
+        connections=reads(request).connections(),
+        timeout=f"{action_limits.CHECK_TIMEOUT_S:g}",
+        notice=None,
+    )
+
+
+@router.post("/connections/{name}/check", dependencies=[Depends(require_csrf)])
+def check_connection(request: Request, actor: CurrentActor, name: str) -> Response:
+    try:
+        actions(request).check_connection(actor, name)
+    except KeyError:
+        return _not_found(request, f"No connection named {name!r}.")
+    return RedirectResponse(f"/connections#connection-{quote(name, safe='')}", status_code=303)

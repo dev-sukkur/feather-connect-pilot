@@ -6,6 +6,7 @@ whether it worked or not, with the actor and the reason.
 """
 
 import logging
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -46,6 +47,7 @@ _STATUSES: dict[str, tuple[DeliveryStatus, ...]] = {
     "skip": ("failed", "held"),
     "replay": ("applied",),
 }
+CHECK_TIMEOUT_S = 15  # how long a connection check may take before it is given up on
 _SIMULATED = ("simulation.", "memory.")  # connectors of tests and demos, which connect to nothing
 
 
@@ -571,10 +573,27 @@ class Actions:
             "check_connection",
             f"connection:{name}",
             {},
-            lambda: self._check(name),
+            lambda: self._check_in_time(name),
             lambda found: "ok" if found.ok else f"failed: {found.message}",
         )
+        self._store.overrides.set(
+            f"connection:{name}",
+            "last_check",
+            {"at": self._state.clock.now().isoformat(), "ok": result.ok, "message": result.message},
+            actor=actor.name,
+        )
         return result
+
+    def _check_in_time(self, name: str) -> CheckResult:
+        """Run the check, and give up on it after `CHECK_TIMEOUT_S`. A connector that hangs is left running in its own
+        thread: it can't be stopped, but it no longer holds up the request."""
+        found: list[CheckResult] = []
+        worker = threading.Thread(target=lambda: found.append(self._check(name)), daemon=True)
+        worker.start()
+        worker.join(CHECK_TIMEOUT_S)
+        if not found:
+            return CheckResult(False, f"The system did not answer within {CHECK_TIMEOUT_S:g} seconds.")
+        return found[0]
 
     def _check(self, name: str) -> CheckResult:
         connectors = [d.source for f in self._rt.flows() for d in f.datasets if d.source.connection == name]
