@@ -20,8 +20,10 @@ from feather_connect.storage.port import Store
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import at_head, migrate
 from feather_connect.storage.spool import Spool
-from feather_server import auth
+from feather_server import auth, web
 from feather_server.loops import LoopRunner, default_loops
+from feather_server.services.actions import Actions
+from feather_server.services.reads import Reads
 from feather_server.settings import Settings
 
 
@@ -110,7 +112,14 @@ def create_app(
 
     app = FastAPI(title="Feather Connect", lifespan=lifespan)
     app.state.feather = state
+    if not state.settings.secret_key:
+        raise ValueError(
+            "the server needs a secret key to sign sessions and confirmations: set FEATHER_SECRET_KEY"
+        )
+    app.state.reads = Reads(state)
+    app.state.actions = Actions(state)
     auth.install(app, state)
+    web.install(app, state)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

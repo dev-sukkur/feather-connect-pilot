@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from feather_connect.clock import FrozenClock
 from feather_server.app import AppState, create_app
 from feather_server.auth import (
+    CSP,
     CurrentActor,
     hash_password,
     issue_token,
@@ -261,6 +262,6 @@ def test_passwords_hash_and_verify() -> None:
 
 def test_the_login_page_sets_a_csp_and_no_inline_script(client: TestClient) -> None:
     response = client.get("/login")
-    assert response.headers["content-security-policy"] == "default-src 'self'"
+    assert response.headers["content-security-policy"] == CSP
     assert "<script" not in response.text and "style=" not in response.text
     assert response.headers["x-content-type-options"] == "nosniff"

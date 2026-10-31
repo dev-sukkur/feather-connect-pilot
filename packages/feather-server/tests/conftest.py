@@ -1,7 +1,10 @@
+import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from feather_connect.clock import FrozenClock
 from feather_connect.engine.local import LocalEngine
@@ -9,8 +12,8 @@ from feather_connect.project import Project
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.spool import MemorySpool
-from feather_server.app import AppState
-from feather_server.auth import Actor
+from feather_server.app import AppState, create_app
+from feather_server.auth import Actor, hash_password
 from feather_server.settings import Settings
 from feather_server.testing import SECRET, World, build_world
 
@@ -26,7 +29,9 @@ def state(clock: FrozenClock) -> AppState:
     store, spool, engine = MemoryStore(clock), MemorySpool(clock), LocalEngine(clock)
     runtime = Runtime([], store, spool, engine, code_sha="sha", clock=clock)
     project = Project("demo", Path("."), "dev", (), {}, {}, {"timezone": "UTC"}, "sha")
-    return AppState(Settings(), project, store, spool, engine, runtime, clock=clock)
+    return AppState(
+        Settings(secret_key="test-secret-key"), project, store, spool, engine, runtime, clock=clock
+    )
 
 
 @pytest.fixture
@@ -43,3 +48,36 @@ def ann() -> Actor:
 @pytest.fixture
 def bob() -> Actor:
     return Actor("token", "bob-ci")
+
+
+PASSWORD = "correct horse battery staple"
+
+
+@pytest.fixture
+def store(world: World) -> MemoryStore:
+    return world.store
+
+
+@pytest.fixture
+def client(world: World) -> TestClient:
+    """A browser signed in as `op` to the dashboard of the world. Redirects are not followed."""
+    world.store.users.create_user("op", hash_password(PASSWORD))
+    app = create_app(state=world.state, loops=lambda s: [])
+    browser = TestClient(app, base_url="http://localhost:8000", follow_redirects=False)
+    login_page = browser.get("/login").text
+    match = re.search(r'name="csrf_token" value="([^"]+)"', login_page)
+    assert match
+    browser.post("/login", data={"username": "op", "password": PASSWORD, "csrf_token": match.group(1)})
+    return browser
+
+
+@pytest.fixture
+def csrf(client: TestClient) -> Callable[[], str]:
+    """The CSRF token of the signed-in session, read from a page as a browser would."""
+
+    def token() -> str:
+        found = re.search(r'<meta name="csrf-token" content="([^"]+)"', client.get("/").text)
+        assert found
+        return found.group(1)
+
+    return token

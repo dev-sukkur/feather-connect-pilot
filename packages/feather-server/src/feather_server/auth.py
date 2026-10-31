@@ -44,6 +44,7 @@ FAILURE_WINDOW = timedelta(minutes=15)
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _MAX_NAME = 200
+CSP = "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
 _THROTTLE_KEYS = 10_000  # failures of more distinct users than this are forgotten early, to bound memory
 
 _templates = Jinja2Templates(directory=Path(__file__).parent / "web" / "templates")
@@ -314,7 +315,7 @@ def install(app: FastAPI, state: "AppState") -> None:
                 samesite="lax",
                 path="/",
             )
-        response.headers.setdefault("Content-Security-Policy", "default-src 'self'")
+        response.headers.setdefault("Content-Security-Policy", CSP)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "same-origin")

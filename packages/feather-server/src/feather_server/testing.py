@@ -131,6 +131,12 @@ def build_world(root: Path, clock: FrozenClock) -> World:
     runtime = Runtime(project.flows, store, spool, engine, code_sha="sha", clock=clock)
     engine.register(runtime.tasks())
     state = AppState(
-        Settings(secret_key="test-secret-key"), project, store, spool, engine, runtime, clock=clock
+        Settings(secret_key="test-secret-key", engine="local"),
+        project,
+        store,
+        spool,
+        engine,
+        runtime,
+        clock=clock,
     )
     return World(state, engine, clock, Actions(state), Reads(state))

@@ -62,7 +62,7 @@ def fresh_url(pg_url: str) -> Iterator[str]:
 
 
 def served(state: AppState, database_url: str) -> TestClient:
-    state.settings = Settings(database_url=database_url)
+    state.settings = Settings(database_url=database_url, secret_key="test-secret-key")
     return TestClient(create_app(state=state, loops=no_loops))
 
 
@@ -131,7 +131,7 @@ def test_create_app_builds_its_state_from_settings(
     (tmp_path / "feather.yaml").write_text("name: demo\n")
     (tmp_path / "env").mkdir()
     (tmp_path / "env" / "dev.yaml").write_text("")
-    settings = Settings(database_url=pg_url, project=tmp_path, engine=engine)  # type: ignore[arg-type]
+    settings = Settings(database_url=pg_url, project=tmp_path, engine=engine, secret_key="test-secret-key")  # type: ignore[arg-type]
     app = create_app(settings, loops=no_loops)
     with TestClient(app) as client:
         assert client.get("/readyz").json() == {"database": "ok", "schema": "current"}

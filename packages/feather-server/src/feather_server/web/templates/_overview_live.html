@@ -1,0 +1,146 @@
+{% import "_macros.html" as m with context %}
+<div id="live" hx-get="/" hx-trigger="every 10s" hx-swap="outerHTML">
+  <p class="muted updated">Updated <time datetime="{{ now.isoformat() }}">{{ now | stamp }}</time>. This page refreshes itself every 10 seconds.</p>
+
+  <section aria-labelledby="h-numbers">
+    <h2 id="h-numbers" class="visually-hidden">Numbers</h2>
+    <ul class="tiles">
+      <li class="tile{% if overview.failed_deliveries %} tile-bad{% endif %}"><h3>Failed deliveries</h3><p class="n">{{ overview.failed_deliveries }}</p></li>
+      <li class="tile{% if overview.failed_runs %} tile-bad{% endif %}"><h3>Failed runs</h3><p class="n">{{ overview.failed_runs }}</p></li>
+      <li class="tile"><h3>Running now</h3><p class="n">{{ overview.running_runs }}</p></li>
+      <li class="tile{% if overview.open_quarantine %} tile-warn{% endif %}"><h3>Open quarantine</h3><p class="n">{{ overview.open_quarantine }}</p></li>
+      <li class="tile{% if overview.paused %} tile-warn{% endif %}"><h3>Paused</h3><p class="n">{{ overview.paused | length }}</p></li>
+    </ul>
+  </section>
+
+  <section aria-labelledby="h-attention">
+    <h2 id="h-attention">Needs attention</h2>
+    {% if attention or overview.paused %}
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">Flow</th><th scope="col">What is wrong</th><th scope="col">Last run</th></tr></thead>
+      <tbody>
+      {% for item in attention %}
+        <tr>
+          <th scope="row"><a href="/flows/{{ item.flow.name | urlencode }}">{{ item.flow.name }}</a></th>
+          <td>
+            {% if item.flow.last_run and item.flow.last_run.status == "failed" %}{{ m.status_badge("failed") }} last run{% endif %}
+            {% if item.failed_routes %}{{ m.status_badge("failed") }} deliveries to {{ item.failed_routes | join(", ") }}{% endif %}
+          </td>
+          <td>{% if item.flow.last_run %}{{ m.time_ago(item.flow.last_run.created_at) }}{% else %}<span class="muted">never</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      {% for target in overview.paused %}
+        <tr><th scope="row">{{ target }}</th><td>{{ m.status_badge("paused") }}</td><td></td></tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <p class="empty"><span class="icon" aria-hidden="true">✓</span> Nothing needs attention.</p>
+    {% endif %}
+  </section>
+
+  {% if groups %}
+  <section aria-labelledby="h-failures">
+    <h2 id="h-failures">Failed deliveries by error</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">Route</th><th scope="col">Error</th><th scope="col" class="num">Deliveries</th></tr></thead>
+      <tbody>
+      {% for group in groups %}
+        <tr>
+          <th scope="row">{{ group.route }}</th>
+          <td>{{ m.status_badge("failed") }} <strong>{{ group.error_class }}</strong>: <span class="error-text">{{ group.message }}</span></td>
+          <td class="num">{{ group.count }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+  </section>
+  {% endif %}
+
+  <section aria-labelledby="h-runs">
+    <h2 id="h-runs">Recent runs{% if durations | length > 1 %} <span class="trend" title="How long the last runs took">{{ sparkline(durations) }}</span>{% endif %}</h2>
+    {% if runs %}
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">Run</th><th scope="col">Flow</th><th scope="col">Started by</th><th scope="col">Status</th><th scope="col">Started</th></tr></thead>
+      <tbody>
+      {% for run in runs %}
+        <tr>
+          <th scope="row"><code>{{ run.run_id[:8] }}</code></th>
+          <td><a href="/flows/{{ run.flow | urlencode }}">{{ run.flow }}</a></td>
+          <td>{{ run.trigger }} · {{ run.actor }}</td>
+          <td>{{ m.status_badge(run.status) }}</td>
+          <td>{{ m.time_ago(run.created_at) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <p class="empty">No runs yet.</p>
+    {% endif %}
+  </section>
+
+  <section aria-labelledby="h-stale">
+    <h2 id="h-stale">Late datasets</h2>
+    {% if overview.stale_datasets %}
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">Dataset</th><th scope="col">Flow</th><th scope="col">Last read</th><th scope="col">Expected every</th></tr></thead>
+      <tbody>
+      {% for item in overview.stale_datasets %}
+        <tr>
+          <th scope="row">{{ item.dataset }}</th>
+          <td><a href="/flows/{{ item.flow | urlencode }}">{{ item.flow }}</a></td>
+          <td>{% if item.last_sealed_at %}{{ m.time_ago(item.last_sealed_at) }}{% else %}<strong>never read</strong>{% endif %}</td>
+          <td>{{ item.expected_every | span }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <p class="empty"><span class="icon" aria-hidden="true">✓</span> Every dataset is up to date.</p>
+    {% endif %}
+  </section>
+
+  <section aria-labelledby="h-budgets">
+    <h2 id="h-budgets">Budgets</h2>
+    {% if overview.budgets %}
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">Budget</th><th scope="col">Window</th><th scope="col">Used</th></tr></thead>
+      <tbody>
+      {% for budget in overview.budgets %}{% for window in budget.windows %}
+        <tr>
+          <th scope="row">{% if loop.first %}{{ budget.name }}{% endif %}</th>
+          <td>per {{ window.seconds | span }}</td>
+          <td>{{ meter(window.used, window.units) }}</td>
+        </tr>
+      {% endfor %}{% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <p class="empty">No budgets are defined.</p>
+    {% endif %}
+  </section>
+
+  <section aria-labelledby="h-engine">
+    <h2 id="h-engine">Engine and workers</h2>
+    <p>Engine: <strong>{{ engine }}</strong>.
+      {% if engine == "local" %}It runs inside this server.
+      {% elif workers_alive %}{{ workers_alive }} worker{{ "s" if workers_alive != 1 }} alive.
+      {% else %}{{ m.status_badge("dead") }} No worker is alive, so nothing will run.{% endif %}</p>
+    {% if overview.workers %}
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">Worker</th><th scope="col">State</th><th scope="col">Seen</th><th scope="col" class="num">Slots</th><th scope="col">Code</th></tr></thead>
+      <tbody>
+      {% for worker in overview.workers %}
+        <tr>
+          <th scope="row">{{ worker.worker_id }}</th>
+          <td>{{ m.status_badge(worker.state) }}</td>
+          <td>{{ m.time_ago(worker.last_seen) }}</td>
+          <td class="num">{{ worker.slots }}</td>
+          <td><code>{{ worker.code_sha[:8] }}</code></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% endif %}
+  </section>
+</div>
