@@ -41,6 +41,10 @@ _TENANT = "default"
 _UTC = "UTC"
 
 
+def _no_config(connection: str) -> Mapping[str, Any]:
+    return {}
+
+
 def _apply_key(delivery: Delivery) -> str:
     """Return the key of the delivery's task: the same state gets the same task, and a retry or a replay a new one."""
     return f"apply:{delivery.route}:{delivery.version_id}:{delivery.replays}:{delivery.retries}"
@@ -54,6 +58,10 @@ class Runtime:
 
     `budgets` maps a connection to the budget its calls are metered by, and the default context gives such a connection
     a `BudgetHandle` at the priority of its datasets and routes. `sleep` is how a handle spends a short wait.
+
+    `config_of` gives the settings of a connection, secrets resolved, for the default context to hand to its
+    connector; it is called each time a context is made, so a secret is never kept. `timezone` is the IANA name of
+    the time zone that contexts carry.
     """
 
     def __init__(
@@ -68,6 +76,8 @@ class Runtime:
         make_context: Callable[[str], Context] | None = None,
         budgets: Mapping[str, str] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        config_of: Callable[[str], Mapping[str, Any]] | None = None,
+        timezone: str = _UTC,
     ) -> None:
         self._engine = engine
         self._clock: Clock = SystemClock() if clock is None else clock
@@ -83,6 +93,8 @@ class Runtime:
                 self._add(self._routes, "route", route.name, route)
         self._budgets = dict(budgets or {})
         self._sleep = sleep
+        self._config_of = config_of or _no_config
+        self._timezone = timezone
         self._priorities = self._connection_priorities()
 
     @staticmethod
@@ -109,7 +121,10 @@ class Runtime:
         if connection in self._budgets:
             priority = self._priorities.get(connection, "normal")
             handle = BudgetHandle(self._deps.store.budgets, self._budgets[connection], priority, self._sleep)
-        return Context({}, logging.getLogger(connection), self._clock.now(), _UTC, budget=handle)
+        config = self._config_of(connection)
+        return Context(
+            config, logging.getLogger(connection), self._clock.now(), self._timezone, budget=handle
+        )
 
     def flow(self, name: str) -> Flow:
         """Return the flow called `name`. Raises `KeyError` if there is none, as `dataset` and `route` do."""

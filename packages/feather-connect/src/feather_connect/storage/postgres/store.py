@@ -10,7 +10,7 @@ from collections.abc import Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
-from typing import Any, LiteralString
+from typing import Any, Literal, LiteralString
 
 import psycopg
 from psycopg.rows import DictRow
@@ -23,14 +23,17 @@ from feather_connect.storage.port import (
     Attempt,
     BudgetSpec,
     BudgetStore,
+    CatalogStore,
     Delivery,
     DeliveryStatus,
+    FlowRow,
     Grant,
     Ledger,
     Priority,
     QuarantineRow,
     QuarantineStore,
     RecordStateStore,
+    RouteRow,
     Run,
     RunJournal,
     StateRow,
@@ -42,6 +45,9 @@ from feather_connect.storage.port import (
     VersionStore,
     Window,
     WindowUsage,
+    WorkerRegistry,
+    WorkerRow,
+    WorkerState,
     check_transition,
 )
 from feather_connect.storage.postgres.support import Pool, ensure_partition
@@ -904,6 +910,153 @@ class PostgresBudgets(BudgetStore):
         return [WindowUsage(Window(r["units"], r["seconds"]), float(r["units"] - r["tokens"])) for r in rows]
 
 
+class _Catalog(CatalogStore):
+    """The catalogue tables hold a row for each (name, code SHA). The latest registration of a name is current,
+    unless the name is retired, which marks every row of it."""
+
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def sync(self, project: str, code_sha: str, specs: Mapping[str, Any]) -> None:
+        db = self._db
+        now = db.clock.now()
+        names = list(specs)
+        with db.tx() as conn:
+            conn.execute(
+                "select pg_advisory_xact_lock(hashtext(%s))", (f"feather.catalog:{db.tenant}:{project}",)
+            )
+            conn.execute(
+                """insert into feather.project (tenant_id, name, code_sha, registered_at) values (%s, %s, %s, %s)
+                   on conflict (tenant_id, name, code_sha) do update set registered_at = excluded.registered_at""",
+                (db.tenant, project, code_sha, now),
+            )
+            gone = conn.execute(
+                """update feather.flow set retired_at = coalesce(retired_at, %s)
+                   where tenant_id = %s and project = %s and name <> all(%s) returning name""",
+                (now, db.tenant, project, names),
+            ).fetchall()
+            conn.execute(
+                "update feather.route set retired_at = coalesce(retired_at, %s) where tenant_id = %s and flow = any(%s)",
+                (now, db.tenant, [r["name"] for r in gone]),
+            )
+            for name, spec in specs.items():
+                kept = [route["name"] for route in spec["routes"]]
+                conn.execute(
+                    """update feather.route set retired_at = coalesce(retired_at, %s)
+                       where tenant_id = %s and flow = %s and name <> all(%s)""",
+                    (now, db.tenant, name, kept),
+                )
+                conn.execute(
+                    """insert into feather.flow (tenant_id, name, code_sha, project, spec, registered_at)
+                       values (%s, %s, %s, %s, %s, %s)
+                       on conflict (tenant_id, name, code_sha) do update
+                       set project = excluded.project, spec = excluded.spec,
+                           registered_at = excluded.registered_at, retired_at = null""",
+                    (db.tenant, name, code_sha, project, _json(spec), now),
+                )
+                # A name that comes back is current again, whichever SHA retired it.
+                conn.execute(
+                    "update feather.flow set retired_at = null where tenant_id = %s and name = %s",
+                    (db.tenant, name),
+                )
+                for route in spec["routes"]:
+                    conn.execute(
+                        """insert into feather.route (tenant_id, name, code_sha, flow, spec, registered_at)
+                           values (%s, %s, %s, %s, %s, %s)
+                           on conflict (tenant_id, name, code_sha) do update
+                           set flow = excluded.flow, spec = excluded.spec,
+                               registered_at = excluded.registered_at, retired_at = null""",
+                        (db.tenant, route["name"], code_sha, name, _json(route), now),
+                    )
+                    conn.execute(
+                        "update feather.route set retired_at = null where tenant_id = %s and name = %s",
+                        (db.tenant, route["name"]),
+                    )
+
+    def flows(self) -> list[FlowRow]:
+        return [_flow_row(r) for r in self._latest("flow")]
+
+    def flow(self, name: str, code_sha: str | None = None) -> FlowRow:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select * from feather.flow where tenant_id = %s and name = %s and (%s::text is null or code_sha = %s)
+                   order by registered_at desc limit 1""",
+                (self._db.tenant, name, code_sha, code_sha),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"no flow {name!r}" + ("" if code_sha is None else f" at {code_sha!r}"))
+        return _flow_row(row)
+
+    def routes(self) -> list[RouteRow]:
+        return [_route_row(r) for r in self._latest("route")]
+
+    def _latest(self, table: Literal["flow", "route"]) -> list[Row]:
+        query: LiteralString = (
+            "select * from (select distinct on (name) * from feather.flow where tenant_id = %s order by name, registered_at desc) latest "
+            "where retired_at is null order by name"
+            if table == "flow"
+            else "select * from (select distinct on (name) * from feather.route where tenant_id = %s order by name, registered_at desc) latest "
+            "where retired_at is null order by name"
+        )
+        with self._db.tx() as conn:
+            return conn.execute(query, (self._db.tenant,)).fetchall()
+
+
+def _flow_row(r: Row) -> FlowRow:
+    return FlowRow(r["name"], r["project"], r["code_sha"], r["spec"], r["registered_at"])
+
+
+def _route_row(r: Row) -> RouteRow:
+    return RouteRow(r["name"], r["flow"], r["code_sha"], r["spec"], r["registered_at"])
+
+
+def _worker(r: Row) -> WorkerRow:
+    return WorkerRow(r["worker_id"], r["labels"], r["code_sha"], r["slots"], r["last_seen"], r["state"])
+
+
+class _Workers(WorkerRegistry):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def heartbeat(self, worker_id: str, labels: Mapping[str, str], code_sha: str, slots: int) -> None:
+        with self._db.tx() as conn:
+            conn.execute(
+                """insert into feather.worker (tenant_id, worker_id, labels, code_sha, slots, last_seen, state)
+                   values (%s, %s, %s, %s, %s, %s, 'alive')
+                   on conflict (tenant_id, worker_id) do update
+                   set labels = excluded.labels, code_sha = excluded.code_sha, slots = excluded.slots,
+                       last_seen = excluded.last_seen,
+                       state = case when feather.worker.state = 'draining' then 'draining' else 'alive' end""",
+                (self._db.tenant, worker_id, Jsonb(dict(labels)), code_sha, slots, self._db.clock.now()),
+            )
+
+    def list_workers(self) -> list[WorkerRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                "select * from feather.worker where tenant_id = %s order by worker_id", (self._db.tenant,)
+            ).fetchall()
+        return [_worker(r) for r in rows]
+
+    def stale(self, older_than: timedelta) -> list[WorkerRow]:
+        cutoff = self._db.clock.now() - older_than
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.worker where tenant_id = %s and state <> 'dead' and last_seen < %s
+                   order by worker_id""",
+                (self._db.tenant, cutoff),
+            ).fetchall()
+        return [_worker(r) for r in rows]
+
+    def mark(self, worker_id: str, state: WorkerState) -> None:
+        with self._db.tx() as conn:
+            done = conn.execute(
+                "update feather.worker set state = %s where tenant_id = %s and worker_id = %s",
+                (state, self._db.tenant, worker_id),
+            )
+            if done.rowcount == 0:
+                raise KeyError(f"no worker {worker_id!r}")
+
+
 class PostgresStore(Store):
     """A `Store` that keeps everything in Postgres, for one tenant. `clock` defaults to the system clock."""
 
@@ -916,4 +1069,6 @@ class PostgresStore(Store):
             state=_State(db),
             quarantine=_Quarantine(db),
             budgets=PostgresBudgets(db),
+            catalog=_Catalog(db),
+            workers=_Workers(db),
         )

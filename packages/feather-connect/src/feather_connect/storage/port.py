@@ -13,6 +13,7 @@ Priority = Literal["low", "normal", "high"]
 VersionStatus = Literal["staged", "sealed"]
 DeliveryStatus = Literal["pending", "running", "applied", "failed", "held", "skipped", "compensated"]
 QuarantineStatus = Literal["open", "superseded"]
+WorkerState = Literal["alive", "draining", "dead"]
 
 
 class VersionSealed(Exception):
@@ -431,6 +432,84 @@ class BudgetStore(Protocol):
 
 
 @dataclass(frozen=True)
+class FlowRow:
+    """A flow as the catalogue knows it for one code version. `spec` is `Flow.spec_dict()`."""
+
+    name: str
+    project: str
+    code_sha: str
+    spec: Mapping[str, Any]
+    registered_at: datetime
+
+
+@dataclass(frozen=True)
+class RouteRow:
+    """A route of `flow` as the catalogue knows it for one code version. `spec` is its entry in the flow's."""
+
+    name: str
+    flow: str
+    code_sha: str
+    spec: Mapping[str, Any]
+    registered_at: datetime
+
+
+@dataclass(frozen=True)
+class WorkerRow:
+    """A worker and its latest heartbeat. `state` is alive, draining (finishing its work) or dead."""
+
+    worker_id: str
+    labels: Mapping[str, str]
+    code_sha: str
+    slots: int
+    last_seen: datetime
+    state: WorkerState
+
+
+class CatalogStore(Protocol):
+    """The flows and routes registered from code. A row is kept for each code SHA (design 6.11)."""
+
+    def sync(self, project: str, code_sha: str, specs: Mapping[str, Any]) -> None:
+        """Register the flows of `project` at `code_sha`; `specs` maps each flow name to its `Flow.spec_dict()`.
+
+        Syncing a SHA again replaces its rows and makes them the latest. A flow the project had before and `specs`
+        lacks is retired, along with its routes, until a sync brings it back.
+        """
+        ...
+
+    def flows(self) -> list[FlowRow]:
+        """Return the latest registration of each flow that isn't retired, by name."""
+        ...
+
+    def flow(self, name: str, code_sha: str | None = None) -> FlowRow:
+        """Return the flow at `code_sha`, or its latest registration. Raises `KeyError` if there is none."""
+        ...
+
+    def routes(self) -> list[RouteRow]:
+        """Return the latest registration of each route that isn't retired, by name."""
+        ...
+
+
+class WorkerRegistry(Protocol):
+    """The workers that are connected, from their heartbeats (design 6.12)."""
+
+    def heartbeat(self, worker_id: str, labels: Mapping[str, str], code_sha: str, slots: int) -> None:
+        """Record that the worker is there now. A draining worker stays draining, and a dead one is alive again."""
+        ...
+
+    def list_workers(self) -> list[WorkerRow]:
+        """Return every worker, by id."""
+        ...
+
+    def stale(self, older_than: timedelta) -> list[WorkerRow]:
+        """Return the workers not marked dead whose last heartbeat is more than `older_than` ago, by id."""
+        ...
+
+    def mark(self, worker_id: str, state: WorkerState) -> None:
+        """Set the worker's state. Raises `KeyError` for a worker that never sent a heartbeat."""
+        ...
+
+
+@dataclass(frozen=True)
 class Store:
     """The ports together. A backend provides one of these."""
 
@@ -440,3 +519,5 @@ class Store:
     state: RecordStateStore
     quarantine: QuarantineStore
     budgets: BudgetStore
+    catalog: CatalogStore
+    workers: WorkerRegistry

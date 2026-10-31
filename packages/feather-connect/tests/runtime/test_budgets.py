@@ -139,7 +139,16 @@ class World:
         self.clock = FrozenClock(T0)
         base = MemoryStore(self.clock)
         self.spy = SpyBudgets(base.budgets, self.clock)
-        self.store = Store(base.runs, base.versions, base.ledger, base.state, base.quarantine, self.spy)
+        self.store = Store(
+            base.runs,
+            base.versions,
+            base.ledger,
+            base.state,
+            base.quarantine,
+            self.spy,
+            base.catalog,
+            base.workers,
+        )
         self.store.budgets.define(spec)
         self.engine = LocalEngine(self.clock)
         self.runtime = Runtime(

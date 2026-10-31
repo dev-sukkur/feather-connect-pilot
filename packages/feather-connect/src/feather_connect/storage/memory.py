@@ -1,5 +1,6 @@
 """The store in memory, for tests and the in-process engine. It passes the same `StoreContract` as any backend."""
 
+import copy
 import math
 import threading
 from collections.abc import Iterable, Mapping, Sequence
@@ -15,14 +16,17 @@ from feather_connect.storage.port import (
     Attempt,
     BudgetSpec,
     BudgetStore,
+    CatalogStore,
     Delivery,
     DeliveryStatus,
+    FlowRow,
     Grant,
     Ledger,
     Priority,
     QuarantineRow,
     QuarantineStore,
     RecordStateStore,
+    RouteRow,
     Run,
     RunJournal,
     StateRow,
@@ -33,6 +37,9 @@ from feather_connect.storage.port import (
     VersionSealed,
     VersionStore,
     WindowUsage,
+    WorkerRegistry,
+    WorkerRow,
+    WorkerState,
     check_transition,
 )
 
@@ -59,6 +66,11 @@ class _Data:
     quarantine: dict[tuple[str | None, str | None, str, str | None], QuarantineRow] = field(
         default_factory=dict[tuple[str | None, str | None, str, str | None], QuarantineRow]
     )
+
+    flows: list[FlowRow] = field(default_factory=list[FlowRow])
+    routes: list[RouteRow] = field(default_factory=list[RouteRow])
+    retired: set[str] = field(default_factory=set[str])  # names of flows, and of routes, that are retired
+    workers: dict[str, WorkerRow] = field(default_factory=dict[str, WorkerRow])
 
 
 class _Runs(RunJournal):
@@ -531,6 +543,81 @@ class _Budgets(BudgetStore):
             ]
 
 
+def _latest[R: (FlowRow, RouteRow)](rows: Sequence[R], retired: set[str]) -> list[R]:
+    """Return the latest row of each name that isn't retired, by name. A later row wins a tie."""
+    latest: dict[str, R] = {}
+    for row in rows:
+        if row.name in retired:
+            continue
+        if row.name not in latest or row.registered_at >= latest[row.name].registered_at:
+            latest[row.name] = row
+    return sorted(latest.values(), key=lambda r: r.name)
+
+
+class _Catalog(CatalogStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def sync(self, project: str, code_sha: str, specs: Mapping[str, Any]) -> None:
+        d = self._d
+        with d.lock:
+            now = d.clock.now()
+            gone = {f.name for f in d.flows if f.project == project and f.name not in specs}
+            d.retired |= gone | {r.name for r in d.routes if r.flow in gone}
+            d.flows = [f for f in d.flows if not (f.name in specs and f.code_sha == code_sha)]
+            d.routes = [r for r in d.routes if not (r.flow in specs and r.code_sha == code_sha)]
+            for name, spec in specs.items():
+                kept = {route["name"] for route in spec["routes"]}
+                d.retired |= {r.name for r in d.routes if r.flow == name and r.name not in kept}
+                d.retired.discard(name)
+                d.flows.append(FlowRow(name, project, code_sha, copy.deepcopy(spec), now))
+                for route in spec["routes"]:
+                    d.retired.discard(route["name"])
+                    d.routes.append(RouteRow(route["name"], name, code_sha, copy.deepcopy(route), now))
+
+    def flows(self) -> list[FlowRow]:
+        with self._d.lock:
+            return _latest(self._d.flows, self._d.retired)
+
+    def flow(self, name: str, code_sha: str | None = None) -> FlowRow:
+        with self._d.lock:
+            rows = [f for f in self._d.flows if f.name == name and code_sha in (None, f.code_sha)]
+            if not rows:
+                raise KeyError(f"no flow {name!r}" + ("" if code_sha is None else f" at {code_sha!r}"))
+            return max(rows, key=lambda f: f.registered_at)
+
+    def routes(self) -> list[RouteRow]:
+        with self._d.lock:
+            return _latest(self._d.routes, self._d.retired)
+
+
+class _Workers(WorkerRegistry):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def heartbeat(self, worker_id: str, labels: Mapping[str, str], code_sha: str, slots: int) -> None:
+        with self._d.lock:
+            before = self._d.workers.get(worker_id)
+            state: WorkerState = "draining" if before is not None and before.state == "draining" else "alive"
+            self._d.workers[worker_id] = WorkerRow(
+                worker_id, dict(labels), code_sha, slots, self._d.clock.now(), state
+            )
+
+    def list_workers(self) -> list[WorkerRow]:
+        with self._d.lock:
+            return [self._d.workers[w] for w in sorted(self._d.workers)]
+
+    def stale(self, older_than: timedelta) -> list[WorkerRow]:
+        cutoff = self._d.clock.now() - older_than
+        return [w for w in self.list_workers() if w.state != "dead" and w.last_seen < cutoff]
+
+    def mark(self, worker_id: str, state: WorkerState) -> None:
+        with self._d.lock:
+            if worker_id not in self._d.workers:
+                raise KeyError(f"no worker {worker_id!r}")
+            self._d.workers[worker_id] = replace(self._d.workers[worker_id], state=state)
+
+
 class MemoryStore(Store):
     """A `Store` that keeps everything in memory. `clock` defaults to the system clock."""
 
@@ -543,4 +630,6 @@ class MemoryStore(Store):
             state=_State(data),
             quarantine=_Quarantine(data),
             budgets=_Budgets(data),
+            catalog=_Catalog(data),
+            workers=_Workers(data),
         )

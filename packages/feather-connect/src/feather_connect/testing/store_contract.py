@@ -650,3 +650,88 @@ class StoreContract(SpoolContract):
             StateRow("k", "p", 1, {"x": 1}, "v1"),
         ]
         assert pickle.loads(pickle.dumps(values)) == values
+
+    # catalogue
+
+    def test_catalog_keeps_specs_per_sha(self, store: Store, clock: FrozenClock):
+        store.catalog.sync("acme", "sha1", {"f": flow_spec("f", ["a", "b"])})
+        clock.advance(timedelta(minutes=1))
+        store.catalog.sync("acme", "sha2", {"f": flow_spec("f", ["a", "c"], owner="ann")})
+        assert store.catalog.flow("f").code_sha == "sha2" and store.catalog.flow("f").spec["owner"] == "ann"
+        old = store.catalog.flow("f", "sha1")
+        assert (old.code_sha, old.project, old.spec["owner"]) == ("sha1", "acme", None)
+        assert [r.name for r in store.catalog.routes()] == ["a", "c"]  # b is not in the latest code
+        assert [(r.name, r.flow, r.code_sha) for r in store.catalog.routes()] == [
+            ("a", "f", "sha2"),
+            ("c", "f", "sha2"),
+        ]
+        with pytest.raises(KeyError):
+            store.catalog.flow("f", "nope")
+        with pytest.raises(KeyError):
+            store.catalog.flow("nope")
+
+    def test_catalog_sync_again_makes_that_sha_the_latest(self, store: Store, clock: FrozenClock):
+        store.catalog.sync("acme", "sha1", {"f": flow_spec("f", ["a"])})
+        clock.advance(timedelta(minutes=1))
+        store.catalog.sync("acme", "sha2", {"f": flow_spec("f", ["a"])})
+        clock.advance(timedelta(minutes=1))
+        store.catalog.sync("acme", "sha1", {"f": flow_spec("f", ["a"], owner="bob")})  # a rollback
+        assert store.catalog.flow("f").code_sha == "sha1" and store.catalog.flow("f").spec["owner"] == "bob"
+        assert [f.code_sha for f in store.catalog.flows()] == ["sha1"]
+
+    def test_catalog_retires_what_a_project_no_longer_has(self, store: Store, clock: FrozenClock):
+        store.catalog.sync("acme", "sha1", {"f": flow_spec("f", ["a"]), "g": flow_spec("g", ["b"])})
+        store.catalog.sync("other", "sha9", {"h": flow_spec("h", ["c"])})
+        clock.advance(timedelta(minutes=1))
+        store.catalog.sync("acme", "sha2", {"f": flow_spec("f", ["a"])})
+        assert [f.name for f in store.catalog.flows()] == ["f", "h"]
+        assert [r.name for r in store.catalog.routes()] == ["a", "c"]
+        assert store.catalog.flow("g").code_sha == "sha1"  # still there to look at
+        clock.advance(timedelta(minutes=1))
+        store.catalog.sync("acme", "sha3", {"f": flow_spec("f", ["a"]), "g": flow_spec("g", ["b"])})
+        assert [f.name for f in store.catalog.flows()] == ["f", "g", "h"]
+        assert [r.name for r in store.catalog.routes()] == ["a", "b", "c"]
+
+    # workers
+
+    def test_workers_heartbeat_and_list(self, store: Store, clock: FrozenClock):
+        store.workers.heartbeat("w2", {"pool": "x"}, "sha2", 4)
+        store.workers.heartbeat("w1", {}, "sha1", 8)
+        clock.advance(timedelta(seconds=5))
+        store.workers.heartbeat("w1", {}, "sha1", 8)
+        rows = store.workers.list_workers()
+        assert [(w.worker_id, w.labels, w.code_sha, w.slots, w.state) for w in rows] == [
+            ("w1", {}, "sha1", 8, "alive"),
+            ("w2", {"pool": "x"}, "sha2", 4, "alive"),
+        ]  # workers on different SHAs are both there
+        assert rows[0].last_seen == clock.now() and rows[1].last_seen == T0
+
+    def test_stale_lists_workers_past_the_timeout(self, store: Store, clock: FrozenClock):
+        store.workers.heartbeat("old", {}, "s", 1)
+        store.workers.heartbeat("gone", {}, "s", 1)
+        store.workers.mark("gone", "dead")
+        clock.advance(timedelta(seconds=40))
+        store.workers.heartbeat("new", {}, "s", 1)
+        assert [w.worker_id for w in store.workers.stale(timedelta(seconds=30))] == ["old"]
+        assert store.workers.stale(timedelta(seconds=41)) == []
+
+    def test_a_draining_worker_stays_draining_and_a_dead_one_comes_back(self, store: Store):
+        store.workers.heartbeat("w", {}, "s", 1)
+        store.workers.mark("w", "draining")
+        store.workers.heartbeat("w", {}, "s", 1)
+        assert store.workers.list_workers()[0].state == "draining"
+        store.workers.mark("w", "dead")
+        store.workers.heartbeat("w", {}, "s", 1)
+        assert store.workers.list_workers()[0].state == "alive"
+        with pytest.raises(KeyError):
+            store.workers.mark("nobody", "dead")
+
+
+def flow_spec(name: str, routes: list[str], owner: str | None = None) -> dict[str, Any]:
+    return {
+        "name": name,
+        "owner": owner,
+        "datasets": [{"name": f"{name}_ds"}],
+        "routes": [{"name": route, "connection": route} for route in routes],
+        "triggers": [],
+    }

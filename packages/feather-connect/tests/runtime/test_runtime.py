@@ -519,3 +519,26 @@ def test_a_task_whose_flow_a_deploy_removed_fails_its_row(step: str, missing: st
     assert {row.status for row in h.store.runs.list_tasks(run)} <= {"succeeded", "failed"}
     assert h.status(run) == "failed"
     assert f"no {missing} is named" in (h.reason(run) or "")
+
+
+def test_a_connector_is_given_the_connections_config_and_the_time_zone():
+    seen: list[Any] = []
+
+    class Spy(Source):
+        def read(self, ctx: Context, req: ReadRequest) -> Iterator[list[dict[str, Any]]]:
+            seen.append((ctx.config["token"], ctx.tz))
+            yield from super().read(ctx, req)
+
+    h = Harness(source=Spy(rows=ROWS))
+    h.rt = Runtime(
+        [h.rt.flow("f")],
+        h.store,
+        MemorySpool(),
+        h.engine,
+        clock=h.clock,
+        config_of=lambda connection: {"token": f"for {connection}"},
+        timezone="Asia/Kolkata",
+    )
+    h.engine.register(h.rt.tasks())
+    h.run()
+    assert seen == [(f"for {h.source.connection}", "Asia/Kolkata")]
