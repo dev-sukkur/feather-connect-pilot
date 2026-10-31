@@ -23,17 +23,22 @@ from feather_connect.core.records import Op, Record, canonical_json, decode_key
 from feather_connect.core.transforms import apply_map, is_batch_map
 from feather_connect.engine.port import RetryPolicy, TaskContext
 from feather_connect.runtime.deps import RuntimeDeps
-from feather_connect.storage.port import CLOSED, Delivery, Version, delivery_cursor
+from feather_connect.storage.port import CLOSED, Delivery, DeliveryStatus, Version, delivery_cursor
 from feather_connect.storage.spool import ChunkKind, table_to_records
 
 log = logging.getLogger(__name__)
 
 _KEY, _OP, _HASH, _MOVED = "_fc_key", "_fc_op", "_fc_row_hash", "_fc_moved_from"
 _ACTOR = "system"
-# A wait shorter than this is `Context.budget`'s to handle. One that gets out here is left to the engine's retry.
+# A wait shorter than this is `Context.budget`'s to handle. One that gets out here is left to the engine's retry,
+# until that is the last one the engine gives.
 _SLEEP_FROM = timedelta(seconds=60)
 # Errors of these kinds keep their meaning wherever they come from. Any other error of a map is about the record.
 _CLASSIFIED = (TransientError, PermanentError, BudgetDeferred)
+# A move out of these statuses starts a delivery's tries afresh: an operator retried or replayed it.
+_RESTARTED_FROM: frozenset[DeliveryStatus] = frozenset({"failed", "held", "applied"})
+# How many keys an error names, of those it is about.
+_NAMED_KEYS = 5
 
 
 @dataclass(frozen=True)
@@ -80,17 +85,44 @@ def _resume(delivery: Delivery, reason: str, deps: RuntimeDeps) -> None:
         )
 
 
+def _chunk_keys(version_id: str, chunk_no: int, kind: ChunkKind, deps: RuntimeDeps) -> list[str]:
+    return cast("list[str]", deps.spool.get_chunk(version_id, chunk_no, kind).column(_KEY).to_pylist())
+
+
 def _plan_of(route: RouteSpec, version: Version, deps: RuntimeDeps) -> _Plan:
     """Work out what the delivery sends. A `replace_partition` route gets the whole slice, and the others the changes.
 
-    A complete version with no `full` chunks and only deletes says that the slice is now empty, which the sink has to
-    hear. With no deletes either nothing changed, so it hears nothing: the keys may be held for rejected rows.
+    A complete version with no `full` chunks and an empty snapshot says that the slice is now empty, because of deletes
+    or moves, which the sink has to hear. Raises `PermanentError` if the snapshot holds keys that the `full` chunks
+    don't, since their rows were turned down at extraction and a replace would silently drop those records.
     """
-    kind: ChunkKind = "full" if route.mode == "replace_partition" else "data"
-    chunks = tuple(chunk.chunk_no for chunk in deps.spool.list_chunks(version.version_id, kind))
-    if kind == "full" and not chunks and version.complete and not version.upserts and version.deletes:
+    version_id = version.version_id
+    if route.mode != "replace_partition":
+        return _Plan("data", tuple(chunk.chunk_no for chunk in deps.spool.list_chunks(version_id)))
+    chunks = tuple(chunk.chunk_no for chunk in deps.spool.list_chunks(version_id, "full"))
+    snapshots = deps.spool.list_chunks(version_id, "snapshot")
+    held = {key for chunk in snapshots for key in _chunk_keys(version_id, chunk.chunk_no, "snapshot", deps)}
+    for chunk_no in chunks:
+        held.difference_update(_chunk_keys(version_id, chunk_no, "full", deps))
+    if held:
+        named = ", ".join(sorted(held)[:_NAMED_KEYS])
+        raise PermanentError(
+            f"{len(held)} records of the slice were turned down at extraction (first keys: {named}), and replacing "
+            "the slice would drop them: fix the source, then skip this version so that a newer one applies"
+        )
+    if snapshots and not chunks and version.complete and not version.upserts:
         return _Plan("data", (0,), clears=True)
-    return _Plan(kind, chunks)
+    return _Plan("full", chunks)
+
+
+def _tries(delivery: Delivery, deps: RuntimeDeps) -> int:
+    """Return how many times the delivery has started running since an operator last sent it back."""
+    tries = 0
+    for attempt in reversed(deps.store.ledger.attempts(delivery.route, delivery.version_id)):
+        tries += attempt.to_status == "running"
+        if attempt.from_status in _RESTARTED_FROM:
+            break
+    return tries
 
 
 def _start(route: RouteSpec, delivery: Delivery, deps: RuntimeDeps) -> _Plan:
@@ -113,31 +145,36 @@ class _ChunkSender:
 
     def __init__(
         self,
-        ctx: TaskContext,
         dataset: Dataset,
         route: RouteSpec,
         delivery: Delivery,
         plan: _Plan,
         deps: RuntimeDeps,
     ) -> None:
-        self._ctx = ctx
         self._dataset = dataset
         self._route = route
         self._delivery = delivery
         self._plan = plan
         self._deps = deps
         self._last_chunks: dict[str, int] | None = None
+        self._moves: dict[str, str] | None = None
 
     def send(self, chunk_no: int) -> _Counts:
-        """Send one chunk. A transient error marks the delivery pending for the engine's retry, until they run out."""
+        """Send one chunk.
+
+        A budget deferral says nothing against the delivery. Any other error but a permanent one marks the delivery
+        pending to be tried again, until the delivery has used up its tries, which makes the error permanent.
+        """
         delivery = self._delivery
         _resume(delivery, "apply retried", self._deps)
         try:
             return self._send(chunk_no)
-        except TransientError as error:
-            attempts = RetryPolicy().max_attempts
-            if self._ctx.attempt >= attempts:
-                raise PermanentError(f"still failing after {attempts} attempts: {error}") from error
+        except (PermanentError, BudgetDeferred):
+            raise
+        except Exception as error:
+            tries = _tries(delivery, self._deps)
+            if tries >= self._deps.retry.max_attempts:
+                raise PermanentError(f"still failing after {tries} attempts: {error}") from error
             self._deps.store.ledger.transition(
                 delivery.route,
                 delivery.version_id,
@@ -168,6 +205,11 @@ class _ChunkSender:
             is_last=chunk_no == plan.chunks[-1],
         )
         result: ApplyResult = route.sink.apply(context, batch)
+        if result.pending_confirmation is not None:
+            raise PermanentError(
+                f"{route.sink.spec.name} asked to confirm later, and confirm-later sinks arrive in M2, "
+                "so this delivery can't be marked applied"
+            )
         for rejection in result.rejected:
             self._reject(_key_text(rejection.key), rejection.message)
         return _Counts(result.applied, rejected + len(result.rejected))
@@ -177,7 +219,7 @@ class _ChunkSender:
         table = self._deps.spool.get_chunk(version.version_id, chunk_no, self._plan.kind)
         if self._plan.kind == "full":
             table = self._without_stale_rows(table, chunk_no)
-        moves = self._moves(version.version_id)
+        moves = self._moves_of(version.version_id)
         if is_batch_map(self._route.map):
             return self._batch_records(version, table, context, moves), 0
         out: list[ApplyRecord] = []
@@ -191,40 +233,29 @@ class _ChunkSender:
         return out, rejected
 
     def _without_stale_rows(self, table: pa.Table, chunk_no: int) -> pa.Table:
-        """Keep the rows of a `full` chunk that the replace should hold: a key's last, and none of a rejected key."""
+        """Keep the rows of a `full` chunk that the replace should hold: each key's last."""
         last_chunks = self._last_chunk_of_each_key()
         keys = cast("list[str]", table.column(_KEY).to_pylist())
-        return _rows_where(table, [last_chunks.get(key) == chunk_no for key in keys])
+        return _rows_where(table, [last_chunks[key] == chunk_no for key in keys])
 
     def _last_chunk_of_each_key(self) -> dict[str, int]:
         """Go through the `full` chunks once, which is a sealed version's and can't change, for a key per record."""
         if self._last_chunks is None:
-            version_id = self._delivery.version_id
-            spool = self._deps.spool
-            last_chunks: dict[str, int] = {}
+            self._last_chunks = {}
             for chunk_no in self._plan.chunks:
-                keys = cast(
-                    "list[str]", spool.get_chunk(version_id, chunk_no, "full").column(_KEY).to_pylist()
-                )
-                last_chunks.update(dict.fromkeys(keys, chunk_no))
-            for chunk in spool.list_chunks(version_id, "rejected"):
-                keys = cast(
-                    "list[str]",
-                    spool.get_chunk(version_id, chunk.chunk_no, "rejected").column(_KEY).to_pylist(),
-                )
-                for key in keys:
-                    last_chunks.pop(key, None)
-            self._last_chunks = last_chunks
+                keys = _chunk_keys(self._delivery.version_id, chunk_no, "full", self._deps)
+                self._last_chunks.update(dict.fromkeys(keys, chunk_no))
         return self._last_chunks
 
-    def _moves(self, version_id: str) -> dict[str, str]:
-        moves: dict[str, str] = {}
-        for chunk in self._deps.spool.list_chunks(version_id, "moves"):
-            table = self._deps.spool.get_chunk(version_id, chunk.chunk_no, "moves")
-            keys = cast("list[str]", table.column(_KEY).to_pylist())
-            sources = cast("list[str]", table.column(_MOVED).to_pylist())
-            moves.update(zip(keys, sources, strict=True))
-        return moves
+    def _moves_of(self, version_id: str) -> dict[str, str]:
+        if self._moves is None:
+            self._moves = {}
+            for chunk in self._deps.spool.list_chunks(version_id, "moves"):
+                table = self._deps.spool.get_chunk(version_id, chunk.chunk_no, "moves")
+                keys = cast("list[str]", table.column(_KEY).to_pylist())
+                sources = cast("list[str]", table.column(_MOVED).to_pylist())
+                self._moves.update(zip(keys, sources, strict=True))
+        return self._moves
 
     def _record_outputs(
         self, version: Version, record: Record, context: Context, moves: Mapping[str, str]
@@ -275,6 +306,8 @@ class _ChunkSender:
         mapped = result
         if _KEY not in mapped.column_names:
             raise PermanentError(f"the batch map of route {name!r} must keep the {_KEY} column of its input")
+        if mapped.column(_KEY).null_count:
+            raise PermanentError(f"the batch map of route {name!r} gave a row with no {_KEY}")
         for column, type_ in ((_OP, pa.string()), (_HASH, pa.uint64()), (_MOVED, pa.string())):
             if column not in mapped.column_names:
                 nulls: Any = pa.nulls(mapped.num_rows, type_)  # pyright: ignore[reportUnknownMemberType]
@@ -303,11 +336,17 @@ class _ChunkSender:
         return ApplyRecord(decode_key(key, self._dataset.key), op, payload, moved_from)
 
     def _reject(self, key: str, message: str) -> None:
+        """Quarantine a record, unless the dataset says to fail or the route's whole-slice replace would lose it."""
+        name = self._route.name
         if self._dataset.on_record_error == "fail":
             raise PermanentError(
-                f"route {self._route.name!r}: record {key} was rejected and on_record_error is 'fail': {message}"
+                f"route {name!r}: record {key} was rejected and on_record_error is 'fail': {message}"
             )
-        self._deps.store.quarantine.add(self._route.name, self._delivery.version_id, key, message)
+        if self._route.mode == "replace_partition":
+            raise PermanentError(
+                f"route {name!r}: record {key} was rejected, and replacing the slice would drop it: {message}"
+            )
+        self._deps.store.quarantine.add(name, self._delivery.version_id, key, message)
 
 
 def _fail(delivery: Delivery, error: str, deps: RuntimeDeps) -> None:
@@ -325,15 +364,25 @@ def _fail(delivery: Delivery, error: str, deps: RuntimeDeps) -> None:
 
 
 def _supersede(delivery: Delivery, plan: _Plan, deps: RuntimeDeps) -> None:
-    """Close what older versions left in quarantine for the keys this version delivered. It can be repeated."""
-    open_rows = deps.store.quarantine.list_open(delivery.route)
-    rejected_here = {row.key for row in open_rows if row.version_id == delivery.version_id}
-    older = {row.key for row in open_rows} - rejected_here
+    """Close what older versions of the dataset left in quarantine for the keys this version delivered.
+
+    It can be repeated. The port closes a key's entries across the route, so a key with an entry from another dataset
+    on the route stays open, rather than close a record that wasn't delivered.
+    """
+    older: set[str] = set()
+    rejected_here: set[str] = set()
+    other_datasets: set[str] = set()
+    for row in deps.store.quarantine.list_open(delivery.route):
+        if row.version_id == delivery.version_id:
+            rejected_here.add(row.key)
+        elif row.version_id is not None:
+            same = deps.store.versions.get(row.version_id).dataset == delivery.dataset
+            (older if same else other_datasets).add(row.key)
+    older -= rejected_here | other_datasets
     if not older:
         return
     for chunk in deps.spool.list_chunks(delivery.version_id, plan.kind):
-        table = deps.spool.get_chunk(delivery.version_id, chunk.chunk_no, plan.kind)
-        for key in older.intersection(cast("list[str]", table.column(_KEY).to_pylist())):
+        for key in older.intersection(_chunk_keys(delivery.version_id, chunk.chunk_no, plan.kind, deps)):
             deps.store.quarantine.supersede(delivery.route, key, delivery.seal_seq)
 
 
@@ -357,15 +406,28 @@ def _finish(
         _supersede(delivery, plan, deps)
 
 
-def _send_durably(ctx: TaskContext, name: str, sender: _ChunkSender, chunk_no: int) -> _Counts:
-    """Run a chunk's step, and sleep off a budget deferral before running it again."""
+def _send_durably(
+    ctx: TaskContext, name: str, sender: _ChunkSender, chunk_no: int, retry: RetryPolicy
+) -> _Counts:
+    """Run a chunk's step, and sleep off a budget deferral before running it again.
+
+    An error for the engine to retry goes to the engine. On the task's last attempt the engine won't, while a delivery
+    can still have tries left, since a task can catch up on several. So the task sleeps and tries again itself.
+    """
+    last_attempt = ctx.attempt >= retry.max_attempts
     while True:
         try:
             return ctx.step(name, lambda: sender.send(chunk_no))
+        except PermanentError:
+            raise
         except BudgetDeferred as deferred:
-            if deferred.wait < _SLEEP_FROM:
+            if deferred.wait < _SLEEP_FROM and not last_attempt:
                 raise
             ctx.sleep(deferred.wait)
+        except Exception:
+            if not last_attempt:
+                raise
+            ctx.sleep(retry.delay(ctx.attempt, rand=lambda: 1.0))
 
 
 def _deliver(
@@ -373,12 +435,13 @@ def _deliver(
 ) -> bool:
     """Apply one delivery and return True, or return False if it failed, which blocks its partition."""
     version_id = delivery.version_id
-    plan = ctx.step(f"start:{version_id}", lambda: _start(route, delivery, deps))
-    sender = _ChunkSender(ctx, dataset, route, delivery, plan, deps)
     totals: list[_Counts] = []
     try:
+        plan = ctx.step(f"start:{version_id}", lambda: _start(route, delivery, deps))
+        sender = _ChunkSender(dataset, route, delivery, plan, deps)
         for chunk_no in plan.chunks:
-            totals.append(_send_durably(ctx, f"chunk:{version_id}:{chunk_no}", sender, chunk_no))
+            name = f"chunk:{version_id}:{chunk_no}"
+            totals.append(_send_durably(ctx, name, sender, chunk_no, deps.retry))
     except PermanentError as error:
         message = str(error)
         ctx.step(f"fail:{version_id}", lambda: _fail(delivery, message, deps))
@@ -393,7 +456,8 @@ def run_apply(
     """Bring `route` up to `version_id` in the version's partition, oldest open delivery first (I2).
 
     A failed or held delivery blocks its partition, and the task ends there. A permanent error fails the delivery, and
-    the task still ends well, so that other partitions carry on. A transient error goes to the engine to retry.
+    the task still ends well, so that other partitions carry on. Any other error goes to the engine to retry, up to
+    `deps.retry.max_attempts` tries for each delivery, after which it fails the delivery too.
     """
     target = ctx.step("target", lambda: deps.store.versions.get(version_id))
     if target.seal_seq is None:

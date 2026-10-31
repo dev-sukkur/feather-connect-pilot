@@ -1,4 +1,5 @@
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -10,13 +11,14 @@ from pydantic import BaseModel
 import feather_connect as fc
 from feather_connect.clock import FrozenClock
 from feather_connect.connectors.memory import Sink, Source
+from feather_connect.core.connector import ApplyResult
 from feather_connect.core.context import Context
 from feather_connect.core.errors import BudgetDeferred, PermanentError, RecordRejected, TransientError
 from feather_connect.engine.local import LocalEngine
-from feather_connect.engine.port import TaskCall
+from feather_connect.engine.port import RetryPolicy, TaskCall
 from feather_connect.runtime.apply import run_apply
 from feather_connect.runtime.deps import RuntimeDeps
-from feather_connect.runtime.extract import run_extract
+from feather_connect.runtime.extract import finalize_versions, run_extract
 from feather_connect.storage import spool
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.spool import MemorySpool
@@ -71,7 +73,7 @@ def submit(ds, route, version_id) -> str:
     """Queue `run_apply` as a new engine task, as a retry or a replay of a delivery does."""
     name = f"apply-{len(ENGINE.submitted())}"
     ENGINE.register({name: lambda ctx, args: run_apply(ctx, ds, route, args["version_id"], DEPS)})
-    return ENGINE.submit(TaskCall(name, {"version_id": version_id}, name))
+    return ENGINE.submit(TaskCall(name, {"version_id": version_id}, name, retry=DEPS.retry))
 
 
 def apply(ds, route, version_id) -> str:
@@ -555,15 +557,6 @@ def test_replace_partition_sends_a_chunk_left_with_nothing_as_it_holds_the_start
     ]
 
 
-def test_replace_partition_leaves_out_a_key_still_in_the_rejected_chunk():
-    ds = dataset()
-    route = replace_route()
-    [v1] = seal_versions(ds, [ROWS], route)
-    DEPS.spool.put_chunk(v1, 0, "rejected", pa.table({"_fc_key": ["2"]}))
-    apply(ds, route, v1)
-    assert sent(route.sink) == [("1", "upsert"), ("3", "upsert")]
-
-
 def test_replace_partition_with_an_empty_slice_clears_it():
     ds = dataset(fc.strategy.snapshot_diff(), allow_empty=True)
     route = replace_route()
@@ -579,10 +572,9 @@ class Strict(BaseModel):
     n: int
 
 
-@pytest.mark.parametrize("mode", ["upsert", "replace_partition"])
-def test_a_version_with_no_records_goes_through_without_a_sink_call(mode):
+def test_a_version_with_no_records_goes_through_without_a_sink_call():
     ds = dataset(fc.strategy.snapshot_diff(), schema=Strict)
-    route = route_to(mode=mode)
+    route = route_to()
     [v1] = seal_versions(
         ds, [[{"id": 1, "n": "not a number"}]], route
     )  # sealed so that the key is remembered
@@ -699,3 +691,254 @@ def test_a_version_that_is_not_sealed_fails_the_task():
     [v1] = run_extract(ds, "r1", "_", routes=[route], stage_only=True, deps=DEPS)
     ref = apply(ds, route, v1.version_id)
     assert ENGINE.status(ref) == "failed" and route.sink.calls == []
+
+
+# Replacing a slice must not lose records.
+
+
+def test_a_slice_emptied_by_moves_is_cleared():
+    ds = dataset(fc.strategy.snapshot_diff(), keep_state=True, partition=fc.partition.by_fields("s"))
+    route = replace_route()
+    v1 = seal(ds, [{"id": 1, "s": "a"}], route, run="r1", partition="s=a")[0].version_id
+    apply(ds, route, v1)
+    ds.source.load([{"id": 1, "s": "b"}])
+    staged = [
+        version
+        for partition in ("s=a", "s=b")
+        for version in run_extract(ds, "r2", partition, routes=[route], stage_only=True, deps=DEPS)
+    ]
+    for version in finalize_versions(ds, staged, [route], DEPS):
+        apply(ds, route, version.version_id)
+    calls = route.sink.calls[1:]
+    assert [(c.partition, len(c.records), c.is_first, c.is_last) for c in calls] == [
+        ("s=a", 0, True, True),
+        ("s=b", 1, True, True),
+    ]
+    assert route.sink.rows == [{"id": 1, "s": "b"}]
+
+
+def test_a_row_turned_down_at_extraction_fails_a_replace_and_a_newer_version_recovers():
+    ds = dataset(fc.strategy.snapshot_diff(), schema=Strict)
+    route = replace_route()
+    v1, v2, v3 = seal_versions(
+        ds,
+        [
+            [{"id": 1, "n": 1}, {"id": 2, "n": 2}],
+            [{"id": 1, "n": 9}, {"id": 2, "n": "bad"}],
+            [{"id": 1, "n": 9}, {"id": 2, "n": 3}],
+        ],
+        route,
+    )
+    apply(ds, route, v1)
+    apply(ds, route, v2)
+    assert status("r", v2) == "failed" and "1 records" in LEDGER.get("r", v2).last_error
+    assert "first keys: 2" in LEDGER.get("r", v2).last_error
+    assert route.sink.rows == [{"id": 1, "n": 1}, {"id": 2, "n": 2}]  # nothing was dropped
+    apply(ds, route, v3)
+    assert status("r", v3) == "pending"  # the stream is blocked
+    LEDGER.transition("r", v2, "skipped", actor="op")
+    apply(ds, route, v3)
+    assert route.sink.rows == [{"id": 1, "n": 9}, {"id": 2, "n": 3}]
+
+
+def test_a_version_of_only_turned_down_rows_fails_a_replace():
+    ds = dataset(fc.strategy.snapshot_diff(), schema=Strict)
+    route = replace_route()
+    [v1] = seal_versions(ds, [[{"id": 1, "n": "bad"}]], route)
+    apply(ds, route, v1)
+    assert status("r", v1) == "failed" and route.sink.calls == []
+
+
+def test_a_row_turned_down_at_extraction_does_not_fail_an_upsert_route():
+    ds = dataset(fc.strategy.snapshot_diff(), schema=Strict)
+    route = route_to()
+    v1, v2 = seal_versions(
+        ds, [[{"id": 1, "n": 1}, {"id": 2, "n": 2}], [{"id": 1, "n": 9}, {"id": 2, "n": "bad"}]], route
+    )
+    apply(ds, route, v2)
+    assert status("r", v1) == status("r", v2) == "applied"
+    assert route.sink.rows == [{"id": 1, "n": 9}, {"id": 2, "n": 2}]
+
+
+def test_a_map_error_fails_a_replace():
+    def boom(r, c):
+        if r["id"] == 2:
+            raise ValueError("no price")
+        return dict(r)
+
+    ds = dataset()
+    route = route_to(map=boom, mode="replace_partition")
+    [v1] = seal_versions(ds, [ROWS], route)
+    apply(ds, route, v1)
+    assert status("r", v1) == "failed" and "no price" in LEDGER.get("r", v1).last_error
+    assert route.sink.calls == [] and QUARANTINE.list_open() == []
+
+
+def test_a_sink_rejection_fails_a_replace():
+    ds = dataset()
+    route = replace_route()
+    [v1] = seal_versions(ds, [ROWS], route)
+    route.sink.reject("2", "bad sku")
+    apply(ds, route, v1)
+    assert status("r", v1) == "failed" and "bad sku" in LEDGER.get("r", v1).last_error
+    assert QUARANTINE.list_open() == []
+
+
+# Any failure ends in a ledger status, counted per delivery.
+
+
+def test_unclassified_errors_retry_and_then_fail_the_delivery():
+    ds = dataset()
+    route = route_to()
+    [v1] = seal_versions(ds, [ROWS], route)
+    for _ in range(6):
+        route.sink.fail_next(KeyError("bug"))
+    ref = apply(ds, route, v1)
+    delivery = LEDGER.get("r", v1)
+    assert (ENGINE.status(ref), delivery.status, delivery.attempts) == ("succeeded", "failed", 6)
+    assert "bug" in delivery.last_error
+
+
+def test_an_unclassified_error_can_recover():
+    ds = dataset()
+    route = route_to()
+    [v1] = seal_versions(ds, [ROWS], route)
+    route.sink.fail_next(KeyError("bug"))
+    apply(ds, route, v1)
+    assert status("r", v1) == "applied" and LEDGER.get("r", v1).attempts == 2
+
+
+def test_short_budget_waits_end_in_a_sleep_on_the_last_attempt():
+    ds = dataset()
+    route = route_to()
+    [v1] = seal_versions(ds, [ROWS], route)
+    for _ in range(6):
+        route.sink.fail_next(BudgetDeferred(timedelta(seconds=5), "minute"))
+    ref = apply(ds, route, v1)
+    assert ENGINE.status(ref) == "succeeded" and statuses("r", v1) == ["running", "applied"]
+    assert len(route.sink.calls) == 1
+
+
+@pytest.mark.parametrize("key", ["id", ("id", "v")])
+def test_a_batch_map_giving_a_null_key_fails_the_version(key):
+    @fc.batch_map
+    def lose_keys(table, ctx):
+        index = table.column_names.index("_fc_key")
+        return table.set_column(index, "_fc_key", pa.nulls(table.num_rows, pa.string()))
+
+    ds = dataset(key=key)
+    route = route_to(map=lose_keys)
+    [v1] = seal_versions(ds, [ROWS], route)
+    apply(ds, route, v1)
+    assert status("r", v1) == "failed" and route.sink.calls == []
+
+
+def test_attempts_count_per_delivery_not_per_task():
+    ds = dataset(fc.strategy.snapshot_diff())
+    route = route_to()
+    v1, v2 = seal_versions(ds, [ROWS, [{"id": 1, "v": "z"}, *ROWS[1:]]], route)
+    for _ in range(5):
+        route.sink.fail_next(TransientError("timeout"))
+    real_apply = route.sink.apply
+
+    def apply_then_fail(ctx, batch):
+        result = real_apply(ctx, batch)
+        if batch.version_id == v1:
+            route.sink.fail_next(TransientError("blip on v2"))
+        return result
+
+    route.sink.apply = apply_then_fail
+    ref = apply(ds, route, v2)  # its sixth attempt, the engine's last, meets the first error of v2
+    assert ENGINE.status(ref) == "succeeded"
+    assert (status("r", v1), LEDGER.get("r", v1).attempts) == ("applied", 6)
+    assert (status("r", v2), LEDGER.get("r", v2).attempts) == ("applied", 2)
+
+
+def test_a_delivery_on_the_engines_last_attempt_still_gets_all_its_tries():
+    ds = dataset(fc.strategy.snapshot_diff())
+    route = route_to()
+    v1, v2 = seal_versions(ds, [ROWS, [{"id": 1, "v": "z"}, *ROWS[1:]]], route)
+    for _ in range(5):
+        route.sink.fail_next(TransientError("timeout"))
+    real_apply = route.sink.apply
+
+    def always_failing_v2(ctx, batch):
+        if batch.version_id == v2:
+            raise TransientError("v2 down")
+        return real_apply(ctx, batch)
+
+    route.sink.apply = always_failing_v2
+    ref = apply(ds, route, v2)
+    delivery = LEDGER.get("r", v2)
+    assert (ENGINE.status(ref), delivery.status, delivery.attempts) == ("succeeded", "failed", 6)
+    assert status("r", v1) == "applied"
+
+
+def test_the_limit_comes_from_the_deps_retry_policy():
+    global DEPS
+    DEPS = replace(DEPS, retry=RetryPolicy(max_attempts=2))
+    ds = dataset()
+    route = route_to()
+    [v1] = seal_versions(ds, [ROWS], route)
+    for _ in range(2):
+        route.sink.fail_next(TransientError("timeout"))
+    apply(ds, route, v1)
+    assert status("r", v1) == "failed" and LEDGER.get("r", v1).attempts == 2
+
+
+def test_an_operator_retry_gets_a_fresh_set_of_tries():
+    global DEPS
+    DEPS = replace(DEPS, retry=RetryPolicy(max_attempts=2))
+    ds = dataset()
+    route = route_to()
+    [v1] = seal_versions(ds, [ROWS], route)
+    for _ in range(3):
+        route.sink.fail_next(TransientError("timeout"))
+    apply(ds, route, v1)
+    LEDGER.transition("r", v1, "pending", actor="op")
+    apply(ds, route, v1)
+    assert status("r", v1) == "applied"
+
+
+# A shared route.
+
+
+def two_datasets():
+    return stated(name="a", keep_state=True), stated(name="b", keep_state=True)
+
+
+def test_supersede_stays_within_the_dataset():
+    a, b = two_datasets()
+    route = route_to()
+    [va] = seal_versions(a, [ROWS], route)
+    route.sink.reject("2", "bad")
+    apply(a, route, va)
+    vb = seal(b, [{"id": 2, "v": "other"}], route, run="rb")[0].version_id
+    apply(b, route, vb)
+    assert [(q.key, q.version_id) for q in QUARANTINE.list_open("r")] == [("2", va)]
+
+
+def test_supersede_leaves_a_key_open_in_two_datasets_rather_than_close_the_other():
+    a, b = two_datasets()
+    route = route_to()
+    va1, va2 = seal_versions(a, [ROWS, [ROWS[0], {"id": 2, "v": "B"}, ROWS[2]]], route)
+    route.sink.reject("2", "bad")
+    apply(a, route, va1)
+    vb = seal(b, [{"id": 2, "v": "other"}], route, run="rb")[0].version_id
+    route.sink.reject("2", "bad")
+    apply(b, route, vb)
+    apply(a, route, va2)
+    assert {q.version_id for q in QUARANTINE.list_open("r")} == {va1, vb}
+
+
+class ConfirmLaterSink(Sink):
+    def apply(self, ctx, batch):
+        return ApplyResult(applied=0, pending_confirmation="token")
+
+
+def test_a_confirm_later_result_fails_the_delivery():
+    ds = dataset()
+    route = fc.to(ConfirmLaterSink("r"), name="r")
+    [v1] = seal_versions(ds, [ROWS], route)
+    apply(ds, route, v1)
+    assert status("r", v1) == "failed" and "M2" in LEDGER.get("r", v1).last_error
