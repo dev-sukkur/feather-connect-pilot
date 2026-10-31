@@ -17,7 +17,7 @@ from typing import Any
 from feather_connect.clock import Clock, SystemClock
 from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
-from feather_connect.core.errors import PermanentError
+from feather_connect.core.errors import BudgetDeferred, PermanentError
 from feather_connect.core.flow import Flow, RouteSpec
 from feather_connect.engine.port import Engine, TaskCall, TaskContext, TaskFn
 from feather_connect.runtime.apply import oldest_open, run_apply
@@ -48,6 +48,19 @@ def _no_config(connection: str) -> Mapping[str, Any]:
 def _apply_key(delivery: Delivery) -> str:
     """Return the key of the delivery's task: the same state gets the same task, and a retry or a replay a new one."""
     return f"apply:{delivery.route}:{delivery.version_id}:{delivery.replays}:{delivery.retries}"
+
+
+def _step_through_deferrals[T](ctx: TaskContext, name: str, fn: Callable[[], T]) -> T:
+    """Run a step, and sleep off a budget deferral before running it again, as delivery does.
+
+    A deferral is a wait for budget, not a failure: the sleep is durable, and no attempt is used up however many
+    deferrals there are. A source that is read again after one starts its read afresh (`run_extract`).
+    """
+    while True:
+        try:
+            return ctx.step(name, fn)
+        except BudgetDeferred as deferred:
+            ctx.sleep(deferred.wait)
 
 
 class Runtime:
@@ -277,7 +290,8 @@ class Runtime:
         def body() -> None:
             flow, dataset = self.flow(args["flow"]), self.dataset(args["dataset"])
             sliced = ctx.step("sliced", lambda: bool(versions.slices_for_run(run_id, dataset.name)))
-            ids = ctx.step("extract", lambda: self._extract(flow, dataset, run_id, partition, sliced))
+            extract = lambda: self._extract(flow, dataset, run_id, partition, sliced)
+            ids = _step_through_deferrals(ctx, "extract", extract)
             if not sliced:
                 ctx.step("submit_applies", lambda: self._submit_applies(flow, run_id, ids))
             elif ctx.step("finish_slice", lambda: versions.finish_slice(run_id, dataset.name, partition)):
