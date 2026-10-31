@@ -751,6 +751,16 @@ class StoreContract(SpoolContract):
         with pytest.raises(KeyError):
             store.workers.mark("nobody", "dead")
 
+    def test_last_tick_is_kept_per_flow_and_trigger(self, store: Store, clock: FrozenClock):
+        assert store.schedules.last_tick("f", "every:60s") is None
+        store.schedules.set_last_tick("f", "every:60s", T0)
+        store.schedules.set_last_tick("f", "cron:x", T0 + timedelta(hours=1))
+        assert store.schedules.last_tick("f", "every:60s") == T0
+        store.schedules.set_last_tick("f", "every:60s", T0 + timedelta(minutes=1))
+        assert store.schedules.last_tick("f", "every:60s") == T0 + timedelta(minutes=1)
+        assert store.schedules.last_tick("f", "cron:x") == T0 + timedelta(hours=1)
+        assert store.schedules.last_tick("g", "every:60s") is None
+
     # retention queries
 
     def test_pending_older_than_lists_only_pending_deliveries_past_the_age(

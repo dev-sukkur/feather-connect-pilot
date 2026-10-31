@@ -2,14 +2,23 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
+import feather_connect as fc
 from feather_connect.clock import FrozenClock
+from feather_connect.connectors.memory import Sink, Source
+from feather_connect.engine.local import LocalEngine
+from feather_connect.project import Project
 from feather_connect.runtime.leader import AlwaysLeader, leader_key
+from feather_connect.runtime.runtime import Runtime
+from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.postgres.leader import PostgresLeaderLock
+from feather_connect.storage.spool import MemorySpool
 from feather_server.app import AppState
 from feather_server.loops import LoopRunner, default_loops
+from feather_server.settings import Settings
 
 KEY = 424_242
 
@@ -81,9 +90,10 @@ def test_stop_waits_for_the_pass_that_is_running() -> None:
     assert finished == [True]
 
 
-def test_default_loops_are_the_sweeper_and_retention(state: AppState) -> None:
+def test_default_loops_are_the_scheduler_sweeper_and_retention(state: AppState) -> None:
     loops = default_loops(state)
     assert {(loop.name, loop.interval_s) for loop in loops} == {
+        ("scheduler", 1.0),
         ("sweeper", 5.0),
         ("retention", 3600.0),
     }
@@ -100,6 +110,29 @@ def test_the_sweeper_and_retention_loops_do_their_work(state: AppState, clock: F
     wait_until(lambda: by_name["retention"].count >= 1)
     by_name["retention"].stop()
     assert by_name["retention"].last_error is None
+
+
+def test_the_scheduler_loop_starts_the_runs_that_are_due(clock: FrozenClock) -> None:
+    store, spool, engine = MemoryStore(clock), MemorySpool(clock), LocalEngine(clock)
+    dataset = fc.Dataset("d", source=Source(rows=[{"id": 1}]), key="id", strategy=fc.strategy.replace())
+    flow = fc.Flow("f", reads=dataset, deliver=[fc.to(Sink("a"))], triggers=[fc.every("1m")])
+    runtime = Runtime([flow], store, spool, engine, code_sha="sha", clock=clock)
+    state = AppState(
+        Settings(),
+        Project("demo", Path("."), "dev", (flow,), {}, {}, {}, "sha"),
+        store,
+        spool,
+        engine,
+        runtime,
+        clock,
+    )
+    scheduler = next(loop for loop in default_loops(state) if loop.name == "scheduler")
+    scheduler.start()
+    wait_until(lambda: scheduler.count >= 1)  # the first pass only notes the time
+    clock.advance(timedelta(minutes=1))
+    wait_until(lambda: store.runs.list_runs(flow="f") != [])
+    scheduler.stop()
+    assert store.runs.list_runs(flow="f")[0].trigger == "every:60s"
 
 
 @pytest.mark.postgres

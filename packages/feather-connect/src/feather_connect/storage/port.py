@@ -560,6 +560,16 @@ class WorkerRegistry(Protocol):
         ...
 
 
+class ScheduleStore(Protocol):
+    """When each trigger of each flow was last handled, so that a restart neither fires a tick twice nor loses it."""
+
+    def last_tick(self, flow: str, trigger_id: str) -> datetime | None:
+        """The time of the last tick handled, or None if the trigger has never been seen."""
+        ...
+
+    def set_last_tick(self, flow: str, trigger_id: str, at: datetime) -> None: ...
+
+
 @dataclass(frozen=True)
 class Store:
     """The ports together. A backend provides one of these."""
@@ -572,3 +582,4 @@ class Store:
     budgets: BudgetStore
     catalog: CatalogStore
     workers: WorkerRegistry
+    schedules: ScheduleStore

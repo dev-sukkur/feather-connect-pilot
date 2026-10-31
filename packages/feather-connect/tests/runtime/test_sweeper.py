@@ -169,3 +169,12 @@ def test_one_delivery_that_cannot_be_submitted_does_not_stop_the_sweep() -> None
     h.sweep()  # the next sweep tries "a" again
     h.engine.run_until_idle()
     assert h.status("a", version) == h.status("b", version) == "applied"
+
+
+def test_a_cancelled_run_is_not_sealed() -> None:
+    h = Harness(**two_days())
+    run = h.crashed_run("submit_seal")
+    h.rt.cancel_run(run, actor="op", reason="not wanted")
+    assert h.sweep().resubmitted_seals == []
+    h.engine.run_until_idle()
+    assert h.store.versions.sealed_for_run(run, "d") == []

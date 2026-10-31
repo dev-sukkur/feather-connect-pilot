@@ -61,7 +61,10 @@ def sweep_once(
     seals: list[tuple[str, str]] = []
     for run_id, dataset in store.versions.runs_ready_to_seal():
         try:
-            runtime.submit_seal(store.runs.get_run(run_id).flow, dataset, run_id)
+            run = store.runs.get_run(run_id)
+            if run.status == "cancelled":  # somebody stopped the run on purpose
+                continue
+            runtime.submit_seal(run.flow, dataset, run_id)
         except Exception:
             log.exception("could not submit the seal of dataset %s for run %s", dataset, run_id)
         else:

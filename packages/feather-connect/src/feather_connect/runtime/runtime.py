@@ -32,6 +32,7 @@ from feather_connect.storage.port import (
     DeliveryStatus,
     InvalidTransition,
     Priority,
+    Run,
     Store,
     delivery_cursor,
 )
@@ -39,6 +40,8 @@ from feather_connect.storage.spool import Spool
 
 _TENANT = "default"
 _UTC = "UTC"
+_ACTIVE = ("queued", "running")
+_MANY = 10_000
 
 
 def _no_config(connection: str) -> Mapping[str, Any]:
@@ -139,6 +142,14 @@ class Runtime:
             config, logging.getLogger(connection), self._clock.now(), self._timezone, budget=handle
         )
 
+    @property
+    def store(self) -> Store:
+        return self._deps.store
+
+    def flows(self) -> list[Flow]:
+        """Return the flows, in the order they were given."""
+        return list(self._flows.values())
+
     def flow(self, name: str) -> Flow:
         """Return the flow called `name`. Raises `KeyError` if there is none, as `dataset` and `route` do."""
         return self._find(self._flows, "flow", name)
@@ -190,6 +201,30 @@ class Runtime:
             "plan",
         )
         return run_id
+
+    def active_runs(self, flow: str) -> list[Run]:
+        """Return the flow's runs that are queued or running, oldest first."""
+        runs = self._deps.store.runs
+        found = [r for status in _ACTIVE for r in runs.list_runs(flow=flow, status=status, limit=_MANY)]
+        return sorted(found, key=lambda r: r.run_id)
+
+    def cancel_run(self, run_id: str, *, actor: str, reason: str | None = None) -> None:
+        """Cancel the run: its plan, extract and seal tasks stop, and the run ends `cancelled`, whatever follows.
+
+        The deliveries of versions that were already sealed carry on, because sealed versions are the ledger's and must
+        still reach their routes in order (I2). Cancelling a run that is over changes nothing.
+        """
+        runs = self._deps.store.runs
+        if runs.get_run(run_id).status not in _ACTIVE:
+            return
+        for row in runs.list_tasks(run_id):
+            if row.status == "running" and row.kind != "apply":
+                try:
+                    self._engine.cancel(row.ref)
+                except KeyError:  # the row was opened and its task never submitted
+                    pass
+                runs.finish_task(row.task_id, "cancelled", reason)
+        runs.set_run_status(run_id, "cancelled", f"{actor}: {reason}" if reason else f"cancelled by {actor}")
 
     def retry(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
         """Send a failed delivery back to be tried again, as a new task."""
@@ -425,6 +460,8 @@ class Runtime:
     def _settle_run(self, run_id: str) -> None:
         """Finish the run if none of its tasks is still running. It failed for the first reason any of them did."""
         runs = self._deps.store.runs
+        if runs.get_run(run_id).status == "cancelled":
+            return  # what the sealed versions still do is the ledger's business now
         rows = runs.list_tasks(run_id)
         if any(row.status == "running" for row in rows):
             return

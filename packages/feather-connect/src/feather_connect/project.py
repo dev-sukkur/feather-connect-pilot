@@ -348,7 +348,7 @@ def _import_flows(root: Path, config: Mapping[str, Any], layers: Mapping[str, st
 def _apply_overlay(
     flows: Sequence[Flow], config: Mapping[str, Any], layers: Mapping[str, str], timezone: str
 ) -> tuple[Flow, ...]:
-    """Return the flows with the overlay's `flows:` section applied: routes enabled or not, triggers replaced."""
+    """Return the flows with the overlay's `flows:` section applied: the flow or its routes enabled or not, triggers replaced."""
     overlay = _mapping(config, "flows", layers)
     by_name = {flow.name: flow for flow in flows}
     for name in overlay:
@@ -361,10 +361,18 @@ def _apply_overlay(
             result.append(flow)
             continue
         path = f"flows.{flow.name}"
-        if not isinstance(knobs, dict) or not set(cast(dict[str, Any], knobs)) <= {"triggers", "routes"}:
-            raise ProjectError(f"{_where(layers, path)}: may hold only triggers and routes")
+        if not isinstance(knobs, dict) or not set(cast(dict[str, Any], knobs)) <= {
+            "triggers",
+            "routes",
+            "enabled",
+        }:
+            raise ProjectError(f"{_where(layers, path)}: may hold only triggers, routes and enabled")
         changed = copy.copy(flow)
         knobs = cast(dict[str, Any], knobs)
+        if "enabled" in knobs:
+            if not isinstance(knobs["enabled"], bool):
+                raise ProjectError(f"{_where(layers, f'{path}.enabled')}: must be true or false")
+            changed.enabled = knobs["enabled"]
         if "routes" in knobs:
             changed.routes = _enabled_routes(flow, knobs["routes"], path, layers)
         if "triggers" in knobs:

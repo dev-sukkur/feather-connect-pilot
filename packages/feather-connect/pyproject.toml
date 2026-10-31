@@ -5,6 +5,7 @@ description = "SDK and runtime for Feather Connect, a code-first integration hub
 requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
+    "cronsim",
     "pyarrow",
     "pydantic>=2",
     "pyyaml",

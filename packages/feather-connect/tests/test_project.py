@@ -168,6 +168,16 @@ def test_overlay_can_disable_a_route_and_change_a_trigger(project_dir):
     assert base.triggers == (Cron("*/5 * * * *", "Asia/Kolkata"),)  # the time zone comes from settings
 
 
+def test_overlay_can_disable_a_whole_flow(project_dir):
+    assert load_project(project_dir, "tz").flows[0].enabled
+    write(project_dir, "env/off.yaml", "flows: {demo: {enabled: false}}")
+    flow = load_project(project_dir, "off").flows[0]
+    assert not flow.enabled and flow.spec_dict()["enabled"] is False
+    write(project_dir, "env/off.yaml", "flows: {demo: {enabled: nope}}")
+    with pytest.raises(ProjectError, match=r"env/off.yaml.*flows\.demo\.enabled"):
+        load_project(project_dir, "off")
+
+
 def test_an_overlay_for_an_unknown_flow_or_route_is_refused(project_dir):
     write(project_dir, "env/typo.yaml", "flows: {demo: {routes: {nothere: {enabled: false}}}}")
     with pytest.raises(ProjectError, match=r"env/typo.yaml.*flows\.demo\.routes\.nothere"):

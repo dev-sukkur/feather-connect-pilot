@@ -36,6 +36,7 @@ from feather_connect.storage.port import (
     RouteRow,
     Run,
     RunJournal,
+    ScheduleStore,
     StateRow,
     Store,
     TaskRow,
@@ -1173,6 +1174,27 @@ class _Workers(WorkerRegistry):
                 raise KeyError(f"no worker {worker_id!r}")
 
 
+class _Schedules(ScheduleStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def last_tick(self, flow: str, trigger_id: str) -> datetime | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                "select last_tick from feather.schedule where tenant_id = %s and flow = %s and trigger_id = %s",
+                (self._db.tenant, flow, trigger_id),
+            ).fetchone()
+        return None if row is None else row["last_tick"]
+
+    def set_last_tick(self, flow: str, trigger_id: str, at: datetime) -> None:
+        with self._db.tx() as conn:
+            conn.execute(
+                """insert into feather.schedule (tenant_id, flow, trigger_id, last_tick) values (%s, %s, %s, %s)
+                   on conflict (tenant_id, flow, trigger_id) do update set last_tick = excluded.last_tick""",
+                (self._db.tenant, flow, trigger_id, at),
+            )
+
+
 class PostgresStore(Store):
     """A `Store` that keeps everything in Postgres, for one tenant. `clock` defaults to the system clock."""
 
@@ -1187,4 +1209,5 @@ class PostgresStore(Store):
             budgets=PostgresBudgets(db),
             catalog=_Catalog(db),
             workers=_Workers(db),
+            schedules=_Schedules(db),
         )

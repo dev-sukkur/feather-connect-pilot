@@ -29,6 +29,7 @@ from feather_connect.storage.port import (
     RouteRow,
     Run,
     RunJournal,
+    ScheduleStore,
     StateRow,
     Store,
     TaskRow,
@@ -72,6 +73,7 @@ class _Data:
     routes: list[RouteRow] = field(default_factory=list[RouteRow])
     retired: set[str] = field(default_factory=set[str])  # names of flows, and of routes, that are retired
     workers: dict[str, WorkerRow] = field(default_factory=dict[str, WorkerRow])
+    ticks: dict[tuple[str, str], datetime] = field(default_factory=dict[tuple[str, str], datetime])
 
 
 class _Runs(RunJournal):
@@ -717,6 +719,19 @@ class _Workers(WorkerRegistry):
             self._d.workers[worker_id] = replace(self._d.workers[worker_id], state=state)
 
 
+class _Schedules(ScheduleStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def last_tick(self, flow: str, trigger_id: str) -> datetime | None:
+        with self._d.lock:
+            return self._d.ticks.get((flow, trigger_id))
+
+    def set_last_tick(self, flow: str, trigger_id: str, at: datetime) -> None:
+        with self._d.lock:
+            self._d.ticks[(flow, trigger_id)] = at
+
+
 class MemoryStore(Store):
     """A `Store` that keeps everything in memory. `clock` defaults to the system clock."""
 
@@ -731,4 +746,5 @@ class MemoryStore(Store):
             budgets=_Budgets(data),
             catalog=_Catalog(data),
             workers=_Workers(data),
+            schedules=_Schedules(data),
         )

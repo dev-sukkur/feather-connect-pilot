@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from feather_connect.runtime.leader import AlwaysLeader, LeaderLock, leader_key
 from feather_connect.runtime.retention import retention_once
+from feather_connect.runtime.scheduler import tick
 from feather_connect.runtime.sweeper import sweep_once
 from feather_connect.storage.postgres.leader import PostgresLeaderLock
 
@@ -71,7 +72,7 @@ class LoopRunner:
 
 
 def default_loops(state: "AppState") -> list[LoopRunner]:
-    """Return the loops of a server: the sweeper and retention.
+    """Return the loops of a server: the scheduler, the sweeper and retention.
 
     Each takes the Postgres lock of its name when the server has a database, and leads alone otherwise.
     """
@@ -79,6 +80,9 @@ def default_loops(state: "AppState") -> list[LoopRunner]:
     def lock(name: str) -> LeaderLock:
         url = state.settings.database_url
         return PostgresLeaderLock(url, leader_key(name)) if url else AlwaysLeader()
+
+    def schedule() -> None:
+        tick(state.runtime, now=state.clock.now())
 
     def sweep() -> None:
         sweep_once(state.store, state.runtime, state.engine, now=state.clock.now())
@@ -88,6 +92,7 @@ def default_loops(state: "AppState") -> list[LoopRunner]:
         retention_once(state.store, state.spool, now=state.clock.now())
 
     return [
+        LoopRunner("scheduler", schedule, 1.0, lock("scheduler")),
         LoopRunner("sweeper", sweep, 5.0, lock("sweeper")),
         LoopRunner("retention", retain, 3600.0, lock("retention")),
     ]

@@ -161,6 +161,7 @@ class Flow:
 
     `overlap` says what happens when a trigger fires while the last run is still going. `catch_up` says
     what happens after downtime: `"latest"` makes one run cover the gap and `"each"` runs every missed tick.
+    `enabled` is True unless an environment's overlay turns the flow off, which leaves its triggers recording skips.
     """
 
     def __init__(
@@ -174,6 +175,7 @@ class Flow:
         tags: Sequence[str] = (),
         overlap: Overlap = "queue",
         catch_up: CatchUp = "latest",
+        enabled: bool = True,
     ) -> None:
         self.name = name
         self.datasets: list[Dataset] = [reads] if isinstance(reads, Dataset) else list(reads)
@@ -183,6 +185,7 @@ class Flow:
         self.tags = tuple(tags)
         self.overlap = overlap
         self.catch_up = catch_up
+        self.enabled = enabled
 
     def spec_dict(self) -> dict[str, Any]:
         """Return a description of the flow that is safe as JSON: its datasets, routes, triggers and owner.
@@ -196,6 +199,7 @@ class Flow:
             "tags": list(self.tags),
             "overlap": self.overlap,
             "catch_up": self.catch_up,
+            "enabled": self.enabled,
             "datasets": [
                 {
                     "name": d.name,
