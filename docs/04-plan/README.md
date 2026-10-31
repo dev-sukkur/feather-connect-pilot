@@ -17,6 +17,8 @@ M1 is too large for one plan, so it is split into six. Each one ends with softwa
 
 **Later plans depend on earlier code.** The interfaces between plans are fixed here, but details may shift during the build. Re-read a plan's **Consumes** lines against the real code before you start it.
 
+**Code guide.** [code-guide.html](code-guide.html) explains each code folder and file, and the remaining work.
+
 ## Build order (changed 31 Oct 2026)
 
 The sponsor wants a dashboard running on Postgres as soon as possible, to run things and watch them live. So the remaining tasks run in the stages below instead of plan by plan. The plan files still hold each task's details; `2.3` means Plan 2, Task 3. The M1 scope and exit criteria don't change, only the order. Each stage gets one review, at its end.
