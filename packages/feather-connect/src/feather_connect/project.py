@@ -19,13 +19,13 @@ import subprocess
 import sys
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, cast
 
 import yaml
 
-from feather_connect.core.flow import Flow, RouteSpec
+from feather_connect.core.flow import Flow, Problem, RouteSpec
 from feather_connect.core.triggers import OnEvent, Trigger, cron, every, manual
 from feather_connect.storage.port import BudgetSpec, parse_limits
 
@@ -37,6 +37,7 @@ __all__ = [
     "effective_config",
     "load_project",
     "resolve_secret",
+    "validate_project",
 ]
 
 # What the code itself decides when no file does.
@@ -432,3 +433,56 @@ def _code_sha(root: Path) -> str:
     except (OSError, subprocess.SubprocessError):
         return "unknown"
     return done.stdout.strip() or "unknown"
+
+
+# Checks across the whole project.
+
+
+def validate_project(project: Project) -> list[Problem]:
+    """Return every mistake in a loaded project that shows without running it: each flow's own problems
+    (`Flow.validate`, with the flow's name in front of the path), a flow that uses a connection the project
+    doesn't define, a connection whose connector is not the one the code uses, and a budget no connection uses.
+
+    Nothing is run, no connection is opened and no secret is resolved.
+    """
+    problems: list[Problem] = []
+    for flow in project.flows:
+        problems += [replace(p, path=f"{flow.name}.{p.path}") for p in flow.validate()]
+        uses = [(f"reads[{i}]", d.source.connection, d.source.spec.name) for i, d in enumerate(flow.datasets)]
+        uses += [(f"deliver[{i}]", r.sink.connection, r.sink.spec.name) for i, r in enumerate(flow.routes)]
+        for where, connection, connector in uses:
+            path = f"{flow.name}.{where}"
+            config = project.connections.get(connection)
+            if config is None:
+                problems.append(
+                    Problem(
+                        "error",
+                        "connection_undefined",
+                        f"flow {flow.name!r} uses the connection {connection!r}, which {project.env!r} does not define",
+                        path,
+                        f"add {connection!r} under connections: in feather.yaml or env/{project.env}.yaml",
+                    )
+                )
+            elif config.connector != connector:
+                problems.append(
+                    Problem(
+                        "error",
+                        "connector_mismatch",
+                        f"flow {flow.name!r} uses {connection!r} as {connector}, but the project declares "
+                        f"it as {config.connector}",
+                        path,
+                        f"make connector: {connector} in the connection's entry, or use the other connector's class",
+                    )
+                )
+    metered = {c.budget for c in project.connections.values()}
+    for name in sorted(project.budgets.keys() - metered):
+        problems.append(
+            Problem(
+                "warning",
+                "budget_unused",
+                f"the budget {name!r} is not used by any connection",
+                f"budgets.{name}",
+                f"set budget: {name} on the connection it should meter, or remove it",
+            )
+        )
+    return problems

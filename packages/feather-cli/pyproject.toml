@@ -1,0 +1,24 @@
+[project]
+name = "feather-cli"
+version = "0.1.0"
+description = "The feather command: validate, run the server and workers, and the local dev stack."
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "feather-connect[postgres]",
+    "feather-engine-dbos",
+    "feather-server",
+    "typer",
+]
+
+[project.scripts]
+feather = "feather_cli.main:app"
+
+[tool.uv.sources]
+feather-connect = { workspace = true }
+feather-engine-dbos = { workspace = true }
+feather-server = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
