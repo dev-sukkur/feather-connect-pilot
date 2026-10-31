@@ -6,8 +6,11 @@ and a second pass over the `full` chunks keeps the rows that changed.
 """
 
 import hashlib
+import math
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, cast
 
 import pyarrow as pa
@@ -28,6 +31,7 @@ from feather_connect.storage.spool import records_to_table, snapshot_table, tabl
 _KEY, _HASH = "_fc_key", "_fc_row_hash"
 _ALL_PARTITIONS = "*"
 _MISSING_KEY = "<missing>"  # how the quarantine names a record that has no key
+_RESERVED_PREFIX = "_fc_"  # the spool's own columns
 
 # What a bad record can raise. Validation and Arrow errors are `ValueError`s or `TypeError`s, or Arrow's own.
 _RECORD_ERRORS = (MissingKeyError, PartitionError, pa.ArrowException, TypeError, ValueError)
@@ -55,10 +59,13 @@ class _Read:
     the keys of records that were read but turned down.
     """
 
-    def __init__(self, dataset: Dataset, run_id: str, partition: str | None, deps: RuntimeDeps) -> None:
+    def __init__(
+        self, dataset: Dataset, run_id: str, partition: str | None, stamp_kind: str | None, deps: RuntimeDeps
+    ) -> None:
         self._dataset = dataset
         self._run_id = run_id
         self._partition = partition  # None when each row's partition comes from the row
+        self._stamp_kind = stamp_kind  # None until the first acceptable stamp of a dataset's first read
         self._deps = deps
         self._buffered = 0
         self.slices: dict[str, _Slice] = {}
@@ -86,18 +93,40 @@ class _Read:
             key = make_key(row, dataset.key)
             partition = dataset.partition.key_of(row) if partition is None else partition
             _validate(dataset.schema, row)
+            _check_columns(row)
             record = Record(key, _op_of(dataset, row), row, row_hash(row))
-            target = self._slice(partition)
-            watermark = _later_stamp(dataset, row, target.watermark)  # a stamp of another type can't compare
+            stamp = self._accepted_stamp(
+                row
+            )  # last, so that only a record that is kept can set the stamp kind
         except _RECORD_ERRORS as e:
             self._reject(key, partition, e)
             return
+        target = self._slice(partition)
         self.latest[key] = (partition, record.row_hash)
-        target.watermark = watermark
+        if stamp is not None and (target.watermark is None or stamp > target.watermark):
+            target.watermark = stamp
         self._buffered += key not in target.buffer
         target.buffer[key] = record
         if self._buffered >= spool_settings.CHUNK_ROWS:
             self.flush()
+
+    def _accepted_stamp(self, row: Mapping[str, Any]) -> Any:
+        """Return the row's change stamp, or None if it has none. Raises if it can't count towards a watermark.
+
+        Only stamps of the dataset's kind are comparable with its watermark, and a sealed watermark can't be taken
+        back. So each stamp is checked, not just compared with the others of its slice.
+        """
+        strategy = self._dataset.strategy
+        stamp = row.get(strategy.field) if isinstance(strategy, ByStamp) else None
+        if stamp is None:
+            return None
+        kind = _stamp_kind(stamp)
+        if self._stamp_kind not in (None, kind):
+            raise TypeError(
+                f"change stamp {stamp!r} is a {kind}, but this dataset's are of kind {self._stamp_kind}"
+            )
+        self._stamp_kind = kind
+        return stamp
 
     def _reject(self, key: str | None, partition: str | None, error: Exception) -> None:
         name = _MISSING_KEY if key is None else key
@@ -133,6 +162,12 @@ def _validate(schema: type[BaseModel] | pa.Schema | None, row: Mapping[str, Any]
         schema.model_validate(row)
 
 
+def _check_columns(row: Mapping[str, Any]) -> None:
+    for name in row:
+        if name.startswith(_RESERVED_PREFIX):
+            raise ValueError(f"column {name!r} uses the reserved prefix {_RESERVED_PREFIX!r}")
+
+
 def _op_of(dataset: Dataset, row: Mapping[str, Any]) -> Op:
     strategy = dataset.strategy
     if isinstance(strategy, ByStamp) and strategy.deleted_field and row.get(strategy.deleted_field):
@@ -140,21 +175,25 @@ def _op_of(dataset: Dataset, row: Mapping[str, Any]) -> Op:
     return "upsert"
 
 
-def _later_stamp(dataset: Dataset, row: Mapping[str, Any], watermark: Any) -> Any:
-    """Return the later of `watermark` and the row's change stamp, for a `by_stamp` dataset."""
-    if not isinstance(dataset.strategy, ByStamp):
-        return watermark
-    stamp = row.get(dataset.strategy.field)
-    return stamp if stamp is not None and (watermark is None or stamp > watermark) else watermark
+def _stamp_kind(stamp: Any) -> str:
+    """Return the kind of a change stamp. Stamps of one kind always compare. Raises `TypeError` for a bad stamp."""
+    if isinstance(stamp, datetime):  # before date, because a datetime is also a date
+        return "naive datetime" if stamp.utcoffset() is None else "aware datetime"
+    if isinstance(stamp, date):
+        return "date"
+    if isinstance(stamp, int) and not isinstance(stamp, bool):
+        return "number"
+    if isinstance(stamp, float | Decimal) and math.isfinite(stamp):
+        return "number"
+    raise TypeError(f"change stamp {stamp!r} is not a date, a datetime or a finite number")
 
 
 def _rows_of(batch: Any) -> list[dict[str, Any]]:
     return batch.to_pylist() if isinstance(batch, pa.RecordBatch) else batch
 
 
-def _read_since(dataset: Dataset, strategy: ByStamp, deps: RuntimeDeps) -> Any:
+def _read_since(dataset: Dataset, strategy: ByStamp, watermark: Any) -> Any:
     """Return where a `by_stamp` read starts: the watermark less the lookback. None means the first read."""
-    watermark = deps.store.versions.latest_watermark(dataset.name)
     if watermark is None or not strategy.lookback:
         return watermark
     try:
@@ -198,10 +237,13 @@ def _recent_hashes(dataset: Dataset, partition: str, since: Any, deps: RuntimeDe
 
 
 def _last_snapshot(dataset: Dataset, partition: str, deps: RuntimeDeps) -> pa.Table | None:
-    latest = deps.store.versions.latest_sealed(dataset.name, partition)
-    if latest is None or not deps.spool.list_chunks(latest.version_id, "snapshot"):
-        return None
-    return deps.spool.get_chunk(latest.version_id, 0, "snapshot")
+    """Return the newest snapshot of the partition. A version without one must not hide an older one."""
+    version = deps.store.versions.latest_sealed(dataset.name, partition)
+    while version is not None:
+        if deps.spool.list_chunks(version.version_id, "snapshot"):
+            return deps.spool.get_chunk(version.version_id, 0, "snapshot")
+        version = deps.store.versions.latest_sealed(dataset.name, partition, before_seal_seq=version.seal_seq)
+    return None
 
 
 def _old_snapshot(
@@ -263,6 +305,12 @@ def _schema_hash(version_id: str, deps: RuntimeDeps) -> str | None:
     return hashlib.blake2b(str(schema).encode("utf-8"), digest_size=16).hexdigest()
 
 
+def _discard(version_id: str, deps: RuntimeDeps) -> None:
+    """Remove what an earlier attempt may have staged, row first: leftover chunks are cleared by the next attempt."""
+    deps.store.versions.discard_staged(version_id)
+    deps.spool.delete_version(version_id)
+
+
 def _stage_slice(
     dataset: Dataset,
     run_id: str,
@@ -286,7 +334,7 @@ def _stage_slice(
     changes = _write_changes(read, target, set(cast("list[str]", diff.upsert_keys.to_pylist())), deps)
     deletes = {key: old_hashes.get(key, 0) for key in cast("list[str]", diff.delete_keys.to_pylist())}
     if not changes and not deletes:
-        deps.spool.delete_version(target.version_id)
+        _discard(target.version_id, deps)
         return None
     if strategy.complete:
         deps.spool.put_chunk(target.version_id, 0, "snapshot", snapshot_table(new.items()))
@@ -312,9 +360,17 @@ def _stage_slice(
 
 
 def _sealed_earlier(dataset: Dataset, run_id: str, partition: str | None, deps: RuntimeDeps) -> list[Version]:
-    """Return what an earlier attempt at this extract already sealed. Sealing is all or nothing, so it did it all."""
-    found = deps.store.versions.list_versions(dataset.name, partition)
-    return [v for v in found if v.run_id == run_id and v.status == "sealed"]
+    """Return what an earlier attempt at this extract already sealed. Sealing is all or nothing, so it did it all.
+
+    `partition` is None for a read across partitions, which can have sealed any number of versions.
+    """
+    if partition is None:
+        return deps.store.versions.sealed_for_run(run_id, dataset.name)
+    try:
+        version = deps.store.versions.get(stable_id(run_id, dataset.name, partition))
+    except KeyError:
+        return []
+    return [version] if version.status == "sealed" else []
 
 
 def run_extract(
@@ -337,9 +393,15 @@ def run_extract(
     by_stamp = strategy if isinstance(strategy, ByStamp) else None
     versions = _sealed_earlier(dataset, run_id, None if by_stamp else partition, deps)
     if not versions:
-        since = None if by_stamp is None else _read_since(dataset, by_stamp, deps)
-        read = _Read(dataset, run_id, None if by_stamp else partition, deps)
+        watermark = None if by_stamp is None else deps.store.versions.latest_watermark(dataset.name)
+        since = None if by_stamp is None else _read_since(dataset, by_stamp, watermark)
+        stamp_kind = None if watermark is None else _stamp_kind(watermark)
+        read = _Read(dataset, run_id, None if by_stamp else partition, stamp_kind, deps)
         _read_source(dataset, read, since, deps, _ALL_PARTITIONS if by_stamp else partition)
+        if by_stamp:  # an earlier attempt may have staged a partition that this read no longer touches
+            for stale in deps.store.versions.staged_for_run(run_id, dataset.name):
+                if stale.partition not in read.slices:
+                    _discard(stale.version_id, deps)
         new_by_slice: dict[str, dict[str, int]] = {name: {} for name in read.slices}
         for key, (slice_name, hash_) in read.latest.items():
             new_by_slice[slice_name][key] = hash_

@@ -76,6 +76,9 @@ class ByStamp(Strategy):
 
     A row that is read again and hasn't changed is dropped, and a version never implies deletes: a row is
     deleted only when its `deleted_field`, a flag that a soft-deleting source sets, says so.
+
+    Stamps are dates, datetimes or numbers, all of one kind across the dataset's life. A record whose stamp is
+    anything else is turned down, because a watermark of the wrong kind would block every later read.
     """
 
     field: str

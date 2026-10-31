@@ -221,8 +221,23 @@ class VersionStore(Protocol):
         """
         ...
 
-    def get(self, version_id: str) -> Version: ...
-    def latest_sealed(self, dataset: str, partition: str) -> Version | None: ...
+    def discard_staged(self, version_id: str) -> None:
+        """Remove a staged version, which an extract found it had no need of. An unknown id changes nothing.
+
+        Raises `VersionSealed` for a sealed version.
+        """
+        ...
+
+    def get(self, version_id: str) -> Version:
+        """Raises `KeyError` when there is no such version."""
+        ...
+
+    def latest_sealed(
+        self, dataset: str, partition: str, before_seal_seq: int | None = None
+    ) -> Version | None:
+        """The partition's newest sealed version, or its newest sealed before `before_seal_seq` when given."""
+        ...
+
     def since_watermark(self, dataset: str, partition: str, since: Any) -> list[Version]:
         """Sealed versions whose stored watermark is `>= since`, newest first. A None watermark never matches."""
         ...
@@ -237,6 +252,10 @@ class VersionStore(Protocol):
         ...
 
     def staged_for_run(self, run_id: str, dataset: str) -> list[Version]: ...
+    def sealed_for_run(self, run_id: str, dataset: str) -> list[Version]:
+        """All of the run's sealed versions of the dataset, in seal order."""
+        ...
+
     def list_versions(self, dataset: str, partition: str | None = None, limit: int = 100) -> list[Version]:
         """Newest first."""
         ...

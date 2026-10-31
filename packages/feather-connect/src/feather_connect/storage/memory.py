@@ -187,6 +187,13 @@ class _Versions(VersionStore):
                 sealed.append(version)
             return sealed
 
+    def discard_staged(self, version_id: str) -> None:
+        with self._d.lock:
+            existing = self._d.versions.get(version_id)
+            if existing is not None and existing.status == "sealed":
+                raise VersionSealed(f"version {version_id} is sealed")
+            self._d.versions.pop(version_id, None)
+
     def get(self, version_id: str) -> Version:
         with self._d.lock:
             return self._d.versions[version_id]
@@ -202,9 +209,14 @@ class _Versions(VersionStore):
         ]
         return sorted(found, key=lambda v: v.seal_seq or 0, reverse=True)
 
-    def latest_sealed(self, dataset: str, partition: str) -> Version | None:
+    def latest_sealed(
+        self, dataset: str, partition: str, before_seal_seq: int | None = None
+    ) -> Version | None:
         with self._d.lock:
-            return next(iter(self._sealed(dataset, partition)), None)
+            found = self._sealed(dataset, partition)
+        if before_seal_seq is not None:
+            found = [v for v in found if (v.seal_seq or 0) < before_seal_seq]
+        return next(iter(found), None)
 
     def since_watermark(self, dataset: str, partition: str, since: Any) -> list[Version]:
         with self._d.lock:
@@ -240,6 +252,11 @@ class _Versions(VersionStore):
                 for v in self._d.versions.values()
                 if v.status == "staged" and v.run_id == run_id and v.dataset == dataset
             ]
+
+    def sealed_for_run(self, run_id: str, dataset: str) -> list[Version]:
+        with self._d.lock:
+            found = [v for v in self._sealed(dataset, None) if v.run_id == run_id]
+        return found[::-1]  # `_sealed` is newest first
 
     def list_versions(self, dataset: str, partition: str | None = None, limit: int = 100) -> list[Version]:
         with self._d.lock:

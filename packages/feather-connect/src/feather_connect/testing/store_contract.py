@@ -235,6 +235,43 @@ class StoreContract:
         store.versions.seal(["v2"], ["a"])
         assert [v.version_id for v in store.versions.staged_for_run("r1", "d")] == ["v1"]
 
+    def test_sealed_for_run(self, store: Store):
+        store.versions.stage(draft("v1", run="r1"))
+        store.versions.stage(draft("v2", run="r1", part="q"))
+        store.versions.stage(draft("v3", run="r2"))
+        store.versions.stage(draft("v4", run="r1", ds="other"))
+        store.versions.stage(draft("v5", run="r1", part="s"))  # staged only
+        store.versions.seal(["v2", "v1", "v3", "v4"], ["a"])
+        assert [v.version_id for v in store.versions.sealed_for_run("r1", "d")] == ["v2", "v1"]
+
+    def test_discard_staged_removes_the_version(self, store: Store):
+        store.versions.stage(draft("v1", run="r1"))
+        store.versions.discard_staged("v1")
+        assert store.versions.staged_for_run("r1", "d") == []
+        with pytest.raises(KeyError):
+            store.versions.get("v1")
+        store.versions.discard_staged("v1")  # nothing there is fine
+
+    def test_discard_staged_refuses_a_sealed_version(self, store: Store):  # I1
+        store.versions.stage(draft("v1"))
+        store.versions.seal(["v1"], ["a"])
+        with pytest.raises(VersionSealed):
+            store.versions.discard_staged("v1")
+        assert store.versions.get("v1").status == "sealed"
+
+    def test_latest_sealed_before_a_seal_number(self, store: Store):
+        store.versions.stage(draft("v1"))
+        first = store.versions.seal(["v1"], ["a"])[0]
+        store.versions.stage(draft("v2"))
+        second = store.versions.seal(["v2"], ["a"])[0]
+        store.versions.stage(draft("v3", part="q"))
+        store.versions.seal(["v3"], ["a"])
+        store.versions.stage(draft("v4"))  # staged only
+        assert second.seal_seq is not None and first.seal_seq is not None
+        earlier = store.versions.latest_sealed("d", "p", before_seal_seq=second.seal_seq)
+        assert earlier is not None and earlier.version_id == "v1"
+        assert store.versions.latest_sealed("d", "p", before_seal_seq=first.seal_seq) is None
+
     def test_latest_watermark_ignores_staged_versions(self, store: Store):
         assert store.versions.latest_watermark("d") is None
         seal(store, "v1", ["a"], wm=10)

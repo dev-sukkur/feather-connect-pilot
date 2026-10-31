@@ -1,5 +1,5 @@
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pyarrow as pa
@@ -16,7 +16,7 @@ from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import ExtractFailed, finalize_versions, run_extract
 from feather_connect.storage import spool
 from feather_connect.storage.memory import MemoryStore
-from feather_connect.storage.port import StateRow
+from feather_connect.storage.port import StateRow, VersionDraft
 from feather_connect.storage.spool import MemorySpool, table_to_records
 
 T0 = datetime(2026, 10, 18, 10, tzinfo=UTC)
@@ -225,6 +225,76 @@ def test_record_whose_stamp_cannot_be_compared_is_quarantined():
     assert DEPS.store.quarantine.list_open()[0].key == "2"
 
 
+class UnfilteredSource(Source):
+    """Hands back everything it holds, as a source that filters on its own side would."""
+
+    def read(self, ctx, req):
+        yield self._rows
+
+
+def test_a_bad_stamp_first_in_a_read_is_quarantined_not_sealed():
+    ds = dataset(fc.strategy.by_stamp("u"))
+    v = extract(ds, [{"id": 2, "u": "soon"}, {"id": 1, "u": T0}], partition="*")[0]
+    assert [r.key for r in recs(v)] == ["1"] and v.watermark == T0
+    assert [q.key for q in DEPS.store.quarantine.list_open()] == ["2"]
+
+
+def test_a_bad_stamp_alone_in_a_later_run_cannot_block_the_dataset():
+    ds = dataset(fc.strategy.by_stamp("u"), source=UnfilteredSource())
+    extract(ds, [{"id": 1, "u": T0}], partition="*")
+    assert extract(ds, [{"id": 2, "u": "soon"}], run="r2", partition="*") == []
+    assert [q.key for q in DEPS.store.quarantine.list_open()] == ["2"]
+    v = extract(ds, [{"id": 3, "u": T1}], run="r3", partition="*")[0]
+    assert v.watermark == T1
+
+
+def test_the_stored_watermark_sets_the_stamp_kind():
+    ds = dataset(fc.strategy.by_stamp("u"), source=UnfilteredSource())
+    extract(ds, [{"id": 1, "u": T0}], partition="*")
+    for stamp in (5, date(2026, 10, 18), datetime(2026, 10, 18, 11), True, float("nan")):
+        assert extract(ds, [{"id": 2, "u": stamp}], run=f"r-{stamp}", partition="*") == []
+    assert DEPS.store.versions.latest_watermark("d") == T0
+
+
+def test_the_first_acceptable_stamp_sets_the_kind_across_slices():
+    ds = dataset(fc.strategy.by_stamp("u"), partition=fc.partition.by_fields("s"))
+    rows = [{"id": 2, "s": "a", "u": 5}, {"id": 3, "s": "b", "u": T0}]
+    v = extract(ds, rows, partition="*")
+    assert [x.partition for x in v] == ["s=a"] and v[0].watermark == 5
+    assert [q.key for q in DEPS.store.quarantine.list_open()] == ["3"]
+
+
+def test_a_record_turned_down_for_other_reasons_does_not_set_the_stamp_kind():
+    ds = dataset(fc.strategy.by_stamp("u"))
+    v = extract(ds, [{"id": None, "u": 5}, {"id": 1, "u": T0}], partition="*")[0]
+    assert v.watermark == T0
+
+
+def test_numbers_of_different_types_are_one_stamp_kind():
+    ds = dataset(fc.strategy.by_stamp("u"))
+    assert extract(ds, [{"id": 1, "u": 5}, {"id": 2, "u": 6.5}], partition="*")[0].watermark == 6.5
+
+
+def test_a_reserved_column_is_quarantined_and_the_rest_proceed():
+    v = extract(dataset(fc.strategy.replace()), [{"id": 1, "_fc_x": 1}, {"id": 2}])[0]
+    assert [r.key for r in recs(v)] == ["2"]
+    row = DEPS.store.quarantine.list_open()[0]
+    assert row.key == "1" and "_fc_x" in row.error
+
+
+def test_an_infrastructure_error_is_not_taken_for_a_bad_record():
+    class BrokenSpool(MemorySpool):
+        def delete_version(self, version_id):
+            raise ValueError("the spool is down")
+
+    deps = RuntimeDeps(DEPS.store, BrokenSpool(), DEPS.clock, "sha", DEPS.make_context)
+    ds = dataset(fc.strategy.by_stamp("u"))
+    ds.source.load([{"id": 1, "u": T0}])
+    with pytest.raises(ValueError, match="the spool is down"):
+        run_extract(ds, "r1", "*", routes=route_specs(("a",)), stage_only=False, deps=deps)
+    assert DEPS.store.quarantine.list_open() == []
+
+
 def test_record_that_cannot_be_hashed_is_quarantined():
     v = extract(dataset(fc.strategy.replace()), [{"id": 1, "v": object()}, {"id": 2}])[0]
     assert [r.key for r in recs(v)] == ["2"]
@@ -332,6 +402,57 @@ def test_restart_after_sealing_leaves_the_version_alone():  # I1
     again = extract(ds, [{"id": 9}])[0]
     assert (again.version_id, again.seal_seq) == (v.version_id, v.seal_seq)
     assert [r.key for r in recs(v)] == ["1", "2"]
+
+
+def test_restart_after_many_later_versions_leaves_the_version_alone():  # I1
+    ds = dataset(fc.strategy.replace())
+    first = extract(ds, [{"id": 1}], run="r0")[0]
+    for i in range(1, 102):
+        extract(ds, [{"id": 1}], run=f"r{i}")
+    again = extract(ds, [{"id": 9}], run="r0")[0]
+    assert (again.version_id, again.seal_seq) == (first.version_id, first.seal_seq)
+    assert [r.key for r in recs(first)] == ["1"]
+
+
+def test_restart_of_a_by_stamp_run_returns_all_it_sealed_however_many():
+    ds = dataset(fc.strategy.by_stamp("u"), partition=fc.partition.by_fields("s"))
+    rows = [{"id": i, "s": str(i), "u": T0} for i in range(101)]
+    sealed = extract(ds, rows, partition="*")
+    assert len(sealed) == 101
+    assert extract(ds, rows, partition="*") == sealed
+
+
+def test_a_no_op_restart_leaves_no_staged_version():
+    ds = dataset(fc.strategy.snapshot_diff())
+    extract(ds, ROWS)
+    routes = route_specs(("a",))
+    ds.source.load(ROWS[:1])
+    staged = run_extract(ds, "r2", "_", routes=routes, stage_only=True, deps=DEPS)[0]
+    ds.source.load(ROWS)
+    assert run_extract(ds, "r2", "_", routes=routes, stage_only=True, deps=DEPS) == []
+    assert DEPS.store.versions.staged_for_run("r2", "d") == []
+    assert DEPS.spool.list_chunks(staged.version_id, "candidates") == []
+
+
+def test_a_by_stamp_restart_drops_a_partition_it_no_longer_touches():
+    ds = dataset(fc.strategy.by_stamp("u"), partition=fc.partition.by_fields("s"))
+    routes = route_specs(("a",))
+    ds.source.load([{"id": 1, "s": "a", "u": T0}, {"id": 2, "s": "b", "u": T0}])
+    run_extract(ds, "r1", "*", routes=routes, stage_only=True, deps=DEPS)
+    ds.source.load([{"id": 1, "s": "a", "u": T0}])
+    run_extract(ds, "r1", "*", routes=routes, stage_only=True, deps=DEPS)
+    assert [v.partition for v in DEPS.store.versions.staged_for_run("r1", "d")] == ["s=a"]
+
+
+def test_a_sealed_version_without_a_snapshot_does_not_hide_an_older_one():
+    ds = dataset(fc.strategy.snapshot_diff())
+    extract(ds, ROWS)
+    draft = VersionDraft("x", "d", "_", "rx", True, 0, 0, "", None, None, "sha")
+    DEPS.store.versions.stage(draft)
+    DEPS.store.versions.seal(["x"], ["a"])
+    v = extract(ds, ROWS[:1], run="r3")[0]
+    assert (v.upserts, v.deletes) == (0, 1)
+    assert [(r.key, r.op) for r in recs(v)] == [("2", "delete")]
 
 
 def test_restart_of_a_by_stamp_run_after_sealing_returns_what_it_sealed():
