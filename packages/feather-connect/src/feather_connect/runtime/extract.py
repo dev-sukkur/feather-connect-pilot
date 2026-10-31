@@ -34,9 +34,8 @@ _REJECTED_SCHEMA = pa.schema([pa.field(_KEY, pa.string())])
 _ALL_PARTITIONS = "*"
 _MISSING_KEY = "<missing>"  # how the quarantine names a record that has no key
 _RESERVED_PREFIX = "_fc_"  # the spool's own columns
-_NOT_DELIVERED = (
-    0  # the hash a snapshot holds for a key whose row was turned down before it ever reached the slice
-)
+# The hash a snapshot holds for a key whose row was turned down before it ever reached the slice.
+_NOT_DELIVERED = 0
 
 # What a bad record can raise. Validation and Arrow errors are `ValueError`s or `TypeError`s, or Arrow's own.
 _RECORD_ERRORS = (MissingKeyError, PartitionError, pa.ArrowException, TypeError, ValueError)
@@ -430,9 +429,11 @@ def run_extract(
             version = _stage_slice(dataset, run_id, read, target, new_by_slice[name], since, keep_full, deps)
             if version is not None:
                 versions.append(version)
-            # After staging, which may discard a no-op slice's chunks. Other slices of the run still need to see these.
-            if stage_only and strategy.complete and read.rejected:
-                rows = [{_KEY: key} for key in sorted(read.rejected)]
+            # After staging, which may discard a no-op slice's chunks. Other slices of the run still need to see these,
+            # and the empty-read guard too. A read that seals at once and has no version leaves nothing to clear them.
+            rejected = read.rejected - read.latest.keys()
+            if strategy.complete and rejected and (stage_only or version is not None):
+                rows = [{_KEY: key} for key in sorted(rejected)]
                 table = pa.Table.from_pylist(rows, schema=_REJECTED_SCHEMA)
                 deps.spool.put_chunk(target.version_id, 0, "rejected", table)
     return versions if stage_only else finalize_versions(dataset, versions, routes, deps)
@@ -523,6 +524,23 @@ def _held_without_a_version(
     return held
 
 
+def _home_hashes(
+    dataset: Dataset,
+    candidates: Iterable[Mapping[str, int]],
+    state: Mapping[str, StateRow],
+    deps: RuntimeDeps,
+) -> dict[str, dict[str, int]]:
+    """Return the last snapshot of each partition where record state places a candidate held as not delivered."""
+    homes = {
+        state[key].partition
+        for found in candidates
+        for key, hash_ in found.items()
+        if hash_ == _NOT_DELIVERED and key in state
+    }
+    snapshots = {home: _last_snapshot(dataset, home, deps) for home in homes}
+    return {home: dict(_pairs(table)) if table is not None else {} for home, table in snapshots.items()}
+
+
 def _by_partition(versions: Iterable[Version]) -> list[Version]:
     return sorted(versions, key=lambda version: version.partition)
 
@@ -548,6 +566,7 @@ def _reconcile(
     held = _held_without_a_version(dataset, versions, wanted - holders.keys(), deps)
     upserted = {r.key for found in changes.values() for r in found if r.op == "upsert"}
     state = deps.store.state.get_many(dataset.name, wanted | upserted) if dataset.keep_state else {}
+    home_hashes = _home_hashes(dataset, candidates.values(), state, deps)
 
     moves: dict[str, dict[str, str]] = {v.version_id: {} for v in ordered}
     deletes: dict[str, dict[str, int]] = {v.version_id: {} for v in ordered}
@@ -557,10 +576,13 @@ def _reconcile(
             if key in holders:
                 # A holder that is sealed already can't take a move, so it may have no entry yet.
                 moves.setdefault(holders[key], {}).setdefault(key, version.partition)
-            elif key not in held and (
-                # A key held as not delivered never lived here, so state elsewhere doesn't make its going a move.
-                hash_ == _NOT_DELIVERED or row is None or row.partition == version.partition
-            ):
+            elif key in held:
+                continue
+            elif row is None or row.partition == version.partition:
+                deletes[version.version_id][key] = hash_
+            elif hash_ == _NOT_DELIVERED and not home_hashes[row.partition].get(key):
+                # The key never lived here, and where the state row says it lives has no delivered copy: that row is
+                # left over from before the rejection, so the record really is gone.
                 deletes[version.version_id][key] = hash_
     # Record state knows where a key last was, so it goes over what an old snapshot says.
     for version in ordered:
@@ -577,16 +599,18 @@ def _reconcile(
 
 
 def _check_empty_read(dataset: Dataset, found: _Reconciled, deps: RuntimeDeps) -> None:
-    """Refuse to let an empty read wipe a slice. A transient empty response must not empty a destination.
+    """Refuse to let a read with no accepted rows wipe a slice. A bad source response must not empty a destination.
 
-    A slice that is empty because its records moved to other slices wipes nothing, so only real deletes count.
+    A slice that is empty because its records moved to other slices wipes nothing, so only real deletes count. Keys
+    held for rejected rows are in the snapshot, but the read didn't accept them, so they don't count as rows.
     """
     version = found.version
     if dataset.allow_empty or not version.complete or not found.deletes:
         return
-    if sum(chunk.rows for chunk in deps.spool.list_chunks(version.version_id, "snapshot")) == 0:
+    rows = sum(chunk.rows for chunk in deps.spool.list_chunks(version.version_id, "snapshot"))
+    if rows == len(_rejected_keys(version.version_id, deps)):
         raise ExtractFailed(
-            f"dataset {dataset.name!r}, partition {version.partition!r}: the read returned no rows, which would "
+            f"dataset {dataset.name!r}, partition {version.partition!r}: the read gave no usable rows, which would "
             "delete the whole slice; if the source can really be empty, set allow_empty=True on the dataset"
         )
 

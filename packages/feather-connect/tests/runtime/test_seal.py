@@ -201,9 +201,8 @@ def test_a_key_held_by_an_unchanged_slice_of_the_run_is_not_a_delete():  # I10
     run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2)})
     run_slices(ds, "r2", {DAY_19: on(DAY_19, 1)})
     vs = run_slices(ds, "r3", {DAY_18: on(DAY_18, 2), DAY_19: on(DAY_19, 1)})
-    assert [v.partition for v in vs] == [
-        DAY_18
-    ]  # day 19 read as unchanged, so nothing can take a move notice
+    # Day 19 read as unchanged, so nothing can take a move notice.
+    assert [v.partition for v in vs] == [DAY_18]
     assert (all_records(vs[0]), vs[0].deletes, moves_of(vs[0])) == ([], 0, {})
 
 
@@ -319,6 +318,72 @@ def test_a_key_turned_down_in_one_slice_can_still_move_to_another():
     vs = run_slices(ds, "r2", slices)
     assert moves_of(version_for(vs, DAY_19)) == {"1": DAY_20}
     assert moves_of(version_for(vs, DAY_18)) == {}
+
+
+def test_a_stale_placeholder_does_not_delete_a_record_that_lives_elsewhere():
+    ds = strict_dataset(keep_state=True)
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2, x=1), DAY_19: on(DAY_19, 3, x=1)})
+    run_slices(ds, "r2", {DAY_18: on(DAY_18, 2, x=1), DAY_19: on(DAY_19, 1, x="bad") + on(DAY_19, 3, x=1)})
+    run_slices(ds, "r3", {DAY_18: on(DAY_18, 1, 2, x=1)})
+    vs = run_slices(ds, "r4", {DAY_19: on(DAY_19, 3, x=1)})
+    assert ("1", "delete") not in [(r.key, r.op) for v in vs for r in all_records(v)]
+    assert DEPS.store.state.get_many("d", ["1"])["1"].partition == DAY_18
+
+
+def test_a_placeholder_is_deleted_when_the_state_row_is_left_over_from_before_the_rejection():
+    ds = moved_into_rejection(keep_state=True, allow_empty=True)
+    assert DEPS.store.state.get_many("d", ["1"])["1"].partition == DAY_18
+    vs = run_slices(ds, "r3", {DAY_19: []})  # day 18's snapshot no longer holds the key
+    assert [(r.key, r.op) for v in vs for r in all_records(v)] == [("1", "delete")]
+    assert DEPS.store.state.get_many("d", ["1"]) == {}
+
+
+def test_a_read_with_only_rejected_rows_cannot_wipe_a_slice():
+    ds = strict_dataset()
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2, 3, x=1)})
+    stage_slices(ds, "r2", {DAY_18: on(DAY_18, 9, x="bad")})
+    with pytest.raises(ExtractFailed, match="allow_empty"):
+        run_seal(ds, "r2", routes=ROUTES, deps=DEPS)
+    assert DEPS.store.versions.sealed_for_run("r2", "d") == []
+
+
+def test_a_read_with_only_rejected_rows_cannot_wipe_a_slice_when_it_seals_at_once():
+    ds = strict_dataset()
+    ds.source.load(on(DAY_18, 1, 2, x=1))
+    run_extract(ds, "r1", DAY_18, routes=ROUTES, stage_only=False, deps=DEPS)
+    ds.source.load(on(DAY_18, 9, x="bad"))
+    with pytest.raises(ExtractFailed, match="allow_empty"):
+        run_extract(ds, "r2", DAY_18, routes=ROUTES, stage_only=False, deps=DEPS)
+
+
+def test_a_rejected_row_of_an_old_key_does_not_count_as_accepted():
+    ds = strict_dataset()
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2, x=1)})
+    stage_slices(ds, "r2", {DAY_18: on(DAY_18, 1, x="bad")})
+    with pytest.raises(ExtractFailed, match="allow_empty"):
+        run_seal(ds, "r2", routes=ROUTES, deps=DEPS)
+
+
+def test_allow_empty_lets_a_read_with_only_rejected_rows_delete():
+    ds = strict_dataset(allow_empty=True)
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, x=1)})
+    v = run_slices(ds, "r2", {DAY_18: on(DAY_18, 9, x="bad")})[0]
+    assert [(r.key, r.op) for r in all_records(v)] == [("1", "delete")]
+
+
+def test_one_accepted_row_passes_the_guard_beside_a_rejected_one():
+    ds = strict_dataset()
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, x=1)})
+    v = run_slices(ds, "r2", {DAY_18: on(DAY_18, 8, x=1) + on(DAY_18, 9, x="bad")})[0]
+    assert sorted((r.key, r.op) for r in all_records(v)) == [("1", "delete"), ("8", "upsert")]
+
+
+def test_a_key_read_good_and_bad_in_one_slice_counts_as_read():
+    ds = strict_dataset()
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2, x=1)})
+    good_and_bad = on(DAY_19, 1, x="bad") + on(DAY_19, 1, x=1)
+    vs = run_slices(ds, "r2", {DAY_18: on(DAY_18, 2, x=1), DAY_19: good_and_bad})
+    assert moves_of(version_for(vs, DAY_19)) == {"1": DAY_18}
 
 
 def test_rejected_keys_survive_the_discard_of_a_no_op_slice_and_go_once_sealed():
