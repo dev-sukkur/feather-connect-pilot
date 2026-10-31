@@ -8,6 +8,7 @@ and a second pass over the `full` chunks keeps the rows that changed.
 import hashlib
 import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
@@ -26,11 +27,12 @@ from feather_connect.ids import stable_id
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.storage import spool as spool_settings
 from feather_connect.storage.port import StateRow, Version, VersionDraft
-from feather_connect.storage.spool import records_to_table, snapshot_table, table_to_records
+from feather_connect.storage.spool import ChunkKind, records_to_table, snapshot_table, table_to_records
 
 _KEY, _OP, _HASH, _MOVED = "_fc_key", "_fc_op", "_fc_row_hash", "_fc_moved_from"
 _MOVES_SCHEMA = pa.schema([pa.field(_KEY, pa.string()), pa.field(_MOVED, pa.string())])
 _REJECTED_SCHEMA = pa.schema([pa.field(_KEY, pa.string())])
+_VERSION_KINDS: tuple[ChunkKind, ...] = ("data", "snapshot", "full", "candidates", "moves")
 _ALL_PARTITIONS = "*"
 _MISSING_KEY = "<missing>"  # how the quarantine names a record that has no key
 _RESERVED_PREFIX = "_fc_"  # the spool's own columns
@@ -141,7 +143,7 @@ class _Read:
         if key is not None:
             self.rejected.add(key)
         version_id = None if partition is None else self._version_id(partition)
-        self._deps.store.quarantine.add(None, version_id, name, str(error))
+        self._deps.store.quarantine.add(None, version_id, name, str(error), self._dataset.name, partition)
 
     def flush(self) -> None:
         """Write out what is buffered, so that all the slices together hold less than a chunk in memory."""
@@ -411,6 +413,7 @@ def run_extract(
     strategy = dataset.strategy
     by_stamp = strategy if isinstance(strategy, ByStamp) else None
     versions = _sealed_earlier(dataset, run_id, None if by_stamp else partition, deps)
+    read_partitions: list[str] = []
     if not versions:
         watermark = None if by_stamp is None else deps.store.versions.latest_watermark(dataset.name)
         since = None if by_stamp is None else _read_since(dataset, by_stamp, watermark)
@@ -421,6 +424,7 @@ def run_extract(
             for stale in deps.store.versions.staged_for_run(run_id, dataset.name):
                 if stale.partition not in read.slices:
                     _discard(stale.version_id, deps)
+        read_partitions = list(read.slices)
         new_by_slice: dict[str, dict[str, int]] = {name: {} for name in read.slices}
         for key, (slice_name, hash_) in read.latest.items():
             new_by_slice[slice_name][key] = hash_
@@ -436,7 +440,16 @@ def run_extract(
                 rows = [{_KEY: key} for key in sorted(rejected)]
                 table = pa.Table.from_pylist(rows, schema=_REJECTED_SCHEMA)
                 deps.spool.put_chunk(target.version_id, 0, "rejected", table)
-    return versions if stage_only else finalize_versions(dataset, versions, routes, deps)
+            # Also after staging. A row accepted now settles what was turned down before, once the run has sealed.
+            accepted = new_by_slice[name].keys() - read.rejected
+            _write_settled(
+                target.version_id, deps.store.quarantine.open_extraction_keys(dataset.name, accepted), deps
+            )
+    if stage_only:
+        return versions
+    sealed = finalize_versions(dataset, versions, routes, deps)
+    settle_quarantine(dataset, run_id, {*read_partitions, *(v.partition for v in sealed)}, deps)
+    return sealed
 
 
 @dataclass(frozen=True)
@@ -445,9 +458,10 @@ class _Reconciled:
 
     `candidates` are its delete candidates as staged, `deletes` those that remain real, `changes` its other records,
     without payloads, and `moves` the partition that each key moving into it came from. `kept` are the candidates that
-    stay in its snapshot, with their old hashes: their rows moved to another slice and were turned down there, so the
-    destination still has them here, and a replace of this slice must not lose them. `kept_before` says that all of
-    them were kept by an earlier version too, because the slices that turned them down have nothing new to say.
+    stay in its snapshot, with their old hashes: their rows are turned down elsewhere, in this run or an earlier one
+    whose quarantine entry is open, so the destination still has them here, and a replace of this slice must not lose
+    them. `kept_before` says that no slice of this run with a version has just turned one of them down. `left` are the
+    keys whose extraction entries it settles: placeholders leaving its snapshot, and its real deletes.
     """
 
     version: Version
@@ -457,6 +471,7 @@ class _Reconciled:
     moves: Mapping[str, str]
     kept: Mapping[str, int]
     kept_before: bool
+    left: AbstractSet[str]
 
 
 def _candidates_of(version: Version, deps: RuntimeDeps) -> dict[str, int]:
@@ -481,12 +496,43 @@ def _changes_of(version: Version, candidates: Mapping[str, int], deps: RuntimeDe
     return changes
 
 
-def _rejected_keys(version_id: str, deps: RuntimeDeps) -> set[str]:
+def _keys_in(version_id: str, kind: ChunkKind, deps: RuntimeDeps) -> set[str]:
     keys: set[str] = set()
-    for chunk in deps.spool.list_chunks(version_id, "rejected"):
-        table = deps.spool.get_chunk(version_id, chunk.chunk_no, "rejected")
+    for chunk in deps.spool.list_chunks(version_id, kind):
+        table = deps.spool.get_chunk(version_id, chunk.chunk_no, kind)
         keys.update(cast("list[str]", table.column(_KEY).to_pylist()))
     return keys
+
+
+def _rejected_keys(version_id: str, deps: RuntimeDeps) -> set[str]:
+    return _keys_in(version_id, "rejected", deps)
+
+
+def _write_settled(version_id: str, keys: Iterable[str], deps: RuntimeDeps) -> None:
+    """Add `keys` to those whose extraction quarantine entries `settle_quarantine` is to close for the slice."""
+    settled = _keys_in(version_id, "settled", deps).union(keys)
+    if settled:
+        rows = [{_KEY: key} for key in sorted(settled)]
+        deps.spool.put_chunk(version_id, 0, "settled", pa.Table.from_pylist(rows, schema=_REJECTED_SCHEMA))
+
+
+def settle_quarantine(dataset: Dataset, run_id: str, partitions: Iterable[str], deps: RuntimeDeps) -> None:
+    """Close the extraction entries of keys that the run, now sealed, settled, and clear what said so.
+
+    A key is settled by an accepted row, or by leaving a slice that held it as turned down, unless a slice of this run
+    turned it down. It comes after sealing, and works from chunks that stay until it is done, so it can be repeated.
+    """
+    version_ids = [stable_id(run_id, dataset.name, partition) for partition in partitions]
+    settled: set[str] = set()
+    rejected: set[str] = set()
+    for version_id in version_ids:
+        settled |= _keys_in(version_id, "settled", deps)
+        rejected |= _rejected_keys(version_id, deps)
+    if settled - rejected:
+        deps.store.quarantine.close_extraction(dataset.name, settled - rejected)
+    for version_id in version_ids:
+        deps.spool.delete_chunks(version_id, "settled")
+        deps.spool.delete_chunks(version_id, "rejected")
 
 
 def _holders(
@@ -520,6 +566,7 @@ def _held_without_a_version(
     The first set is the keys a slice turned down. The second is the keys of a registered slice with no version, which
     read as unchanged and so still holds what its last snapshot does: a key it holds only as a placeholder isn't one.
     Neither is a delete. The third is those of the first turned down by a slice with no version: old news.
+    A key with no entry in any of these can still be protected, by an open quarantine entry from an earlier run.
     """
     if not keys:
         return set(), set(), set()
@@ -537,23 +584,6 @@ def _held_without_a_version(
         if old is not None:
             unchanged.update(key for key, hash_ in _pairs(old) if key in keys and hash_ != NOT_DELIVERED)
     return turned_down, unchanged, repeated
-
-
-def _home_hashes(
-    dataset: Dataset,
-    candidates: Iterable[Mapping[str, int]],
-    state: Mapping[str, StateRow],
-    deps: RuntimeDeps,
-) -> dict[str, dict[str, int]]:
-    """Return the last snapshot of each partition where record state places a candidate held as not delivered."""
-    homes = {
-        state[key].partition
-        for found in candidates
-        for key, hash_ in found.items()
-        if hash_ == NOT_DELIVERED and key in state
-    }
-    snapshots = {home: _last_snapshot(dataset, home, deps) for home in homes}
-    return {home: dict(_pairs(table)) if table is not None else {} for home, table in snapshots.items()}
 
 
 def _by_partition(versions: Iterable[Version]) -> list[Version]:
@@ -583,34 +613,40 @@ def _reconcile(
     )
     upserted = {r.key for found in changes.values() for r in found if r.op == "upsert"}
     state = deps.store.state.get_many(dataset.name, wanted | upserted) if dataset.keep_state else {}
-    home_hashes = _home_hashes(dataset, candidates.values(), state, deps)
+    # A key leaving its placeholder has its entry closed by this run, so unless it was turned down again, no entry
+    # protects it here. A slice read in the same run can delete it.
+    leaving = {key for found in candidates.values() for key, hash_ in found.items() if hash_ == NOT_DELIVERED}
 
     moves: dict[str, dict[str, str]] = {v.version_id: {} for v in ordered}
     deletes: dict[str, dict[str, int]] = {v.version_id: {} for v in ordered}
     kept: dict[str, dict[str, int]] = {v.version_id: {} for v in ordered}
-    # A placeholder says nothing about a key that another slice's snapshot has as really delivered: that slice decides.
-    delivered = {
-        key for found in candidates.values() for key, hash_ in found.items() if hash_ != NOT_DELIVERED
-    }
+    left: dict[str, set[str]] = {v.version_id: set() for v in ordered}
     for version in ordered:
+        # An entry from this very slice protects nothing: the slice has just been read without the key, so its row is
+        # gone. An entry from elsewhere says that the source may still have the key there.
+        protected = turned_down | (
+            deps.store.quarantine.open_extraction_keys(
+                dataset.name,
+                candidates[version.version_id].keys() - holders.keys(),
+                outside=version.partition,
+            )
+            - leaving
+        )
         for key, hash_ in candidates[version.version_id].items():
             row = state.get(key)
-            if key in holders:
+            if hash_ == NOT_DELIVERED:
+                # Never delivered from this slice, so there is nothing to delete or move from it.
+                left[version.version_id].add(key)
+            elif key in holders:
                 # A holder that is sealed already can't take a move, so it may have no entry yet.
                 moves.setdefault(holders[key], {}).setdefault(key, version.partition)
             elif key in unchanged:
                 continue
-            elif key in turned_down:
-                if hash_ != NOT_DELIVERED:
-                    kept[version.version_id][key] = hash_
-            elif hash_ == NOT_DELIVERED and key in delivered:
-                continue
+            elif key in protected:
+                kept[version.version_id][key] = hash_
             elif row is None or row.partition == version.partition:
                 deletes[version.version_id][key] = hash_
-            elif hash_ == NOT_DELIVERED and not home_hashes[row.partition].get(key):
-                # The key never lived here, and where the state row says it lives has no delivered copy: that row is
-                # left over from before the rejection, so the record really is gone.
-                deletes[version.version_id][key] = hash_
+                left[version.version_id].add(key)
     # Record state knows where a key last was, so it goes over what an old snapshot says.
     for version in ordered:
         for record in changes[version.version_id]:
@@ -625,7 +661,8 @@ def _reconcile(
             changes[v.version_id],
             moves[v.version_id],
             kept[v.version_id],
-            kept[v.version_id].keys() <= repeated,
+            not kept[v.version_id].keys() & (turned_down - repeated),
+            left[v.version_id],
         )
         for v in ordered
     ]
@@ -675,7 +712,7 @@ def _new_snapshot(found: _Reconciled, deps: RuntimeDeps) -> dict[str, int]:
 def _says_nothing(dataset: Dataset, found: _Reconciled, deps: RuntimeDeps) -> bool:
     """Return whether a version turns out to repeat what its partition's last snapshot says.
 
-    Its only candidates are keys it keeps again, because their rows are still turned down in another slice.
+    Its only candidates are keys it keeps again, because their rows are still turned down elsewhere.
     """
     if found.changes or found.deletes or found.moves or not found.kept or not found.kept_before:
         return False
@@ -695,6 +732,7 @@ def _write_decision(found: _Reconciled, deps: RuntimeDeps) -> None:
         deps.spool.put_chunk(
             version.version_id, 0, "snapshot", snapshot_table(_new_snapshot(found, deps).items())
         )
+    _write_settled(version.version_id, found.left, deps)
     if found.candidates:
         _write_implied_deletes(found, deps)
         deps.store.versions.stage(
@@ -750,6 +788,10 @@ def finalize_versions(
     A delete candidate that another of `versions` holds in its new snapshot is a move, and with `keep_state` so is one
     whose record state is in another partition. A move is written to the `moves` chunk of the version that received it.
 
+    A placeholder candidate, for a key that was never delivered from its slice, just leaves the snapshot. A candidate
+    whose row is turned down elsewhere, in this run or by an open quarantine entry, stays in the snapshot. Calling
+    `settle_quarantine` for the run is what comes after this.
+
     Raises `ExtractFailed`, with nothing sealed, when a complete read came back empty and would really delete records,
     unless the dataset allows it. Versions that are already sealed stay as they are, so this can be repeated: all that
     comes before sealing is worked out from the candidates, which go only after it. Record state is updated after
@@ -772,7 +814,8 @@ def finalize_versions(
             _update_state(dataset, version, deps)
     for version in sealed:
         deps.spool.delete_chunks(version.version_id, "candidates")
-        deps.spool.delete_chunks(version.version_id, "rejected")
     for version_id in silent:
-        _discard(version_id, deps)
+        deps.store.versions.discard_staged(version_id)
+        for kind in _VERSION_KINDS:  # what `settle_quarantine` reads stays for it
+            deps.spool.delete_chunks(version_id, kind)
     return sealed

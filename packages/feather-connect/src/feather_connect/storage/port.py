@@ -156,13 +156,19 @@ class StateRow:
 
 @dataclass(frozen=True)
 class QuarantineRow:
-    """A record a route's sink rejected. `route` and `version_id` are None for a record rejected at extraction."""
+    """A record that was turned down.
+
+    A sink rejected it, or for an entry with no `route`, extraction did. An extraction entry names its `dataset` and
+    its `partition`. These and its `version_id` are None when the record had no partition.
+    """
 
     route: str | None
     version_id: str | None
     key: str
     error: str
     status: QuarantineStatus
+    dataset: str | None = None
+    partition: str | None = None
 
 
 class RunJournal(Protocol):
@@ -324,8 +330,24 @@ class RecordStateStore(Protocol):
 class QuarantineStore(Protocol):
     """Records a sink rejected, kept until a later version of the record is delivered."""
 
-    def add(self, route: str | None, version_id: str | None, key: str, error: str) -> None:
-        """Adding the same (route, version, key) again replaces the entry and reopens it."""
+    def add(
+        self,
+        route: str | None,
+        version_id: str | None,
+        key: str,
+        error: str,
+        dataset: str | None = None,
+        partition: str | None = None,
+    ) -> None:
+        """Adding the same (route, version, key, dataset) again replaces the entry and reopens it."""
+        ...
+
+    def open_extraction_keys(self, dataset: str, keys: Iterable[str], outside: str | None = None) -> set[str]:
+        """Those of `keys` with an open extraction entry in the dataset, from a partition other than `outside`."""
+        ...
+
+    def close_extraction(self, dataset: str, keys: Iterable[str]) -> int:
+        """Close the dataset's open extraction entries for `keys`. Returns how many it closed."""
         ...
 
     def supersede(self, route: str, key: str, before_seal_seq: int) -> int:

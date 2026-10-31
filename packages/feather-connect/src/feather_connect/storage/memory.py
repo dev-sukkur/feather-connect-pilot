@@ -48,8 +48,8 @@ class _Data:
         default_factory=dict[tuple[str, str], list[Attempt]]
     )
     state: dict[str, dict[str, StateRow]] = field(default_factory=dict[str, dict[str, StateRow]])
-    quarantine: dict[tuple[str | None, str | None, str], QuarantineRow] = field(
-        default_factory=dict[tuple[str | None, str | None, str], QuarantineRow]
+    quarantine: dict[tuple[str | None, str | None, str, str | None], QuarantineRow] = field(
+        default_factory=dict[tuple[str | None, str | None, str, str | None], QuarantineRow]
     )
 
 
@@ -393,11 +393,42 @@ class _Quarantine(QuarantineStore):
     def __init__(self, data: _Data) -> None:
         self._d = data
 
-    def add(self, route: str | None, version_id: str | None, key: str, error: str) -> None:
+    def add(
+        self,
+        route: str | None,
+        version_id: str | None,
+        key: str,
+        error: str,
+        dataset: str | None = None,
+        partition: str | None = None,
+    ) -> None:
         with self._d.lock:
-            self._d.quarantine[(route, version_id, key)] = QuarantineRow(
-                route, version_id, key, error, "open"
+            self._d.quarantine[(route, version_id, key, dataset)] = QuarantineRow(
+                route, version_id, key, error, "open", dataset, partition
             )
+
+    def open_extraction_keys(self, dataset: str, keys: Iterable[str], outside: str | None = None) -> set[str]:
+        wanted = set(keys)
+        with self._d.lock:
+            return {
+                r.key
+                for r in self._d.quarantine.values()
+                if r.status == "open"
+                and r.route is None
+                and r.dataset == dataset
+                and r.key in wanted
+                and (outside is None or r.partition != outside)
+            }
+
+    def close_extraction(self, dataset: str, keys: Iterable[str]) -> int:
+        wanted = set(keys)
+        with self._d.lock:
+            closed = 0
+            for entry_key, r in self._d.quarantine.items():
+                if r.status == "open" and r.route is None and r.dataset == dataset and r.key in wanted:
+                    self._d.quarantine[entry_key] = replace(r, status="superseded")
+                    closed += 1
+            return closed
 
     def supersede(self, route: str, key: str, before_seal_seq: int) -> int:
         with self._d.lock:

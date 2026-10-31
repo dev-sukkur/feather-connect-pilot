@@ -342,6 +342,106 @@ def test_a_moved_key_turned_down_is_deleted_when_its_old_slice_is_read_without_i
     assert DEPS.store.state.get_many("d", ["1"]) == {}
 
 
+def test_a_moved_key_still_turned_down_is_not_deleted_when_its_old_slice_is_read_without_it():
+    ds = moved_into_rejection(keep_state=True, allow_empty=True)
+    ds_rows = on(DAY_18, 2, x=1) + on(DAY_19, 1, x="bad")
+    vs = read_only(ds, "r3", ds_rows, [DAY_18])
+    assert [(r.key, r.op) for v in vs for r in all_records(v)] == []
+    assert "1" in DEPS.store.state.get_many("d", ["1"])
+    assert [q.key for q in DEPS.store.quarantine.list_open()] == ["1"]
+
+
+def read_only(ds, run, source_rows, partitions):
+    """Load all of `source_rows`, but read only `partitions`."""
+    ds.source.load(source_rows)
+    DEPS.store.versions.register_slices(run, ds.name, partitions)
+    for partition in partitions:
+        run_extract(ds, run, partition, routes=ROUTES, stage_only=True, deps=DEPS)
+    return run_seal(ds, run, routes=ROUTES, deps=DEPS)
+
+
+def records_of(vs):
+    return [(v.partition, r.key, r.op) for v in vs for r in all_records(v)]
+
+
+@pytest.mark.parametrize("keep_state", [False, True])
+def test_n1_old_slice_read_alone_with_the_bad_row_still_in_the_source_deletes_nothing(keep_state):
+    ds = moved_into_rejection(keep_state=keep_state)
+    vs = read_only(ds, "r3", on(DAY_18, 2, x=1) + on(DAY_19, 1, x="bad"), [DAY_18])
+    assert records_of(vs) == []
+    assert DEPS.store.quarantine.open_extraction_keys("d", ["1"]) == {"1"}
+
+
+@pytest.mark.parametrize("keep_state", [False, True])
+def test_n2_a_row_back_home_unchanged_is_not_deleted_by_its_placeholder(keep_state):
+    ds = moved_into_rejection(keep_state=keep_state, allow_empty=True)
+    source = on(DAY_18, 1, 2, x=1)
+    assert records_of(read_only(ds, "r3", source, [DAY_19])) == []
+    assert records_of(read_only(ds, "r4", source, [DAY_18])) == []
+    assert records_of(read_only(ds, "r5", source, [DAY_18, DAY_19])) == []
+    assert DEPS.store.quarantine.list_open() == []
+
+
+@pytest.mark.parametrize("keep_state", [False, True])
+def test_a_key_the_source_drops_is_deleted_once_placeholder_slice_first(keep_state):
+    ds = moved_into_rejection(keep_state=keep_state, allow_empty=True)
+    source = on(DAY_18, 2, x=1)
+    emitted = records_of(read_only(ds, "r3", source, [DAY_19]))
+    assert DEPS.store.quarantine.list_open() == []
+    emitted += records_of(read_only(ds, "r4", source, [DAY_18]))
+    emitted += records_of(read_only(ds, "r5", source, [DAY_18, DAY_19]))
+    assert emitted == [(DAY_18, "1", "delete")]
+
+
+@pytest.mark.parametrize("keep_state", [False, True])
+def test_a_key_the_source_drops_is_deleted_once_home_slice_first(keep_state):
+    ds = moved_into_rejection(keep_state=keep_state, allow_empty=True)
+    source = on(DAY_18, 2, x=1)
+    emitted = records_of(read_only(ds, "r3", source, [DAY_18]))
+    assert emitted == []  # the accepted limit: the placeholder's slice has to be read first
+    emitted += records_of(read_only(ds, "r4", source, [DAY_19]))
+    emitted += records_of(read_only(ds, "r5", source, [DAY_18]))
+    emitted += records_of(read_only(ds, "r6", source, [DAY_18, DAY_19]))
+    assert emitted == [(DAY_18, "1", "delete")]
+
+
+def test_an_accepted_row_closes_the_entry_only_after_sealing():
+    ds = moved_into_rejection()
+    source = on(DAY_18, 2, x=1) + on(DAY_19, 1, x=1)
+    stage_slices(ds, "r3", {DAY_18: on(DAY_18, 2, x=1), DAY_19: on(DAY_19, 1, x=1)})
+    assert [q.key for q in DEPS.store.quarantine.list_open()] == ["1"]
+    ds.source.load(source)
+    run_seal(ds, "r3", routes=ROUTES, deps=DEPS)
+    assert DEPS.store.quarantine.list_open() == []
+    run_seal(ds, "r3", routes=ROUTES, deps=DEPS)  # a repeat changes nothing
+    assert DEPS.store.quarantine.list_open() == []
+
+
+def test_an_accepted_row_in_a_slice_with_no_version_closes_the_entry():
+    ds = strict_dataset()
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2, x=1)})
+    run_slices(ds, "r2", {DAY_18: on(DAY_18, 2, x=1), DAY_19: on(DAY_19, 1, x="bad")})
+    assert run_slices(ds, "r3", {DAY_18: on(DAY_18, 1, 2, x=1)}) == []
+    assert DEPS.store.quarantine.list_open() == []
+
+
+def test_a_key_accepted_in_one_slice_and_turned_down_in_another_stays_open():
+    ds = strict_dataset()
+    vs = run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, x="bad"), DAY_19: on(DAY_19, 1, x=1)})
+    assert [r.key for v in vs for r in all_records(v)] == ["1"]
+    assert [q.key for q in DEPS.store.quarantine.list_open()] == ["1"]
+
+
+def test_a_key_turned_down_in_its_own_slice_is_deleted_when_that_slice_is_read_without_it():
+    ds = strict_dataset(allow_empty=True)
+    run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2, x=1)})
+    run_slices(ds, "r2", {DAY_18: on(DAY_18, 1, x="bad") + on(DAY_18, 2, x=2)})
+    assert [q.key for q in DEPS.store.quarantine.list_open()] == ["1"]
+    vs = run_slices(ds, "r3", {DAY_18: on(DAY_18, 2, x=2)})
+    assert records_of(vs) == [(DAY_18, "1", "delete")]
+    assert DEPS.store.quarantine.list_open() == []
+
+
 def test_a_read_with_only_rejected_rows_cannot_wipe_a_slice():
     ds = strict_dataset()
     run_slices(ds, "r1", {DAY_18: on(DAY_18, 1, 2, 3, x=1)})

@@ -391,6 +391,22 @@ class StoreContract:
         assert remaining == {("a", "v3", "k"), ("a", "v1", "other"), ("b", "v1", "k"), (None, None, "k")}
         assert store.quarantine.supersede("a", "k", seq["v3"] or 0) == 0  # already closed
 
+    def test_extraction_entries_are_found_and_closed_by_dataset(self, store: Store):
+        store.quarantine.add(None, "v1", "k", "bad", dataset="d", partition="p")
+        store.quarantine.add(None, None, "m", "no partition", dataset="d")
+        store.quarantine.add(None, "v2", "k", "bad", dataset="other")
+        store.quarantine.add("a", "v1", "r", "a sink's")
+        assert store.quarantine.open_extraction_keys("d", ["k", "m", "r", "x"]) == {"k", "m"}
+        assert store.quarantine.open_extraction_keys("d", ["k", "m"], outside="p") == {"m"}
+        assert store.quarantine.open_extraction_keys("d", ["k"], outside="q") == {"k"}
+        assert store.quarantine.close_extraction("d", ["k", "r"]) == 1
+        assert store.quarantine.close_extraction("d", ["k"]) == 0  # already closed
+        assert store.quarantine.open_extraction_keys("d", ["k", "m"]) == {"m"}
+        assert store.quarantine.open_extraction_keys("other", ["k"]) == {"k"}
+        assert len(store.quarantine.list_open("a")) == 1
+        store.quarantine.add(None, "v1", "k", "bad again", dataset="d", partition="p")  # reopened
+        assert store.quarantine.open_extraction_keys("d", ["k"]) == {"k"}
+
     def test_quarantine_lists_by_route_and_add_is_idempotent(self, store: Store):
         store.quarantine.add("a", "v1", "k", "first")
         store.quarantine.add("a", "v1", "k", "second")

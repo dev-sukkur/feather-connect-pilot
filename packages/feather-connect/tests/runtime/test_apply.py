@@ -744,18 +744,13 @@ def test_a_row_turned_down_at_extraction_fails_a_replace_and_a_newer_version_rec
 def test_a_key_never_delivered_does_not_fail_a_replace():
     ds = dataset(fc.strategy.snapshot_diff(), schema=Strict)
     route = replace_route()
-    v1, v2 = seal_versions(
-        ds,
-        [
-            [{"id": 1, "n": 1}, {"id": 2, "n": "bad"}],
-            [{"id": 1, "n": 1}, {"id": 2, "n": 2}],
-        ],
-        route,
-    )
+    [v1] = seal_versions(ds, [[{"id": 1, "n": 1}, {"id": 2, "n": "bad"}]], route)
     apply(ds, route, v1)
     assert status("r", v1) == "applied" and route.sink.rows == [{"id": 1, "n": 1}]
     assert [q.key for q in QUARANTINE.list_open()] == ["2"]
+    v2 = seal(ds, [{"id": 1, "n": 1}, {"id": 2, "n": 2}], route, run="r2")[0].version_id
     apply(ds, route, v2)  # the row is fixed, and arrives
+    assert QUARANTINE.list_open() == []
     assert route.sink.rows == [{"id": 1, "n": 1}, {"id": 2, "n": 2}]
 
 
