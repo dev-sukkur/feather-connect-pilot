@@ -131,10 +131,18 @@ def start_worker(project: Path, pg_url: str, worker_id: str, sha: str = SHA) -> 
 def workers() -> Iterator[list[subprocess.Popen[bytes]]]:
     procs: list[subprocess.Popen[bytes]] = []
     yield procs
+    # Let each drain, since the next test shares the database. A run reads succeeded a moment before its last task's
+    # workflow ends: killed in that moment, the workflow stays PENDING, and with no sweeper here it holds the one slot
+    # of its concurrency key, so that the next test's delivery on the same route waits for good.
     for proc in procs:
         if proc.poll() is None:
+            stop_gracefully(proc)
+    for proc in procs:
+        try:
+            proc.wait(timeout=45)
+        except subprocess.TimeoutExpired:
             proc.kill()
-        proc.wait()
+            proc.wait()
 
 
 def stop_gracefully(proc: subprocess.Popen[bytes]) -> None:
