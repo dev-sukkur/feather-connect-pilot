@@ -98,6 +98,14 @@ def test_cancel_and_health(engine, sys_db):
     assert workflow_row(sys_db, ref).status == "CANCELLED"
 
 
+def test_has_ended_says_whether_a_known_task_is_over(engine):
+    ref = engine.submit(TaskCall("t", {}, key(), None))
+    assert engine.has_ended(ref) is False
+    engine.cancel(ref)
+    assert engine.has_ended(ref) is True
+    assert engine.has_ended("nobody-" + key()) is False
+
+
 def test_recover_worker_with_nothing_to_recover(engine):
     assert engine.recover_worker("nobody-" + key()) == []
 

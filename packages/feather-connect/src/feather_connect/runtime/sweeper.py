@@ -1,8 +1,10 @@
 """The sweeper: finds work that fell through a crash and puts it back on its way (design 6.12 and 7.5).
 
-A worker that stops sending heartbeats is marked dead and its tasks are re-queued. A pending delivery that has sat for
-a while may have lost the submit that follows sealing, and a run whose slices are all read may have lost its seal task.
-Both are submitted again under the same idempotency key, so one that exists is not run twice.
+A worker that stops sending heartbeats has its tasks re-queued and is then marked dead, so a recovery that fails is
+tried again. A pending delivery that has sat for a while may have lost the submit that follows sealing, a run still
+queued may have lost the submit of its plan, and a run whose slices are all read may have lost its seal task. These are
+submitted again under the same idempotency key, so one that exists is not run twice. A delivery still open when its task
+has ended can't be helped by that, so it is failed, which lets an operator retry or skip it.
 """
 
 import logging
@@ -14,6 +16,8 @@ from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.port import Store
 
 log = logging.getLogger(__name__)
+_QUEUED = 1000  # runs one sweep looks at
+_RUNNING = 1000  # deliveries one sweep looks at
 
 
 @dataclass(frozen=True)
@@ -24,6 +28,8 @@ class SweepReport:
     recovered_tasks: list[str] = field(default_factory=list[str])
     resubmitted_deliveries: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     resubmitted_seals: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    resubmitted_runs: list[str] = field(default_factory=list[str])
+    stranded_deliveries: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
 
 
 def sweep_once(
@@ -41,25 +47,52 @@ def sweep_once(
     `pending_after`. What can't be put right, such as one delivery the engine refuses, is logged and left for the next
     sweep, so it doesn't hold up the rest.
     """
-    dead = [
-        w.worker_id
-        for w in store.workers.list_workers()
-        if w.state != "dead" and w.last_seen < now - dead_after
-    ]
+    dead: list[str] = []
     recovered: list[str] = []
-    for worker_id in dead:
-        store.workers.mark(worker_id, "dead")
-        recovered += engine.recover_worker(worker_id)
+    for worker in store.workers.list_workers():
+        if worker.state == "dead" or worker.last_seen >= now - dead_after:
+            continue
+        try:  # in this order: a worker marked dead is never looked at again, so it must be recovered by then
+            recovered += engine.recover_worker(worker.worker_id)
+            store.workers.mark(worker.worker_id, "dead")
+        except Exception:
+            log.exception("could not recover worker %s", worker.worker_id)
+        else:
+            dead.append(worker.worker_id)
     deliveries: list[tuple[str, str]] = []
+    stranded: list[tuple[str, str]] = []
+    streams: set[tuple[str, str, str]] = set()
     for delivery in store.ledger.pending_older_than(pending_after, now=now):
         if runtime.is_route_paused(delivery.route):  # held on purpose, and picked up when the pause ends
             continue
+        name = (delivery.route, delivery.version_id)
+        stream = (delivery.route, delivery.dataset, delivery.partition)
         try:
-            runtime.submit_apply(delivery.route, delivery.version_id)
+            runtime.submit_apply(*name)
+            # These come in seal order, and only the first of a stream can have had a task.
+            ended = stream not in streams and runtime.fail_stranded(*name)
         except Exception:
-            log.exception("could not submit delivery %s of version %s", delivery.route, delivery.version_id)
+            log.exception("could not submit delivery %s of version %s", *name)
         else:
-            deliveries.append((delivery.route, delivery.version_id))
+            (stranded if ended else deliveries).append(name)
+        streams.add(stream)
+    for delivery in store.ledger.list_deliveries(status="running", limit=_RUNNING):
+        name = (delivery.route, delivery.version_id)
+        try:
+            if runtime.fail_stranded(*name):
+                stranded.append(name)
+        except Exception:
+            log.exception("could not check delivery %s of version %s", *name)
+    runs: list[str] = []
+    for run in store.runs.list_runs(status="queued", limit=_QUEUED):
+        if run.created_at >= now - pending_after or runtime.is_flow_paused(run.flow):
+            continue
+        try:
+            runtime.submit_plan(run.flow, run.run_id)
+        except Exception:
+            log.exception("could not submit the plan of run %s", run.run_id)
+        else:
+            runs.append(run.run_id)
     seals: list[tuple[str, str]] = []
     for run_id, dataset in store.versions.runs_ready_to_seal():
         try:
@@ -71,4 +104,4 @@ def sweep_once(
             log.exception("could not submit the seal of dataset %s for run %s", dataset, run_id)
         else:
             seals.append((run_id, dataset))
-    return SweepReport(dead, recovered, deliveries, seals)
+    return SweepReport(dead, recovered, deliveries, seals, runs, stranded)

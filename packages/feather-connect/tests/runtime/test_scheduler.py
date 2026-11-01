@@ -7,6 +7,7 @@ from feather_connect.connectors.memory import Sink, Source
 from feather_connect.core.flow import CatchUp, Overlap
 from feather_connect.core.triggers import Trigger
 from feather_connect.engine.local import LocalEngine
+from feather_connect.engine.port import TaskCall
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.runtime.scheduler import TickResult, tick
 from feather_connect.storage.memory import MemoryStore
@@ -242,3 +243,32 @@ def test_last_tick_is_kept_per_trigger() -> None:
     w.tick()
     results = w.go(timedelta(hours=1))
     assert {r.trigger_id for r in results} == {EVERY_15, "cron:0 * * * *:UTC"}
+
+
+class RefusingEngine(LocalEngine):
+    """An engine that is away: it takes no submit."""
+
+    def submit(self, call: TaskCall) -> str:
+        raise ConnectionError("the engine is away")
+
+
+def test_a_failed_submit_fails_its_own_run_and_lets_the_next_tick_go() -> None:  # F6
+    clock = FrozenClock(datetime(2026, 10, 18, 10, tzinfo=UTC))
+    store = MemoryStore(clock)
+    good = LocalEngine(clock)
+    source = Source(rows=[{"id": 1}])
+    dataset = fc.Dataset("d", source=source, key="id", strategy=fc.strategy.replace())
+    flow = fc.Flow("f", reads=dataset, deliver=[fc.to(Sink("a"))], triggers=[fc.every("1m")], overlap="skip")
+    refusing = Runtime([flow], store, MemorySpool(clock), RefusingEngine(clock), clock=clock)
+    tick(refusing, now=clock.now())
+    clock.advance(timedelta(minutes=1))
+    (result,) = tick(refusing, now=clock.now())
+    assert result.status == "failed" and "away" in (result.reason or "")
+    (only,) = store.runs.list_runs()
+    assert (only.run_id, only.status) == (result.run_id, "failed")  # one run, and it isn't left queued
+    assert [row.status for row in store.runs.list_tasks(only.run_id)] == ["failed"]
+
+    working = Runtime([flow], store, MemorySpool(clock), good, clock=clock)
+    clock.advance(timedelta(minutes=1))
+    (next_tick,) = tick(working, now=clock.now())
+    assert next_tick.status != "skipped"

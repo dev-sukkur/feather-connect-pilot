@@ -4,6 +4,7 @@ from typing import Any
 import feather_connect as fc
 from feather_connect.clock import FrozenClock
 from feather_connect.connectors.memory import Sink, Source
+from feather_connect.core.errors import PermanentError
 from feather_connect.engine.local import LocalEngine
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.runtime.sweeper import sweep_once
@@ -178,3 +179,146 @@ def test_a_cancelled_run_is_not_sealed() -> None:
     assert h.sweep().resubmitted_seals == []
     h.engine.run_until_idle()
     assert h.store.versions.sealed_for_run(run, "d") == []
+
+
+class FailingRecovery(LocalEngine):
+    """An engine whose recovery fails while `broken` is set, as it may just after a stall."""
+
+    broken = True
+
+    def recover_worker(self, worker_id: str) -> list[str]:
+        if self.broken:
+            raise TimeoutError("the pool timed out")
+        return super().recover_worker(worker_id)
+
+
+def test_a_failed_recovery_leaves_the_worker_to_the_next_sweep() -> None:  # F5
+    h = Harness()
+    engine = FailingRecovery(h.clock)
+    h.engine = engine
+    h.rt = Runtime(h.rt.flows(), h.store, MemorySpool(h.clock), engine, code_sha="sha", clock=h.clock)
+    engine.register(h.rt.tasks())
+    run = h.crashed_run("extract")
+    h.store.workers.heartbeat("w1", {}, "sha", 1)
+    h.clock.advance(timedelta(seconds=31))
+
+    first = h.sweep()
+    assert first.dead_workers == [] and first.recovered_tasks == []
+    assert h.store.workers.list_workers()[0].state == "alive"
+
+    engine.broken = False
+    second = h.sweep()
+    assert second.dead_workers == ["w1"] and len(second.recovered_tasks) == 1
+    assert h.store.workers.list_workers()[0].state == "dead"
+    engine.run_until_idle()
+    assert h.store.runs.get_run(run).status == "succeeded"
+
+
+def test_a_queued_run_that_lost_its_submit_is_submitted_again() -> None:  # F6
+    h = Harness()
+    run = h.store.runs.create_run("f", "manual", "op", {})  # a server killed before the submit left this
+    assert h.sweep().resubmitted_runs == []  # too young to tell
+    h.clock.advance(timedelta(minutes=2))
+    assert h.sweep().resubmitted_runs == [run]
+    h.engine.run_until_idle()
+    assert h.store.runs.get_run(run).status == "succeeded"
+    assert h.sweep().resubmitted_runs == []
+
+
+def test_a_queued_run_of_a_paused_flow_waits_for_the_pause_to_end() -> None:  # F6
+    h = Harness()
+    run = h.store.runs.create_run("f", "manual", "op", {})
+    h.rt.pause_flow("f", actor="op")
+    h.clock.advance(timedelta(minutes=2))
+    assert h.sweep().resubmitted_runs == []
+    h.rt.resume_flow("f", actor="op")
+    assert h.sweep().resubmitted_runs == [run]
+
+
+def stranded(h: Harness, step: str = "end") -> tuple[str, str]:
+    """Run until a delivery to `a` is left open with its task ended: the step that closes it raises for good."""
+    real = h.rt.tasks()["feather.apply"]
+
+    def failing(ctx: Any, args: Any) -> Any:
+        def broken_step(name: str, fn: Any) -> Any:
+            if name.startswith(f"{step}:") and args["route"] == "a":
+                raise PermanentError("the step broke")
+            return original(name, fn)
+
+        original = ctx.step
+        ctx.step = broken_step
+        return real(ctx, args)
+
+    h.engine.register({**h.rt.tasks(), "feather.apply": failing})
+    run = h.rt.start_run("f")
+    h.engine.run_until_idle()
+    h.engine.register(h.rt.tasks())
+    return run, h.store.versions.sealed_for_run(run, "d")[0].version_id
+
+
+def test_a_task_that_ends_with_its_delivery_open_fails_the_delivery() -> None:  # F7
+    h = Harness()
+    _, version = stranded(h, "end")
+    delivery = h.store.ledger.get("a", version)
+    assert delivery.status == "failed" and "the step broke" in (delivery.last_error or "")
+    h.rt.retry("a", version, actor="op")
+    h.engine.run_until_idle()
+    assert h.status("a", version) == "applied"
+
+
+def test_the_sweeper_fails_a_running_delivery_whose_task_has_ended() -> None:  # F7
+    h = Harness()
+    run, version = stranded_for_sweeper(h, "running")
+    assert h.status("a", version) == "running"
+    report = h.sweep()
+    assert report.stranded_deliveries == [("a", version)]
+    delivery = h.store.ledger.get("a", version)
+    assert delivery.status == "failed" and "ended" in (delivery.last_error or "")
+    assert h.store.runs.get_run(run).status == "failed"
+    h.rt.skip("a", version, actor="op")  # the dashboard can move it now
+    assert h.status("a", version) == "skipped"
+
+
+def test_the_sweeper_fails_a_pending_delivery_whose_task_has_ended() -> None:  # F7
+    h = Harness()
+    _, version = stranded_for_sweeper(h, "pending")
+    assert h.status("a", version) == "pending"
+    h.clock.advance(timedelta(minutes=2))
+    assert h.sweep().stranded_deliveries == [("a", version)]
+    assert h.status("a", version) == "failed"
+    h.rt.retry("a", version, actor="op")
+    h.engine.run_until_idle()
+    assert h.status("a", version) == "applied"
+
+
+def test_the_sweeper_leaves_a_delivery_whose_task_is_alive() -> None:  # F7
+    h = Harness()
+    h.engine.crash_before("target")  # the task of the first delivery is crashed, so it has not ended
+    run = h.rt.start_run("f")
+    h.engine.run_until_idle()
+    open_ = [d for d in h.store.ledger.list_deliveries() if d.status not in ("applied",)]
+    h.clock.advance(timedelta(minutes=2))
+    assert open_ and h.sweep().stranded_deliveries == []
+    assert h.store.runs.get_run(run).status == "running"
+
+
+def stranded_for_sweeper(h: Harness, status: str) -> tuple[str, str]:
+    """Leave a delivery to `a` in `status` with its task ended and its journal row still open."""
+    real = h.rt.tasks()["feather.apply"]
+
+    def dies(ctx: Any, args: Any) -> Any:
+        if args["route"] != "a":
+            return real(ctx, args)
+        if status == "running":
+            h.store.ledger.transition("a", args["version_id"], "running", actor="system")
+        raise _Vanished
+
+    h.engine.register({**h.rt.tasks(), "feather.apply": dies})
+    run = h.rt.start_run("f")
+    h.engine.run_until_idle()
+    h.engine.register(h.rt.tasks())
+    return run, h.store.versions.sealed_for_run(run, "d")[0].version_id
+
+
+class _Vanished(PermanentError):
+    """A task that ended without a word to the journal, as when the database is away for its last attempt."""

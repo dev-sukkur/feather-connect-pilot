@@ -22,7 +22,7 @@ from feather_connect.core.errors import BudgetDeferred, PermanentError
 from feather_connect.core.flow import Flow, RouteSpec
 from feather_connect.engine.port import Engine, RetryPolicy, TaskCall, TaskContext, TaskFn
 from feather_connect.logs import bind
-from feather_connect.runtime.apply import oldest_open, replay_gap, run_apply
+from feather_connect.runtime.apply import fail_open, oldest_open, replay_gap, run_apply
 from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import ExtractFailed, VerifyResult, run_extract
@@ -61,6 +61,15 @@ def _apply_key(delivery: Delivery) -> str:
 
 class FlowPaused(Exception):
     """A run was asked for on a flow that is paused. The message says why, as far as the pause says."""
+
+
+class RunNotStarted(Exception):
+    """The run was written, and its plan could not be submitted. The run has been marked failed with the reason."""
+
+    def __init__(self, run_id: str, reason: str) -> None:
+        super().__init__(reason)
+        self.run_id = run_id
+        self.reason = reason
 
 
 def _step_through_deferrals[T](ctx: TaskContext, name: str, fn: Callable[[], T]) -> T:
@@ -281,6 +290,8 @@ class Runtime:
 
         `max_concurrent` limits how many of the run's extract tasks are submitted at once, as a backfill needs: the
         plan submits that many, and each extract that ends submits the next.
+
+        Raises `RunNotStarted` when the plan can't be submitted, having failed the run, so it isn't left `queued`.
         """
         self.flow(flow)
         if max_concurrent is not None and max_concurrent < 1:
@@ -291,6 +302,17 @@ class Runtime:
         if max_concurrent is not None:
             params["max_concurrent"] = max_concurrent
         run_id = self._deps.store.runs.create_run(flow, trigger, actor, params, reason=reason)
+        try:
+            self.submit_plan(flow, run_id)
+        except Exception as error:
+            reason = f"could not start: {error}"
+            self._fail_unstarted(run_id, reason)
+            raise RunNotStarted(run_id, reason) from error
+        return run_id
+
+    def submit_plan(self, flow: str, run_id: str) -> None:
+        """Submit the task that plans the run. Doing it again changes nothing, whatever became of the task."""
+        self.flow(flow)
         self._submit(
             TaskCall(
                 "feather.plan",
@@ -302,7 +324,17 @@ class Runtime:
             run_id,
             "plan",
         )
-        return run_id
+
+    def _fail_unstarted(self, run_id: str, reason: str) -> None:
+        """End a run whose plan never went out. If the database is what is away, the sweeper submits it later."""
+        runs = self._deps.store.runs
+        try:
+            for row in runs.list_tasks(run_id):
+                if row.status == "running":
+                    runs.finish_task(row.task_id, "failed", reason)
+            runs.set_run_status(run_id, "failed", reason)
+        except Exception:
+            log.exception("could not mark run %s failed", run_id)
 
     def verify_partition(self, dataset: str, partition: str) -> VerifyResult:
         """Read the partition from its source and say what differs from the last sealed version, changing nothing.
@@ -411,6 +443,28 @@ class Runtime:
         if next_up is not None and next_up.version_id == version_id and not self.is_route_paused(route):
             self._engine.submit(self._apply_call(delivery, run_id))
 
+    def fail_stranded(self, route: str, version_id: str) -> bool:
+        """Fail the delivery if it is pending or running and its task has ended, and return whether it did.
+
+        No task will finish such a delivery and its key can't run again, while `retry` and `skip` take only a failed
+        one. A delivery whose task is queued, running or unknown to the engine is left alone.
+        """
+        deps = self._deps
+        delivery = deps.store.ledger.get(route, version_id)
+        if delivery.status not in ("pending", "running"):
+            return False
+        run_id = deps.store.versions.get(version_id).run_id
+        ref = self._apply_ref(delivery, run_id)
+        if not self._engine.has_ended(ref):
+            return False
+        why = f"its task {ref} ended without finishing it: retry or skip it"
+        fail_open(delivery, why, deps)
+        row = next((r for r in deps.store.runs.list_tasks(run_id) if r.ref == ref), None)
+        if row is not None and row.status == "running":
+            deps.store.runs.finish_task(row.task_id, "failed", why)
+        self._settle_run(run_id)
+        return True
+
     def submit_seal(self, flow: str, dataset: str, run_id: str) -> None:
         """Submit the task that seals the run's slices of `dataset`."""
         self._submit(
@@ -484,7 +538,7 @@ class Runtime:
             hand_on()
             self._finish_step(ctx, run_id)
 
-        self._tracked(ctx, run_id, body, on_failure=hand_on)
+        self._tracked(ctx, run_id, body, on_failure=lambda _: hand_on())
 
     def _seal_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
         run_id = args["run_id"]
@@ -505,14 +559,18 @@ class Runtime:
             run_apply(ctx, dataset, route, version_id, self._deps)
             ctx.step("finish", lambda: self._finish_apply(ctx.task_ref, run_id, route.name, version_id))
 
-        self._tracked(ctx, run_id, body)
+        def close(error: Exception) -> None:
+            message = str(error)
+            ctx.step("close", lambda: self._close_delivery(args["route"], version_id, message))
+
+        self._tracked(ctx, run_id, body, on_failure=close)
 
     def _tracked(
         self,
         ctx: TaskContext,
         run_id: str,
         body: Callable[[], None],
-        on_failure: Callable[[], None] | None = None,
+        on_failure: Callable[[Exception], None] | None = None,
     ) -> None:
         """Run a task's body, and answer for it in the journal if it is about to end in failure.
 
@@ -523,13 +581,13 @@ class Runtime:
         except PermanentError as error:
             self._fail_step(ctx, run_id, error)
             if on_failure is not None:
-                on_failure()
+                on_failure(error)
             raise
         except Exception as error:
             if ctx.attempt >= self._deps.retry.max_attempts:
                 self._fail_step(ctx, run_id, error)
                 if on_failure is not None:
-                    on_failure()
+                    on_failure(error)
             else:
                 self._note_retry(ctx, run_id, error)
             raise
@@ -655,8 +713,23 @@ class Runtime:
         if delivery.status == "pending" and self.is_route_paused(route):
             self._hold(ref, run_id, delivery)
             return
+        next_up = self._next_of(delivery)
+        if delivery.status == "pending" and next_up is not None and next_up.version_id == version_id:
+            # The route was resumed after this task saw the pause. Its key is used up, so the delivery takes the next.
+            self._hold(ref, run_id, delivery)
+            self.submit_apply(route, version_id)
+            return
         why = delivery.last_error or f"it is still {delivery.status}, behind an older version"
         self._finish_task(ref, run_id, "failed", f"route {route!r}, version {version_id}: {why}")
+
+    def _close_delivery(self, route: str, version_id: str, error: str) -> None:
+        """Fail what the ending task leaves open: the first open delivery of its stream, up to its own."""
+        delivery = self._deps.store.ledger.get(route, version_id)
+        next_up = self._next_of(delivery)
+        if next_up is None or next_up.seal_seq > delivery.seal_seq:
+            return
+        if next_up.status in ("pending", "running"):
+            fail_open(next_up, error, self._deps)
 
     def _hold(self, ref: str, run_id: str, delivery: Delivery) -> None:
         """End a task that found its route paused, and give its delivery a row to wait under, so that the run stays going."""

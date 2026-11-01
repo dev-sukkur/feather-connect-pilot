@@ -420,6 +420,12 @@ def _fail(delivery: Delivery, error: str, deps: RuntimeDeps) -> None:
         )
 
 
+def fail_open(delivery: Delivery, error: str, deps: RuntimeDeps) -> None:
+    """Fail a pending or running delivery that no task will finish, so that an operator can retry or skip it."""
+    _resume(delivery, "its task ended", deps)
+    _fail(delivery, error, deps)
+
+
 def _supersede(delivery: Delivery, plan: _Plan, deps: RuntimeDeps) -> None:
     """Close what older versions of the dataset left in quarantine for the keys this version delivered.
 

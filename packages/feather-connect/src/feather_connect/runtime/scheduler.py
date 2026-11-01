@@ -15,7 +15,7 @@ from cronsim import CronSim
 
 from feather_connect.core.flow import Flow
 from feather_connect.core.triggers import Cron, Every, Trigger
-from feather_connect.runtime.runtime import Runtime
+from feather_connect.runtime.runtime import RunNotStarted, Runtime
 
 log = logging.getLogger(__name__)
 
@@ -143,6 +143,9 @@ def _fire(runtime: Runtime, flow: Flow, tid: str, due_at: datetime) -> TickResul
             runtime.cancel_run(run.run_id, actor=_ACTOR, reason="cancel_previous: the next tick is due")
     try:
         run_id = runtime.start_run(flow.name, trigger=tid, actor=_ACTOR)
+    except RunNotStarted as error:  # the run is written, and already says so
+        log.exception("could not start flow %s for tick %s", flow.name, tid)
+        return TickResult(flow.name, tid, due_at, error.run_id, "failed", error.reason)
     except Exception as error:
         log.exception("could not start flow %s for tick %s", flow.name, tid)
         reason = f"could not start: {error}"

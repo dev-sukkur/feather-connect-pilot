@@ -168,3 +168,27 @@ def test_a_pause_is_visible_to_whoever_lists_overrides() -> None:
     h.rt.pause_flow("f", actor="op")
     found = {(o.target, o.key, o.value, o.reason, o.created_by) for o in h.store.overrides.list_all()}
     assert found == {("route:a", "paused", True, "window", "op"), ("flow:f", "paused", True, None, "op")}
+
+
+def test_a_route_resumed_just_before_the_task_ends_loses_nothing() -> None:  # F7
+    h = Harness()
+    real = h.rt.tasks()["feather.apply"]
+
+    def paused_then_resumed(ctx: Any, args: Any) -> Any:
+        original = ctx.step
+
+        def step(name: str, fn: Any) -> Any:
+            if args["route"] == "a" and name == "paused:0" and not ctx.task_ref.endswith("#1"):
+                h.rt.pause_route("a", actor="op")
+            if args["route"] == "a" and name == "finish" and h.rt.is_route_paused("a"):
+                h.store.overrides.clear("route:a", "paused", actor="op")
+            return original(name, fn)
+
+        ctx.step = step
+        return real(ctx, args)
+
+    h.engine.register({**h.rt.tasks(), "feather.apply": paused_then_resumed})
+    run = h.run()
+    version = h.version_of(run)
+    assert h.status("a", version) == "applied"  # no key was used up, and nothing is left stuck
+    assert h.run_status(run) == "succeeded"

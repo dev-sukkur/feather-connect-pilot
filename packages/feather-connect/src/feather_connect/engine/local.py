@@ -314,6 +314,11 @@ class LocalEngine(Engine):
             by_status[task.status] += 1
         return {"queue_depth": by_status["queued"], "by_status": by_status}
 
+    def has_ended(self, ref: str) -> bool:
+        """Whether the task exists and has ended. One that crashed has not: it can be recovered."""
+        task = self._tasks.get(ref)
+        return task is not None and task.status in _ENDED
+
     def status(self, ref: str) -> TaskStatus:
         """Return the status of the task."""
         return self._tasks[ref].status

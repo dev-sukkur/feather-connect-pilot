@@ -24,6 +24,7 @@ FREE = "feather-free"
 WORKFLOW = "feather_task"
 MAX_ARGS_BYTES = 64 * 1024  # invariant I8: a task carries ids, never data
 _DBOS_PRIORITY = {2: 1, 1: 2, 0: 3}
+_ENDED = frozenset({"SUCCESS", "ERROR", "CANCELLED", "MAX_RECOVERY_ATTEMPTS_EXCEEDED"})
 
 
 def queue_name(base: str, pool: str | None) -> str:
@@ -82,6 +83,11 @@ class DbosEngine(Engine):
         for workflow in running:
             self._client.resume_workflow(workflow.workflow_id, queue_name=workflow.queue_name)
         return [workflow.workflow_id for workflow in running]
+
+    def has_ended(self, ref: str) -> bool:
+        """Whether the workflow exists and has ended."""
+        found = self._client.list_workflows(workflow_ids=[ref], load_input=False, load_output=False)
+        return any(workflow.status in _ENDED for workflow in found)
 
     def health(self) -> Mapping[str, Any]:
         """Return `queue_depth`, the number of tasks waiting on a queue, and `queues`, the depth of each."""
