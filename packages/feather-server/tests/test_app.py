@@ -135,6 +135,8 @@ def test_create_app_builds_its_state_from_settings(
     app = create_app(settings, loops=no_loops)
     with TestClient(app) as client:
         assert client.get("/readyz").json() == {"database": "ok", "schema": "current"}
-    state: AppState = app.state.feather
-    assert state.project.name == "demo" and state.store.runs.list_runs() == []
-    assert type(state.engine).__name__ == {"local": "LocalEngine", "dbos": "DbosEngine"}[engine]
+        state: AppState = app.state.feather
+        assert state.project.name == "demo" and state.store.runs.list_runs() == []
+        assert type(state.engine).__name__ == {"local": "LocalEngine", "dbos": "DbosEngine"}[engine]
+        assert state.closers
+    assert not state.closers  # the lifespan's end let go of the pool and the engine (F10)
