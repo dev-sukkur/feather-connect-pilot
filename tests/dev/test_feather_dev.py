@@ -396,3 +396,63 @@ def test_reset_password_gives_a_new_password_and_keeps_the_data(start_dev, datab
     json_lines = [line for line in second.output().splitlines() if line.startswith("{")]
     assert json_lines and not any(new in line for line in json_lines)
     assert second.interrupt() == 0
+
+
+RELOADS = """
+import json, sys, time
+from pathlib import Path
+
+import psycopg
+
+from feather_cli.commands.dev import Stack
+from feather_connect.storage.postgres.migrate import migrate
+from feather_server.settings import Settings
+
+url, project, port = sys.argv[1], Path(sys.argv[2]), int(sys.argv[3])
+
+
+def backends():
+    with psycopg.connect(url, autocommit=True) as conn:
+        row = conn.execute(
+            "select count(*) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()"
+        ).fetchone()
+    return row[0]
+
+
+migrate(url)
+stack = Stack(Settings(env="dev", database_url=url, secret_key="k" * 32, project=project, engine_poll_s=0.5))
+counts = []
+for _ in range(3):
+    stack.start(port)
+    stack.stop()
+    time.sleep(1)
+    counts.append(backends())
+print("COUNTS " + json.dumps(counts), flush=True)
+"""
+
+
+@needs_postgres
+def test_a_reload_leaves_no_connections_behind(tmp_path: Path, pg_url: str) -> None:  # F10
+    """Start and stop the stack as a reload does, in a process of its own, since DBOS is one per process."""
+    project = tmp_path / "demo"
+    shutil.copytree(DEMO, project, ignore=shutil.ignore_patterns("__pycache__", "out"))
+    name = f"feather_reload_{uuid.uuid4().hex[:8]}"
+    with psycopg.connect(pg_url, autocommit=True) as admin:
+        admin.execute(sql.SQL("create database {}").format(sql.Identifier(name)))
+    url = pg_url.rsplit("/", 1)[0] + f"/{name}"
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", RELOADS, url, str(project), str(free_port())],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            cwd=tmp_path,
+        )
+        found = re.search(r"COUNTS (\[.*\])", done.stdout)
+        assert found, f"{done.stdout[-2000:]}\n{done.stderr[-2000:]}"
+        first, _, last = json.loads(found.group(1))
+        assert last <= first, f"backends after each stop: {found.group(1)}"
+    finally:
+        with psycopg.connect(pg_url, autocommit=True) as admin:
+            admin.execute(sql.SQL("drop database if exists {} with (force)").format(sql.Identifier(name)))

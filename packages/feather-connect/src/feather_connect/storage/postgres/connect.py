@@ -5,7 +5,6 @@ import atexit
 from psycopg.rows import dict_row
 
 from feather_connect.clock import Clock
-from feather_connect.storage.port import Store
 from feather_connect.storage.postgres.spool import PostgresSpool
 from feather_connect.storage.postgres.store import PostgresStore
 from feather_connect.storage.postgres.support import Pool, session_options
@@ -18,10 +17,10 @@ def connect(
     tenant: str = "default",
     min_size: int = 1,
     max_size: int = 10,
-) -> tuple[Store, PostgresSpool]:
+) -> tuple[PostgresStore, PostgresSpool]:
     """Return a store and a spool for `tenant` that share a pool of connections. The schema must be migrated.
 
-    The pool closes when the process exits.
+    The pool closes with `store.close()`, or else when the process exits.
     """
     pool = Pool(
         database_url,

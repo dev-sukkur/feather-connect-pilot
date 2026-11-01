@@ -4,6 +4,7 @@ It passes the same `StoreContract` as `MemoryStore`. Rows are read as dicts (`di
 made with that row factory; `connect` does.
 """
 
+import atexit
 import json
 import math
 from collections.abc import Generator, Iterable, Mapping, Sequence
@@ -1533,6 +1534,8 @@ class _Reads(ReadStore):
 class PostgresStore(Store):
     """A `Store` that keeps everything in Postgres, for one tenant. `clock` defaults to the system clock."""
 
+    _pool: Pool
+
     def __init__(self, pool: Pool, clock: Clock | None = None, tenant: str = "default") -> None:
         db = _Db(pool, clock or SystemClock(), tenant)
         super().__init__(
@@ -1550,3 +1553,9 @@ class PostgresStore(Store):
             audit=_Audit(db),
             reads=_Reads(db),
         )
+        object.__setattr__(self, "_pool", pool)  # `Store` is frozen
+
+    def close(self) -> None:
+        """Close the pool, which the spool of the same `connect` shares. Closing it again changes nothing."""
+        atexit.unregister(self._pool.close)
+        self._pool.close()

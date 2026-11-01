@@ -90,7 +90,7 @@ def run_worker(
     It stops on SIGTERM, SIGINT or SIGBREAK, or, when `stop` is given, when that event is set: a caller that runs
     the worker in a thread (`feather dev`) passes one, and no signal handler is installed.
     """
-    from feather_engine_dbos import DbosEngine, DbosWorkerRuntime
+    from feather_engine_dbos import DbosEngine
 
     configure_logging(os.environ.get("FEATHER_LOG_LEVEL", "INFO"))
     worker_id = worker_id or os.environ.get("FEATHER_WORKER_ID") or socket.gethostname()
@@ -99,20 +99,45 @@ def run_worker(
     _check_connections(project)
     migrate(database_url)
     store, spool = connect(database_url)
-    logging.getLogger().addHandler(TaskLogHandler(store))
-    store.catalog.sync(project.name, project.code_sha, {f.name: f.spec_dict() for f in project.flows})
-    for budget in project.budgets.values():
-        store.budgets.define(budget)
-    runtime = Runtime(
-        project.flows,
-        store,
-        spool,
-        DbosEngine(database_url),
-        code_sha=project.code_sha,
-        budgets={c.name: c.budget for c in project.connections.values() if c.budget is not None},
-        config_of=lambda connection: _config_of(project, connection),
-        timezone=str(project.settings["timezone"]),
-    )
+    task_logs = TaskLogHandler(store)
+    logging.getLogger().addHandler(task_logs)
+    engine: DbosEngine | None = None
+    try:
+        store.catalog.sync(project.name, project.code_sha, {f.name: f.spec_dict() for f in project.flows})
+        for budget in project.budgets.values():
+            store.budgets.define(budget)
+        engine = DbosEngine(database_url)
+        runtime = Runtime(
+            project.flows,
+            store,
+            spool,
+            engine,
+            code_sha=project.code_sha,
+            budgets={c.name: c.budget for c in project.connections.values() if c.budget is not None},
+            config_of=lambda connection: _config_of(project, connection),
+            timezone=str(project.settings["timezone"]),
+        )
+        return _work(runtime, store, database_url, worker_id, labels, slots, poll_s, stop, project.code_sha)
+    finally:  # a reload in `feather dev` runs this again in the same process
+        logging.getLogger().removeHandler(task_logs)
+        if engine is not None:
+            engine.close()
+        store.close()
+
+
+def _work(
+    runtime: Runtime,
+    store: Store,
+    database_url: str,
+    worker_id: str,
+    labels: Mapping[str, str],
+    slots: int,
+    poll_s: float,
+    stop: threading.Event | None,
+    code_sha: str,
+) -> int:
+    """Execute tasks and heartbeat until told to stop, and drain."""
+    from feather_engine_dbos import DbosWorkerRuntime
 
     told_to_stop = threading.Event() if stop is None else stop
 
@@ -124,11 +149,11 @@ def run_worker(
             if (number := getattr(signal, name, None)) is not None:
                 signal.signal(number, on_signal)
 
-    store.workers.heartbeat(worker_id, labels, project.code_sha, slots)
+    store.workers.heartbeat(worker_id, labels, code_sha, slots)
     handle = DbosWorkerRuntime(database_url, poll_s=poll_s, drain_s=DRAIN_S).run(
         runtime.tasks(), worker_id, labels, slots
     )
-    stop_beating = _heartbeats(store, worker_id, labels, project.code_sha, slots)
+    stop_beating = _heartbeats(store, worker_id, labels, code_sha, slots)
     try:
         while not told_to_stop.wait(
             0.5

@@ -223,3 +223,11 @@ def test_the_leader_lock_session_has_the_same_settings(pg_url: str):  # F9
         assert session.execute("show statement_timeout").fetchone() == ("2min",)
     finally:
         lock.release()
+
+
+def test_closing_a_store_closes_its_pool(pg: Pg, pg_url: str, clock: FrozenClock):  # F10
+    store, _ = connect(pg_url, clock=clock, max_size=1)
+    pool = pool_of(store)
+    store.close()
+    assert pool.closed
+    store.close()  # closing again is harmless

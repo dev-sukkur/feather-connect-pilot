@@ -24,6 +24,7 @@ FREE = "feather-free"
 WORKFLOW = "feather_task"
 MAX_ARGS_BYTES = 64 * 1024  # invariant I8: a task carries ids, never data
 _DBOS_PRIORITY = {2: 1, 1: 2, 0: 3}
+_CLIENT_POOL = 2  # a client only submits and looks things up, in short calls; DBOS's default is 5
 _ENDED = frozenset({"SUCCESS", "ERROR", "CANCELLED", "MAX_RECOVERY_ATTEMPTS_EXCEEDED"})
 
 
@@ -50,7 +51,11 @@ class DbosEngine(Engine):
 
     def __init__(self, database_url: str, *, schema: str = "dbos") -> None:
         DBOS.migrate(database_url, schema=schema)
-        self._client = DBOSClient(system_database_url=database_url, dbos_system_schema=schema)
+        self._client = DBOSClient(
+            system_database_url=database_url,
+            dbos_system_schema=schema,
+            system_database_pool_size=_CLIENT_POOL,
+        )
 
     def submit(self, call: TaskCall) -> str:
         args = dict(call.args)

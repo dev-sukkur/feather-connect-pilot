@@ -27,6 +27,9 @@ from feather_server.services.reads import Reads
 from feather_server.settings import Settings
 
 
+log = logging.getLogger(__name__)
+
+
 @dataclass
 class AppState:
     """What the server's routes and loops share. It is on the app as `app.state.feather`."""
@@ -38,6 +41,15 @@ class AppState:
     engine: Engine
     runtime: Runtime
     clock: Clock = field(default_factory=SystemClock)
+    closers: list[Callable[[], None]] = field(default_factory=list[Callable[[], None]])
+
+    def close(self) -> None:
+        """Let go of what `build_state` opened. A state made by hand has nothing here."""
+        while self.closers:
+            try:
+                self.closers.pop()()
+            except Exception:
+                log.exception("could not close part of the server's state")
 
 
 def build_state(settings: Settings) -> AppState:
@@ -51,14 +63,18 @@ def build_state(settings: Settings) -> AppState:
     clock = SystemClock()
     store, spool = connect(settings.database_url, clock=clock)
     configure_logging(os.environ.get("FEATHER_LOG_LEVEL", "INFO"), secrets=[settings.secret_key])
-    logging.getLogger().addHandler(TaskLogHandler(store))
+    task_logs = TaskLogHandler(store)
+    logging.getLogger().addHandler(task_logs)
+    closers: list[Callable[[], None]] = [store.close, lambda: logging.getLogger().removeHandler(task_logs)]
     for budget in project.budgets.values():  # the overview reads their use
         store.budgets.define(budget)
     local = LocalEngine() if settings.engine == "local" else None
     if local is None:
         from feather_engine_dbos import DbosEngine
 
-        engine: Engine = DbosEngine(settings.database_url)
+        dbos_engine = DbosEngine(settings.database_url)
+        closers.append(dbos_engine.close)
+        engine: Engine = dbos_engine
     else:
         engine = local
     runtime = Runtime(
@@ -72,7 +88,7 @@ def build_state(settings: Settings) -> AppState:
     )
     if local is not None:
         local.register(runtime.tasks())
-    return AppState(settings, project, store, spool, engine, runtime, clock)
+    return AppState(settings, project, store, spool, engine, runtime, clock, closers)
 
 
 def _readiness(state: AppState) -> dict[str, str]:
@@ -109,6 +125,7 @@ def create_app(
         finally:
             for runner in running:
                 runner.stop()
+            state.close()
 
     app = FastAPI(title="Feather Connect", lifespan=lifespan)
     app.state.feather = state
