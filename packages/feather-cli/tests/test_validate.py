@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -121,4 +122,5 @@ def test_help_lists_every_command(cli):
 @pytest.mark.parametrize("command", COMMANDS)
 def test_every_command_takes_env_and_json(cli, command):
     r = cli(command, "--help")
-    assert "--env" in r.stdout and "--json" in r.stdout
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout)  # CI turns colour on, which splits the option names
+    assert "--env" in plain and "--json" in plain
