@@ -1,0 +1,20 @@
+{
+  "name": "prices-to-channels",
+  "reads": [
+    {
+      "name": "erp.price",
+      "connector": "example.erp.prices",
+      "connection": "erp",
+      "key": ["material", "price_list"],
+      "strategy": { "kind": "snapshot_diff" },
+      "partition": { "kind": "by_fields", "parts": ["store_id", { "kind": "by_day", "field": "date", "tz": "UTC" }] },
+      "keep_state": true
+    }
+  ],
+  "deliver": [
+    { "name": "shop", "connector": "example.shop.prices", "connection": "shop", "map": "to_shop", "priority": "low" },
+    { "name": "warehouse", "connector": "example.warehouse.table", "connection": "warehouse", "mode": "append" }
+  ],
+  "triggers": [{ "kind": "cron", "expr": "*/15 * * * *", "tz": "UTC" }, { "kind": "manual" }],
+  "owner": "retail-integration"
+}

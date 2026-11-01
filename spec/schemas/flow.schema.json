@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "feather-connect/0.1/flow.schema.json",
+  "title": "Flow description",
+  "description": "A flow without its code: what it reads, where it delivers and what starts it. Transforms are named, not carried.",
+  "type": "object",
+  "required": ["name", "reads", "deliver"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string", "minLength": 1 },
+    "reads": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/dataset" } },
+    "deliver": { "type": "array", "items": { "$ref": "#/$defs/route" } },
+    "triggers": { "type": "array", "items": { "$ref": "#/$defs/trigger" } },
+    "owner": { "type": "string" },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "overlap": { "enum": ["queue", "skip", "cancel_previous"], "default": "queue" },
+    "catch_up": { "enum": ["latest", "each"], "default": "latest" }
+  },
+  "$defs": {
+    "priority": { "enum": ["low", "normal", "high"], "default": "normal" },
+    "duration": { "type": "string", "pattern": "^([0-9]+[smhd])+$" },
+    "dataset": {
+      "type": "object",
+      "required": ["name", "connector", "connection", "key", "strategy"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "connector": { "type": "string", "description": "The name in the source's connector spec." },
+        "connection": { "type": "string" },
+        "key": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+          ]
+        },
+        "strategy": { "$ref": "#/$defs/strategy" },
+        "partition": { "$ref": "#/$defs/partition" },
+        "keep_state": { "type": "boolean", "default": false },
+        "priority": { "$ref": "#/$defs/priority" },
+        "on_record_error": { "enum": ["quarantine", "fail"], "default": "quarantine" },
+        "allow_empty": { "type": "boolean", "default": false }
+      }
+    },
+    "strategy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "field"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "by_stamp" },
+            "field": { "type": "string", "minLength": 1 },
+            "lookback": { "$ref": "#/$defs/duration" },
+            "deleted_field": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "properties": { "kind": { "enum": ["snapshot_diff", "replace", "push"] } }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "complete"],
+          "description": "A custom strategy, named x-<name>.",
+          "properties": {
+            "kind": { "type": "string", "pattern": "^x-" },
+            "complete": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+    "partition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "properties": { "kind": { "const": "none" } }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "field", "tz"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "enum": ["by_day", "by_month"] },
+            "field": { "type": "string", "minLength": 1 },
+            "tz": { "type": "string", "minLength": 1, "description": "An IANA time zone name." }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "field", "n"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "by_bucket" },
+            "field": { "type": "string", "minLength": 1 },
+            "n": { "type": "integer", "minimum": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "parts"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "by_fields" },
+            "parts": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "oneOf": [
+                  { "type": "string", "minLength": 1, "description": "A field, keyed by its text." },
+                  { "$ref": "#/$defs/partition" }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "route": {
+      "type": "object",
+      "required": ["name", "connector", "connection"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "connector": { "type": "string", "description": "The name in the sink's connector spec." },
+        "connection": { "type": "string" },
+        "map": { "type": "string", "description": "The name of the transform in the flow's code, if it has one." },
+        "mode": { "enum": ["upsert", "append", "replace_partition", "side_effect"], "default": "upsert" },
+        "priority": { "$ref": "#/$defs/priority" }
+      }
+    },
+    "trigger": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "expr", "tz"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "cron" },
+            "expr": { "type": "string", "minLength": 1 },
+            "tz": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "interval"],
+          "additionalProperties": false,
+          "properties": { "kind": { "const": "every" }, "interval": { "$ref": "#/$defs/duration" } }
+        },
+        {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "properties": { "kind": { "const": "manual" } }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "dataset"],
+          "additionalProperties": false,
+          "properties": { "kind": { "const": "on_event" }, "dataset": { "type": "string", "minLength": 1 } }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "feather-connect/0.1/attempt.schema.json",
+  "title": "Delivery attempt",
+  "description": "One transition of a delivery, with who made it, why, and when.",
+  "type": "object",
+  "required": ["route", "version_id", "from_status", "to_status", "actor", "at"],
+  "additionalProperties": false,
+  "properties": {
+    "route": { "type": "string", "minLength": 1 },
+    "version_id": { "type": "string", "pattern": "^[A-Z2-7]{26}$" },
+    "from_status": { "$ref": "#/$defs/status" },
+    "to_status": { "$ref": "#/$defs/status" },
+    "actor": { "type": "string", "minLength": 1 },
+    "reason": { "type": ["string", "null"] },
+    "error": { "type": ["string", "null"] },
+    "rows_applied": { "type": "integer", "minimum": 0 },
+    "rows_rejected": { "type": "integer", "minimum": 0 },
+    "code_sha": { "type": ["string", "null"] },
+    "at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "status": { "enum": ["pending", "running", "applied", "failed", "held", "skipped", "compensated"] }
+  }
+}

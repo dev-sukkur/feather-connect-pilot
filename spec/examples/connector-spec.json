@@ -1,0 +1,12 @@
+{
+  "name": "example.erp.prices",
+  "config": {
+    "type": "object",
+    "required": ["base_url"],
+    "properties": { "base_url": { "type": "string" } }
+  },
+  "strategies": ["snapshot_diff", "replace"],
+  "modes": [],
+  "deletes": "none",
+  "cost": { "list": 1, "detail": 1 }
+}

@@ -1,0 +1,14 @@
+{
+  "route": "shop",
+  "version_id": "XYEIV7U4VSM7EWS2IMYOVTWKDF",
+  "dataset": "erp.price",
+  "partition": "store_id=1509/date=2026-10-18",
+  "seal_seq": 42,
+  "status": "applied",
+  "attempts": 1,
+  "last_error": null,
+  "rows_applied": 3,
+  "rows_rejected": 0,
+  "replays": 0,
+  "retries": 0
+}

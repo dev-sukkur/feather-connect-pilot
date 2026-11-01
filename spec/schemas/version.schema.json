@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "feather-connect/0.1/version.schema.json",
+  "title": "Version manifest",
+  "description": "An immutable batch of upserts and deletes for one dataset partition, without its records.",
+  "type": "object",
+  "required": [
+    "version_id",
+    "dataset",
+    "partition",
+    "run_id",
+    "complete",
+    "upserts",
+    "deletes",
+    "content_hash",
+    "code_sha",
+    "status"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version_id": { "type": "string", "pattern": "^[A-Z2-7]{26}$" },
+    "dataset": { "type": "string", "minLength": 1 },
+    "partition": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "complete": { "type": "boolean" },
+    "upserts": { "type": "integer", "minimum": 0 },
+    "deletes": { "type": "integer", "minimum": 0 },
+    "content_hash": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "schema_hash": { "type": ["string", "null"] },
+    "watermark": { "description": "The greatest change stamp in the version, or null." },
+    "code_sha": { "type": "string" },
+    "status": { "enum": ["staged", "sealed"] },
+    "seal_seq": { "type": ["integer", "null"], "minimum": 1 },
+    "sealed_at": { "type": ["string", "null"], "format": "date-time" }
+  }
+}
