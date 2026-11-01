@@ -610,8 +610,8 @@ def test_replay_on_a_replace_route_is_refused_when_only_the_snapshot_is_left() -
 
 def test_replay_on_a_replace_route_is_refused_when_the_snapshot_is_gone_too() -> None:
     h, v1 = replace_route_harness()
-    h.spool.delete_chunks(v1, "full")
-    h.spool.delete_chunks(v1, "snapshot")
+    h.spool.expire_chunks(v1, "full")
+    h.spool.expire_chunks(v1, "snapshot")
     with pytest.raises(InvalidTransition, match="aged out"):
         h.rt.replay("r", v1, actor="op")
 

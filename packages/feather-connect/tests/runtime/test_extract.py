@@ -324,7 +324,7 @@ def test_a_reserved_column_is_quarantined_and_the_rest_proceed():
 
 def test_an_infrastructure_error_is_not_taken_for_a_bad_record():
     class BrokenSpool(MemorySpool):
-        def delete_version(self, version_id):
+        def delete_version(self, version_id, writer=None):
             raise ValueError("the spool is down")
 
     deps = RuntimeDeps(DEPS.store, BrokenSpool(), DEPS.clock, "sha", DEPS.make_context)

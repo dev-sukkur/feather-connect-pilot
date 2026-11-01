@@ -4,13 +4,16 @@ import io
 from datetime import date, timedelta
 from typing import LiteralString, cast
 
+import psycopg
 import pyarrow as pa
 import pyarrow.parquet as pq
 from psycopg import sql
+from psycopg.rows import DictRow
 
 from feather_connect.clock import Clock, SystemClock
-from feather_connect.storage.postgres.support import Pool, ensure_partition
-from feather_connect.storage.spool import ChunkKind, ChunkRef, Spool
+from feather_connect.storage.port import VersionStore
+from feather_connect.storage.postgres.support import Pool, ensure_partition, guard_version
+from feather_connect.storage.spool import ChunkKind, ChunkRef, Spool, is_working_kind
 
 # The day of a version's chunks, which its first write records, so that a rewrite after midnight finds them.
 _DAY_OF: LiteralString = (
@@ -31,6 +34,9 @@ class PostgresSpool(Spool):
         self._clock = clock or SystemClock()
         self._tenant = tenant
         self._known: set[str] = set()
+
+    def bind(self, versions: VersionStore) -> None:
+        """Nothing to do: the versions are in the same database, and each write checks them in its transaction."""
 
     def ensure_partitions(self, days_ahead: int = 7) -> None:
         """Create the day partitions from today to `days_ahead` days on."""
@@ -71,7 +77,9 @@ class PostgresSpool(Spool):
             conn.execute("delete from feather.spool_version where day = %s", (day,))
         self._known.discard(_partition(day))
 
-    def put_chunk(self, version_id: str, chunk_no: int, kind: ChunkKind, table: pa.Table) -> ChunkRef:
+    def put_chunk(
+        self, version_id: str, chunk_no: int, kind: ChunkKind, table: pa.Table, writer: str | None = None
+    ) -> ChunkRef:
         sink = io.BytesIO()
         pq.write_table(table, sink, compression="zstd")  # type: ignore[reportUnknownMemberType]
         data = sink.getvalue()
@@ -86,6 +94,7 @@ class PostgresSpool(Spool):
         }
         if kind == "snapshot":
             with self._pool.connection() as conn:
+                guard_version(conn, self._tenant, version_id, writer)
                 conn.execute(
                     """insert into feather.spool_snapshot (tenant_id, version_id, chunk_no, data, rows, size)
                        values (%(tenant)s, %(version)s, %(no)s, %(data)s, %(rows)s, %(size)s)
@@ -97,6 +106,7 @@ class PostgresSpool(Spool):
             day = self._version_day(version_id)
             self._ensure_day(day)
             with self._pool.connection() as conn:
+                guard_version(conn, self._tenant, version_id, writer)
                 conn.execute(
                     """insert into feather.spool_chunk (tenant_id, day, version_id, chunk_no, kind, data, rows, size)
                        values (%(tenant)s, %(day)s, %(version)s, %(no)s, %(kind)s, %(data)s, %(rows)s, %(size)s)
@@ -127,25 +137,46 @@ class PostgresSpool(Spool):
             ).fetchall()
         return [ChunkRef(version_id, r["chunk_no"], kind, r["rows"], r["size"]) for r in rows]
 
-    def delete_chunks(self, version_id: str, kind: ChunkKind, from_chunk: int = 0) -> None:
+    def delete_chunks(
+        self, version_id: str, kind: ChunkKind, from_chunk: int = 0, writer: str | None = None
+    ) -> None:
         with self._pool.connection() as conn:
+            if writer is not None or not is_working_kind(kind):
+                guard_version(conn, self._tenant, version_id, writer)
             conn.execute(
                 f"""delete from {self._table(kind)}
                     where tenant_id = %(tenant)s and version_id = %(version)s and chunk_no >= %(from)s{self._where(kind)}""",
                 {"tenant": self._tenant, "version": version_id, "from": from_chunk, "kind": kind},
             )
 
-    def delete_version(self, version_id: str) -> None:
-        params = {"tenant": self._tenant, "version": version_id}
+    def delete_version(self, version_id: str, writer: str | None = None) -> None:
+        with self._pool.connection() as conn:
+            guard_version(conn, self._tenant, version_id, writer)
+            self._delete_all(conn, version_id, keep_claim=writer is not None)
+
+    def expire_chunks(self, version_id: str, kind: ChunkKind) -> None:
         with self._pool.connection() as conn:
             conn.execute(
-                f"delete from feather.spool_chunk where tenant_id = %(tenant)s and version_id = %(version)s and day = {_DAY_OF}",
-                params,
+                f"""delete from {self._table(kind)}
+                    where tenant_id = %(tenant)s and version_id = %(version)s{self._where(kind)}""",
+                {"tenant": self._tenant, "version": version_id, "kind": kind},
             )
-            conn.execute(
-                "delete from feather.spool_snapshot where tenant_id = %(tenant)s and version_id = %(version)s",
-                params,
-            )
+
+    def expire_version(self, version_id: str) -> None:
+        with self._pool.connection() as conn:
+            self._delete_all(conn, version_id, keep_claim=False)
+
+    def _delete_all(self, conn: psycopg.Connection[DictRow], version_id: str, *, keep_claim: bool) -> None:
+        params = {"tenant": self._tenant, "version": version_id}
+        conn.execute(
+            f"delete from feather.spool_chunk where tenant_id = %(tenant)s and version_id = %(version)s and day = {_DAY_OF}",
+            params,
+        )
+        conn.execute(
+            "delete from feather.spool_snapshot where tenant_id = %(tenant)s and version_id = %(version)s",
+            params,
+        )
+        if not keep_claim:
             conn.execute(
                 "delete from feather.spool_version where tenant_id = %(tenant)s and version_id = %(version)s",
                 params,

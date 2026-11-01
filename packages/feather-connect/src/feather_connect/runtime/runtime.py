@@ -12,6 +12,7 @@ then a waiting delivery has a row but no task, which keeps its run going while a
 import logging
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -21,6 +22,7 @@ from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import BudgetDeferred, PermanentError
 from feather_connect.core.flow import Flow, RouteSpec
 from feather_connect.engine.port import Engine, RetryPolicy, TaskCall, TaskContext, TaskFn
+from feather_connect.ids import new_id
 from feather_connect.logs import bind, redact
 from feather_connect.runtime.apply import fail_open, oldest_open, replay_gap, run_apply
 from feather_connect.runtime.budgets import BudgetHandle
@@ -70,6 +72,14 @@ class RunNotStarted(Exception):
         super().__init__(reason)
         self.run_id = run_id
         self.reason = reason
+
+
+@dataclass(frozen=True)
+class _Extracted:
+    """What an extract step hands to the steps after it: what it sealed, and the claim it read its slice under."""
+
+    version_ids: list[str]
+    writer: str
 
 
 def _step_through_deferrals[T](ctx: TaskContext, name: str, fn: Callable[[], T]) -> T:
@@ -530,10 +540,13 @@ class Runtime:
             flow, dataset = self.flow(args["flow"]), self.dataset(args["dataset"])
             sliced = ctx.step("sliced", lambda: bool(versions.slices_for_run(run_id, dataset.name)))
             extract = lambda: self._extract(flow, dataset, run_id, partition, sliced)
-            ids = _step_through_deferrals(ctx, "extract", extract)
+            found = _step_through_deferrals(ctx, "extract", extract)
             if not sliced:
-                ctx.step("submit_applies", lambda: self._submit_applies(flow, run_id, ids))
-            elif ctx.step("finish_slice", lambda: versions.finish_slice(run_id, dataset.name, partition)):
+                ctx.step("submit_applies", lambda: self._submit_applies(flow, run_id, found.version_ids))
+            elif ctx.step(
+                "finish_slice",
+                lambda: versions.finish_slice(run_id, dataset.name, partition, found.writer),
+            ):
                 ctx.step("submit_seal", lambda: self.submit_seal(flow.name, dataset.name, run_id))
             hand_on()
             self._finish_step(ctx, run_id)
@@ -613,14 +626,21 @@ class Runtime:
 
     # What the steps do.
 
-    def _extract(self, flow: Flow, dataset: Dataset, run_id: str, partition: str, sliced: bool) -> list[str]:
+    def _extract(self, flow: Flow, dataset: Dataset, run_id: str, partition: str, sliced: bool) -> _Extracted:
+        writer = new_id()
         try:
             versions = run_extract(
-                dataset, run_id, partition, routes=flow.routes, stage_only=sliced, deps=self._deps
+                dataset,
+                run_id,
+                partition,
+                routes=flow.routes,
+                stage_only=sliced,
+                deps=self._deps,
+                writer=writer,
             )
         except ExtractFailed as error:  # the source would say the same again, so a retry can't help
             raise PermanentError(str(error)) from error
-        return [] if sliced else [version.version_id for version in versions]
+        return _Extracted([] if sliced else [version.version_id for version in versions], writer)
 
     def _seal(self, flow: Flow, dataset: Dataset, run_id: str) -> list[str]:
         try:

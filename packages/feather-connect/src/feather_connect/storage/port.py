@@ -22,6 +22,14 @@ class VersionSealed(Exception):
     """A sealed version was staged again. Sealed versions never change (I1)."""
 
 
+class StaleWriter(Exception):
+    """An execution wrote to a version that a later execution has claimed. Only the last claim may write (I1)."""
+
+
+class SliceFinished(Exception):
+    """An execution claimed a slice whose run has marked it done: the read that finished it stands, for the seal task."""
+
+
 class InvalidTransition(Exception):
     """A delivery was moved to a status that design section 6.5 doesn't allow from its current one."""
 
@@ -243,21 +251,46 @@ class RunJournal(Protocol):
 class VersionStore(Protocol):
     """Versions, from staging to sealing, and the slices of a run."""
 
-    def stage(self, draft: VersionDraft) -> Version:
-        """Store a draft. Staging a version again replaces it, until it is sealed; then `VersionSealed`."""
-        ...
+    def claim(self, version_id: str, writer: str, run_id: str, dataset: str, partition: str) -> None:
+        """Make `writer` the only execution that may write this version, and forget the version staged before it.
 
-    def seal(self, version_ids: Sequence[str], routes: Sequence[str]) -> list[Version]:
-        """Seal each version, give it the next `seal_seq` and a pending delivery per route.
+        A task can run twice at once, and both copies use the same version id. The last claim wins: from here on the
+        spool, `stage`, `seal`, `discard_staged` and `finish_slice` refuse any other writer with `StaleWriter`, so that a
+        version is only ever sealed with the chunks of one execution.
 
-        Sealing a version that is already sealed changes nothing.
+        Raises `VersionSealed` for a sealed version, and `SliceFinished` when (`run_id`, `dataset`, `partition`) is a slice
+        marked done, whose seal task may be working from it. Neither changes anything.
         """
         ...
 
-    def discard_staged(self, version_id: str) -> None:
+    def take_over(self, version_ids: Sequence[str], writer: str) -> None:
+        """Make `writer` the writer of staged versions, as they are, for a seal task to decide and seal them.
+
+        Raises `VersionSealed`, changing nothing, if any of them is sealed.
+        """
+        ...
+
+    def stage(self, draft: VersionDraft, writer: str | None = None) -> Version:
+        """Store a draft. Staging a version again replaces it, until it is sealed; then `VersionSealed`.
+
+        With a `writer`, raises `StaleWriter` unless it holds the claim.
+        """
+        ...
+
+    def seal(
+        self, version_ids: Sequence[str], routes: Sequence[str], writer: str | None = None
+    ) -> list[Version]:
+        """Seal each version, give it the next `seal_seq` and a pending delivery per route.
+
+        Sealing a version that is already sealed changes nothing. With a `writer`, raises `StaleWriter`, sealing none,
+        unless it holds the claim of each version that isn't sealed yet.
+        """
+        ...
+
+    def discard_staged(self, version_id: str, writer: str | None = None) -> None:
         """Remove a staged version, which an extract found it had no need of. An unknown id changes nothing.
 
-        Raises `VersionSealed` for a sealed version.
+        Raises `VersionSealed` for a sealed version. With a `writer`, raises `StaleWriter` unless it holds the claim.
         """
         ...
 
@@ -280,8 +313,11 @@ class VersionStore(Protocol):
         ...
 
     def register_slices(self, run_id: str, dataset: str, partitions: Iterable[str]) -> None: ...
-    def finish_slice(self, run_id: str, dataset: str, partition: str) -> bool:
-        """Mark a slice done. True when every registered slice of the run's dataset is done. Safe to repeat."""
+    def finish_slice(self, run_id: str, dataset: str, partition: str, writer: str | None = None) -> bool:
+        """Mark a slice done. True when every registered slice of the run's dataset is done. Safe to repeat.
+
+        With a `writer`, raises `StaleWriter` unless the slice is done already or it holds the claim of the slice's version.
+        """
         ...
 
     def slices_for_run(self, run_id: str, dataset: str) -> list[str]:

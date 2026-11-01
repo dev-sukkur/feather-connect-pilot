@@ -18,7 +18,7 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
 from feather_connect.clock import Clock, SystemClock
-from feather_connect.ids import new_id
+from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
     Attempt,
@@ -46,6 +46,8 @@ from feather_connect.storage.port import (
     Run,
     RunJournal,
     ScheduleStore,
+    SliceFinished,
+    StaleWriter,
     StateRow,
     Store,
     TaskRow,
@@ -64,7 +66,7 @@ from feather_connect.storage.port import (
     check_transition,
     split_error,
 )
-from feather_connect.storage.postgres.support import Pool, ensure_partition
+from feather_connect.storage.postgres.support import Pool, ensure_partition, guard_version
 from feather_connect.storage.spool import decode_json_value, encode_json_value
 
 # The oldest delivery of a partition that is still open (I2). `status <> 'applied'` is repeated outside the
@@ -375,8 +377,40 @@ class _Versions(VersionStore):
     def __init__(self, db: _Db) -> None:
         self._db = db
 
-    def stage(self, draft: VersionDraft) -> Version:
+    def _hold_claim(self, conn: psycopg.Connection[DictRow], version_id: str, writer: str) -> None:
+        """Make `writer` the writer of the version. The row stays locked until the transaction ends."""
+        conn.execute(
+            """insert into feather.spool_version (tenant_id, version_id, day, writer) values (%s, %s, %s, %s)
+               on conflict (tenant_id, version_id) do update set writer = excluded.writer""",
+            (self._db.tenant, version_id, self._db.clock.now().date(), writer),
+        )
+
+    def claim(self, version_id: str, writer: str, run_id: str, dataset: str, partition: str) -> None:
         with self._db.tx() as conn:
+            done = conn.execute(
+                """select done from feather.run_slice
+                   where tenant_id = %s and run_id = %s and dataset = %s and partition = %s for share""",
+                (self._db.tenant, run_id, dataset, partition),
+            ).fetchone()
+            if done is not None and done["done"]:
+                raise SliceFinished(f"slice {partition} of run {run_id} is done")
+            self._hold_claim(conn, version_id, writer)
+            guard_version(conn, self._db.tenant, version_id, None)
+            conn.execute(
+                "delete from feather.version where tenant_id = %s and version_id = %s",
+                (self._db.tenant, version_id),
+            )
+
+    def take_over(self, version_ids: Sequence[str], writer: str) -> None:
+        with self._db.tx() as conn:
+            for version_id in sorted(version_ids):
+                self._hold_claim(conn, version_id, writer)
+                guard_version(conn, self._db.tenant, version_id, None)
+
+    def stage(self, draft: VersionDraft, writer: str | None = None) -> Version:
+        with self._db.tx() as conn:
+            if writer is not None:
+                guard_version(conn, self._db.tenant, draft.version_id, writer)
             row = conn.execute(
                 """insert into feather.version as v (tenant_id, version_id, dataset, partition, run_id, complete,
                                                 upserts, deletes, content_hash, schema_hash, watermark, code_sha)
@@ -408,11 +442,21 @@ class _Versions(VersionStore):
             raise VersionSealed(f"version {draft.version_id} is sealed")
         return _version(row)
 
-    def seal(self, version_ids: Sequence[str], routes: Sequence[str]) -> list[Version]:
+    def seal(
+        self, version_ids: Sequence[str], routes: Sequence[str], writer: str | None = None
+    ) -> list[Version]:
         with self._db.tx() as conn:
             # One sealer at a time, so that seal_seq follows commit order and a reader never sees a lower
             # number appear after a higher one.
             conn.execute("select pg_advisory_xact_lock(hashtext('feather.seal'))")
+            owners = {
+                r["version_id"]: r["writer"]
+                for r in conn.execute(
+                    """select version_id, writer from feather.spool_version
+                       where tenant_id = %s and version_id = any(%s) order by version_id for share""",
+                    (self._db.tenant, list(version_ids) if writer is not None else []),
+                ).fetchall()
+            }
             found = {
                 r["version_id"]: r
                 for r in conn.execute(
@@ -421,6 +465,12 @@ class _Versions(VersionStore):
                     (self._db.tenant, list(version_ids)),
                 ).fetchall()
             }
+            if writer is not None:  # before the rest: a version that a later claim took away is not "missing"
+                for version_id in version_ids:
+                    if version_id in found and found[version_id]["status"] == "sealed":
+                        continue
+                    if owners.get(version_id) != writer:
+                        raise StaleWriter(f"version {version_id} was claimed by a later execution")
             if missing := next((v for v in version_ids if v not in found), None):
                 raise KeyError(f"no such version: {missing}")  # before sealing any, so it is all or nothing
             now = self._db.clock.now()
@@ -452,8 +502,10 @@ class _Versions(VersionStore):
                     )
         return [_version(found[v]) for v in version_ids]
 
-    def discard_staged(self, version_id: str) -> None:
+    def discard_staged(self, version_id: str, writer: str | None = None) -> None:
         with self._db.tx() as conn:
+            if writer is not None:
+                guard_version(conn, self._db.tenant, version_id, writer)
             conn.execute(
                 "delete from feather.version where tenant_id = %s and version_id = %s and status = 'staged'",
                 (self._db.tenant, version_id),
@@ -523,7 +575,7 @@ class _Versions(VersionStore):
                 (self._db.tenant, run_id, dataset, list(partitions)),
             )
 
-    def finish_slice(self, run_id: str, dataset: str, partition: str) -> bool:
+    def finish_slice(self, run_id: str, dataset: str, partition: str, writer: str | None = None) -> bool:
         with self._db.tx() as conn:
             # Lock the run's slices first: two slices finishing together must not each miss the other's.
             slices = conn.execute(
@@ -533,6 +585,14 @@ class _Versions(VersionStore):
             ).fetchall()
             if partition not in {s["partition"] for s in slices}:
                 raise KeyError(f"slice {partition} is not registered for run {run_id}, dataset {dataset}")
+            this_one = next(s for s in slices if s["partition"] == partition)
+            if writer is not None and not this_one["done"]:
+                owner = conn.execute(
+                    "select writer from feather.spool_version where tenant_id = %s and version_id = %s for share",
+                    (self._db.tenant, stable_id(run_id, dataset, partition)),
+                ).fetchone()
+                if owner is None or owner["writer"] != writer:
+                    raise StaleWriter(f"slice {partition} of run {run_id} was claimed by a later execution")
             conn.execute(
                 """update feather.run_slice set done = true
                    where tenant_id = %s and run_id = %s and dataset = %s and partition = %s""",

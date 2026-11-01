@@ -27,7 +27,7 @@ from feather_connect.ids import new_id, stable_id
 from feather_connect.logs import redact
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.storage import spool as spool_settings
-from feather_connect.storage.port import StateRow, Version, VersionDraft
+from feather_connect.storage.port import SliceFinished, StateRow, Version, VersionDraft, VersionSealed
 from feather_connect.storage.spool import ChunkKind, records_to_table, snapshot_table, table_to_records
 
 _KEY, _OP, _HASH, _MOVED = "_fc_key", "_fc_op", "_fc_row_hash", "_fc_moved_from"
@@ -74,9 +74,9 @@ class _Read:
         stamp_kind: str | None,
         deps: RuntimeDeps,
         *,
-        dry_run: bool = False,
+        writer: str | None = None,
     ) -> None:
-        self._dry_run = dry_run  # a dry run turns no record down in the store: the quarantine is left alone
+        self.writer = writer  # None for a dry run, which claims nothing and turns no record down in the store
         self._dataset = dataset
         self._run_id = run_id
         self._partition = partition  # None when each row's partition comes from the row
@@ -96,7 +96,13 @@ class _Read:
         found = self.slices.get(partition)
         if found is None:
             found = _Slice(partition, self._version_id(partition))
-            self._deps.spool.delete_version(found.version_id)  # what an interrupted attempt left behind
+            if (
+                self.writer is not None
+            ):  # from here on, any other execution of this version writes no more of it
+                self._deps.store.versions.claim(
+                    found.version_id, self.writer, self._run_id, self._dataset.name, partition
+                )
+            self._deps.spool.delete_version(found.version_id, self.writer)  # what an earlier attempt left
             self.slices[partition] = found
         return found
 
@@ -151,7 +157,7 @@ class _Read:
             ) from error
         if key is not None:
             self.rejected.add(key)
-        if self._dry_run:
+        if self.writer is None:
             return
         version_id = None if partition is None else self._version_id(partition)
         self._deps.store.quarantine.add(
@@ -163,7 +169,7 @@ class _Read:
         for target in self.slices.values():
             if target.buffer:
                 table = records_to_table(list(target.buffer.values()))
-                self._deps.spool.put_chunk(target.version_id, target.chunks, "full", table)
+                self._deps.spool.put_chunk(target.version_id, target.chunks, "full", table, self.writer)
                 target.chunks += 1
                 target.buffer = {}
         self._buffered = 0
@@ -288,7 +294,7 @@ def _write_changes(read: _Read, target: _Slice, upsert_keys: set[str], deps: Run
 
     def write_buffer() -> None:
         nonlocal chunks, buffer
-        deps.spool.put_chunk(target.version_id, chunks, "data", records_to_table(buffer))
+        deps.spool.put_chunk(target.version_id, chunks, "data", records_to_table(buffer), read.writer)
         written.extend(Record(r.key, r.op, {}, r.row_hash) for r in buffer)
         chunks += 1
         buffer = []
@@ -324,10 +330,10 @@ def _schema_hash(version_id: str, deps: RuntimeDeps) -> str | None:
     return hashlib.blake2b(str(schema).encode("utf-8"), digest_size=16).hexdigest()
 
 
-def _discard(version_id: str, deps: RuntimeDeps) -> None:
+def _discard(version_id: str, writer: str, deps: RuntimeDeps) -> None:
     """Remove what an earlier attempt may have staged, row first: leftover chunks are cleared by the next attempt."""
-    deps.store.versions.discard_staged(version_id)
-    deps.spool.delete_version(version_id)
+    deps.store.versions.discard_staged(version_id, writer)
+    deps.spool.delete_version(version_id, writer)
 
 
 def _moved_here(dataset: Dataset, partition: str, keys: Iterable[str], deps: RuntimeDeps) -> set[str]:
@@ -381,6 +387,7 @@ def _stage_slice(
     new: dict[str, int],
     since: Any,
     keep_full: bool,
+    writer: str,
     deps: RuntimeDeps,
 ) -> Version | None:
     """Compare a slice with what was known, write its chunks and stage its version, if there is anything to say."""
@@ -389,14 +396,14 @@ def _stage_slice(
     changes, deletes, held, old_hashes = found.changes, found.deletes, found.held, found.old_hashes
     # A newly held key must reach the snapshot even with no records, or nothing would remember it.
     if not changes and not deletes and held <= old_hashes.keys():
-        _discard(target.version_id, deps)
+        _discard(target.version_id, writer, deps)
         return None
     if strategy.complete:
-        deps.spool.put_chunk(target.version_id, 0, "snapshot", snapshot_table(new.items()))
+        deps.spool.put_chunk(target.version_id, 0, "snapshot", snapshot_table(new.items()), writer)
     if deletes:
-        deps.spool.put_chunk(target.version_id, 0, "candidates", snapshot_table(deletes.items()))
+        deps.spool.put_chunk(target.version_id, 0, "candidates", snapshot_table(deletes.items()), writer)
     if not keep_full:
-        deps.spool.delete_chunks(target.version_id, "full")
+        deps.spool.delete_chunks(target.version_id, "full", writer=writer)
     return deps.store.versions.stage(
         VersionDraft(
             version_id=target.version_id,
@@ -410,7 +417,8 @@ def _stage_slice(
             schema_hash=_schema_hash(target.version_id, deps),
             watermark=target.watermark,
             code_sha=deps.code_sha,
-        )
+        ),
+        writer,
     )
 
 
@@ -445,9 +453,7 @@ def _verify(dataset: Dataset, partition: str, deps: RuntimeDeps) -> VerifyResult
     watermark = None if by_stamp is None else deps.store.versions.latest_watermark(dataset.name)
     since = None if by_stamp is None else _read_since(dataset, by_stamp, watermark)
     stamp_kind = None if watermark is None else _stamp_kind(watermark)
-    read = _Read(
-        dataset, f"verify-{new_id()}", None if by_stamp else partition, stamp_kind, deps, dry_run=True
-    )
+    read = _Read(dataset, f"verify-{new_id()}", None if by_stamp else partition, stamp_kind, deps)
     upserts = deletes = 0
     try:
         _read_source(dataset, read, since, deps, _ALL_PARTITIONS if by_stamp else partition)
@@ -467,6 +473,57 @@ def _verify(dataset: Dataset, partition: str, deps: RuntimeDeps) -> VerifyResult
     return VerifyResult(upserts, deletes)
 
 
+def _read_and_stage(
+    dataset: Dataset,
+    run_id: str,
+    partition: str,
+    routes: Sequence[RouteSpec],
+    stage_only: bool,
+    writer: str,
+    deps: RuntimeDeps,
+) -> tuple[list[str], list[Version]]:
+    """Read the source and stage a version per slice. Return the partitions read and the versions staged."""
+    strategy = dataset.strategy
+    by_stamp = strategy if isinstance(strategy, ByStamp) else None
+    watermark = None if by_stamp is None else deps.store.versions.latest_watermark(dataset.name)
+    since = None if by_stamp is None else _read_since(dataset, by_stamp, watermark)
+    stamp_kind = None if watermark is None else _stamp_kind(watermark)
+    read = _Read(dataset, run_id, None if by_stamp else partition, stamp_kind, deps, writer=writer)
+    _read_source(dataset, read, since, deps, _ALL_PARTITIONS if by_stamp else partition)
+    if by_stamp:  # an earlier attempt may have staged a partition that this read no longer touches
+        for stale in deps.store.versions.staged_for_run(run_id, dataset.name):
+            if stale.partition not in read.slices:
+                deps.store.versions.claim(stale.version_id, writer, run_id, dataset.name, stale.partition)
+                _discard(stale.version_id, writer, deps)
+    versions: list[Version] = []
+    new_by_slice: dict[str, dict[str, int]] = {name: {} for name in read.slices}
+    for key, (slice_name, hash_) in read.latest.items():
+        new_by_slice[slice_name][key] = hash_
+    keep_full = any(route.mode == "replace_partition" for route in routes)
+    for name, target in read.slices.items():
+        version = _stage_slice(
+            dataset, run_id, read, target, new_by_slice[name], since, keep_full, writer, deps
+        )
+        if version is not None:
+            versions.append(version)
+        # After staging, which may discard a no-op slice's chunks. Other slices of the run still need to see these,
+        # and the empty-read guard too. A read that seals at once and has no version leaves nothing to clear them.
+        rejected = read.rejected - read.latest.keys()
+        if strategy.complete and rejected and (stage_only or version is not None):
+            rows = [{_KEY: key} for key in sorted(rejected)]
+            table = pa.Table.from_pylist(rows, schema=_REJECTED_SCHEMA)
+            deps.spool.put_chunk(target.version_id, 0, "rejected", table, writer)
+        # Also after staging. A row accepted now settles what was turned down before, once the run has sealed.
+        accepted = new_by_slice[name].keys() - read.rejected
+        _write_settled(
+            target.version_id,
+            deps.store.quarantine.open_extraction_keys(dataset.name, accepted),
+            writer,
+            deps,
+        )
+    return list(read.slices), versions
+
+
 @overload
 def run_extract(
     dataset: Dataset,
@@ -477,6 +534,7 @@ def run_extract(
     stage_only: bool,
     deps: RuntimeDeps,
     dry_run: Literal[False] = False,
+    writer: str | None = None,
 ) -> list[Version]: ...
 
 
@@ -490,6 +548,7 @@ def run_extract(
     stage_only: bool,
     deps: RuntimeDeps,
     dry_run: Literal[True],
+    writer: str | None = None,
 ) -> VerifyResult: ...
 
 
@@ -502,6 +561,7 @@ def run_extract(
     stage_only: bool,
     deps: RuntimeDeps,
     dry_run: bool = False,
+    writer: str | None = None,
 ) -> list[Version] | VerifyResult:
     """Read one partition of a dataset and return the versions it produced, or an empty list if nothing changed.
 
@@ -511,47 +571,28 @@ def run_extract(
     for each partition it touched. With `stage_only` the versions wait for `finalize_versions`, otherwise they are
     finalized here. Calling this again with the same arguments starts again and replaces what the last attempt left,
     unless that attempt got as far as sealing: sealed versions never change (I1), and are returned as they are.
+
+    Two executions can overlap, since an engine that thinks a worker is dead runs its task again. Each claims its versions
+    under `writer`, which identifies this call, and the store and spool hold it to that (`VersionStore.claim`). One that
+    finds its version sealed, or its slice done, stops and answers as a repeat would. One whose version was claimed after
+    it raises `StaleWriter`, and it is the engine's next attempt that decides.
     """
     if dry_run:
         return _verify(dataset, partition, deps)
-    strategy = dataset.strategy
-    by_stamp = strategy if isinstance(strategy, ByStamp) else None
-    versions = _sealed_earlier(dataset, run_id, None if by_stamp else partition, deps)
+    earlier_of = None if isinstance(dataset.strategy, ByStamp) else partition
+    versions = _sealed_earlier(dataset, run_id, earlier_of, deps)
     read_partitions: list[str] = []
+    writer = writer or new_id()
     if not versions:
-        watermark = None if by_stamp is None else deps.store.versions.latest_watermark(dataset.name)
-        since = None if by_stamp is None else _read_since(dataset, by_stamp, watermark)
-        stamp_kind = None if watermark is None else _stamp_kind(watermark)
-        read = _Read(dataset, run_id, None if by_stamp else partition, stamp_kind, deps)
-        _read_source(dataset, read, since, deps, _ALL_PARTITIONS if by_stamp else partition)
-        if by_stamp:  # an earlier attempt may have staged a partition that this read no longer touches
-            for stale in deps.store.versions.staged_for_run(run_id, dataset.name):
-                if stale.partition not in read.slices:
-                    _discard(stale.version_id, deps)
-        read_partitions = list(read.slices)
-        new_by_slice: dict[str, dict[str, int]] = {name: {} for name in read.slices}
-        for key, (slice_name, hash_) in read.latest.items():
-            new_by_slice[slice_name][key] = hash_
-        keep_full = any(route.mode == "replace_partition" for route in routes)
-        for name, target in read.slices.items():
-            version = _stage_slice(dataset, run_id, read, target, new_by_slice[name], since, keep_full, deps)
-            if version is not None:
-                versions.append(version)
-            # After staging, which may discard a no-op slice's chunks. Other slices of the run still need to see these,
-            # and the empty-read guard too. A read that seals at once and has no version leaves nothing to clear them.
-            rejected = read.rejected - read.latest.keys()
-            if strategy.complete and rejected and (stage_only or version is not None):
-                rows = [{_KEY: key} for key in sorted(rejected)]
-                table = pa.Table.from_pylist(rows, schema=_REJECTED_SCHEMA)
-                deps.spool.put_chunk(target.version_id, 0, "rejected", table)
-            # Also after staging. A row accepted now settles what was turned down before, once the run has sealed.
-            accepted = new_by_slice[name].keys() - read.rejected
-            _write_settled(
-                target.version_id, deps.store.quarantine.open_extraction_keys(dataset.name, accepted), deps
+        try:
+            read_partitions, versions = _read_and_stage(
+                dataset, run_id, partition, routes, stage_only, writer, deps
             )
+        except (VersionSealed, SliceFinished):
+            versions = _sealed_earlier(dataset, run_id, earlier_of, deps)
     if stage_only:
         return versions
-    sealed = finalize_versions(dataset, versions, routes, deps)
+    sealed = finalize_versions(dataset, versions, routes, deps, writer)
     settle_quarantine(dataset, run_id, {*read_partitions, *(v.partition for v in sealed)}, deps)
     return sealed
 
@@ -612,12 +653,14 @@ def _rejected_keys(version_id: str, deps: RuntimeDeps) -> set[str]:
     return _keys_in(version_id, "rejected", deps)
 
 
-def _write_settled(version_id: str, keys: Iterable[str], deps: RuntimeDeps) -> None:
+def _write_settled(version_id: str, keys: Iterable[str], writer: str, deps: RuntimeDeps) -> None:
     """Add `keys` to those whose extraction quarantine entries `settle_quarantine` is to close for the slice."""
     settled = _keys_in(version_id, "settled", deps).union(keys)
     if settled:
         rows = [{_KEY: key} for key in sorted(settled)]
-        deps.spool.put_chunk(version_id, 0, "settled", pa.Table.from_pylist(rows, schema=_REJECTED_SCHEMA))
+        deps.spool.put_chunk(
+            version_id, 0, "settled", pa.Table.from_pylist(rows, schema=_REJECTED_SCHEMA), writer
+        )
 
 
 def settle_quarantine(dataset: Dataset, run_id: str, partitions: Iterable[str], deps: RuntimeDeps) -> None:
@@ -789,7 +832,7 @@ def _check_empty_read(dataset: Dataset, found: _Reconciled, deps: RuntimeDeps) -
         )
 
 
-def _write_implied_deletes(found: _Reconciled, deps: RuntimeDeps) -> None:
+def _write_implied_deletes(found: _Reconciled, writer: str, deps: RuntimeDeps) -> None:
     """Write a version's real deletes at the end of its last data chunk, in place of what an earlier attempt wrote.
 
     The last chunk is written whole, in one step, so that this can be repeated. A chunk left with nothing is removed:
@@ -804,9 +847,9 @@ def _write_implied_deletes(found: _Reconciled, deps: RuntimeDeps) -> None:
         return
     records += [Record(key, "delete", {}, hash_) for key, hash_ in found.deletes.items()]
     if records:
-        deps.spool.put_chunk(version_id, last, "data", records_to_table(records))
+        deps.spool.put_chunk(version_id, last, "data", records_to_table(records), writer)
     else:
-        deps.spool.delete_chunks(version_id, "data", last)
+        deps.spool.delete_chunks(version_id, "data", last, writer)
 
 
 def _new_snapshot(found: _Reconciled, deps: RuntimeDeps) -> dict[str, int]:
@@ -824,28 +867,31 @@ def _says_nothing(dataset: Dataset, found: _Reconciled, deps: RuntimeDeps) -> bo
     return old is not None and dict(_pairs(old)) == _new_snapshot(found, deps)
 
 
-def _write_decision(found: _Reconciled, deps: RuntimeDeps) -> None:
+def _write_decision(found: _Reconciled, writer: str, deps: RuntimeDeps) -> None:
     """Write what `_reconcile` decided over what an earlier attempt wrote, and correct the staged version to match."""
     version = found.version
     if found.moves:
         rows = [{_KEY: key, _MOVED: partition} for key, partition in found.moves.items()]
-        deps.spool.put_chunk(version.version_id, 0, "moves", pa.Table.from_pylist(rows, schema=_MOVES_SCHEMA))
+        deps.spool.put_chunk(
+            version.version_id, 0, "moves", pa.Table.from_pylist(rows, schema=_MOVES_SCHEMA), writer
+        )
     else:
-        deps.spool.delete_chunks(version.version_id, "moves")
+        deps.spool.delete_chunks(version.version_id, "moves", writer=writer)
     if found.kept:
         deps.spool.put_chunk(
-            version.version_id, 0, "snapshot", snapshot_table(_new_snapshot(found, deps).items())
+            version.version_id, 0, "snapshot", snapshot_table(_new_snapshot(found, deps).items()), writer
         )
-    _write_settled(version.version_id, found.left, deps)
+    _write_settled(version.version_id, found.left, writer, deps)
     if found.candidates:
-        _write_implied_deletes(found, deps)
+        _write_implied_deletes(found, writer, deps)
         deps.store.versions.stage(
             replace(
                 version,
                 upserts=sum(r.op == "upsert" for r in found.changes),
                 deletes=sum(r.op == "delete" for r in found.changes) + len(found.deletes),
                 content_hash=_content_hash(found.changes, found.deletes),
-            )
+            ),
+            writer,
         )
 
 
@@ -885,7 +931,11 @@ def _update_state(dataset: Dataset, version: Version, deps: RuntimeDeps) -> None
 
 
 def finalize_versions(
-    dataset: Dataset, versions: Sequence[Version], routes: Sequence[RouteSpec], deps: RuntimeDeps
+    dataset: Dataset,
+    versions: Sequence[Version],
+    routes: Sequence[RouteSpec],
+    deps: RuntimeDeps,
+    writer: str | None = None,
 ) -> list[Version]:
     """Decide the implied deletes and moves of staged versions and seal them all together, with a delivery per route.
 
@@ -900,18 +950,41 @@ def finalize_versions(
     unless the dataset allows it. Versions that are already sealed stay as they are, so this can be repeated: all that
     comes before sealing is worked out from the candidates, which go only after it. Record state is updated after
     sealing, so that a crash in between can't hide a change from the next read of an unsealed version.
+
+    `writer` is the claim the versions were staged under. A seal task has none and takes the versions over, so that of
+    two copies of it only the later writes. A copy that another has sealed under finds that out here and answers as a
+    repeat does, having changed nothing.
     """
+    try:
+        return _finalize(dataset, versions, routes, deps, writer)
+    except VersionSealed:
+        return _finalize(dataset, versions, routes, deps, writer)
+
+
+def _finalize(
+    dataset: Dataset,
+    versions: Sequence[Version],
+    routes: Sequence[RouteSpec],
+    deps: RuntimeDeps,
+    writer: str | None,
+) -> list[Version]:
     current = [deps.store.versions.get(version.version_id) for version in versions]
-    decisions = _reconcile(dataset, current, [v for v in current if v.status == "staged"], deps)
+    staged = [v for v in current if v.status == "staged"]
+    if writer is None:
+        writer = new_id()
+        deps.store.versions.take_over([v.version_id for v in staged], writer)
+    decisions = _reconcile(dataset, current, staged, deps)
     for found in decisions:
         _check_empty_read(dataset, found, deps)
     # What says nothing goes only after sealing, so that a repeat decides the same from the same chunks.
     silent = {f.version.version_id for f in decisions if _says_nothing(dataset, f, deps)}
     for found in decisions:
         if found.version.version_id not in silent:
-            _write_decision(found, deps)
+            _write_decision(found, writer, deps)
     sealed = deps.store.versions.seal(
-        [v.version_id for v in current if v.version_id not in silent], [route.name for route in routes]
+        [v.version_id for v in current if v.version_id not in silent],
+        [route.name for route in routes],
+        writer,
     )
     if dataset.keep_state:
         for version in sealed:
@@ -919,7 +992,7 @@ def finalize_versions(
     for version in sealed:
         deps.spool.delete_chunks(version.version_id, "candidates")
     for version_id in silent:
-        deps.store.versions.discard_staged(version_id)
+        deps.store.versions.discard_staged(version_id, writer)
         for kind in _VERSION_KINDS:  # what `settle_quarantine` reads stays for it
-            deps.spool.delete_chunks(version_id, kind)
+            deps.spool.delete_chunks(version_id, kind, writer=writer)
     return sealed

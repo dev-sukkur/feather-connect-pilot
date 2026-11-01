@@ -93,7 +93,7 @@ def _drop_old_snapshots(store: Store, spool: Spool, cutoff: datetime) -> int:
     held = _open_among(store, stale)  # a replace_partition delivery still reads its version's snapshot
     gone = [version_id for version_id in stale if version_id not in held]
     for version_id in gone:
-        spool.delete_chunks(version_id, "snapshot")
+        spool.expire_chunks(version_id, "snapshot")
     return len(gone)
 
 
@@ -105,7 +105,7 @@ def _drop_old_manifests(store: Store, spool: Spool, cutoff: datetime) -> int:
         if not spool.list_chunks(v.version_id, "snapshot")
     ]
     for version_id in gone:
-        spool.delete_version(version_id)
+        spool.expire_version(version_id)
     return store.versions.delete_many(gone)
 
 

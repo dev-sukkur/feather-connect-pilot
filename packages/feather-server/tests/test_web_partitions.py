@@ -235,7 +235,7 @@ def test_grid_replay_of_an_aged_out_version_is_refused_at_the_preview(
     world.run()
     latest = world.store.versions.latest_sealed("orders", day(17))
     assert latest is not None
-    world.state.spool.delete_chunks(latest.version_id, "data")
+    world.state.spool.expire_chunks(latest.version_id, "data")
     response = client.post(
         f"/routes/warehouse/partitions/{quote(day(17), safe='')}/replay/preview",
         data={"csrf_token": csrf(), "dataset": "orders"},

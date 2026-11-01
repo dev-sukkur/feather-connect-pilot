@@ -11,7 +11,7 @@ from fractions import Fraction
 from typing import Any
 
 from feather_connect.clock import Clock, SystemClock
-from feather_connect.ids import new_id
+from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
     Attempt,
@@ -39,6 +39,8 @@ from feather_connect.storage.port import (
     Run,
     RunJournal,
     ScheduleStore,
+    SliceFinished,
+    StaleWriter,
     StateRow,
     Store,
     TaskRow,
@@ -69,6 +71,7 @@ class _Data:
     logs: dict[str, list[tuple[datetime, str]]] = field(default_factory=dict[str, list[tuple[datetime, str]]])
     versions: dict[str, Version] = field(default_factory=dict[str, Version])
     seal_seq: int = 0
+    writers: dict[str, str] = field(default_factory=dict[str, str])  # who holds the claim of a version
     slices: dict[tuple[str, str], dict[str, bool]] = field(
         default_factory=dict[tuple[str, str], dict[str, bool]]
     )
@@ -237,17 +240,50 @@ class _Versions(VersionStore):
     def __init__(self, data: _Data) -> None:
         self._d = data
 
-    def stage(self, draft: VersionDraft) -> Version:
+    @property
+    def lock(self) -> threading.RLock:
+        return self._d.lock
+
+    def check_writable(self, version_id: str, writer: str | None) -> None:
         with self._d.lock:
-            existing = self._d.versions.get(draft.version_id)
+            existing = self._d.versions.get(version_id)
             if existing is not None and existing.status == "sealed":
-                raise VersionSealed(f"version {draft.version_id} is sealed")
+                raise VersionSealed(f"version {version_id} is sealed")
+            if writer is not None and self._d.writers.get(version_id) != writer:
+                raise StaleWriter(f"version {version_id} was claimed by a later execution")
+
+    def claim(self, version_id: str, writer: str, run_id: str, dataset: str, partition: str) -> None:
+        with self._d.lock:
+            if self._d.slices.get((run_id, dataset), {}).get(partition):
+                raise SliceFinished(f"slice {partition} of run {run_id} is done")
+            self.check_writable(version_id, None)
+            self._d.writers[version_id] = writer
+            self._d.versions.pop(version_id, None)
+
+    def take_over(self, version_ids: Sequence[str], writer: str) -> None:
+        with self._d.lock:
+            for version_id in version_ids:
+                self.check_writable(version_id, None)
+            self._d.writers.update(dict.fromkeys(version_ids, writer))
+
+    def stage(self, draft: VersionDraft, writer: str | None = None) -> Version:
+        with self._d.lock:
+            self.check_writable(draft.version_id, writer)
             version = Version(**vars(draft))
             self._d.versions[draft.version_id] = version
             return version
 
-    def seal(self, version_ids: Sequence[str], routes: Sequence[str]) -> list[Version]:
+    def seal(
+        self, version_ids: Sequence[str], routes: Sequence[str], writer: str | None = None
+    ) -> list[Version]:
         with self._d.lock:
+            if writer is not None:  # before the rest: a version that a later claim took away is not "missing"
+                for version_id in version_ids:
+                    found = self._d.versions.get(version_id)
+                    if (found is None or found.status != "sealed") and self._d.writers.get(
+                        version_id
+                    ) != writer:
+                        raise StaleWriter(f"version {version_id} was claimed by a later execution")
             missing = [v for v in version_ids if v not in self._d.versions]
             if missing:
                 raise KeyError(
@@ -271,11 +307,9 @@ class _Versions(VersionStore):
                 sealed.append(version)
             return sealed
 
-    def discard_staged(self, version_id: str) -> None:
+    def discard_staged(self, version_id: str, writer: str | None = None) -> None:
         with self._d.lock:
-            existing = self._d.versions.get(version_id)
-            if existing is not None and existing.status == "sealed":
-                raise VersionSealed(f"version {version_id} is sealed")
+            self.check_writable(version_id, writer)
             self._d.versions.pop(version_id, None)
 
     def get(self, version_id: str) -> Version:
@@ -321,11 +355,14 @@ class _Versions(VersionStore):
             for partition in partitions:
                 slices.setdefault(partition, False)  # a replay must not undo finished slices
 
-    def finish_slice(self, run_id: str, dataset: str, partition: str) -> bool:
+    def finish_slice(self, run_id: str, dataset: str, partition: str, writer: str | None = None) -> bool:
         with self._d.lock:
             slices = self._d.slices[(run_id, dataset)]
             if partition not in slices:
                 raise KeyError(f"slice {partition} is not registered for run {run_id}, dataset {dataset}")
+            version_id = stable_id(run_id, dataset, partition)
+            if writer is not None and not slices[partition] and self._d.writers.get(version_id) != writer:
+                raise StaleWriter(f"slice {partition} of run {run_id} was claimed by a later execution")
             slices[partition] = True
             return all(slices.values())
 
@@ -385,6 +422,7 @@ class _Versions(VersionStore):
             found = [v for v in dict.fromkeys(version_ids) if v in self._d.versions]
             for version_id in found:
                 del self._d.versions[version_id]
+                self._d.writers.pop(version_id, None)
             return len(found)
 
     def _sealed_all(self) -> list[Version]:

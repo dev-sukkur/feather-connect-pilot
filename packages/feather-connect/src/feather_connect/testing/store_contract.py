@@ -15,6 +15,7 @@ import pytest
 
 from feather_connect.clock import FrozenClock
 from feather_connect.core.records import Record, row_hash
+from feather_connect.ids import stable_id
 from feather_connect.storage.port import (
     CLOSED,
     TRANSITIONS,
@@ -22,6 +23,8 @@ from feather_connect.storage.port import (
     DeliveryStatus,
     DuplicateUser,
     InvalidTransition,
+    SliceFinished,
+    StaleWriter,
     StateRow,
     Store,
     TokenRow,
@@ -227,6 +230,105 @@ class SpoolContract:
 
 
 class StoreContract(SpoolContract):
+    def _table(self) -> pa.Table:
+        return records_to_table(upserts(("k", {"x": 1})))
+
+    def test_a_sealed_version_refuses_every_write_and_delete(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        spool.put_chunk("v1", 0, "data", self._table())
+        spool.put_chunk("v1", 0, "snapshot", snapshot_table([("k", 1)]))
+        seal(store, "v1", ["a"])
+        for kind in ("data", "snapshot", "full", "moves", "settled"):
+            with pytest.raises(VersionSealed):
+                spool.put_chunk("v1", 0, kind, self._table())
+        for kind in ("data", "snapshot", "full", "moves"):
+            with pytest.raises(VersionSealed):
+                spool.delete_chunks("v1", kind)
+        with pytest.raises(VersionSealed):
+            spool.delete_version("v1")
+        assert [c.chunk_no for c in spool.list_chunks("v1")] == [0]
+        assert [c.chunk_no for c in spool.list_chunks("v1", "snapshot")] == [0]
+
+    def test_what_follows_sealing_may_still_clear_the_working_chunks(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        spool.put_chunk("v1", 0, "candidates", snapshot_table([("k", 1)]))
+        seal(store, "v1", ["a"])
+        spool.delete_chunks("v1", "candidates")
+        assert spool.list_chunks("v1", "candidates") == []
+
+    def test_retention_can_still_take_a_sealed_versions_chunks(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        spool.put_chunk("v1", 0, "data", self._table())
+        spool.put_chunk("v1", 0, "snapshot", snapshot_table([("k", 1)]))
+        seal(store, "v1", ["a"])
+        spool.expire_chunks("v1", "snapshot")
+        assert spool.list_chunks("v1", "snapshot") == []
+        spool.expire_version("v1")
+        assert spool.list_chunks("v1") == []
+
+    def test_a_later_claim_shuts_out_the_earlier_writer(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        store.versions.claim("v1", "first", "r1", "d", "p")
+        spool.put_chunk("v1", 0, "data", self._table(), "first")
+        store.versions.stage(draft("v1"), "first")
+        store.versions.claim("v1", "second", "r1", "d", "p")
+
+        with pytest.raises(KeyError):  # the claim took the staged version with it
+            store.versions.get("v1")
+        with pytest.raises(StaleWriter):
+            spool.put_chunk("v1", 1, "data", self._table(), "first")
+        with pytest.raises(StaleWriter):
+            spool.delete_chunks("v1", "data", writer="first")
+        with pytest.raises(StaleWriter):
+            spool.delete_version("v1", "first")
+        with pytest.raises(StaleWriter):
+            store.versions.stage(draft("v1"), "first")
+        with pytest.raises(StaleWriter):
+            store.versions.discard_staged("v1", "first")
+        store.versions.stage(draft("v1"), "second")
+        with pytest.raises(StaleWriter):  # not the later writer's version to seal, though it is staged
+            store.versions.seal(["v1"], ["a"], "first")
+        assert store.versions.get("v1").status == "staged"
+        assert store.versions.seal(["v1"], ["a"], "second")[0].status == "sealed"
+        assert store.versions.seal(["v1"], ["a"], "first")[0].status == "sealed"  # a repeat changes nothing
+
+    def test_a_writer_that_clears_its_version_keeps_its_claim(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        store.versions.claim("v1", "w", "r1", "d", "p")
+        spool.put_chunk("v1", 0, "data", self._table(), "w")
+        spool.delete_version("v1", "w")
+        assert spool.list_chunks("v1") == []
+        spool.put_chunk("v1", 0, "settled", self._table(), "w")
+
+    def test_a_sealed_version_cannot_be_claimed_or_taken_over(self, store: Store, spool: Spool):
+        seal(store, "v1", ["a"])
+        with pytest.raises(VersionSealed):
+            store.versions.claim("v1", "w", "r1", "d", "p")
+        with pytest.raises(VersionSealed):
+            store.versions.take_over(["v1"], "w")
+
+    def test_taking_over_shuts_out_the_earlier_writer_and_keeps_the_version(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        store.versions.claim("v1", "first", "r1", "d", "p")
+        store.versions.stage(draft("v1"), "first")
+        store.versions.take_over(["v1"], "seal")
+        assert store.versions.get("v1").status == "staged"
+        with pytest.raises(StaleWriter):
+            spool.put_chunk("v1", 0, "data", self._table(), "first")
+        assert store.versions.seal(["v1"], ["a"], "seal")[0].status == "sealed"
+
+    def test_a_finished_slice_cannot_be_claimed_and_a_stale_writer_cannot_finish_one(self, store: Store):
+        store.versions.register_slices("r1", "d", ["p", "q"])
+        vid = stable_id("r1", "d", "p")
+        store.versions.claim(vid, "first", "r1", "d", "p")
+        store.versions.claim(vid, "second", "r1", "d", "p")
+        with pytest.raises(StaleWriter):
+            store.versions.finish_slice("r1", "d", "p", "first")
+        assert store.versions.finish_slice("r1", "d", "p", "second") is False
+        assert store.versions.finish_slice("r1", "d", "p", "first") is False  # done already: it's a repeat
+        with pytest.raises(SliceFinished):
+            store.versions.claim(vid, "third", "r1", "d", "p")
+
     # budgets
 
     def test_budget_never_exceeds_any_window(self, store: Store, clock: FrozenClock):

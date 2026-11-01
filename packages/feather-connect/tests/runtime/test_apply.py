@@ -14,6 +14,7 @@ from feather_connect.connectors.memory import Sink, Source
 from feather_connect.core.connector import ApplyResult
 from feather_connect.core.context import Context
 from feather_connect.core.errors import BudgetDeferred, PermanentError, RecordRejected, TransientError
+from feather_connect.core.records import Record, row_hash
 from feather_connect.engine.local import LocalEngine
 from feather_connect.engine.port import RetryPolicy, TaskCall
 from feather_connect.runtime.apply import run_apply
@@ -21,7 +22,8 @@ from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import finalize_versions, run_extract
 from feather_connect.storage import spool
 from feather_connect.storage.memory import MemoryStore
-from feather_connect.storage.spool import MemorySpool
+from feather_connect.storage.port import VersionDraft
+from feather_connect.storage.spool import MemorySpool, records_to_table
 
 T0 = datetime(2026, 10, 18, 10, tzinfo=UTC)
 T1 = T0 + timedelta(hours=1)
@@ -602,11 +604,11 @@ def test_move_reaches_the_sink_as_moved_from():
 def test_moved_from_also_comes_from_the_record():
     ds = dataset()
     route = route_to()
-    [v1] = seal_versions(ds, [[{"id": 1}]], route)
-    table = DEPS.spool.get_chunk(v1, 0)
-    moved = pa.array(["s=old"], pa.string())
-    index = table.column_names.index("_fc_moved_from")
-    DEPS.spool.put_chunk(v1, 0, "data", table.set_column(index, "_fc_moved_from", moved))
+    v1 = "moved"
+    table = records_to_table([Record("1", "upsert", {"id": 1}, row_hash({"id": 1}), moved_from="s=old")])
+    DEPS.spool.put_chunk(v1, 0, "data", table)
+    DEPS.store.versions.stage(VersionDraft(v1, ds.name, "_", "r1", True, 1, 0, "h", None, None, "sha"))
+    DEPS.store.versions.seal([v1], [route.name])
     apply(ds, route, v1)
     assert route.sink.calls[0].records[0].moved_from == "s=old"
 

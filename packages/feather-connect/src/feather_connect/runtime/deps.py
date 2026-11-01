@@ -25,3 +25,8 @@ class RuntimeDeps:
     code_sha: str
     make_context: Callable[[str], Context]
     retry: RetryPolicy = field(default_factory=RetryPolicy)
+
+    def __post_init__(self) -> None:
+        self.spool.bind(
+            self.store.versions
+        )  # so that a backend can guard a sealed version whatever the caller does
