@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from feather_connect.clock import Clock, SystemClock
 from feather_connect.core.context import Context
@@ -51,6 +52,8 @@ _UTC = "UTC"
 _ACTIVE = ("queued", "running")
 _PAUSED = "route paused"  # why a task ended without delivering: the key of its successor ends in `#n`
 _MANY = 10_000
+_STREAM = "stream"  # the trigger of the daily run that a push dataset's versions belong to
+_RUNS_A_PAGE = 200
 _READS_IN_VAIN = (
     5  # reads that spend budget and still come up short, each after the longest wait, before giving up
 )
@@ -132,6 +135,7 @@ class Runtime:
         self._config_of = config_of or _no_config
         self._timezone = timezone
         self._priorities = self._connection_priorities()
+        self._stream_runs: dict[str, tuple[str, str]] = {}  # by flow: the day, and the stream run of that day
 
     @staticmethod
     def _add[T](found: dict[str, T], kind: str, name: str, value: T) -> None:
@@ -352,6 +356,10 @@ class Runtime:
         Raises `KeyError` for an unknown dataset and `PermanentError` when the source can't be read as a run would.
         """
         found = self.dataset(dataset)
+        if found.strategy.name == "push":
+            raise PermanentError(
+                f"dataset {dataset!r} is a push dataset: nothing can read it back to compare"
+            )
         try:
             return run_extract(
                 found, "verify", partition, routes=(), stage_only=False, deps=self._deps, dry_run=True
@@ -360,10 +368,42 @@ class Runtime:
             raise PermanentError(str(error)) from error
 
     def active_runs(self, flow: str) -> list[Run]:
-        """Return the flow's runs that are queued or running, oldest first."""
+        """Return the flow's runs that are queued or running, oldest first. A stream run is not one that a tick can
+        overlap, since it only holds the deliveries of versions that are already sealed."""
         runs = self._deps.store.runs
         found = [r for status in _ACTIVE for r in runs.list_runs(flow=flow, status=status, limit=_MANY)]
-        return sorted(found, key=lambda r: r.run_id)
+        return sorted((r for r in found if r.trigger != _STREAM), key=lambda r: r.run_id)
+
+    def stream_run(self, flow: str, now: datetime) -> str:
+        """Return the id of the flow's stream run of today, making it if need be. An event-driven flow's versions attach
+        to it, so that a flow taking an event a second doesn't write a run a second.
+
+        It starts out `succeeded`, having nothing to do yet: sealing a version sets it running, and it settles as any
+        run does when the deliveries end. Two replicas racing here can make two runs of a day, which does no harm: each
+        holds the versions attached to it.
+        """
+        day = now.astimezone(ZoneInfo(self._timezone)).date().isoformat()
+        cached = self._stream_runs.get(flow)
+        if cached is not None and cached[0] == day:
+            return cached[1]
+        run_id = self._find_stream_run(flow, day, now) or self._deps.store.runs.create_run(
+            flow, _STREAM, "system", {"day": day}, status="succeeded"
+        )
+        self._stream_runs[flow] = (day, run_id)
+        return run_id
+
+    def _find_stream_run(self, flow: str, day: str, now: datetime) -> str | None:
+        runs = self._deps.store.runs
+        horizon = now - timedelta(days=2)  # a day in any time zone is well within this
+        page = runs.list_runs(flow=flow, limit=_RUNS_A_PAGE)
+        while page:
+            for run in page:
+                if run.created_at < horizon:
+                    return None
+                if run.trigger == _STREAM and run.params.get("day") == day:
+                    return run.run_id
+            page = runs.list_runs(flow=flow, limit=_RUNS_A_PAGE, cursor=page[-1].run_id)
+        return None
 
     def cancel_run(self, run_id: str, *, actor: str, reason: str | None = None) -> None:
         """Cancel the run: its plan, extract and seal tasks stop, and the run ends `cancelled`, whatever follows.

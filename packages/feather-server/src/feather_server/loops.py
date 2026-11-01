@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from feather_connect.runtime.leader import AlwaysLeader, LeaderLock, leader_key
 from feather_connect.runtime.retention import RetentionReport, retention_once
 from feather_connect.runtime.scheduler import tick
+from feather_connect.runtime.sealer import seal_once
 from feather_connect.runtime.sweeper import SweepReport, sweep_once
 from feather_connect.storage.postgres.leader import PostgresLeaderLock
 
@@ -119,7 +120,7 @@ class SweepLog:
 
 
 def default_loops(state: "AppState") -> list[LoopRunner]:
-    """Return the loops of a server: the scheduler, the sweeper and retention.
+    """Return the loops of a server: the scheduler, the sweeper, retention and the sealer.
 
     Each takes the Postgres lock of its name when the server has a database, and leads alone otherwise.
     """
@@ -141,8 +142,13 @@ def default_loops(state: "AppState") -> list[LoopRunner]:
         state.store.inbox.ensure_partitions()
         log_retention(retention_once(state.store, state.spool, now=state.clock.now()))
 
+    def seal() -> None:
+        seal_once(state.runtime, now=state.clock.now())
+
     return [
         LoopRunner("scheduler", schedule, 1.0, lock("scheduler")),
         LoopRunner("sweeper", sweep, 5.0, lock("sweeper")),
         LoopRunner("retention", retain, 3600.0, lock("retention")),
+        # Often enough that a batch waits about `max_age` (1 s), and no more than a quarter of that again.
+        LoopRunner("sealer", seal, 0.25, lock("sealer")),
     ]

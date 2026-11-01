@@ -113,8 +113,8 @@ class _Read:
         try:
             key = make_key(row, dataset.key)
             partition = dataset.partition.key_of(row) if partition is None else partition
-            _validate(dataset.schema, row)
-            _check_columns(row)
+            validate_row(dataset.schema, row)
+            check_columns(row)
             record = Record(key, _op_of(dataset, row), row, row_hash(row))
             stamp = self._accepted_stamp(
                 row
@@ -175,7 +175,7 @@ class _Read:
         self._buffered = 0
 
 
-def _validate(schema: type[BaseModel] | pa.Schema | None, row: Mapping[str, Any]) -> None:
+def validate_row(schema: type[BaseModel] | pa.Schema | None, row: Mapping[str, Any]) -> None:
     """Raise if `row` doesn't fit the dataset's declared schema. The row itself stays as it was read."""
     if isinstance(schema, pa.Schema):
         pa.Table.from_pylist([dict(row)], schema=schema)
@@ -187,7 +187,7 @@ def _validate(schema: type[BaseModel] | pa.Schema | None, row: Mapping[str, Any]
         schema.model_validate(row)
 
 
-def _check_columns(row: Mapping[str, Any]) -> None:
+def check_columns(row: Mapping[str, Any]) -> None:
     for name in row:
         if name.startswith(_RESERVED_PREFIX):
             raise ValueError(f"column {name!r} uses the reserved prefix {_RESERVED_PREFIX!r}")
@@ -314,7 +314,7 @@ def _write_changes(read: _Read, target: _Slice, upsert_keys: set[str], deps: Run
     return written
 
 
-def _content_hash(changes: Sequence[Record], deletes: Mapping[str, int]) -> str:
+def content_hash(changes: Sequence[Record], deletes: Mapping[str, int]) -> str:
     """Return a hash of what a version says, which doesn't depend on the order it was read in."""
     items = sorted(
         [[r.key, r.op, r.row_hash] for r in changes] + [[k, "delete", h] for k, h in deletes.items()]
@@ -322,7 +322,7 @@ def _content_hash(changes: Sequence[Record], deletes: Mapping[str, int]) -> str:
     return hashlib.blake2b(canonical_json(items), digest_size=16).hexdigest()
 
 
-def _schema_hash(version_id: str, deps: RuntimeDeps) -> str | None:
+def schema_hash(version_id: str, deps: RuntimeDeps) -> str | None:
     """Return a hash of the columns of the version's first data chunk, or None if it has no data chunk yet."""
     if not deps.spool.list_chunks(version_id):
         return None
@@ -420,8 +420,8 @@ def _stage_slice(
             complete=strategy.complete,
             upserts=sum(r.op == "upsert" for r in changes),
             deletes=sum(r.op == "delete" for r in changes) + len(deletes),
-            content_hash=_content_hash(changes, deletes),
-            schema_hash=_schema_hash(target.version_id, deps),
+            content_hash=content_hash(changes, deletes),
+            schema_hash=schema_hash(target.version_id, deps),
             watermark=target.watermark,
             code_sha=deps.code_sha,
         ),
@@ -896,7 +896,7 @@ def _write_decision(found: _Reconciled, writer: str, deps: RuntimeDeps) -> None:
                 version,
                 upserts=sum(r.op == "upsert" for r in found.changes),
                 deletes=sum(r.op == "delete" for r in found.changes) + len(found.deletes),
-                content_hash=_content_hash(found.changes, found.deletes),
+                content_hash=content_hash(found.changes, found.deletes),
             ),
             writer,
         )
@@ -921,7 +921,7 @@ def _keys_with_newer_state(
     return {key for key, row in rows.items() if row.last_version in later}
 
 
-def _update_state(dataset: Dataset, version: Version, deps: RuntimeDeps) -> None:
+def update_state(dataset: Dataset, version: Version, deps: RuntimeDeps) -> None:
     for chunk in deps.spool.list_chunks(version.version_id):
         records = table_to_records(deps.spool.get_chunk(version.version_id, chunk.chunk_no))
         newer = _keys_with_newer_state(dataset, version, [r.key for r in records], deps)
@@ -995,7 +995,7 @@ def _finalize(
     )
     if dataset.keep_state:
         for version in sealed:
-            _update_state(dataset, version, deps)
+            update_state(dataset, version, deps)
     for version in sealed:
         deps.spool.delete_chunks(version.version_id, "candidates")
     for version_id in silent:

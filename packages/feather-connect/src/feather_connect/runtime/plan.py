@@ -9,6 +9,7 @@ from feather_connect.core.strategies import ByStamp
 from feather_connect.runtime.deps import RuntimeDeps
 
 _ALL_PARTITIONS = "*"
+_PUSH = "push"
 
 
 def _partitions_of(dataset: Dataset, explicit: Sequence[str] | None, deps: RuntimeDeps) -> list[str]:
@@ -39,6 +40,10 @@ def run_plan(flow: Flow, run_id: str, deps: RuntimeDeps) -> dict[str, list[str]]
     explicit = deps.store.runs.get_run(run_id).params.get("partitions")
     planned: dict[str, list[str]] = {}
     for dataset in flow.datasets:
+        if (
+            dataset.strategy.name == _PUSH
+        ):  # nothing to read: its events come in, and the sealer makes its versions
+            continue
         partitions = _partitions_of(dataset, explicit, deps)
         if dataset.strategy.complete and len(partitions) > 1:
             deps.store.versions.register_slices(run_id, dataset.name, partitions)
