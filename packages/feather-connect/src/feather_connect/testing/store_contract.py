@@ -836,6 +836,18 @@ class StoreContract(SpoolContract):
         with pytest.raises(DuplicateUser):
             store.users.create_user("op", "hash-2")
 
+    def test_a_users_password_hash_can_be_replaced(self, store: Store):
+        user_id = store.users.create_user("op", "hash-1")
+        store.users.set_password_hash("op", "hash-2")
+        found = store.users.get_user("op")
+        assert found is not None and (found.user_id, found.password_hash, found.created_at) == (
+            user_id,
+            "hash-2",
+            T0,
+        )
+        with pytest.raises(KeyError):
+            store.users.set_password_hash("nobody", "hash-3")
+
     def test_tokens_are_found_by_hash_and_revoked_once(self, store: Store, clock: FrozenClock):
         assert store.users.find_token("h1") is None
         expiry = T0 + timedelta(days=1)

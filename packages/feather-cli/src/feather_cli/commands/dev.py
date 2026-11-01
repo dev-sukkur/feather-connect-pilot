@@ -3,7 +3,8 @@
 Postgres comes from `FEATHER_DATABASE_URL`, or else from a container named `feather-dev-postgres` with a named volume.
 The server and one worker then run in this process, on the demo project unless `--project` says another, and are
 started again whenever a file under `flows/` or `env/`, or `feather.yaml`, changes. Ctrl+C stops them and the
-container; the data stays in the volume.
+container; the data stays in the volume. The generated password of the `dev` user is printed to the console when the
+user is made, or again with `--reset-password`, and never goes to a log.
 """
 
 import hashlib
@@ -256,12 +257,19 @@ class Stack:
             root.removeHandler(handler)  # each start adds its own
 
 
-def _ensure_dev_user(store: Store) -> str | None:
-    """Make the user `dev` the first time, and return its generated password; None when it exists."""
-    if store.users.get_user(DEV_USER) is not None:
+def _ensure_dev_user(store: Store, reset: bool = False) -> str | None:
+    """Make the user `dev` the first time, and return its generated password; None when it exists.
+
+    With `reset`, an existing user gets a new generated password instead, which is returned. The data is kept.
+    """
+    exists = store.users.get_user(DEV_USER) is not None
+    if exists and not reset:
         return None
     password = secrets.token_urlsafe(12)
-    store.users.create_user(DEV_USER, hash_password(password))
+    if exists:
+        store.users.set_password_hash(DEV_USER, hash_password(password))
+    else:
+        store.users.create_user(DEV_USER, hash_password(password))
     return password
 
 
@@ -287,6 +295,12 @@ def dev(
     ] = None,
     port: Annotated[int, typer.Option(help="The port of the dashboard.")] = 8080,
     no_browser: Annotated[bool, typer.Option("--no-browser", help="Do not open the dashboard.")] = False,
+    reset_password: Annotated[
+        bool,
+        typer.Option(
+            "--reset-password", help="Give the dev user a new password, shown once. The data is kept."
+        ),
+    ] = False,
     env: Env = "dev",
     json_mode: Json = False,
 ) -> None:
@@ -326,7 +340,7 @@ def dev(
 
     container = not own_database
     try:
-        _run(root, env, port, own_database, no_browser, json_mode, stop)
+        _run(root, env, port, own_database, no_browser, reset_password, json_mode, stop)
     except (RuntimeError, psycopg.Error) as error:
         fail(str(error), hint="the log above says more", json_mode=json_mode)
     finally:
@@ -340,13 +354,14 @@ def _run(
     port: int,
     own_database: str | None,
     no_browser: bool,
+    reset_password: bool,
     json_mode: bool,
     stop: threading.Event,
 ) -> None:
     database_url = own_database or _start_postgres_container(json_mode)
     migrate(database_url)
     store, _ = connect(database_url)
-    password = _ensure_dev_user(store)
+    password = _ensure_dev_user(store, reset_password)
     settings = Settings(
         env=env,
         database_url=database_url,
@@ -387,7 +402,8 @@ def _announce(document: dict[str, Any], own_database: bool) -> None:
     else:
         typer.echo(
             f"  the user {document['user']} already exists; its password was shown when it was created. "
-            f"To start over, remove the dev data: docker rm -f {CONTAINER} && docker volume rm {VOLUME}"
+            "To get a new one and keep the data, start again with: feather dev --reset-password. "
+            f"To start over with no data: docker rm -f {CONTAINER} && docker volume rm {VOLUME}"
         )
     where = "your FEATHER_DATABASE_URL" if own_database else f"Docker container {CONTAINER}"
     typer.echo(f"  project {document['project']}, database in {where}")

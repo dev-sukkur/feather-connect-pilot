@@ -828,6 +828,10 @@ class _Users(UserStore):
         with self._d.lock:
             return self._d.users.get(username)
 
+    def set_password_hash(self, username: str, password_hash: str) -> None:
+        with self._d.lock:
+            self._d.users[username] = replace(self._d.users[username], password_hash=password_hash)
+
     def create_token(self, name: str, token_hash: str, expires_at: datetime | None) -> str:
         with self._d.lock:
             if any(t.token_hash == token_hash for t in self._d.tokens.values()):

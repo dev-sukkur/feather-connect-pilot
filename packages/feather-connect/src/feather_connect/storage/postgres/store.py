@@ -1330,6 +1330,15 @@ class _Users(UserStore):
             return None
         return UserRow(row["user_id"], row["username"], row["password_hash"], row["created_at"])
 
+    def set_password_hash(self, username: str, password_hash: str) -> None:
+        with self._db.tx() as conn:
+            changed = conn.execute(
+                "update feather.app_user set password_hash = %s where tenant_id = %s and username = %s",
+                (password_hash, self._db.tenant, username),
+            )
+        if changed.rowcount == 0:
+            raise KeyError(username)
+
     def create_token(self, name: str, token_hash: str, expires_at: datetime | None) -> str:
         token_id = new_id()
         with self._db.tx() as conn:

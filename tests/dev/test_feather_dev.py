@@ -363,3 +363,36 @@ def test_ctrl_c_then_restart_keeps_data_and_leaves_no_processes(dev_clean, start
     assert done.status_code == 303
     assert seen <= set(second.run_ids(again))  # the earlier runs are still there
     assert second.interrupt() == 0
+
+
+@needs_postgres
+def test_reset_password_gives_a_new_password_and_keeps_the_data(start_dev, database):
+    env = {"FEATHER_DATABASE_URL": database}
+    first = start_dev(env=env)
+    first.wait_ready()
+    old = first.password()
+    assert old
+    client = first.sign_in()
+    wait_until(lambda: first.run_ids(client), 90, "a run")
+    seen = set(first.run_ids(client))
+    assert first.interrupt() == 0
+
+    second = start_dev("--reset-password", env=env)
+    second.wait_ready()
+    new = second.password()
+    assert new and new != old
+
+    def sign_in_with(password: str) -> int:
+        again = httpx.Client(base_url=second.base, follow_redirects=False, timeout=10)
+        csrf = re.search(r'name="csrf_token" value="([^"]+)"', again.get("/login").text)
+        assert csrf
+        data = {"username": "dev", "password": password, "csrf_token": csrf.group(1)}
+        return again.post("/login", data=data).status_code
+
+    assert sign_in_with(new) == 303
+    assert sign_in_with(old) != 303
+    assert seen <= set(second.run_ids(second.sign_in()))  # the data is kept
+    # The password goes to the console only, never into a log line.
+    json_lines = [line for line in second.output().splitlines() if line.startswith("{")]
+    assert json_lines and not any(new in line for line in json_lines)
+    assert second.interrupt() == 0
