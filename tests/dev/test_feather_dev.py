@@ -240,7 +240,10 @@ def test_editing_a_flow_reloads_it(start_dev, database, tmp_path):
 
     flow_file.write_text(flow_file.read_text().replace('owner="demo"', 'owner="reloaded"'))
     wait_until(lambda: store.catalog.flow("orders").spec["owner"] == "reloaded", 60, "the reloaded flow")
-    assert httpx.get(f"{running.base}/readyz", timeout=5).status_code == 200
+    # the worker registers the new code before the restarted server is back
+    wait_until(
+        lambda: httpx.get(f"{running.base}/readyz", timeout=5).status_code == 200, 60, "the restarted server"
+    )
 
     # a file that does not load leaves the running stack alone and says why
     flow_file.write_text("this is not python (\n")
