@@ -27,6 +27,18 @@ TCP_USER_TIMEOUT_MS = (
 STATEMENT_TIMEOUT_MS = 120_000
 
 
+def connection_timeouts() -> dict[str, int]:
+    """Return how a connection deals with a network that has gone quiet, as libpq parameters."""
+    return {
+        "connect_timeout": CONNECT_TIMEOUT_S,
+        "keepalives": 1,
+        "keepalives_idle": KEEPALIVES_IDLE_S,
+        "keepalives_interval": KEEPALIVES_INTERVAL_S,
+        "keepalives_count": KEEPALIVES_COUNT,
+        "tcp_user_timeout": TCP_USER_TIMEOUT_MS,
+    }
+
+
 def session_options(database_url: str) -> dict[str, Any]:
     """Return the connection settings of every session we open, on a pool or alone, as keywords for psycopg.
 
@@ -35,12 +47,7 @@ def session_options(database_url: str) -> dict[str, Any]:
     options = conninfo.conninfo_to_dict(database_url).get("options")
     return {
         "application_name": "feather",
-        "connect_timeout": CONNECT_TIMEOUT_S,
-        "keepalives": 1,
-        "keepalives_idle": KEEPALIVES_IDLE_S,
-        "keepalives_interval": KEEPALIVES_INTERVAL_S,
-        "keepalives_count": KEEPALIVES_COUNT,
-        "tcp_user_timeout": TCP_USER_TIMEOUT_MS,
+        **connection_timeouts(),
         "options": f"{options or ''} -c statement_timeout={STATEMENT_TIMEOUT_MS}".strip(),
     }
 

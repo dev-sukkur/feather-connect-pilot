@@ -21,7 +21,7 @@ from feather_connect.engine.port import (
     WorkerHandle,
     WorkerRuntime,
 )
-from feather_engine_dbos.engine import FREE, KEYED, WORKFLOW, queue_name
+from feather_engine_dbos.engine import FREE, KEYED, WORKFLOW, queue_name, system_database_url
 
 APPLICATION_VERSION = "feather-1"  # fixed (design §6.12): a deploy is a new worker, never a new version
 
@@ -122,7 +122,7 @@ class DbosWorkerRuntime(WorkerRuntime):
         keyed, free = queue_name(KEYED, pool), queue_name(FREE, pool)
         config: DBOSConfig = {
             "name": "feather",
-            "system_database_url": self._url,
+            "system_database_url": system_database_url(self._url),
             "dbos_system_schema": self._schema,
             "application_version": self._version,
             "executor_id": worker_id,
