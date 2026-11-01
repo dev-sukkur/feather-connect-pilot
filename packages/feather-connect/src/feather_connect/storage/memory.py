@@ -527,15 +527,22 @@ class _Ledger(Ledger):
         with self._d.lock:
             return all(d.status == "applied" for d in self._d.deliveries.values())
 
-    def pending_older_than(self, age: timedelta, *, now: datetime | None = None) -> list[Delivery]:
+    def pending_older_than(
+        self, age: timedelta, *, now: datetime | None = None, limit: int = 1000
+    ) -> list[Delivery]:
         cutoff = (self._d.clock.now() if now is None else now) - age
         with self._d.lock:
+            next_up: dict[tuple[str, str, str], Delivery] = {}
+            for delivery in sorted(self._d.deliveries.values(), key=lambda d: d.seal_seq):
+                if delivery.status not in CLOSED:
+                    stream = (delivery.route, delivery.dataset, delivery.partition)
+                    next_up.setdefault(stream, delivery)
             found = [
                 d
-                for key, d in self._d.deliveries.items()
-                if d.status == "pending" and self._d.changed[key] < cutoff
+                for d in next_up.values()
+                if d.status == "pending" and self._d.changed[(d.route, d.version_id)] < cutoff
             ]
-        return sorted(found, key=lambda d: (d.seal_seq, d.route))
+        return sorted(found, key=lambda d: (d.seal_seq, d.route))[:limit]
 
     def open_versions(self, version_ids: Iterable[str]) -> set[str]:
         wanted = set(version_ids)

@@ -322,3 +322,27 @@ def stranded_for_sweeper(h: Harness, status: str) -> tuple[str, str]:
 
 class _Vanished(PermanentError):
     """A task that ended without a word to the journal, as when the database is away for its last attempt."""
+
+
+def test_a_sweep_does_nothing_for_deliveries_waiting_behind_a_failure() -> None:
+    """F11: only the head of a stream can be helped, so what waits behind one costs no work and isn't reported."""
+    h = Harness({"strategy": fc.strategy.snapshot_diff()})
+    h.a.fail_next(PermanentError("destination gone"))
+    h.rt.start_run("f")
+    h.engine.run_until_idle()
+    for n in range(5):
+        h.clock.advance(timedelta(minutes=1))
+        h.rt.flow("f").datasets[0].source.load([{"id": 1, "v": f"changed {n}"}])  # type: ignore[union-attr]
+        h.rt.start_run("f")
+        h.engine.run_until_idle()
+    waiting = h.store.ledger.list_deliveries(route=h.rt.flow("f").routes[0].name, status="pending")
+    assert len(waiting) == 5
+    h.clock.advance(timedelta(minutes=2))
+
+    looked_up: list[str] = []
+    real = h.store.versions.get
+    h.store.versions.get = lambda v: (looked_up.append(v), real(v))[1]  # type: ignore[method-assign]
+    report = h.sweep()
+
+    assert report.resubmitted_deliveries == []
+    assert not {d.version_id for d in waiting} & set(looked_up)

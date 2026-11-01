@@ -1105,6 +1105,31 @@ class StoreContract(SpoolContract):
         later = clock.now() + timedelta(minutes=5)
         assert len(store.ledger.pending_older_than(timedelta(minutes=1), now=later)) == 2
 
+    def test_pending_older_than_lists_only_the_next_delivery_of_each_stream(
+        self, store: Store, clock: FrozenClock
+    ):
+        for version_id in ("v1", "v2", "v3"):  # in one stream, on route a
+            seal(store, version_id, ["a"])
+        seal(store, "other", ["a"], ds="e")  # another dataset, so another stream
+        seal(store, "blocked", ["b"], part="q")
+        seal(store, "behind", ["b"], part="q")  # waits behind a failure, so nothing can be done for it
+        store.ledger.transition("b", "blocked", "running", actor="t")
+        store.ledger.transition("b", "blocked", "failed", actor="t")
+        clock.advance(timedelta(minutes=2))
+        found = store.ledger.pending_older_than(timedelta(minutes=1))
+        assert [(d.route, d.version_id) for d in found] == [("a", "v1"), ("a", "other")]
+
+        store.ledger.transition("a", "v1", "running", actor="t")  # a running one is next, and isn't pending
+        assert [d.version_id for d in store.ledger.pending_older_than(timedelta(minutes=1))] == ["other"]
+        assert store.ledger.pending_older_than(timedelta(minutes=1), limit=0) == []
+
+    def test_pending_older_than_stops_at_its_limit(self, store: Store, clock: FrozenClock):
+        for n in range(3):
+            seal(store, f"v{n}", ["a"], part=f"p{n}")
+        clock.advance(timedelta(minutes=2))
+        found = store.ledger.pending_older_than(timedelta(minutes=1), limit=2)
+        assert [d.version_id for d in found] == ["v0", "v1"]
+
     def test_open_versions_are_those_with_a_delivery_that_is_not_closed(self, store: Store):
         for vid, part in (("v1", "p"), ("v2", "q"), ("v3", "r")):
             seal(store, vid, ["a", "b"], part=part)

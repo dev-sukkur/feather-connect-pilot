@@ -44,7 +44,8 @@ def sweep_once(
     """Do one sweep as of `now`.
 
     A worker is dead when it hasn't sent a heartbeat for `dead_after`, and a delivery is lost when it has been pending for
-    `pending_after`. What can't be put right, such as one delivery the engine refuses, is logged and left for the next
+    `pending_after` and is the next of its stream: one behind it waits its turn and has no task to lose, so its cost is
+    nothing however long the queue behind a failure grows. What can't be put right, such as one delivery the engine refuses, is logged and left for the next
     sweep, so it doesn't hold up the rest.
     """
     dead: list[str] = []
@@ -61,21 +62,17 @@ def sweep_once(
             dead.append(worker.worker_id)
     deliveries: list[tuple[str, str]] = []
     stranded: list[tuple[str, str]] = []
-    streams: set[tuple[str, str, str]] = set()
     for delivery in store.ledger.pending_older_than(pending_after, now=now):
         if runtime.is_route_paused(delivery.route):  # held on purpose, and picked up when the pause ends
             continue
         name = (delivery.route, delivery.version_id)
-        stream = (delivery.route, delivery.dataset, delivery.partition)
         try:
             runtime.submit_apply(*name)
-            # These come in seal order, and only the first of a stream can have had a task.
-            ended = stream not in streams and runtime.fail_stranded(*name)
+            ended = runtime.fail_stranded(*name)
         except Exception:
             log.exception("could not submit delivery %s of version %s", *name)
         else:
             (stranded if ended else deliveries).append(name)
-        streams.add(stream)
     for delivery in store.ledger.list_deliveries(status="running", limit=_RUNNING):
         name = (delivery.route, delivery.version_id)
         try:

@@ -854,13 +854,17 @@ class _Ledger(Ledger):
         assert row is not None
         return row["ok"]
 
-    def pending_older_than(self, age: timedelta, *, now: datetime | None = None) -> list[Delivery]:
+    def pending_older_than(
+        self, age: timedelta, *, now: datetime | None = None, limit: int = 1000
+    ) -> list[Delivery]:
         cutoff = (self._db.clock.now() if now is None else now) - age
         with self._db.tx() as conn:
             rows = conn.execute(
-                """select * from feather.delivery
-                   where tenant_id = %s and status = 'pending' and updated_at < %s order by seal_seq, route""",
-                (self._db.tenant, cutoff),
+                """select * from (select distinct on (route, dataset, partition) * from feather.delivery
+                                  where tenant_id = %s and status <> 'applied' and status <> all(%s)
+                                  order by route, dataset, partition, seal_seq) next_up
+                   where status = 'pending' and updated_at < %s order by seal_seq, route limit %s""",
+                (self._db.tenant, sorted(CLOSED), cutoff, limit),
             ).fetchall()
         return [_delivery(r) for r in rows]
 

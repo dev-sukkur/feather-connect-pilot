@@ -400,7 +400,9 @@ class Ledger(Protocol):
         """True when every delivery is applied, which includes there being none."""
         ...
 
-    def pending_older_than(self, age: timedelta, *, now: datetime | None = None) -> list[Delivery]:
+    def pending_older_than(
+        self, age: timedelta, *, now: datetime | None = None, limit: int = 1000
+    ) -> list[Delivery]:
         """The pending deliveries that last changed more than `age` before `now` (the store's clock by default).
 
         In seal order. A delivery that is pending has nothing running it, or a task waiting out a retry delay.
