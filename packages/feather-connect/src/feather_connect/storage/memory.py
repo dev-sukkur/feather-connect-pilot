@@ -174,10 +174,18 @@ class _Runs(RunJournal):
             self._d.logs[task_id] = []
             return task_id
 
+    def record_attempt(self, task_id: str, attempt: int, error: str) -> None:
+        with self._d.lock:
+            self._d.tasks[task_id] = replace(self._d.tasks[task_id], attempt=attempt, error=error)
+
     def finish_task(self, task_id: str, status: str, error: str | None = None) -> None:
         with self._d.lock:
+            task = self._d.tasks[task_id]
             self._d.tasks[task_id] = replace(
-                self._d.tasks[task_id], status=status, error=error, finished_at=self._d.clock.now()
+                task,
+                status=status,
+                error=task.error if error is None else error,
+                finished_at=self._d.clock.now(),
             )
 
     def list_tasks(self, run_id: str) -> list[TaskRow]:
@@ -946,6 +954,14 @@ class _Reads(ReadStore):
             counts: dict[str, int] = {}
             for delivery in self._d.deliveries.values():
                 counts[delivery.status] = counts.get(delivery.status, 0) + 1
+            return counts
+
+    def retried_tasks(self, run_ids: Sequence[str]) -> dict[str, int]:
+        with self._d.lock:
+            counts: dict[str, int] = {}
+            for task in self._d.tasks.values():
+                if task.run_id in run_ids and task.attempt > 1:
+                    counts[task.run_id] = counts.get(task.run_id, 0) + 1
             return counts
 
     def waiting(self, route: str, partitions: Sequence[str]) -> dict[tuple[str, str], int]:

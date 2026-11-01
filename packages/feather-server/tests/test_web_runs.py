@@ -1,9 +1,10 @@
 import re
 from collections.abc import Callable
+from typing import Any
 
 from fastapi.testclient import TestClient
 
-from feather_connect.core.errors import PermanentError
+from feather_connect.core.errors import PermanentError, TransientError
 from feather_server.testing import World, day
 
 
@@ -55,6 +56,37 @@ def test_detail_has_timeline_inputs_attempts_and_sha(client: TestClient, world: 
     assert 'href="/routes/warehouse/deliveries?partition=date%3D2026-10-17"' in html
     assert 'href="/flows/orders"' in html
     assert client.get("/runs/nothing").status_code == 404
+
+
+def _make_source_fail(world: World, times: int) -> None:
+    """Make the orders source raise a transient error on its first `times` reads."""
+    source: Any = world.state.runtime.flow("orders").datasets[0].source
+    read, left = source.read, [times]
+
+    def flaky(ctx: Any, req: Any) -> Any:
+        if left[0]:
+            left[0] -= 1
+            raise TransientError(f"shop timed out ({times - left[0]})")
+        return read(ctx, req)
+
+    source.read = flaky
+
+
+def test_a_task_that_retried_says_so_in_the_run_and_in_the_list(client: TestClient, world: World) -> None:
+    _make_source_fail(world, 2)
+    run_id = world.run([day(17)])
+    detail = client.get(f"/runs/{run_id}").text
+    assert "succeeded after 3 attempts" in detail
+    assert "shop timed out (2)" in detail  # the latest error stays after the success
+    assert "Attempt" in detail
+    listed = client.get("/runs").text
+    assert "1 task retried" in listed
+
+
+def test_a_run_without_retries_has_nothing_about_attempts(client: TestClient, world: World) -> None:
+    run_id = world.run([day(17)])
+    assert "after 2 attempts" not in client.get(f"/runs/{run_id}").text
+    assert "retried" not in client.get("/runs").text
 
 
 def test_logs_are_shown_escaped_and_paged(client: TestClient, world: World) -> None:  # Review Focus 5

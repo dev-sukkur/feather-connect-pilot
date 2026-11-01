@@ -361,6 +361,10 @@ class Reads:
     ) -> list[Run]:
         return self._store.runs.list_runs(flow=flow, status=status, limit=limit, cursor=cursor)
 
+    def retried_tasks(self, run_ids: list[str]) -> dict[str, int]:
+        """For each run, how many of its tasks took more than one attempt. Runs with none are left out."""
+        return self._store.reads.retried_tasks(run_ids)
+
     def run_detail(self, run_id: str) -> RunDetail:
         """Raises `KeyError` for an unknown run."""
         run = self._store.runs.get_run(run_id)

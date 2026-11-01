@@ -42,6 +42,7 @@ from feather_connect.storage.port import (
 )
 from feather_connect.storage.spool import Spool
 
+log = logging.getLogger(__name__)
 _TENANT = "default"
 _UTC = "UTC"
 _ACTIVE = ("queued", "running")
@@ -497,10 +498,24 @@ class Runtime:
                 self._fail_step(ctx, run_id, error)
                 if on_failure is not None:
                     on_failure()
+            else:
+                self._note_retry(ctx, run_id, error)
             raise
 
     def _finish_step(self, ctx: TaskContext, run_id: str) -> None:
         ctx.step("finish", lambda: self._finish_task(ctx.task_ref, run_id, "succeeded"))
+
+    def _note_retry(self, ctx: TaskContext, run_id: str, error: Exception) -> None:
+        """Put in the journal that the attempt failed and the engine will run another, so that a retry is not silent.
+
+        It is not a step: it sets the row to absolute values, so running it again on a replay changes nothing, and
+        a step would be a new path in the journal of a body that failed before its first step.
+        """
+        attempt, message = ctx.attempt, str(error) or type(error).__name__
+        log.warning(
+            "attempt %d of %d failed and will be retried: %s", attempt, self._deps.retry.max_attempts, message
+        )
+        self._record_attempt(ctx.task_ref, run_id, attempt + 1, message)
 
     def _fail_step(self, ctx: TaskContext, run_id: str, error: Exception) -> None:
         message = str(error)
@@ -636,6 +651,12 @@ class Runtime:
         task_id = next(row.task_id for row in runs.list_tasks(run_id) if row.ref == ref)
         runs.finish_task(task_id, status, error)
         self._settle_run(run_id)
+
+    def _record_attempt(self, ref: str, run_id: str, attempt: int, error: str) -> None:
+        runs = self._deps.store.runs
+        runs.record_attempt(
+            next(row.task_id for row in runs.list_tasks(run_id) if row.ref == ref), attempt, error
+        )
 
     def _settle_run(self, run_id: str) -> None:
         """Finish the run if none of its tasks is still running. It failed for the first reason any of them did."""

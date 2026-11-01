@@ -8,20 +8,21 @@
     {% if detail.tasks %}
     <div class="table-wrap"><table>
       <caption class="sr-only">The tasks of the run, in the order they started</caption>
-      <thead><tr><th scope="col">Task</th><th scope="col">For</th><th scope="col">Status</th><th scope="col">Started</th><th scope="col">Took</th><th scope="col">Worker</th><th scope="col">Code</th><th scope="col">Log</th></tr></thead>
+      <thead><tr><th scope="col">Task</th><th scope="col">For</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Started</th><th scope="col">Took</th><th scope="col">Worker</th><th scope="col">Code</th><th scope="col">Log</th></tr></thead>
       <tbody>
       {% for task in detail.tasks %}
         <tr>
           <th scope="row">{{ task.kind }}</th>
           <td>{% if task.dataset and task.partition %}{{ m.partition_label(task.dataset, task.partition) }}{% elif task.dataset %}{{ task.dataset }}{% endif %}{% if task.route %} &rarr; {{ task.route }}{% endif %}</td>
           <td>{{ m.status_badge(task.status) }}</td>
+          <td>{% if task.attempt > 1 %}{% if task.status == "running" %}attempt {{ task.attempt }}{% else %}{{ task.status }} after {{ task.attempt }} attempts{% endif %}{% else %}1{% endif %}</td>
           <td>{{ m.time_ago(task.started_at) }}</td>
           <td>{{ ((task.finished_at or now) - task.started_at) | span }}</td>
           <td>{% if task.worker %}{{ task.worker }}{% else %}<span class="muted">&ndash;</span>{% endif %}</td>
           <td>{% if task.code_sha %}<code>{{ task.code_sha[:8] }}</code>{% endif %}</td>
           <td><a href="/tasks/{{ task.task_id | urlencode }}/logs?run={{ run.run_id | urlencode }}">Log</a></td>
         </tr>
-        {% if task.error %}<tr><td colspan="8"><span class="error-text">{{ task.error }}</span></td></tr>{% endif %}
+        {% if task.error %}<tr><td colspan="9"><span class="error-text">{% if task.attempt > 1 and task.status != "failed" %}Last error: {% endif %}{{ task.error }}</span></td></tr>{% endif %}
       {% endfor %}
       </tbody>
     </table></div>

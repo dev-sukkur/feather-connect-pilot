@@ -139,6 +139,7 @@ def _task(r: Row) -> TaskRow:
         r["error"],
         r["started_at"],
         r["finished_at"],
+        r["attempt"],
     )
 
 
@@ -287,10 +288,19 @@ class _Runs(RunJournal):
         assert row is not None
         return row["task_id"]
 
+    def record_attempt(self, task_id: str, attempt: int, error: str) -> None:
+        with self._db.tx() as conn:
+            changed = conn.execute(
+                "update feather.task set attempt = %s, error = %s where tenant_id = %s and task_id = %s",
+                (attempt, error, self._db.tenant, task_id),
+            )
+        if changed.rowcount == 0:
+            raise KeyError(task_id)
+
     def finish_task(self, task_id: str, status: str, error: str | None = None) -> None:
         with self._db.tx() as conn:
             changed = conn.execute(
-                """update feather.task set status = %s, error = %s, finished_at = %s
+                """update feather.task set status = %s, error = coalesce(%s, error), finished_at = %s
                    where tenant_id = %s and task_id = %s""",
                 (status, error, self._db.clock.now(), self._db.tenant, task_id),
             )
@@ -1488,6 +1498,17 @@ class _Reads(ReadStore):
                 (self._db.tenant,),
             ).fetchall()
         return {r["status"]: r["n"] for r in rows}
+
+    def retried_tasks(self, run_ids: Sequence[str]) -> dict[str, int]:
+        if not run_ids:
+            return {}
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select run_id, count(*) as n from feather.task
+                   where tenant_id = %s and run_id = any(%s) and attempt > 1 group by run_id""",
+                (self._db.tenant, list(run_ids)),
+            ).fetchall()
+        return {r["run_id"]: r["n"] for r in rows}
 
     def waiting(self, route: str, partitions: Sequence[str]) -> dict[tuple[str, str], int]:
         with self._db.tx() as conn:

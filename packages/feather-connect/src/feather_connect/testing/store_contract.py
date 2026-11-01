@@ -610,6 +610,34 @@ class StoreContract(SpoolContract):
         assert store.runs.task_logs(t1) == ["info: started", "error: bad row"]
         assert store.runs.task_logs(t2) == []
 
+    def test_a_retry_is_noted_on_the_task_and_outlives_its_finish(self, store: Store):
+        rid = store.runs.create_run("f", "manual", "ann", {})
+        task = store.runs.start_task(rid, "extract", "ref")
+        assert store.runs.list_tasks(rid)[0].attempt == 1
+        store.runs.record_attempt(task, 2, "timeout")
+        store.runs.record_attempt(task, 3, "reset by peer")
+        row = store.runs.list_tasks(rid)[0]
+        assert (row.attempt, row.error, row.status) == (3, "reset by peer", "running")
+        store.runs.finish_task(task, "succeeded")  # no error to give: the last retry's stays
+        row = store.runs.list_tasks(rid)[0]
+        assert (row.attempt, row.error, row.status) == (3, "reset by peer", "succeeded")
+        store.runs.finish_task(task, "failed", "gave up")
+        assert store.runs.list_tasks(rid)[0].error == "gave up"
+        with pytest.raises(KeyError):
+            store.runs.record_attempt("nothing", 2, "x")
+
+    def test_retried_tasks_counts_the_tasks_that_took_more_than_one_attempt(self, store: Store):
+        first = store.runs.create_run("f", "manual", "ann", {})
+        second = store.runs.create_run("f", "manual", "ann", {})
+        third = store.runs.create_run("f", "manual", "ann", {})
+        a, b = store.runs.start_task(first, "extract", "a"), store.runs.start_task(first, "extract", "b")
+        store.runs.start_task(first, "extract", "c")
+        store.runs.start_task(second, "extract", "a")
+        store.runs.record_attempt(a, 2, "x")
+        store.runs.record_attempt(b, 4, "y")
+        assert store.reads.retried_tasks([first, second, third]) == {first: 2}
+        assert store.reads.retried_tasks([]) == {}
+
     # record state and quarantine
 
     def test_record_state_round_trip(self, store: Store):

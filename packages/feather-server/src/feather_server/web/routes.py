@@ -550,6 +550,7 @@ def runs_list(
         title="Runs",
         actor=actor,
         runs=found,
+        retries=reads(request).retried_tasks([r.run_id for r in found]),
         flows=sorted(f.name for f in flows),
         statuses=["queued", "running", "succeeded", "failed", "cancelled", "skipped"],
         chosen={"flow": flow, "status": status},

@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -13,6 +14,7 @@ from feather_connect.core.context import Context
 from feather_connect.core.errors import PermanentError, TransientError
 from feather_connect.engine.local import LocalEngine
 from feather_connect.engine.port import RetryPolicy
+from feather_connect.logs import bound_ids
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.port import InvalidTransition
@@ -244,6 +246,80 @@ def test_an_extract_that_keeps_failing_fails_the_run_on_its_last_attempt() -> No
     assert h.source.reads == RetryPolicy().max_attempts
     assert h.status(run) == "failed"
     assert "timeout" in (h.reason(run) or "")
+
+
+class FailsThenReads(Source):
+    """Raises a transient error on its first `failures` reads, then serves its rows."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__(rows=ROWS)
+        self.failures = failures
+        self.reads = 0
+
+    def read(self, ctx: Context, req: ReadRequest) -> Iterator[list[dict[str, Any]]]:
+        self.reads += 1
+        if self.reads <= self.failures:
+            raise TransientError(f"timeout {self.reads}")
+        return super().read(ctx, req)
+
+
+class _Seen(logging.Handler):
+    """Keeps each warning with the ids that were bound while it was logged."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.seen: list[tuple[str, dict[str, str]]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.seen.append((record.getMessage(), bound_ids()))
+
+
+def test_a_task_that_succeeds_after_retries_keeps_its_attempts_and_last_error() -> None:
+    handler = _Seen()
+    logging.getLogger().addHandler(handler)
+    try:
+        h = Harness(source=FailsThenReads(failures=2))
+        run = h.run()
+    finally:
+        logging.getLogger().removeHandler(handler)
+    assert h.status(run) == "succeeded"
+    [extract] = [t for t in h.store.runs.list_tasks(run) if t.kind == "extract"]
+    assert (extract.status, extract.attempt) == ("succeeded", 3)
+    assert extract.error == "timeout 2"  # the latest failure stays after the success
+    assert all(
+        t.attempt == 1 and t.error is None for t in h.store.runs.list_tasks(run) if t.kind != "extract"
+    )
+    retries = [(message, ids) for message, ids in handler.seen if "will be retried" in message]
+    assert len(retries) == 2
+    assert "attempt 1" in retries[0][0] and "timeout 1" in retries[0][0]
+    assert "attempt 2" in retries[1][0] and "timeout 2" in retries[1][0]
+    assert retries[0][1]["run"] == run and retries[0][1]["task"] == extract.task_id
+    assert retries[0][1]["dataset"] == "d" and retries[0][1]["flow"] == "f"
+    assert h.store.reads.retried_tasks([run]) == {run: 1}
+
+
+def test_the_attempts_survive_a_crash_and_a_replay_of_the_task() -> None:
+    h = Harness(source=FailsThenReads(failures=1))
+    h.engine.crash_before(
+        "submit_applies"
+    )  # the worker dies in the second attempt, after the retry was noted
+    run = h.run()
+    h.engine.recover()
+    h.engine.run_until_idle()
+    [extract] = [t for t in h.store.runs.list_tasks(run) if t.kind == "extract"]
+    assert (h.status(run), extract.status, extract.attempt, extract.error) == (
+        "succeeded",
+        "succeeded",
+        2,
+        "timeout 1",
+    )
+
+
+def test_a_task_that_never_retried_shows_one_attempt_and_no_error() -> None:
+    h = Harness()
+    run = h.run()
+    assert {(t.attempt, t.error) for t in h.store.runs.list_tasks(run)} == {(1, None)}
+    assert h.store.reads.retried_tasks([run]) == {}
 
 
 def test_a_failed_slice_never_seals_and_fails_the_run() -> None:

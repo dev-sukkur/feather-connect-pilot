@@ -79,6 +79,7 @@ class TaskRow:
     error: str | None
     started_at: datetime
     finished_at: datetime | None
+    attempt: int = 1  # the attempt the task is on, or ended on: more than 1 means it was retried; `error` is the last failure
 
 
 @dataclass(frozen=True)
@@ -212,7 +213,15 @@ class RunJournal(Protocol):
         """Add a running task and return its id. A `(run_id, ref)` that exists keeps its row, whose id is returned."""
         ...
 
-    def finish_task(self, task_id: str, status: str, error: str | None = None) -> None: ...
+    def record_attempt(self, task_id: str, attempt: int, error: str) -> None:
+        """Note that the task failed and goes on to attempt number `attempt`, with the error that ended the last one.
+        `KeyError` for an unknown task."""
+        ...
+
+    def finish_task(self, task_id: str, status: str, error: str | None = None) -> None:
+        """End the task. Without an `error`, the one `record_attempt` left stays."""
+        ...
+
     def list_tasks(self, run_id: str) -> list[TaskRow]: ...
     def log(self, task_id: str, level: str, message: str) -> None: ...
     def task_logs(self, task_id: str) -> list[str]:
@@ -699,6 +708,10 @@ class ReadStore(Protocol):
 
     def delivery_counts(self) -> dict[str, int]:
         """How many deliveries there are in each status that has any."""
+        ...
+
+    def retried_tasks(self, run_ids: Sequence[str]) -> dict[str, int]:
+        """For each of the runs, how many of its tasks went beyond their first attempt. Runs with none are left out."""
         ...
 
     def waiting(self, route: str, partitions: Sequence[str]) -> dict[tuple[str, str], int]:

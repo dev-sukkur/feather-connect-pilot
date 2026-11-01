@@ -162,6 +162,26 @@ def test_a_run_completes_through_a_real_worker(demo_project, pg_url, db, workers
     assert sim_sink_rows(demo_project) == ROWS
 
 
+def test_a_retry_is_noted_in_the_journal_through_a_real_worker(demo_project, pg_url, db, workers):
+    """Seed 5 makes the first two reads of the source time out and the third one work."""
+    store, spool = db
+    flow = demo_project / "flows" / "demo.py"
+    flow.write_text(
+        flow.read_text().replace(
+            'fixture=root / "fixtures" / "rows.json"',
+            'fixture=root / "fixtures" / "rows.json", seed=5, faults=simulation.Faults(http_5xx=0.5)',
+        )
+    )
+    workers.append(start_worker(demo_project, pg_url, "w-retry-" + uuid.uuid4().hex[:6]))
+    client = Runtime(load_project(demo_project, "dev").flows, store, spool, DbosEngine(pg_url))
+    wait_until(lambda: store.workers.list_workers())
+    run = client.start_run("demo")
+    wait_until(lambda: store.runs.get_run(run).status == "succeeded", timeout=90)
+    [extract] = [t for t in store.runs.list_tasks(run) if t.kind == "extract"]
+    assert (extract.status, extract.attempt, extract.error) == ("succeeded", 3, "simulated HTTP 503")
+    assert sim_sink_rows(demo_project) == ROWS
+
+
 def test_sigterm_drains_and_exits_zero(demo_project, pg_url, db, workers):
     store, _ = db
     wid = "w-term-" + uuid.uuid4().hex[:6]
