@@ -32,6 +32,9 @@ ROOT = Path(__file__).resolve().parents[2]
 DEMO = ROOT / "examples" / "demo"
 CONTAINER = "feather-dev-postgres"
 VOLUME = "feather-dev-postgres-data"
+
+# These start a whole stack, some of them twice; the suite's default of 120 s would kill the session.
+pytestmark = pytest.mark.timeout(420)
 FIVE_MINUTES = 300
 
 
@@ -318,7 +321,6 @@ def fake_docker_daemon_down(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @needs_docker
-@pytest.mark.timeout(360)  # the test's own limit is 300 s; the suite's default of 120 s would kill the whole session
 def test_dev_shows_the_demo_flow_within_five_minutes(dev_clean, start_dev):  # M1 exit criterion, NFR-06
     started = time.monotonic()
     running = start_dev()
