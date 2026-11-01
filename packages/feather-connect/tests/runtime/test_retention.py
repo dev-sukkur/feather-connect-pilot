@@ -10,7 +10,7 @@ from feather_connect.clock import FrozenClock
 from feather_connect.connectors.memory import Sink, Source
 from feather_connect.core.records import Record
 from feather_connect.engine.local import LocalEngine
-from feather_connect.runtime.retention import retention_once
+from feather_connect.runtime.retention import kept_days, retention_once
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.port import Store, VersionDraft
@@ -77,6 +77,16 @@ class RetentionTests:
         clock.advance(timedelta(days=30))
         r = retention_once(store, spool, now=clock.now())
         assert r.dropped_days == [] and "not sealed" in r.kept_days[T0.date()]
+
+    def test_kept_days_says_what_a_pass_would_keep_and_changes_nothing(  # F14
+        self, store: Store, spool: Spool, clock: FrozenClock
+    ):
+        stage(store, spool, "v1")
+        clock.advance(timedelta(days=30))
+        found = kept_days(store, spool, now=clock.now())
+        assert "not sealed" in found[T0.date()]
+        assert len(spool.list_chunks("v1")) == 1
+        assert retention_once(store, spool, now=clock.now()).kept_days == found
 
     def test_retention_keeps_the_latest_snapshot_of_each_partition(
         self, store: Store, spool: Spool, clock: FrozenClock

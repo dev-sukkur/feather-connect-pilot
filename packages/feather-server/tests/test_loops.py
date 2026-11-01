@@ -1,7 +1,8 @@
+import logging
 import threading
 import time
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -9,15 +10,19 @@ import pytest
 import feather_connect as fc
 from feather_connect.clock import FrozenClock
 from feather_connect.connectors.memory import Sink, Source
+from feather_connect.core.records import Record
 from feather_connect.engine.local import LocalEngine
 from feather_connect.project import Project
 from feather_connect.runtime.leader import AlwaysLeader, leader_key
+from feather_connect.runtime.retention import RetentionReport
 from feather_connect.runtime.runtime import Runtime
+from feather_connect.runtime.sweeper import SweepReport
 from feather_connect.storage.memory import MemoryStore
+from feather_connect.storage.port import VersionDraft
 from feather_connect.storage.postgres.leader import PostgresLeaderLock
-from feather_connect.storage.spool import MemorySpool
+from feather_connect.storage.spool import MemorySpool, records_to_table
 from feather_server.app import AppState
-from feather_server.loops import LoopRunner, default_loops
+from feather_server.loops import LoopRunner, SweepLog, default_loops, log_retention
 from feather_server.settings import Settings
 
 KEY = 424_242
@@ -204,3 +209,79 @@ def test_a_lock_whose_session_was_killed_is_lost(pg_url: str) -> None:
     assert not lock.try_acquire()  # and the first holder finds out, without raising
     other.release()
     lock.release()
+
+
+def resubmits(*deliveries: tuple[str, str]) -> SweepReport:
+    return SweepReport(resubmitted_deliveries=list(deliveries))
+
+
+def test_a_retention_report_warns_of_each_kept_day_with_why(caplog: pytest.LogCaptureFixture) -> None:  # F14
+    with caplog.at_level(logging.INFO, logger="feather_server.loops"):
+        log_retention(RetentionReport(kept_days={date(2026, 10, 1): "2 versions not sealed, such as v1"}))
+    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+        ("WARNING", "retention kept 2026-10-01: 2 versions not sealed, such as v1")
+    ]
+
+
+def test_a_quiet_retention_pass_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:  # F14
+    with caplog.at_level(logging.INFO, logger="feather_server.loops"):
+        log_retention(RetentionReport())
+    assert caplog.records == []
+
+
+def test_what_a_sweep_put_right_or_gave_up_on_is_a_warning(caplog: pytest.LogCaptureFixture) -> None:  # F14
+    report = SweepReport(
+        dead_workers=["w1"],
+        recovered_tasks=["t1"],
+        stranded_deliveries=[("warehouse", "v2")],
+        discarded_versions=["v3"],
+    )
+    with caplog.at_level(logging.INFO, logger="feather_server.loops"):
+        SweepLog()(report)
+    assert {r.levelname for r in caplog.records} == {"WARNING"}
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "w1" in text and "t1" in text and "warehouse" in text and "v2" in text and "v3" in text
+
+
+def test_a_quiet_sweep_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:  # F14
+    with caplog.at_level(logging.INFO, logger="feather_server.loops"):
+        SweepLog()(SweepReport())
+    assert caplog.records == []
+
+
+def test_resubmits_are_logged_at_info_only_when_they_change(caplog: pytest.LogCaptureFixture) -> None:  # F14
+    sweep_log = SweepLog()
+    with caplog.at_level(logging.INFO, logger="feather_server.loops"):
+        sweep_log(resubmits(("warehouse", "v1")))
+        sweep_log(resubmits(("warehouse", "v1")))  # the same again 5 s later: already said
+        assert len(caplog.records) == 1 and caplog.records[0].levelname == "INFO"
+        assert "v1" in caplog.records[0].getMessage()
+        sweep_log(resubmits(("warehouse", "v1"), ("warehouse", "v2")))
+        assert len(caplog.records) == 2
+        sweep_log(resubmits())  # it cleared, which is news too
+        assert len(caplog.records) == 3
+        sweep_log(resubmits())
+        assert len(caplog.records) == 3
+
+
+def test_a_long_list_is_logged_by_its_size_and_first_few(caplog: pytest.LogCaptureFixture) -> None:  # F14
+    with caplog.at_level(logging.INFO, logger="feather_server.loops"):
+        SweepLog()(SweepReport(discarded_versions=[f"v{n}" for n in range(1000)]))
+    message = caplog.records[0].getMessage()
+    assert "1000" in message and "v0" in message and "v999" not in message
+
+
+def test_the_retention_loop_logs_its_report(
+    state: AppState, clock: FrozenClock, caplog: pytest.LogCaptureFixture
+) -> None:  # F14
+    state.store.versions.stage(VersionDraft("v1", "d", "p", "r1", True, 1, 0, "h", None, None, "sha"))
+    state.spool.put_chunk(
+        "v1", 0, "data", records_to_table([Record("a", "upsert", {"x": 1}, 1)])
+    )  # never sealed
+    clock.advance(timedelta(days=15))
+    retention = next(loop for loop in default_loops(state) if loop.name == "retention")
+    with caplog.at_level(logging.INFO, logger="feather_server.loops"):
+        retention.start()
+        wait_until(lambda: retention.count >= 1)
+        retention.stop()
+    assert any(r.levelname == "WARNING" and "retention kept" in r.getMessage() for r in caplog.records)

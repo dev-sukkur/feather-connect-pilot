@@ -72,6 +72,13 @@ def _drop_old_days(store: Store, spool: Spool, last_kept: date) -> tuple[list[da
     return dropped, kept
 
 
+def kept_days(store: Store, spool: Spool, *, now: datetime, keep_days: int = 14) -> dict[date, str]:
+    """Return the days older than `keep_days` that a pass would keep as of `now`, each with why. Changes nothing."""
+    last_kept = (now - timedelta(days=keep_days)).date()
+    found = {day: _why_kept(store, spool.versions_on(day)) for day in spool.days() if day < last_kept}
+    return {day: why for day, why in found.items() if why is not None}
+
+
 def _drop_old_snapshots(store: Store, spool: Spool, cutoff: datetime) -> int:
     """Delete the snapshots that a newer one of the same partition has replaced, once they are old and unneeded.
 

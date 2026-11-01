@@ -101,6 +101,20 @@
     {% endif %}
   </section>
 
+  {% if overview.kept_days %}
+  <section aria-labelledby="h-kept">
+    <h2 id="h-kept">Days kept past retention</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">Day</th><th scope="col">Why</th></tr></thead>
+      <tbody>
+      {% for item in overview.kept_days %}
+        <tr><th scope="row">{{ item.day.isoformat() }}</th><td>{{ item.why }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+  </section>
+  {% endif %}
+
   <section aria-labelledby="h-budgets">
     <h2 id="h-budgets">Budgets</h2>
     {% if overview.budgets %}

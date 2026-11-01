@@ -5,7 +5,7 @@ appears as `***` or not at all.
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -14,6 +14,7 @@ from cronsim import CronSim
 from feather_connect.core.flow import Flow
 from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Trigger
 from feather_connect.project import ConfigValue, effective_config
+from feather_connect.runtime.retention import kept_days
 from feather_connect.storage.port import (
     Delivery,
     DeliveryStatus,
@@ -38,6 +39,9 @@ _RECENT_RUNS = 10
 _RECENT_VERSIONS = 15
 _FAILED_RUNS_SHOWN = 100
 _BLOCKED_SHOWN = 2
+_KEPT_DAYS_FOR = timedelta(
+    seconds=60
+)  # the page refreshes every 10 s, and working this out reads every old day
 
 
 @dataclass(frozen=True)
@@ -104,6 +108,12 @@ class BudgetUse:
 
 
 @dataclass(frozen=True)
+class KeptDay:
+    day: date
+    why: str
+
+
+@dataclass(frozen=True)
 class Overview:
     deliveries: Mapping[str, int]
     failed_deliveries: int
@@ -114,6 +124,7 @@ class Overview:
     stale_datasets: tuple[StaleDataset, ...]
     budgets: tuple[BudgetUse, ...]
     workers: tuple[WorkerRow, ...]
+    kept_days: tuple[KeptDay, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -227,6 +238,7 @@ class Reads:
         self._state = state
         self._rt = state.runtime
         self._store = state.store
+        self._kept_days: tuple[datetime, tuple[KeptDay, ...]] | None = None
 
     # Flows.
 
@@ -315,6 +327,15 @@ class Reads:
             )
         return found
 
+    def _kept(self) -> tuple[KeptDay, ...]:
+        """Why old days are being kept, worked out here because retention's own report is only on the replica that
+        leads it. Two requests at once may both work it out, which does no harm."""
+        now = self._state.clock.now()
+        if self._kept_days is None or now - self._kept_days[0] >= _KEPT_DAYS_FOR:
+            days = kept_days(self._store, self._state.spool, now=now)
+            self._kept_days = (now, tuple(KeptDay(day, why) for day, why in sorted(days.items())))
+        return self._kept_days[1]
+
     def overview(self) -> Overview:
         counts = self._store.reads.delivery_counts()
         runs = self._store.runs
@@ -328,6 +349,7 @@ class Reads:
             tuple(self._stale()),
             tuple(self._budgets()),
             tuple(self._store.workers.list_workers()),
+            self._kept(),
         )
 
     # The partition grid, runs, failures.
