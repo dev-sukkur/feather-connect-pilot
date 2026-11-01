@@ -3,7 +3,7 @@ import logging
 import threading
 from collections.abc import Iterator, Sequence
 from datetime import timedelta
-from typing import Any
+from typing import Any, ClassVar
 
 import psycopg
 import pytest
@@ -14,7 +14,7 @@ from pydantic import BaseModel
 import feather_connect as fc
 from feather_connect.clock import FrozenClock
 from feather_connect.connectors import memory
-from feather_connect.core.connector import Deleted, InboundRequest
+from feather_connect.core.connector import ConnectorSpec, Deleted, InboundRequest
 from feather_connect.core.context import Context
 from feather_connect.core.errors import PermanentError
 from feather_connect.core.partitions import by_bucket, by_fields
@@ -41,7 +41,7 @@ class Row(BaseModel):
 class Hooks:
     """A push source that reads each request's body as JSON: an object, a list, or `{"_deleted": ...}`."""
 
-    spec = memory.Source.spec
+    spec: ClassVar[ConnectorSpec] = memory.Source.spec
     connection = "hooks"
     unsigned = True
 
