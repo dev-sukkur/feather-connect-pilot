@@ -1,0 +1,218 @@
+<title>Feather Connect Operating Guide</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a single reading column with a step rail; screenshots run wider than the text. */
+:root {
+  --bg: #f6f8f7; --surface: #ffffff; --fg: #17201d; --muted: #52605a; --line: #d3dcd8;
+  --accent: #0b6e5f; --accent-soft: #dcefe9; --warn: #8a5300; --warn-soft: #fbf0dc; --code-bg: #e9efec;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #101614; --surface: #171f1c; --fg: #e4ebe8; --muted: #9fada7; --line: #2c3834;
+  --accent: #58c9b3; --accent-soft: #17332d; --warn: #e6b566; --warn-soft: #33280f; --code-bg: #1e2825; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #101614; --surface: #171f1c; --fg: #e4ebe8; --muted: #9fada7; --line: #2c3834;
+  --accent: #58c9b3; --accent-soft: #17332d; --warn: #e6b566; --warn-soft: #33280f; --code-bg: #1e2825; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 16px/1.6 var(--sans); padding-block: 40px 72px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.page { max-width: 880px; margin: 0 auto; display: grid; gap: 52px; }
+.prose { max-width: 68ch; }
+h1 { font-size: clamp(30px, 5vw, 42px); line-height: 1.15; margin: 0 0 12px; text-wrap: balance; }
+h2 { font-size: 25px; line-height: 1.25; margin: 0 0 12px; text-wrap: balance; }
+h2 .n { color: var(--accent); font-family: var(--mono); font-weight: 500; margin-right: 10px; }
+h3 { font-size: 17px; margin: 26px 0 6px; }
+p { margin: 0 0 12px; }
+.lead { font-size: 18px; color: var(--muted); }
+section { display: grid; gap: 14px; min-width: 0; }
+section > * { min-width: 0; margin-top: 0; margin-bottom: 0; }
+code { font-family: var(--mono); font-size: .9em; background: var(--code-bg); padding: 1px 5px; border-radius: 3px; overflow-wrap: anywhere; }
+pre { font: 14px/1.55 var(--mono); background: var(--code-bg); padding: 14px 16px; border-radius: 6px; overflow-x: auto; margin: 0; }
+pre code { background: none; padding: 0; overflow-wrap: normal; }
+.file { font: 500 13px var(--mono); color: var(--muted); margin-bottom: -8px; }
+figure { margin: 0; display: grid; gap: 6px; }
+figure img { width: 100%; height: auto; display: block; border: 1px solid var(--line); border-radius: 6px; }
+figcaption { font-size: 14px; color: var(--muted); }
+a { color: var(--accent); }
+.status { background: var(--warn-soft); border-left: 4px solid var(--warn); padding: 14px 16px; }
+.status p:last-child { margin: 0; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 15px; background: var(--surface); }
+th { text-align: left; font-size: 13px; color: var(--muted); font-weight: 600; }
+th, td { padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+ol, ul { margin: 0; padding-left: 22px; display: grid; gap: 6px; }
+nav { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 15px; }
+</style>
+
+<div class="page">
+<header>
+  <h1>Feather Connect Operating Guide</h1>
+  <p class="lead prose">How to run Feather Connect on your machine, then how a customer creates a new flow, runs it, watches it and fixes it when something goes wrong.</p>
+  <nav>
+    <a href="#run">Run it</a><a href="#create">Create a flow</a><a href="#start">Start the flow</a><a href="#monitor">Monitor</a><a href="#operate">Operate</a><a href="#limits">Not ready yet</a>
+  </nav>
+</header>
+
+<div class="status prose">
+  <p><b>This describes Stage 2 of milestone 1, a development setup.</b> Every screenshot and command comes from a real run on 1 Nov 2026. Today a flow can only read and write simulated data, because real connectors arrive in Stage 4. Until <a href="https://github.com/dev-sukkur/feather-connect/pull/3">PR 3</a> merges, the code is on the <code>stage-2-dashboard</code> branch.</p>
+</div>
+
+<section id="run">
+  <h2><span class="n">1</span>Run it</h2>
+  <p class="prose">You need <a href="https://docs.astral.sh/uv/">uv</a> and a running Docker. Docker hosts the Postgres database. If you already have a database, set <code>FEATHER_DATABASE_URL</code> and Docker isn't needed.</p>
+  <pre><code>git clone https://github.com/dev-sukkur/feather-connect.git
+cd feather-connect
+git switch stage-2-dashboard
+uv sync --all-extras
+uv run feather dev</code></pre>
+  <p class="prose">That one command starts Postgres, runs the database migrations, starts the server and a worker, and loads a demo shop. The first start also downloads the Postgres image. It prints the address and a password:</p>
+  <pre><code>Feather Connect is running: http://localhost:8080
+  sign in as dev, password: (generated, different each time)
+  (shown this once; it is stored hashed)
+  edit a file under flows/ or env/ to reload; press Ctrl+C to stop</code></pre>
+  <figure><img src="img/login.jpg" alt="The sign-in form with username and password fields." width="800" height="500"><figcaption>Sign in as <code>dev</code> with the printed password.</figcaption></figure>
+  <h3>Everyday commands</h3>
+  <div class="scroll"><table>
+    <tr><th>You want to</th><th>Do this</th></tr>
+    <tr><td>Stop everything</td><td>Press Ctrl+C. Your data stays.</td></tr>
+    <tr><td>Use a different port</td><td><code>uv run feather dev --port 8081</code></td></tr>
+    <tr><td>Get a new password</td><td><code>uv run feather dev --reset-password</code></td></tr>
+    <tr><td>Run your own project</td><td><code>uv run feather dev --project path/to/project</code></td></tr>
+    <tr><td>Start again with no data</td><td><code>docker rm -f feather-dev-postgres</code>, then <code>docker volume rm feather-dev-postgres-data</code></td></tr>
+  </table></div>
+</section>
+
+<section id="create">
+  <h2><span class="n">2</span>Create a flow</h2>
+  <p class="prose">A flow is a Python file that says what to read, how to tell what changed, where to deliver it and when to run. This example copies customers from a CRM to a warehouse every 30 seconds. A project needs three files:</p>
+  <pre><code>my-shop/
+├── feather.yaml        # the project: its flow modules and connections
+├── env/dev.yaml        # settings for the dev environment
+└── flows/customers.py  # the flow</code></pre>
+  <div class="file">feather.yaml</div>
+  <pre><code>name: my-shop
+modules: [flows.customers]
+settings: {timezone: Asia/Kolkata}
+connections:
+  crm: {connector: simulation.source}
+  warehouse: {connector: simulation.sink}</code></pre>
+  <div class="file">env/dev.yaml</div>
+  <pre><code># Settings for the dev environment. Empty is fine, but the file must exist.
+{}</code></pre>
+  <div class="file">flows/customers.py</div>
+  <pre><code>import feather_connect as fc
+from feather_connect.connectors import simulation
+
+customers = fc.Dataset(
+    "customers",
+    source=simulation.Source(
+        "crm",
+        generator={
+            "customer_id": simulation.seq(),
+            "name": simulation.name(),
+            "plan": simulation.choice(["free", "team", "business"]),
+        },
+        rows_per_partition=50,
+    ),
+    key="customer_id",
+    strategy=fc.strategy.replace(),
+)
+
+sync_customers = fc.Flow(
+    "sync_customers",
+    reads=customers,
+    deliver=[fc.to(simulation.Sink("warehouse"))],
+    triggers=[fc.every("30s")],
+    owner="data-team",
+    tags=["crm"],
+)</code></pre>
+  <div class="scroll"><table>
+    <tr><th>Part</th><th>What it means</th></tr>
+    <tr><td><code>Dataset</code></td><td>What to read. <code>key</code> names the field that identifies a record.</td></tr>
+    <tr><td><code>strategy</code></td><td>How changes are found. <code>replace()</code> takes the whole set each time. <code>snapshot_diff()</code> compares with the last read. <code>by_stamp("updated_at")</code> reads what changed since a timestamp.</td></tr>
+    <tr><td><code>deliver</code></td><td>The destinations. Each <code>fc.to(...)</code> is a route, and a failure on one doesn't stop the others.</td></tr>
+    <tr><td><code>triggers</code></td><td>When it runs: <code>fc.every("30s")</code>, or <code>fc.cron("0 6 * * *", tz="Asia/Kolkata")</code>.</td></tr>
+  </table></div>
+  <h3>Check it before you run it</h3>
+  <pre><code>uv run feather validate --project my-shop</code></pre>
+  <p class="prose">A good project prints <code>no problems</code>. Otherwise it names the file and what to fix. Without <code>env/dev.yaml</code>, for example:</p>
+  <pre><code>error: project: project_invalid: env/dev.yaml: no such file in env
+  hint: fix the file and key the message names, then run validate again</code></pre>
+</section>
+
+<section id="start">
+  <h2><span class="n">3</span>Start the flow</h2>
+  <pre><code>uv run feather dev --project my-shop</code></pre>
+  <p class="prose">The worker registers the flow and the schedule starts it. There's no deploy step. While <code>feather dev</code> runs, saving a file under <code>flows/</code> or <code>env/</code> reloads it. To run the flow straight away, open it and press <b>Run now</b>.</p>
+  <figure><img src="img/flow.jpg" alt="The sync_customers flow page, with owner, schedule, Run now and Pause buttons, and a diagram from customers to warehouse." width="800" height="506"><figcaption>The flow's page: who owns it, when it runs, its controls, and where the data goes.</figcaption></figure>
+  <figure><img src="img/flow2.jpg" alt="Lower on the flow page: recent runs, latest versions with 50 upserts each, and the backfill form." width="800" height="500"><figcaption>Further down: recent runs, the versions they sealed, a form to backfill a date range, and every setting with the file that set it.</figcaption></figure>
+</section>
+
+<section id="monitor">
+  <h2><span class="n">4</span>Monitor it</h2>
+  <p class="prose">Start at <b>Overview</b>. It refreshes itself every 10 seconds, and when all is well it says so.</p>
+  <figure><img src="img/overview.jpg" alt="Overview with zero failures, Nothing needs attention, and two recent succeeded runs." width="800" height="506"><figcaption>A healthy system.</figcaption></figure>
+  <figure><img src="img/overview-failed.jpg" alt="Overview showing one failed delivery, naming the orders flow and the archive route, with a link to fix it." width="800" height="506"><figcaption>The same page when something is wrong: which flow, which destination, what error, and a link to fix it.</figcaption></figure>
+  <div class="scroll"><table>
+    <tr><th>Page</th><th>Answers</th></tr>
+    <tr><td><b>Flows</b></td><td>What exists, its status, how fresh its data is, and who owns it.</td></tr>
+    <tr><td><b>Runs</b></td><td>What ran, how long it took, how many tasks retried, and why anything failed or was skipped.</td></tr>
+    <tr><td><b>Failures</b></td><td>What's broken now, grouped by destination and error.</td></tr>
+    <tr><td><b>Quarantine</b></td><td>Single records a destination refused.</td></tr>
+    <tr><td><b>Connections</b></td><td>The systems in use. Secrets are never shown.</td></tr>
+    <tr><td><b>Partitions</b> (from a flow)</td><td>One row per slice of data, with its state at each destination.</td></tr>
+  </table></div>
+  <figure><img src="img/runs.jpg" alt="The runs list with running, failed and succeeded runs, retry counts and failure reasons." width="800" height="506"><figcaption>Runs arrive as they happen. A brief fault is retried by itself and shows as “1 task retried”.</figcaption></figure>
+  <figure><img src="img/run.jpg" alt="A run's page with a timeline; the extract task reads succeeded after 2 attempts, last error simulated HTTP 503." width="800" height="506"><figcaption>Open a run for its timeline. This one hit a simulated HTTP 503, retried, and succeeded on attempt 2. Each task also has a log.</figcaption></figure>
+  <figure><img src="img/connections.jpg" alt="The connections page listing archive, shop and warehouse, each with a Check now button." width="800" height="500"><figcaption>Connections, with a check you can run on demand.</figcaption></figure>
+</section>
+
+<section id="operate">
+  <h2><span class="n">5</span>Operate it</h2>
+  <h3>Fix a failed delivery</h3>
+  <p class="prose">Brief faults are retried automatically, so a failure on this page needs a person. Until it's handled, that destination holds its later deliveries for the same data, so they stay in order. Other destinations keep going.</p>
+  <figure><img src="img/failures.jpg" alt="The failures page: archive route, PermanentError, holds up 1 later delivery, with Retry and Skip buttons." width="800" height="500"><figcaption>Fix the cause first, then press <b>Retry</b>, or <b>Skip</b> to give up on that delivery.</figcaption></figure>
+  <figure><img src="img/retry.jpg" alt="A confirmation box: 1 partition, 1 delivery, a reason field, and Confirm and Cancel buttons." width="800" height="500"><figcaption>Nothing happens until you confirm. You see the impact first, and can record a reason in the audit log. The confirmation works once, for 10 minutes, and refuses if the selection has changed.</figcaption></figure>
+  <figure><img src="img/done.jpg" alt="The failures page after confirming: 1 delivery handled, no failed deliveries." width="400" height="250"><figcaption>Done. From the Overview page this takes three clicks.</figcaption></figure>
+  <h3>Pause a flow during maintenance</h3>
+  <p class="prose">On the flow's page, press <b>Pause</b> and give a reason. Scheduled runs are then recorded as skipped, so you can see what didn't run and why. <b>Resume</b> starts them again. To hold just one destination while reading continues, pause its route instead.</p>
+  <figure><img src="img/paused.jpg" alt="The flow page with a Paused badge, a confirmation message and a Resume button." width="800" height="506"><figcaption>A paused flow.</figcaption></figure>
+  <figure><img src="img/skipped.jpg" alt="The runs list showing two skipped runs with reason paused above two succeeded runs." width="800" height="500"><figcaption>Skipped runs show their reason.</figcaption></figure>
+  <h3>Send data again</h3>
+  <p class="prose">Open <b>Partitions</b> from the flow. <b>Replay</b> re-sends the latest version to one destination and leaves the others alone. <b>Read the selected partitions again</b> fetches fresh data from the source. <b>Verify</b> compares the source with what's stored, and changes nothing.</p>
+  <figure><img src="img/replay.jpg" alt="A replay confirmation naming the warehouse route and a version id, above the partition grid showing warehouse applied and archive failed." width="800" height="506"><figcaption>A replay names the exact version and destination before you confirm. Replaying an old version is refused, because it would overwrite newer data with older.</figcaption></figure>
+  <h3>When things go wrong</h3>
+  <div class="scroll"><table>
+    <tr><th>You see</th><th>What it means</th><th>Do this</th></tr>
+    <tr><td>“N tasks retried”</td><td>A brief fault that recovered</td><td>Nothing, unless it keeps happening.</td></tr>
+    <tr><td>Failed delivery</td><td>Retries ran out, or the destination refused</td><td>Fix the cause, then Retry from Failures.</td></tr>
+    <tr><td>Skipped run, reason <code>paused</code></td><td>The flow is paused</td><td>Resume it when ready.</td></tr>
+    <tr><td>Skipped run, reason <code>overlap</code></td><td>The last run was still going</td><td>Check whether the schedule is too tight.</td></tr>
+    <tr><td>Records in Quarantine</td><td>A destination refused those records</td><td>Read the reason, fix the data, and dismiss them.</td></tr>
+    <tr><td>Code shown as two versions</td><td>Workers run different code. Normal during a rollout</td><td>Check again once the rollout ends.</td></tr>
+    <tr><td><code>port 8080 is already in use</code></td><td>Something else holds the port</td><td>Add <code>--port 8081</code>.</td></tr>
+    <tr><td>Slow pages or database timeouts</td><td>Other busy Docker containers can slow this machine's database</td><td>Stop what you don't need, and try again.</td></tr>
+  </table></div>
+</section>
+
+<section id="limits">
+  <h2><span class="n">6</span>Not ready yet</h2>
+  <div class="scroll"><table>
+    <tr><th>Missing</th><th>Arrives in</th></tr>
+    <tr><td>Proof that a crash loses and duplicates nothing. Don't rely on this stage for that, and one known risk (F4) must close first</td><td>Stage 3</td></tr>
+    <tr><td>Webhooks and near-real-time events</td><td>Stage 3</td></tr>
+    <tr><td>Real connectors: Postgres, S3, REST, GraphQL, HTTP, DuckDB. Flows use simulated data until then</td><td>Stage 4</td></tr>
+    <tr><td><code>feather new</code> to create a project for you, <code>feather run</code>, <code>feather test</code> and the remote commands</td><td>Stage 5</td></tr>
+    <tr><td>JSON API, container images and Compose, so a real deployment. <code>feather dev</code> is for development only</td><td>Stage 5</td></tr>
+    <tr><td>Roles and permissions. Every signed-in user is an administrator</td><td>Milestone 2</td></tr>
+  </table></div>
+  <h3>How far this was checked</h3>
+  <ul class="prose">
+    <li><b>Run by hand in a browser:</b> creating and validating this project, sign-in, runs arriving, Run now, pause and resume, retrying a failed delivery, and opening a replay preview.</li>
+    <li><b>Covered by automated tests only:</b> confirming a replay, Skip, backfill, re-reading partitions, Verify, connection checks and quarantine dismissal.</li>
+    <li><b>Small known oddities:</b> schedules read like <code>every 0:00:30</code>, and a run that recovers can keep showing its earlier failure as the reason.</li>
+  </ul>
+</section>
+</div>
