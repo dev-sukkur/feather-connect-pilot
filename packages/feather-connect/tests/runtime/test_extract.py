@@ -646,3 +646,25 @@ def test_repeating_a_finalize_keeps_the_same_decision_for_a_turned_down_move():
     sealed = {v.partition: v for v in finalize_versions(ds, staged, routes, DEPS)}
     assert DEPS.spool.list_chunks(sealed["s=a"].version_id, "moves") == []
     assert sealed["s=a"].deletes == 0 and list(_snapshot_of(sealed["s=a"].version_id)) == ["1"]
+
+
+def test_a_dry_run_counts_the_difference_and_writes_nothing():
+    ds = dataset(fc.strategy.snapshot_diff())
+    extract(ds, ROWS)
+    chunks, versions = dict(DEPS.spool._chunks), DEPS.store.versions.list_versions("d")  # type: ignore[attr-defined]
+    ds.source.load([{"id": 1, "v": "changed"}, {"id": 3, "v": "new"}])  # 1 changed, 3 new, 2 gone
+    found = run_extract(ds, "verify", "_", routes=(), stage_only=False, deps=DEPS, dry_run=True)
+    assert (found.upserts, found.deletes) == (2, 1)
+    assert dict(DEPS.spool._chunks) == chunks  # type: ignore[attr-defined]  # not even a scratch chunk is left
+    assert DEPS.store.versions.list_versions("d") == versions
+    again = run_extract(ds, "verify", "_", routes=(), stage_only=False, deps=DEPS, dry_run=True)
+    assert again == found  # nothing it did changed the answer
+
+
+def test_a_dry_run_of_an_unchanged_source_finds_nothing_and_leaves_the_quarantine_alone():
+    ds = dataset(fc.strategy.snapshot_diff())
+    extract(ds, ROWS)
+    ds.source.load([*ROWS, {"v": "no key"}])  # a row that would be turned down
+    found = run_extract(ds, "verify", "_", routes=(), stage_only=False, deps=DEPS, dry_run=True)
+    assert (found.upserts, found.deletes) == (0, 0)
+    assert DEPS.store.quarantine.list_open() == []

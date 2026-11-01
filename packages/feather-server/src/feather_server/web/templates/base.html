@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "allowScriptTags": false}'>
+  <title>{% block title %}{{ title }}{% endblock %} · Feather Connect</title>
+  <link rel="stylesheet" href="/static/app.css">
+  {% block scripts %}<script src="/static/htmx.min.js" defer></script>{% endblock %}
+</head>
+<body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+  <a class="skip" href="#main">Skip to the content</a>
+  {% block header %}
+  <header class="bar">
+    <a class="brand" href="/"><span aria-hidden="true">&#9670;</span> Feather Connect</a>
+    <nav aria-label="Main">
+      {% for label, target in nav %}<a href="{{ target }}"{% if (target == "/" and path == "/") or (target != "/" and path.startswith(target)) %} aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}
+    </nav>
+    {% if actor %}
+    <form class="who" method="post" action="/logout">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <span class="muted">{{ actor.name }}</span>
+      <button type="submit" class="link">Sign out</button>
+    </form>
+    {% endif %}
+  </header>
+  {% endblock %}
+  <main id="main" tabindex="-1">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

@@ -15,6 +15,7 @@ from typing import Any, Literal, Protocol, cast
 
 import pyarrow as pa
 
+from feather_connect.clock import Clock, SystemClock
 from feather_connect.core.records import Op, Record
 
 ChunkKind = Literal["data", "snapshot", "full", "candidates", "moves", "rejected", "settled"]
@@ -61,17 +62,46 @@ class Spool(Protocol):
         """Drop every chunk of the version, of every kind."""
         ...
 
+    # Retention (design 7.3). The chunks of a version live on the day of its first write, whatever kind they are
+    # except a snapshot, which outlives the day.
+
+    def days(self) -> list[date]:
+        """The days that hold chunks, oldest first."""
+        ...
+
+    def versions_on(self, day: date) -> list[str]:
+        """The versions whose chunks live on `day`."""
+        ...
+
+    def snapshot_versions(self) -> list[str]:
+        """The versions that have a snapshot chunk."""
+        ...
+
+    def drop_day(self, day: date) -> None:
+        """Drop the day's chunks, but not the snapshots."""
+        ...
+
+    def ensure_partitions(self, days_ahead: int = 7) -> None:
+        """Make room for writes from today to `days_ahead` days on, for a backend that needs it."""
+        ...
+
 
 class MemorySpool:
     """A spool in memory, for tests and the in-process engine."""
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Clock | None = None) -> None:
         self._lock = threading.Lock()
+        self._clock = clock or SystemClock()
         self._chunks: dict[tuple[str, ChunkKind, int], pa.Table] = {}
+        self._day_of: dict[
+            str, date
+        ] = {}  # the day of a version's first write of a chunk that is not a snapshot
 
     def put_chunk(self, version_id: str, chunk_no: int, kind: ChunkKind, table: pa.Table) -> ChunkRef:
         with self._lock:
             self._chunks[(version_id, kind, chunk_no)] = table
+            if kind != "snapshot":
+                self._day_of.setdefault(version_id, self._clock.now().date())
         return ChunkRef(version_id, chunk_no, kind, table.num_rows, table.nbytes)
 
     def get_chunk(self, version_id: str, chunk_no: int, kind: ChunkKind = "data") -> pa.Table:
@@ -97,9 +127,33 @@ class MemorySpool:
         with self._lock:
             for key in [k for k in self._chunks if k[0] == version_id]:
                 del self._chunks[key]
+            self._day_of.pop(version_id, None)
+
+    def days(self) -> list[date]:
+        with self._lock:
+            return sorted(set(self._day_of.values()))
+
+    def versions_on(self, day: date) -> list[str]:
+        with self._lock:
+            return sorted(v for v, d in self._day_of.items() if d == day)
+
+    def snapshot_versions(self) -> list[str]:
+        with self._lock:
+            return sorted({v for v, kind, _ in self._chunks if kind == "snapshot"})
+
+    def drop_day(self, day: date) -> None:
+        with self._lock:
+            gone = {v for v, d in self._day_of.items() if d == day}
+            for key in [k for k in self._chunks if k[0] in gone and k[1] != "snapshot"]:
+                del self._chunks[key]
+            for version_id in gone:
+                del self._day_of[version_id]
+
+    def ensure_partitions(self, days_ahead: int = 7) -> None:
+        """Memory needs no partitions."""
 
 
-def _encode(value: Any) -> Any:
+def encode_json_value(value: Any) -> Any:
     """The `default` for `json.dumps`: tag the types that JSON can't hold."""
     if isinstance(value, datetime):  # before date, because a datetime is also a date
         return {_TAG: "datetime", "v": value.isoformat()}
@@ -112,8 +166,8 @@ def _encode(value: Any) -> Any:
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-def _decode(obj: dict[str, Any]) -> Any:
-    """The `object_hook` for `json.loads`: undo `_encode`."""
+def decode_json_value(obj: dict[str, Any]) -> Any:
+    """The `object_hook` for `json.loads`: undo `encode_json_value`."""
     match obj.get(_TAG):
         case "datetime":
             return datetime.fromisoformat(obj["v"])
@@ -183,7 +237,7 @@ def records_to_table(records: Sequence[Record]) -> pa.Table:
         if array is None:
             json_columns.append(name)
             array = _array(
-                [None if v is None else json.dumps(v, default=_encode) for v in values], pa.string()
+                [None if v is None else json.dumps(v, default=encode_json_value) for v in values], pa.string()
             )
         arrays.append(array)
     arrays += [
@@ -210,7 +264,7 @@ def table_to_records(table: pa.Table) -> list[Record]:
             continue
         values: list[Any] = table.column(name).to_pylist()
         if name in json_columns:
-            values = [None if v is None else json.loads(v, object_hook=_decode) for v in values]
+            values = [None if v is None else json.loads(v, object_hook=decode_json_value) for v in values]
         columns[name] = values
     keys = cast("list[str]", table.column(_KEY).to_pylist())
     ops = cast("list[Op]", table.column(_OP).to_pylist())

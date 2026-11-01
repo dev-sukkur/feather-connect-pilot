@@ -1,0 +1,24 @@
+[project]
+name = "feather-server"
+version = "0.1.0"
+description = "The Feather Connect server: dashboard, API, scheduler and the other leader-elected loops."
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "feather-connect[postgres]",
+    "feather-engine-dbos",
+    "fastapi",
+    "uvicorn",
+    "argon2-cffi",
+    "itsdangerous",
+    "python-multipart",
+    "jinja2",
+]
+
+[tool.uv.sources]
+feather-connect = { workspace = true }
+feather-engine-dbos = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"

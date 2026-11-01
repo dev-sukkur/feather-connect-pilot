@@ -1,0 +1,207 @@
+import subprocess
+from pathlib import Path
+from textwrap import dedent
+
+import pytest
+
+from feather_connect.core.triggers import Cron, Every
+from feather_connect.project import ProjectError, effective_config, load_project, resolve_secret
+
+FLOW_MODULE = """
+    import feather_connect as fc
+    from feather_connect.connectors import memory
+
+    orders = fc.Dataset("orders", source=memory.Source("shop"), key="id", strategy=fc.strategy.replace())
+    demo = fc.Flow(
+        "demo",
+        reads=orders,
+        deliver=[fc.to(memory.Sink("warehouse")), fc.to(memory.Sink("gofrugal"))],
+        triggers=[fc.cron("0 * * * *", tz="UTC")],
+    )
+"""
+
+BASE = """
+    name: acme
+    modules: [flows.demo]
+    settings: {timezone: Asia/Kolkata}
+    connections:
+      warehouse:
+        connector: motherduck
+        database: dev_bronze
+        threads: 2
+        budget: api
+      shop:
+        connector: shop.api
+        site: hq
+    budgets:
+      api: {limits: ["90/minute", "24000/day"], reserve: {high: 0.6}}
+"""
+
+OVERLAYS = {
+    "prod": """
+        connections:
+          warehouse:
+            database: prod_bronze
+            auth: {token: "${secret:env:TOKEN}"}
+        flows:
+          demo:
+            triggers: {every: 15m}
+            routes: {gofrugal: {enabled: false}}
+    """,
+    "tz": "flows: {demo: {triggers: {cron: '*/5 * * * *'}}}",
+    "bad-secret": "connections: {bad: {connector: x, auth: {token: '${secret:nothere:a/b}'}}}",
+    "vault": "connections: {bad: {connector: x, auth: {token: '${secret:vault:kv/a#b}'}}}",
+    "plain": "connections: {bad: {connector: x, auth: {token: hunter2}}}",
+    "elsewhere": "connections: {bad: {connector: x, url: '${secret:env:A}'}}",
+}
+
+
+def write(root: Path, rel: str, text: str) -> None:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(dedent(text), encoding="utf-8")
+
+
+@pytest.fixture
+def project_dir(tmp_path: Path) -> Path:
+    write(tmp_path, "feather.yaml", BASE)
+    write(tmp_path, "flows/__init__.py", "")
+    write(tmp_path, "flows/demo.py", FLOW_MODULE)
+    for env, text in OVERLAYS.items():
+        write(tmp_path, f"env/{env}.yaml", text)
+    return tmp_path
+
+
+def test_later_layers_win(project_dir):
+    p = load_project(project_dir, "prod")
+    assert p.connections["warehouse"].options["database"] == "prod_bronze"
+    assert p.connections["warehouse"].options["threads"] == 2  # from feather.yaml
+    assert p.connections["shop"].site == "hq" and p.connections["warehouse"].budget == "api"
+    assert p.budgets["api"].reserve == {"high": 0.6} and len(p.budgets["api"].windows) == 2
+    assert p.name == "acme" and p.settings["timezone"] == "Asia/Kolkata"
+
+
+def test_effective_config_names_the_layer_and_hides_secrets(project_dir, monkeypatch):
+    monkeypatch.setenv("TOKEN", "s3cret")
+    vals = {v.path: v for v in effective_config(load_project(project_dir, "prod"))}
+    assert vals["connections.warehouse.options.database"].layer == "env/prod.yaml"
+    assert vals["connections.warehouse.options.threads"].layer == "feather.yaml"
+    assert vals["connections.warehouse.auth.token"].value == "***"
+    assert vals["connections.warehouse.budget"].value == "api"
+    assert not any(v.value == "s3cret" for v in vals.values())
+
+
+def test_a_setting_nobody_sets_comes_from_the_code(tmp_path):
+    write(tmp_path, "feather.yaml", "name: p\nmodules: [flows.demo]\n")
+    write(tmp_path, "flows/demo.py", FLOW_MODULE)
+    write(tmp_path, "env/dev.yaml", "")
+    vals = {v.path: v for v in effective_config(load_project(tmp_path, "dev"))}
+    assert (vals["settings.timezone"].value, vals["settings.timezone"].layer) == ("UTC", "defaults")
+
+
+def test_secret_providers(tmp_path, monkeypatch):
+    monkeypatch.setenv("A", "x")
+    (tmp_path / "s").write_text("y\n")
+    assert resolve_secret("${secret:env:A}") == "x"
+    assert resolve_secret(f"${{secret:file:{tmp_path / 's'}}}") == "y"
+
+
+def test_a_connection_resolves_its_credentials_only_when_asked(project_dir, monkeypatch):
+    monkeypatch.delenv("TOKEN", raising=False)
+    p = load_project(project_dir, "prod")  # TOKEN is not set, and loading does not mind
+    with pytest.raises(ProjectError, match="TOKEN"):
+        p.connections["warehouse"].resolve()
+    monkeypatch.setenv("TOKEN", "s3cret")
+    assert p.connections["warehouse"].resolve() == {
+        "database": "prod_bronze",
+        "threads": 2,
+        "token": "s3cret",
+    }
+
+
+def test_unknown_secret_provider_names_the_key(project_dir):  # Review Focus 5
+    with pytest.raises(ProjectError, match=r"env/bad-secret.yaml.*connections\.bad.*nothere"):
+        load_project(project_dir, "bad-secret")
+    with pytest.raises(ProjectError, match=r"connections\.bad.*vault.*M3"):
+        load_project(project_dir, "vault")
+
+
+def test_a_plain_credential_or_a_secret_outside_auth_is_refused(project_dir):
+    with pytest.raises(ProjectError, match=r"connections\.bad\.auth\.token.*reference") as plain:
+        load_project(project_dir, "plain")
+    assert "hunter2" not in str(plain.value)
+    with pytest.raises(ProjectError, match=r"connections\.bad\.url.*only under a connection's auth"):
+        load_project(project_dir, "elsewhere")
+
+
+def test_missing_flow_module_names_the_file(tmp_path):  # Review Focus 5
+    write(tmp_path, "feather.yaml", "name: p\nmodules: [flows.nope]\n")
+    write(tmp_path, "env/dev.yaml", "")
+    with pytest.raises(ProjectError, match=r"feather\.yaml.*modules.*flows\.nope"):
+        load_project(tmp_path, "dev")
+
+
+def test_a_missing_overlay_and_a_bad_env_name_are_refused(project_dir):
+    with pytest.raises(ProjectError, match=r"env/qa.yaml"):
+        load_project(project_dir, "qa")
+    with pytest.raises(ProjectError, match="environment name"):
+        load_project(project_dir, "../x")
+
+
+def test_secret_value_never_appears_in_errors_or_repr(project_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("TOKEN", "s3cret")
+    project = load_project(project_dir, "prod")
+    assert "s3cret" not in repr(project) and "s3cret" not in repr(project.connections)
+    assert "s3cret" not in repr(effective_config(project))
+    secret_file = tmp_path / "missing" / "s3cret"
+    with pytest.raises(ProjectError) as error:
+        resolve_secret(f"${{secret:file:{secret_file}}}")
+    assert "s3cret" not in str(error.value).replace(str(secret_file), "")
+
+
+def test_overlay_can_disable_a_route_and_change_a_trigger(project_dir):
+    flow = load_project(project_dir, "prod").flows[0]
+    assert [r.name for r in flow.routes] == ["warehouse"]
+    assert [type(t) for t in flow.triggers] == [Every]
+    base = load_project(project_dir, "tz").flows[0]
+    assert [r.name for r in base.routes] == ["warehouse", "gofrugal"]
+    assert base.triggers == (Cron("*/5 * * * *", "Asia/Kolkata"),)  # the time zone comes from settings
+
+
+def test_overlay_can_disable_a_whole_flow(project_dir):
+    assert load_project(project_dir, "tz").flows[0].enabled
+    write(project_dir, "env/off.yaml", "flows: {demo: {enabled: false}}")
+    flow = load_project(project_dir, "off").flows[0]
+    assert not flow.enabled and flow.spec_dict()["enabled"] is False
+    write(project_dir, "env/off.yaml", "flows: {demo: {enabled: nope}}")
+    with pytest.raises(ProjectError, match=r"env/off.yaml.*flows\.demo\.enabled"):
+        load_project(project_dir, "off")
+
+
+def test_an_overlay_for_an_unknown_flow_or_route_is_refused(project_dir):
+    write(project_dir, "env/typo.yaml", "flows: {demo: {routes: {nothere: {enabled: false}}}}")
+    with pytest.raises(ProjectError, match=r"env/typo.yaml.*flows\.demo\.routes\.nothere"):
+        load_project(project_dir, "typo")
+    write(project_dir, "env/typo.yaml", "flows: {demp: {triggers: {manual: true}}}")
+    with pytest.raises(ProjectError, match=r"flows\.demp"):
+        load_project(project_dir, "typo")
+
+
+def test_loading_twice_builds_the_flows_again(project_dir):
+    first = load_project(project_dir, "prod").flows[0]
+    assert load_project(project_dir, "prod").flows[0] is not first
+
+
+def test_code_sha_comes_from_env_then_git(project_dir, monkeypatch):
+    monkeypatch.delenv("FEATHER_CODE_SHA", raising=False)
+    assert load_project(project_dir, "prod").code_sha == "unknown"
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run([*git, "init", "-q"], cwd=project_dir, check=True)
+    subprocess.run([*git, "add", "."], cwd=project_dir, check=True)
+    subprocess.run([*git, "commit", "-qm", "x"], cwd=project_dir, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=project_dir, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert load_project(project_dir, "prod").code_sha == head
+    monkeypatch.setenv("FEATHER_CODE_SHA", "fromenv")
+    assert load_project(project_dir, "prod").code_sha == "fromenv"

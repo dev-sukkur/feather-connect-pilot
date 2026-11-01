@@ -1,9 +1,11 @@
 import json
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 import feather_connect as fc
 from feather_connect.clock import FrozenClock
@@ -13,7 +15,9 @@ from feather_connect.core.context import Context
 from feather_connect.core.errors import PermanentError, TransientError
 from feather_connect.engine.local import LocalEngine
 from feather_connect.engine.port import RetryPolicy
-from feather_connect.runtime.runtime import Runtime
+from feather_connect.logs import bound_ids, register_secrets
+from feather_connect.runtime.retention import retention_once
+from feather_connect.runtime.runtime import RunNotStarted, Runtime
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.port import InvalidTransition
 from feather_connect.storage.spool import MemorySpool
@@ -37,7 +41,8 @@ class Harness:
         kw: dict[str, Any] = {"strategy": fc.strategy.replace(), **(reads_kw or {})}
         self.dataset = fc.Dataset("d", source=self.source, key="id", **kw)
         flow = fc.Flow("f", reads=self.dataset, deliver=[fc.to(self.a), fc.to(self.b)])
-        self.rt = Runtime([flow], self.store, MemorySpool(), self.engine, code_sha="sha", clock=self.clock)
+        self.spool = MemorySpool(self.clock)
+        self.rt = Runtime([flow], self.store, self.spool, self.engine, code_sha="sha", clock=self.clock)
         self.engine.register(self.rt.tasks())
 
     def run(self, **kw: Any) -> str:
@@ -244,6 +249,80 @@ def test_an_extract_that_keeps_failing_fails_the_run_on_its_last_attempt() -> No
     assert h.source.reads == RetryPolicy().max_attempts
     assert h.status(run) == "failed"
     assert "timeout" in (h.reason(run) or "")
+
+
+class FailsThenReads(Source):
+    """Raises a transient error on its first `failures` reads, then serves its rows."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__(rows=ROWS)
+        self.failures = failures
+        self.reads = 0
+
+    def read(self, ctx: Context, req: ReadRequest) -> Iterator[list[dict[str, Any]]]:
+        self.reads += 1
+        if self.reads <= self.failures:
+            raise TransientError(f"timeout {self.reads}")
+        return super().read(ctx, req)
+
+
+class _Seen(logging.Handler):
+    """Keeps each warning with the ids that were bound while it was logged."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.seen: list[tuple[str, dict[str, str]]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.seen.append((record.getMessage(), bound_ids()))
+
+
+def test_a_task_that_succeeds_after_retries_keeps_its_attempts_and_last_error() -> None:
+    handler = _Seen()
+    logging.getLogger().addHandler(handler)
+    try:
+        h = Harness(source=FailsThenReads(failures=2))
+        run = h.run()
+    finally:
+        logging.getLogger().removeHandler(handler)
+    assert h.status(run) == "succeeded"
+    [extract] = [t for t in h.store.runs.list_tasks(run) if t.kind == "extract"]
+    assert (extract.status, extract.attempt) == ("succeeded", 3)
+    assert extract.error == "timeout 2"  # the latest failure stays after the success
+    assert all(
+        t.attempt == 1 and t.error is None for t in h.store.runs.list_tasks(run) if t.kind != "extract"
+    )
+    retries = [(message, ids) for message, ids in handler.seen if "will be retried" in message]
+    assert len(retries) == 2
+    assert "attempt 1" in retries[0][0] and "timeout 1" in retries[0][0]
+    assert "attempt 2" in retries[1][0] and "timeout 2" in retries[1][0]
+    assert retries[0][1]["run"] == run and retries[0][1]["task"] == extract.task_id
+    assert retries[0][1]["dataset"] == "d" and retries[0][1]["flow"] == "f"
+    assert h.store.reads.retried_tasks([run]) == {run: 1}
+
+
+def test_the_attempts_survive_a_crash_and_a_replay_of_the_task() -> None:
+    h = Harness(source=FailsThenReads(failures=1))
+    h.engine.crash_before(
+        "submit_applies"
+    )  # the worker dies in the second attempt, after the retry was noted
+    run = h.run()
+    h.engine.recover()
+    h.engine.run_until_idle()
+    [extract] = [t for t in h.store.runs.list_tasks(run) if t.kind == "extract"]
+    assert (h.status(run), extract.status, extract.attempt, extract.error) == (
+        "succeeded",
+        "succeeded",
+        2,
+        "timeout 1",
+    )
+
+
+def test_a_task_that_never_retried_shows_one_attempt_and_no_error() -> None:
+    h = Harness()
+    run = h.run()
+    assert {(t.attempt, t.error) for t in h.store.runs.list_tasks(run)} == {(1, None)}
+    assert h.store.reads.retried_tasks([run]) == {}
 
 
 def test_a_failed_slice_never_seals_and_fails_the_run() -> None:
@@ -465,14 +544,76 @@ def test_replay_waits_for_a_newer_open_delivery() -> None:
     assert h.delivery("a", v1) == "applied"
     h.engine.run_until_idle()
 
-    # Drained, the older one replays, and a failure of it strands nothing.
+    # Drained, the newest replays, and a failure of it strands nothing.
     h.a.fail_next(PermanentError("boom"))
-    h.rt.replay("a", v1, actor="op")
+    h.rt.replay("a", v2, actor="op")
     h.engine.run_until_idle()
-    assert (h.delivery("a", v1), h.delivery("a", v2)) == ("failed", "applied")
-    h.rt.retry("a", v1, actor="op")
+    assert (h.delivery("a", v1), h.delivery("a", v2)) == ("applied", "failed")
+    h.rt.retry("a", v2, actor="op")
     h.engine.run_until_idle()
     assert (h.delivery("a", v1), h.delivery("a", v2)) == ("applied", "applied")
+
+
+def test_replay_of_an_older_version_is_refused_and_names_the_latest() -> None:
+    h, _, _, v1, v2 = two_versions()
+    calls = len(h.a.calls)
+    with pytest.raises(InvalidTransition, match=f"older.*replay {v2}"):
+        h.rt.replay("a", v1, actor="op")
+    h.engine.run_until_idle()
+    assert h.delivery("a", v1) == "applied" and len(h.a.calls) == calls
+    assert h.a.rows == [{"id": 1, "v": "new"}]
+
+
+def test_a_skipped_newer_version_does_not_stop_a_replay() -> None:
+    h = Harness()
+    v1 = h.version_of(h.run())
+    h.a.fail_next(PermanentError("bad"))
+    h.source.load([{"id": 1, "v": "new"}])
+    v2 = h.version_of(h.run())
+    h.rt.skip("a", v2, actor="op")
+    h.rt.replay("a", v1, actor="op")
+    h.engine.run_until_idle()
+    assert h.ledger.get("a", v1).replays == 1 and h.delivery("a", v1) == "applied"
+
+
+def test_replay_of_a_version_aged_out_of_retention_is_refused_up_front() -> None:
+    h = Harness()
+    v1 = h.version_of(h.run())
+    calls = len(h.a.calls)
+    h.clock.advance(timedelta(days=20))
+    assert retention_once(h.store, h.spool, now=h.clock.now()).dropped_days
+    with pytest.raises(InvalidTransition, match="aged out"):
+        h.rt.replay("a", v1, actor="op")
+    assert h.delivery("a", v1) == "applied" and h.ledger.get("a", v1).replays == 0
+    h.engine.run_until_idle()
+    assert len(h.a.calls) == calls
+
+
+def replace_route_harness() -> tuple[Harness, str]:
+    h = Harness()
+    dataset = fc.Dataset("d", source=h.source, key="id", strategy=fc.strategy.replace())
+    flow = fc.Flow("f", reads=dataset, deliver=[fc.to(Sink("r"), mode="replace_partition")])
+    h.rt = Runtime([flow], h.store, h.spool, h.engine, code_sha="sha", clock=h.clock)
+    h.engine.register(h.rt.tasks())
+    return h, h.version_of(h.run())
+
+
+def test_replay_on_a_replace_route_is_refused_when_only_the_snapshot_is_left() -> None:
+    h, v1 = replace_route_harness()
+    h.clock.advance(timedelta(days=20))
+    retention_once(h.store, h.spool, now=h.clock.now())
+    assert h.spool.list_chunks(v1, "snapshot") and not h.spool.list_chunks(v1, "full")
+    with pytest.raises(InvalidTransition, match="aged out"):
+        h.rt.replay("r", v1, actor="op")
+    assert h.delivery("r", v1) == "applied"  # not failed, so it blocks nothing
+
+
+def test_replay_on_a_replace_route_is_refused_when_the_snapshot_is_gone_too() -> None:
+    h, v1 = replace_route_harness()
+    h.spool.delete_chunks(v1, "full")
+    h.spool.delete_chunks(v1, "snapshot")
+    with pytest.raises(InvalidTransition, match="aged out"):
+        h.rt.replay("r", v1, actor="op")
 
 
 def test_replay_ignores_an_open_delivery_of_another_partition_or_route() -> None:
@@ -519,3 +660,81 @@ def test_a_task_whose_flow_a_deploy_removed_fails_its_row(step: str, missing: st
     assert {row.status for row in h.store.runs.list_tasks(run)} <= {"succeeded", "failed"}
     assert h.status(run) == "failed"
     assert f"no {missing} is named" in (h.reason(run) or "")
+
+
+def test_a_connector_is_given_the_connections_config_and_the_time_zone():
+    seen: list[Any] = []
+
+    class Spy(Source):
+        def read(self, ctx: Context, req: ReadRequest) -> Iterator[list[dict[str, Any]]]:
+            seen.append((ctx.config["token"], ctx.tz))
+            yield from super().read(ctx, req)
+
+    h = Harness(source=Spy(rows=ROWS))
+    h.rt = Runtime(
+        [h.rt.flow("f")],
+        h.store,
+        MemorySpool(),
+        h.engine,
+        clock=h.clock,
+        config_of=lambda connection: {"token": f"for {connection}"},
+        timezone="Asia/Kolkata",
+    )
+    h.engine.register(h.rt.tasks())
+    h.run()
+    assert seen == [(f"for {h.source.connection}", "Asia/Kolkata")]
+
+
+SECRET_F8 = "f8-runtime-api-key"
+
+
+def test_a_map_error_goes_to_quarantine_without_the_secret() -> None:  # F8
+    register_secrets(SECRET_F8)
+
+    def leaky(record: Any, ctx: Any) -> Any:
+        raise ValueError(f"calling with key={SECRET_F8}")
+
+    h = Harness()
+    dataset = fc.Dataset("d", source=h.source, key="id", strategy=fc.strategy.replace())
+    flow = fc.Flow("f", reads=dataset, deliver=[fc.to(Sink("m"), map=leaky)])
+    h.rt = Runtime([flow], h.store, h.spool, h.engine, code_sha="sha", clock=h.clock)
+    h.engine.register(h.rt.tasks())
+    h.run()
+    entries = h.store.quarantine.list_open("m")
+    assert entries and all(SECRET_F8 not in e.error and "***" in e.error for e in entries)
+
+
+def test_a_sink_rejection_goes_to_quarantine_without_the_secret() -> None:  # F8
+    register_secrets(SECRET_F8)
+    h = Harness()
+    h.a.reject("1", f"refused for key={SECRET_F8}")
+    h.run()
+    (entry,) = h.store.quarantine.list_open("a")
+    assert SECRET_F8 not in entry.error and "***" in entry.error
+
+
+def test_a_record_turned_down_at_extraction_goes_to_quarantine_without_the_secret() -> None:  # F8
+    register_secrets(SECRET_F8)
+
+    class Row(BaseModel):
+        id: int
+        v: int
+
+    h = Harness({"schema": Row}, rows=[{"id": 1, "v": SECRET_F8}, {"id": 2, "v": 2}])
+    h.run()
+    entries = h.store.quarantine.list_open(None)
+    assert entries and all(SECRET_F8 not in e.error for e in entries)
+
+
+def test_a_failed_submit_says_so_without_the_secret() -> None:  # F8
+    register_secrets(SECRET_F8)
+    h = Harness()
+
+    def refuse(call: Any) -> str:
+        raise ConnectionError(f"the engine at key={SECRET_F8} is away")
+
+    h.engine.submit = refuse  # type: ignore[method-assign]
+    with pytest.raises(RunNotStarted) as raised:
+        h.rt.start_run("f")
+    assert SECRET_F8 not in raised.value.reason
+    assert SECRET_F8 not in (h.store.runs.get_run(raised.value.run_id).reason or "")

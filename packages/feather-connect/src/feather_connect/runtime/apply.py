@@ -23,9 +23,10 @@ from feather_connect.core.flow import BatchMap, RouteSpec
 from feather_connect.core.records import Op, Record, canonical_json, decode_key
 from feather_connect.core.transforms import apply_map, is_batch_map
 from feather_connect.engine.port import RetryPolicy, TaskContext
+from feather_connect.logs import redact
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import NOT_DELIVERED
-from feather_connect.storage.port import CLOSED, Delivery, DeliveryStatus, Version, delivery_cursor
+from feather_connect.storage.port import CLOSED, Delivery, DeliveryStatus, Version, delivery_cursor, is_paused
 from feather_connect.storage.spool import ChunkKind, table_to_records
 
 log = logging.getLogger(__name__)
@@ -123,6 +124,28 @@ def _plan_of(route: RouteSpec, version: Version, deps: RuntimeDeps) -> _Plan:
     return _Plan("full", chunks)
 
 
+def replay_gap(route: RouteSpec, version: Version, deps: RuntimeDeps) -> str | None:
+    """Say why a replay of `version` on `route` would send nothing, or None if it has something to send.
+
+    Retention drops a version's chunks long before its ledger row, and a plan with no chunks would pass for applied.
+    """
+    version_id = version.version_id
+    try:
+        plan = _plan_of(route, version, deps)
+    except PermanentError as error:
+        if deps.spool.list_chunks(version_id, "full"):
+            return str(error)
+        plan = _Plan("full", ())  # the records the snapshot names are gone from the `full` chunks
+    if plan.chunks:
+        return None
+    if version.upserts or version.deletes or route.mode == "replace_partition":
+        return (
+            f"version {version_id} can't replay on route {route.name!r}: its data has aged out of retention, though "
+            "its ledger row remains. Read the partition again from its source to deliver it afresh"
+        )
+    return f"version {version_id} can't replay on route {route.name!r}: it has nothing to send"
+
+
 def _tries(delivery: Delivery, deps: RuntimeDeps) -> int:
     """Return how many times the delivery has started running since an operator last sent it back."""
     tries = 0
@@ -153,7 +176,7 @@ def _counting_a_try[T](delivery: Delivery, deps: RuntimeDeps, fn: Callable[[], T
             "pending",
             actor=_ACTOR,
             reason="retryable error",
-            error=str(error),
+            error=redact(str(error)),
             code_sha=deps.code_sha,
         )
         raise
@@ -381,7 +404,7 @@ class _ChunkSender:
                 f"route {name!r}: the sink rejected record {key} and has already applied its batch, "
                 f"so the destination may hold a partial slice: {message}"
             )
-        self._deps.store.quarantine.add(name, self._delivery.version_id, key, message)
+        self._deps.store.quarantine.add(name, self._delivery.version_id, key, redact(message))
 
 
 def _fail(delivery: Delivery, error: str, deps: RuntimeDeps) -> None:
@@ -393,9 +416,15 @@ def _fail(delivery: Delivery, error: str, deps: RuntimeDeps) -> None:
             "failed",
             actor=_ACTOR,
             reason="permanent error",
-            error=error,
+            error=redact(error),
             code_sha=deps.code_sha,
         )
+
+
+def fail_open(delivery: Delivery, error: str, deps: RuntimeDeps) -> None:
+    """Fail a pending or running delivery that no task will finish, so that an operator can retry or skip it."""
+    _resume(delivery, "its task ended", deps)
+    _fail(delivery, error, deps)
 
 
 def _supersede(delivery: Delivery, plan: _Plan, deps: RuntimeDeps) -> None:
@@ -491,7 +520,8 @@ def run_apply(
 ) -> None:
     """Bring `route` up to `version_id` in the version's partition, oldest open delivery first (I2).
 
-    A failed or held delivery blocks its partition, and the task ends there. A permanent error fails the delivery, and
+    A failed or held delivery blocks its partition, and the task ends there. So does a paused route, before it
+    starts the next delivery, and leaves that delivery as it is. A permanent error fails the delivery, and
     the task still ends well, so that other partitions carry on. Any other error goes to the engine to retry, up to
     `deps.retry.max_attempts` tries for each delivery, after which it fails the delivery too.
     """
@@ -507,5 +537,8 @@ def run_apply(
         if delivery.status in ("failed", "held"):
             log.info("route %s, version %s: blocked by %s", route.name, version_id, delivery.version_id)
             return
+        if ctx.step(f"paused:{n}", lambda: is_paused(deps.store.overrides, f"route:{route.name}")):
+            log.info("route %s, version %s: the route is paused", route.name, version_id)
+            return  # the delivery stays as it is; `resume_route` or the sweeper submits it again
         if not _deliver(ctx, dataset, route, delivery, deps):
             return

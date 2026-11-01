@@ -139,7 +139,21 @@ class World:
         self.clock = FrozenClock(T0)
         base = MemoryStore(self.clock)
         self.spy = SpyBudgets(base.budgets, self.clock)
-        self.store = Store(base.runs, base.versions, base.ledger, base.state, base.quarantine, self.spy)
+        self.store = Store(
+            runs=base.runs,
+            versions=base.versions,
+            ledger=base.ledger,
+            state=base.state,
+            quarantine=base.quarantine,
+            budgets=self.spy,
+            catalog=base.catalog,
+            workers=base.workers,
+            schedules=base.schedules,
+            overrides=base.overrides,
+            users=base.users,
+            audit=base.audit,
+            reads=base.reads,
+        )
         self.store.budgets.define(spec)
         self.engine = LocalEngine(self.clock)
         self.runtime = Runtime(
@@ -220,3 +234,57 @@ def test_a_budgeted_connection_cannot_work_at_two_priorities():
     flow = fc.Flow("f", reads=dataset, deliver=[fc.to(Sink("shared"), priority="low")])
     with pytest.raises(ValueError, match="two priorities"):
         Runtime([flow], MemoryStore(), MemorySpool(), LocalEngine(), budgets={"shared": "z"})
+
+
+def test_an_extract_that_hits_the_budget_waits_durably_and_completes():
+    both = days(1, 2)
+    dataset = by_day_dataset("d", MeteredSource("src", rows_on(both, 1)))
+    out = Sink("dst")
+    world = World(
+        BudgetSpec("z", parse_limits(["1/hour"])),
+        [fc.Flow("f", reads=dataset, deliver=[fc.to(out, name="r")])],
+        {"src": "z"},
+    )
+    run = world.runtime.start_run("f", partitions=both)
+    world.engine.run_until_idle()
+
+    assert world.store.runs.get_run(run).status == "succeeded" and len(out.rows) == 2
+    assert world.clock.now() - T0 >= timedelta(hours=1)
+
+
+ROWS = [{"id": 1, "v": "a"}, {"id": 2, "v": "b"}]
+
+
+class DrySource(Source):
+    """Reads fail with a budget deferral for the first `dry` reads."""
+
+    def __init__(self, connection: str, rows: list[dict[str, Any]], dry: int) -> None:
+        super().__init__(connection, rows)
+        self.dry, self.reads = dry, 0
+
+    def read(self, ctx: Context, req: ReadRequest) -> Iterator[list[dict[str, Any]]]:
+        self.reads += 1
+        if self.reads <= self.dry:
+            raise BudgetDeferred(timedelta(hours=8), "daily")
+        yield from super().read(ctx, req)
+
+
+def test_a_deferred_extract_does_not_use_up_an_attempt():
+    # More deferrals than the six attempts a task gets: waiting must not count as failing.
+    dry = DrySource("src", ROWS, dry=7)
+    clock = FrozenClock(T0)
+    store, engine, out = MemoryStore(clock), LocalEngine(clock), Sink("dst")
+    flow = fc.Flow(
+        "f",
+        reads=fc.Dataset("d", source=dry, key="id", strategy=fc.strategy.replace()),
+        deliver=[fc.to(out, name="r")],
+    )
+    runtime = Runtime([flow], store, MemorySpool(), engine, clock=clock)
+    engine.register(runtime.tasks())
+    run = runtime.start_run("f")
+    engine.run_until_idle()
+
+    assert store.runs.get_run(run).status == "succeeded" and out.rows == ROWS
+    assert dry.reads == 8 and clock.now() - T0 >= timedelta(hours=56)
+    [extract] = [t for t in store.runs.list_tasks(run) if t.kind == "extract"]
+    assert extract.status == "succeeded"

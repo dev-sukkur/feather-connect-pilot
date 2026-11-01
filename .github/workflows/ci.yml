@@ -16,8 +16,32 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      - run: uv sync
+      - run: uv sync --all-extras
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pyright
-      - run: uv run pytest packages/feather-connect/tests --cov=feather_connect --cov-fail-under=85
+      - run: uv run pytest packages/feather-connect/tests tests/demo -m "not postgres"
+
+  # The tests marked `postgres` need a server, which only Linux runners can host. This job runs every test
+  # and holds the coverage gate.
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: feather
+          POSTGRES_PASSWORD: feather
+          POSTGRES_DB: feather_test
+        ports:
+          - 25433:5432
+        options: >-
+          --health-cmd "pg_isready -U feather -d feather_test"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      FEATHER_TEST_DATABASE_URL: postgresql://feather:feather@127.0.0.1:25433/feather_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uv sync --all-extras
+      - run: uv run pytest packages/feather-connect/tests packages/feather-engine-dbos/tests packages/feather-server/tests packages/feather-cli/tests tests/e2e tests/dev --cov=feather_connect --cov=feather_engine_dbos --cov=feather_server --cov=feather_cli --cov-fail-under=85

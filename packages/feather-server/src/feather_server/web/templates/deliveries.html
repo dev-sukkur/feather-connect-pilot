@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+<h1>Deliveries to {{ route }}</h1>
+<p class="muted">Destination: {{ destination }}. Oldest first, as the route applies them.</p>
+<p><a href="/failures">&larr; Failures</a></p>
+{% if notice %}<p class="notice notice-{{ notice[0] }}" role="{{ 'alert' if notice[0] == 'bad' else 'status' }}">{{ notice[1] }}</p>{% endif %}
+
+{% if preview %}
+{{ m.confirm_form(preview, "/deliveries/confirm", url(), "Confirm", reason_required, {"from": "deliveries", "route": route}) }}
+{% endif %}
+
+<form class="filters" method="get" action="/routes/{{ route | urlencode }}/deliveries">
+  <p><label for="f-status">Status</label><br>
+    <select id="f-status" name="status">
+      <option value="">Any</option>
+      {% for s in statuses %}<option value="{{ s }}"{% if s == chosen.status %} selected{% endif %}>{{ s | capitalize }}</option>{% endfor %}
+    </select></p>
+  <p><label for="f-partition">Partition</label><br>
+    <input id="f-partition" name="partition" type="text" value="{{ chosen.partition }}" placeholder="date=2026-10-17"></p>
+  <p><button type="submit">Filter</button>
+    {% if chosen.status or chosen.partition %} <a class="button" href="/routes/{{ route | urlencode }}/deliveries">Clear</a>{% endif %}</p>
+</form>
+
+{% if deliveries %}
+<form method="post" action="/deliveries/preview">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="route" value="{{ route }}">
+  <input type="hidden" name="from" value="deliveries">
+  <div class="table-wrap"><table>
+    <caption class="sr-only">Deliveries to {{ route }}</caption>
+    <thead><tr><th scope="col">Pick</th><th scope="col">Partition</th><th scope="col">Status</th><th scope="col" class="num">Attempts</th><th scope="col" class="num">Applied</th><th scope="col" class="num">Rejected</th><th scope="col">Last error</th></tr></thead>
+    <tbody>
+    {% for d in deliveries %}
+      <tr>
+        <td><input type="checkbox" name="version_id" value="{{ d.version_id }}" id="pick-{{ d.version_id }}" aria-label="Pick {{ label_of(d.dataset, d.partition) }}"></td>
+        <th scope="row">{{ m.partition_label(d.dataset, d.partition) }} <span class="muted"><code>{{ d.version_id[-6:] }}</code></span></th>
+        <td>{{ m.status_badge(d.status) }}{% if d.replays %} <span class="muted">replayed {{ d.replays }}&times;</span>{% endif %}</td>
+        <td class="num">{{ d.attempts }}</td>
+        <td class="num">{{ d.rows_applied }}</td>
+        <td class="num">{{ d.rows_rejected }}</td>
+        <td>{% if d.last_error %}<span class="error-text">{{ d.last_error }}</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  <p class="actions">
+    <button type="submit" name="action" value="retry">Retry picked&hellip;</button>
+    <button type="submit" name="action" value="skip">Skip picked&hellip;</button>
+    <button type="submit" name="action" value="replay">Replay picked&hellip;</button>
+  </p>
+  <p class="muted">Retry works on failed deliveries, skip on failed or held ones, replay on the latest applied version of a partition. You see what it would touch before anything changes.</p>
+</form>
+{{ m.pagination(next_cursor) }}
+{% else %}
+<p class="empty">No deliveries match.</p>
+{% endif %}
+{% endblock %}

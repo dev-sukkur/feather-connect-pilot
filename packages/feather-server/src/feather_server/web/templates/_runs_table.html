@@ -1,0 +1,26 @@
+{% import "_macros.html" as m with context %}
+<div id="live" hx-get="{{ url() }}" hx-trigger="every 5s" hx-swap="outerHTML">
+  {% if runs %}
+  <div class="table-wrap"><table>
+    <caption class="sr-only">Runs, newest first</caption>
+    <thead><tr><th scope="col">Run</th><th scope="col">Flow</th><th scope="col">Started by</th><th scope="col">Status</th><th scope="col">Started</th><th scope="col">Took</th><th scope="col">Retries</th><th scope="col">Reason</th></tr></thead>
+    <tbody>
+    {% for run in runs %}
+      <tr>
+        <th scope="row"><a href="/runs/{{ run.run_id | urlencode }}"><code>{{ run.run_id[:8] }}</code></a></th>
+        <td><a href="/flows/{{ run.flow | urlencode }}">{{ run.flow }}</a></td>
+        <td>{{ run.trigger }} · {{ run.actor }}</td>
+        <td>{{ m.status_badge(run.status) }}</td>
+        <td>{{ m.time_ago(run.created_at) }}</td>
+        <td>{% if run.status in ("succeeded", "failed", "cancelled") %}{{ (run.updated_at - run.created_at) | span }}{% else %}<span class="muted">&ndash;</span>{% endif %}</td>
+        <td>{% if retries.get(run.run_id) %}{{ retries[run.run_id] }} task{{ "s" if retries[run.run_id] != 1 }} retried{% endif %}</td>
+        <td>{% if run.reason %}{{ run.reason }}{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {{ m.pagination(next_cursor) }}
+  {% else %}
+  <p class="empty">No runs match.</p>
+  {% endif %}
+</div>

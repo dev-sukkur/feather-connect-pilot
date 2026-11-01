@@ -19,6 +19,8 @@ M1 is too large for one plan, so it is split into six. Each one ends with softwa
 
 **Code guide.** [code-guide.html](code-guide.html) explains each code folder and file, and the remaining work.
 
+**Operating guide.** [operating-guide/index.html](operating-guide/index.html) shows how to run Feather Connect, then create, run, monitor and operate a flow.
+
 ## Build order (changed 31 Oct 2026)
 
 The sponsor wants a dashboard running on Postgres as soon as possible, to run things and watch them live. So the remaining tasks run in the stages below instead of plan by plan. The plan files still hold each task's details; `2.3` means Plan 2, Task 3. The M1 scope and exit criteria don't change, only the order. Each stage gets one review, at its end.
@@ -40,6 +42,19 @@ The sponsor wants a dashboard running on Postgres as soon as possible, to run th
 - The `sealer` loop in Task 3.1 is added in Stage 3 with Task 3.4.
 - Stage 2 also fixes a known gap: extraction must wait durably on `BudgetDeferred`, as delivery does.
 - Until Stage 3 proves it, Stage 2 isn't claimed to be crash-safe.
+
+**Open after the Stage 2 review:**
+
+| Item | What's wrong | Close in |
+|---|---|---|
+| F4 | A task running twice can overwrite or delete sealed chunks. Conditional and not reproduced. Counts as critical at the Stage 3 exit | Stage 3, with Task 2.10 |
+| F11 | The sweeper's cost grows with every delivery waiting behind a failure | Stage 3 |
+| F12 | A read needing more calls than its budget refills never finishes | Stage 3 |
+| F13 | Staged versions of failed or cancelled runs keep their day's chunks for good, and resubmit their seal every 5 s | Stage 3 |
+| F14 | Retention and sweeper reports are discarded, so nobody sees why a day was kept | Stage 3 |
+| Long test run | One pytest process running every package can hang at a random test. Each package passes in its own process. Leftover connection pools from earlier tests are the first suspect | Stage 3 |
+| Slow database | Connections slow down when other Docker containers on the machine are busy. Not reproduced otherwise, and DBOS's own connections don't have the new timeouts yet | Stage 3 |
+| Minor findings | 13 small items from the review, including trigger text such as `every 0:00:10`, navigation wrapping, and partial bulk refusals showing only in the audit row | Stage 5 |
 
 ## M1 exit criteria
 

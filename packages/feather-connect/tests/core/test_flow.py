@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfoNotFoundError
@@ -327,3 +328,28 @@ def test_the_public_api_has_what_flow_authors_import():
     ]
     assert all(name in fc.__all__ and hasattr(fc, name) for name in names)
     assert fc.strategy is strategies and fc.partition is partitions
+
+
+def test_spec_dict_describes_the_flow_as_json():
+    flow = make_flow()
+    flow.owner = "ann"
+    spec = flow.spec_dict()
+    assert json.loads(json.dumps(spec)) == spec
+    assert (spec["name"], spec["owner"]) == ("prices", "ann")
+    assert (
+        spec["datasets"][0]["key"] == ["material", "price_list"]
+        and spec["datasets"][0]["name"] == "sap.price"
+    )
+    assert spec["routes"] == [
+        {
+            "name": "zakya",
+            "connection": "zakya",
+            "connector": "memory.sink",
+            "mode": "upsert",
+            "priority": "normal",
+        }
+    ]
+    assert spec["triggers"] == [
+        {"kind": "cron", "expr": "*/15 * * * *", "tz": "Asia/Kolkata"},
+        {"kind": "manual"},
+    ]

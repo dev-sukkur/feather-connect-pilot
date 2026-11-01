@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% set ds = grid.dataset | urlencode %}
+{% block content %}
+<h1>{{ grid.dataset }} <span class="muted">partitions</span></h1>
+<p><a href="/flows/{{ flow | urlencode }}">&larr; Flow {{ flow }}</a></p>
+
+{% if notice %}<p class="notice notice-{{ notice[0] }}" role="{{ 'alert' if notice[0] == 'bad' else 'status' }}">{{ notice[1] }}</p>{% endif %}
+{% if replayed %}<p class="notice notice-ok" role="status">Replay started for {{ replayed | int }} {{ "delivery" if replayed | int == 1 else "deliveries" }}.</p>{% endif %}
+
+{% if preview %}
+{{ m.confirm_form(preview, confirm_action, url(), confirm_label) }}
+{% endif %}
+
+<form class="filters" method="get" action="/datasets/{{ ds }}/partitions">
+  <p><label for="since">Sealed since</label><br><input id="since" name="since" type="date" value="{{ since }}"></p>
+  <p><button type="submit">Filter</button>{% if since %} <a class="button" href="/datasets/{{ ds }}/partitions">Clear</a>{% endif %}</p>
+</form>
+
+{% if grid.rows %}
+<form method="post" action="/datasets/{{ ds }}/partitions/rerun/preview">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="dataset" value="{{ grid.dataset }}">
+  <p class="actions"><button type="submit" class="primary">Read the selected partitions again&hellip;</button>
+    <span class="muted">You see what it would touch before anything starts.</span></p>
+  <div class="table-wrap scroll"><table>
+    <caption>Newest first. Each cell is the latest version of the partition, on that route.</caption>
+    <thead><tr>
+      <th scope="col"><span class="visually-hidden">Select</span></th>
+      <th scope="col">Partition</th><th scope="col" class="num">Records</th><th scope="col">Sealed</th>
+      {% for route in grid.routes %}<th scope="col">{{ route }}</th>{% endfor %}
+      <th scope="col">Check</th>
+    </tr></thead>
+    <tbody>
+    {% for row in grid.rows %}
+      <tr>
+        <td><input type="checkbox" name="partition" value="{{ row.partition }}" id="p-{{ loop.index }}" aria-label="Select {{ row.label }}"></td>
+        <th scope="row"><label for="p-{{ loop.index }}" class="plain">{{ m.partition_label(grid.dataset, row.partition) }}</label></th>
+        <td class="num">{{ row.records }}</td>
+        <td>{{ m.time_ago(row.sealed_at) }}</td>
+        {% for cell in row.cells %}
+        <td class="cell">
+          {% if cell.status %}
+            <a href="/routes/{{ cell.route | urlencode }}/deliveries?partition={{ row.partition | urlencode }}" title="Show the deliveries of {{ row.label }} to {{ cell.route }}">{{ m.status_badge(cell.status) }}</a>
+            {% if cell.status == "applied" %}<button type="submit" class="link" formaction="/routes/{{ cell.route | urlencode }}/partitions/{{ row.partition | urlencode }}/replay/preview" title="Send the latest version of {{ row.label }} to {{ cell.route }} again">Replay</button>{% endif %}
+          {% else %}
+            <span class="muted" aria-hidden="true">&ndash;</span><span class="visually-hidden">No delivery</span>
+          {% endif %}
+        </td>
+        {% endfor %}
+        <td><button type="submit" class="link" formaction="/datasets/{{ ds }}/partitions/{{ row.partition | urlencode }}/verify" title="Compare {{ row.label }} with its source, changing nothing">Verify</button></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</form>
+{{ m.pagination(grid.next_cursor) }}
+{% else %}
+<p class="empty">No partitions{% if since %} sealed since {{ since }}{% endif %}.</p>
+{% endif %}
+{% endblock %}

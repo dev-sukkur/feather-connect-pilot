@@ -5,10 +5,18 @@ description = "SDK and runtime for Feather Connect, a code-first integration hub
 requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
+    "cronsim",
     "pyarrow",
     "pydantic>=2",
+    "pyyaml",
     # Windows has no system time zone database, so zoneinfo needs this package there.
     "tzdata; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+postgres = [
+    "alembic",
+    "psycopg[binary,pool]",
 ]
 
 [build-system]

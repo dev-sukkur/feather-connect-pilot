@@ -20,6 +20,8 @@ dev = [
     "ruff",
     "pyright",
     "pyarrow-stubs",
+    "types-pyyaml",
+    "httpx",
 ]
 
 [tool.ruff]
@@ -41,4 +43,7 @@ strict = ["packages/feather-connect/src"]
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
+markers = ["postgres: needs the test Postgres of deploy/compose.test.yaml"]
 timeout = 120
+# Starlette would have its test client move to a package we do not use; httpx is the one FastAPI documents.
+filterwarnings = ["ignore:Using .httpx. with .starlette.testclient.:Warning"]

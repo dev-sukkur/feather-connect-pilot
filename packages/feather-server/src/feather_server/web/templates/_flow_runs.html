@@ -1,0 +1,49 @@
+{% import "_macros.html" as m with context %}
+{% set flow = detail.summary %}
+<div id="live" hx-get="{{ path }}" hx-trigger="every 10s" hx-swap="outerHTML">
+  <section aria-labelledby="h-runs">
+    <h2 id="h-runs">Recent runs</h2>
+    {% if detail.recent_runs %}
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">Run</th><th scope="col">Started by</th><th scope="col">Status</th><th scope="col">Started</th><th scope="col">Reason</th></tr></thead>
+      <tbody>
+      {% for run in detail.recent_runs %}
+        <tr id="run-{{ run.run_id }}">
+          <th scope="row"><a href="/runs/{{ run.run_id | urlencode }}"><code>{{ run.run_id[:8] }}</code></a></th>
+          <td>{{ run.trigger }} · {{ run.actor }}</td>
+          <td>{{ m.status_badge(run.status) }}</td>
+          <td>{{ m.time_ago(run.created_at) }}</td>
+          <td>{% if run.reason %}{{ run.reason }}{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <p class="empty">This flow has not run yet.</p>
+    {% endif %}
+  </section>
+
+  <section aria-labelledby="h-versions">
+    <h2 id="h-versions">Latest versions</h2>
+    {% if detail.recent_versions %}
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">Partition</th><th scope="col">Dataset</th><th scope="col">Status</th><th scope="col" class="num">Upserts</th><th scope="col" class="num">Deletes</th><th scope="col">Sealed</th><th scope="col">Code</th></tr></thead>
+      <tbody>
+      {% for v in detail.recent_versions %}
+        <tr>
+          <th scope="row">{{ m.partition_label(v.dataset, v.partition) }}</th>
+          <td>{{ v.dataset }}</td>
+          <td>{{ m.status_badge(v.status) }}</td>
+          <td class="num">{{ v.upserts }}</td>
+          <td class="num">{{ v.deletes }}</td>
+          <td>{{ m.time_ago(v.sealed_at) }}</td>
+          <td><code>{{ v.code_sha[:8] }}</code></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <p class="empty">No data has been read yet.</p>
+    {% endif %}
+  </section>
+</div>

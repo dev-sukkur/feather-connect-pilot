@@ -4,6 +4,8 @@ Every backend must pass `feather_connect.testing.store_contract.StoreContract`. 
 dataclasses so that they pickle, which the engine needs for step results.
 """
 
+import json
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -13,6 +15,7 @@ Priority = Literal["low", "normal", "high"]
 VersionStatus = Literal["staged", "sealed"]
 DeliveryStatus = Literal["pending", "running", "applied", "failed", "held", "skipped", "compensated"]
 QuarantineStatus = Literal["open", "superseded"]
+WorkerState = Literal["alive", "draining", "dead"]
 
 
 class VersionSealed(Exception):
@@ -76,6 +79,7 @@ class TaskRow:
     error: str | None
     started_at: datetime
     finished_at: datetime | None
+    attempt: int = 1  # the attempt the task is on, or ended on: more than 1 means it was retried; `error` is the last failure
 
 
 @dataclass(frozen=True)
@@ -209,11 +213,30 @@ class RunJournal(Protocol):
         """Add a running task and return its id. A `(run_id, ref)` that exists keeps its row, whose id is returned."""
         ...
 
-    def finish_task(self, task_id: str, status: str, error: str | None = None) -> None: ...
+    def record_attempt(self, task_id: str, attempt: int, error: str) -> None:
+        """Note that the task failed and goes on to attempt number `attempt`, with the error that ended the last one.
+        `KeyError` for an unknown task."""
+        ...
+
+    def finish_task(self, task_id: str, status: str, error: str | None = None) -> None:
+        """End the task. Without an `error`, the one `record_attempt` left stays."""
+        ...
+
     def list_tasks(self, run_id: str) -> list[TaskRow]: ...
     def log(self, task_id: str, level: str, message: str) -> None: ...
     def task_logs(self, task_id: str) -> list[str]:
         """The task's log lines in order, each as `level: message`."""
+        ...
+
+    def delete_runs_before(self, cutoff: datetime) -> int:
+        """Delete the runs last changed before `cutoff`, with their tasks, logs and slices; return how many.
+
+        A run that is still going, or whose versions have a delivery that isn't closed, is kept.
+        """
+        ...
+
+    def delete_logs_before(self, cutoff: datetime) -> int:
+        """Delete the task log lines written before `cutoff`; return how many."""
         ...
 
 
@@ -274,6 +297,28 @@ class VersionStore(Protocol):
         """Newest first."""
         ...
 
+    def get_many(self, version_ids: Iterable[str]) -> list[Version]:
+        """The versions that exist, in no particular order; an unknown id is left out."""
+        ...
+
+    def runs_ready_to_seal(self) -> list[tuple[str, str]]:
+        """The `(run_id, dataset)` pairs whose slices are all finished and that still have a staged version.
+
+        Their seal task has not run to the end: it was never submitted, or it was lost.
+        """
+        ...
+
+    def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:
+        """Sealed versions sealed before `cutoff` that retention may forget, oldest first.
+
+        Not the newest sealed version of its (dataset, partition), and none that still has a delivery.
+        """
+        ...
+
+    def delete_many(self, version_ids: Iterable[str]) -> int:
+        """Delete the sealed versions' manifests, which `sealed_before` listed; return how many existed."""
+        ...
+
 
 class Ledger(Protocol):
     """One delivery per (route, version), moved only along the transitions of design section 6.5."""
@@ -317,6 +362,24 @@ class Ledger(Protocol):
 
     def all_applied(self) -> bool:
         """True when every delivery is applied, which includes there being none."""
+        ...
+
+    def pending_older_than(self, age: timedelta, *, now: datetime | None = None) -> list[Delivery]:
+        """The pending deliveries that last changed more than `age` before `now` (the store's clock by default).
+
+        In seal order. A delivery that is pending has nothing running it, or a task waiting out a retry delay.
+        """
+        ...
+
+    def open_versions(self, version_ids: Iterable[str]) -> set[str]:
+        """Those of `version_ids` with a delivery that isn't applied, skipped or compensated."""
+        ...
+
+    def delete_closed_before(self, cutoff: datetime) -> int:
+        """Delete the applied, skipped and compensated deliveries last changed before `cutoff`, with their attempts.
+
+        Return how many deliveries went.
+        """
         ...
 
 
@@ -431,6 +494,314 @@ class BudgetStore(Protocol):
 
 
 @dataclass(frozen=True)
+class FlowRow:
+    """A flow as the catalogue knows it for one code version. `spec` is `Flow.spec_dict()`."""
+
+    name: str
+    project: str
+    code_sha: str
+    spec: Mapping[str, Any]
+    registered_at: datetime
+
+
+@dataclass(frozen=True)
+class RouteRow:
+    """A route of `flow` as the catalogue knows it for one code version. `spec` is its entry in the flow's."""
+
+    name: str
+    flow: str
+    code_sha: str
+    spec: Mapping[str, Any]
+    registered_at: datetime
+
+
+@dataclass(frozen=True)
+class WorkerRow:
+    """A worker and its latest heartbeat. `state` is alive, draining (finishing its work) or dead."""
+
+    worker_id: str
+    labels: Mapping[str, str]
+    code_sha: str
+    slots: int
+    last_seen: datetime
+    state: WorkerState
+
+
+class CatalogStore(Protocol):
+    """The flows and routes registered from code. A row is kept for each code SHA (design 6.11)."""
+
+    def sync(self, project: str, code_sha: str, specs: Mapping[str, Any]) -> None:
+        """Register the flows of `project` at `code_sha`; `specs` maps each flow name to its `Flow.spec_dict()`.
+
+        Syncing a SHA again replaces its rows and makes them the latest. A flow the project had before and `specs`
+        lacks is retired, along with its routes, until a sync brings it back.
+        """
+        ...
+
+    def flows(self) -> list[FlowRow]:
+        """Return the latest registration of each flow that isn't retired, by name."""
+        ...
+
+    def flow(self, name: str, code_sha: str | None = None) -> FlowRow:
+        """Return the flow at `code_sha`, or its latest registration. Raises `KeyError` if there is none."""
+        ...
+
+    def routes(self) -> list[RouteRow]:
+        """Return the latest registration of each route that isn't retired, by name."""
+        ...
+
+
+class WorkerRegistry(Protocol):
+    """The workers that are connected, from their heartbeats (design 6.12)."""
+
+    def heartbeat(self, worker_id: str, labels: Mapping[str, str], code_sha: str, slots: int) -> None:
+        """Record that the worker is there now. A draining worker stays draining, and a dead one is alive again."""
+        ...
+
+    def list_workers(self) -> list[WorkerRow]:
+        """Return every worker, by id."""
+        ...
+
+    def stale(self, older_than: timedelta) -> list[WorkerRow]:
+        """Return the workers not marked dead whose last heartbeat is more than `older_than` ago, by id."""
+        ...
+
+    def mark(self, worker_id: str, state: WorkerState) -> None:
+        """Set the worker's state. Raises `KeyError` for a worker that never sent a heartbeat."""
+        ...
+
+
+@dataclass(frozen=True)
+class Override:
+    """An operator's setting on `target` (`flow:name` or `route:name`) that stands over the code. In M1 the only `key`
+    is `paused`."""
+
+    target: str
+    key: str
+    value: Any
+    reason: str | None
+    created_by: str
+    created_at: datetime
+    expires_at: datetime | None
+
+
+class OverrideStore(Protocol):
+    """Settings made at run time. One that has expired is gone: nothing reads it, though it may still be stored."""
+
+    def set(
+        self,
+        target: str,
+        key: str,
+        value: Any,
+        *,
+        actor: str,
+        reason: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> None:
+        """Set the override, replacing one that is there."""
+        ...
+
+    def get(self, target: str, key: str) -> Any | None:
+        """The value, or None when there is none or it has expired."""
+        ...
+
+    def claim(
+        self,
+        target: str,
+        key: str,
+        value: Any,
+        *,
+        actor: str,
+        reason: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> bool:
+        """Set the override only if none is in force, and say whether it was set. Two callers claiming the same
+        target and key at once cannot both win."""
+        ...
+
+    def list_all(self) -> list[Override]:
+        """The overrides in force, by target and key."""
+        ...
+
+    def clear(self, target: str, key: str, *, actor: str, reason: str | None = None) -> None:
+        """Remove the override. Nothing happens when there is none."""
+        ...
+
+
+def is_paused(overrides: OverrideStore, target: str) -> bool:
+    """Whether `target` (`flow:name` or `route:name`) is paused now."""
+    return bool(overrides.get(target, "paused"))
+
+
+class ScheduleStore(Protocol):
+    """When each trigger of each flow was last handled, so that a restart neither fires a tick twice nor loses it."""
+
+    def last_tick(self, flow: str, trigger_id: str) -> datetime | None:
+        """The time of the last tick handled, or None if the trigger has never been seen."""
+        ...
+
+    def set_last_tick(self, flow: str, trigger_id: str, at: datetime) -> None: ...
+
+
+@dataclass(frozen=True)
+class PartitionRow:
+    """A partition of a dataset as its latest sealed version left it: `cells` maps each route to the status of that
+    version's delivery there."""
+
+    dataset: str
+    partition: str
+    version_id: str
+    seal_seq: int
+    sealed_at: datetime
+    upserts: int
+    deletes: int
+    cells: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class FailureGroup:
+    """Failed deliveries of one route that failed with the same error. `versions` holds up to five of them."""
+
+    route: str
+    error_class: str
+    message: str
+    count: int
+    versions: tuple[str, ...]
+
+
+DEFAULT_ERROR_CLASS = (
+    "PermanentError"  # a delivery fails only on a permanent error, which stores its message alone
+)
+_CLASSED = re.compile(r"([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)): (.*)", re.DOTALL)
+
+
+def split_error(error: str | None) -> tuple[str, str]:
+    """Split a delivery's stored error into its class and its message. The class is the name before the first colon
+    when that looks like an exception, and `PermanentError` when it does not."""
+    text = error or ""
+    found = _CLASSED.fullmatch(text)
+    return (found.group(1), found.group(2)) if found else (DEFAULT_ERROR_CLASS, text)
+
+
+def failure_cursor(group: FailureGroup) -> str:
+    """The cursor that continues `ReadStore.failure_groups` after `group`."""
+    return json.dumps([group.route, group.error_class, group.message])
+
+
+class ReadStore(Protocol):
+    """Queries for the dashboard that join the ledger to versions."""
+
+    def partition_grid(
+        self, dataset: str, *, since: datetime | None = None, cursor: str | None = None, limit: int = 100
+    ) -> list[PartitionRow]:
+        """The dataset's partitions that have a sealed version, by partition name, last first. `since` keeps those
+        whose latest version was sealed then or later. `cursor` is the `partition` of the last row of the page
+        before."""
+        ...
+
+    def failure_groups(
+        self, route: str | None = None, *, limit: int = 100, cursor: str | None = None
+    ) -> list[FailureGroup]:
+        """Failed deliveries grouped by route, error class and message, in that order. Pass `failure_cursor(last)`
+        as `cursor` to continue after `last`."""
+        ...
+
+    def delivery_counts(self) -> dict[str, int]:
+        """How many deliveries there are in each status that has any."""
+        ...
+
+    def retried_tasks(self, run_ids: Sequence[str]) -> dict[str, int]:
+        """For each of the runs, how many of its tasks went beyond their first attempt. Runs with none are left out."""
+        ...
+
+    def waiting(self, route: str, partitions: Sequence[str]) -> dict[tuple[str, str], int]:
+        """For each (dataset, partition) of `partitions` on the route, how many deliveries are pending or held. Those
+        with none are left out."""
+        ...
+
+
+@dataclass(frozen=True)
+class UserRow:
+    user_id: str
+    username: str
+    password_hash: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class TokenRow:
+    """An API token as stored: the SHA-256 of the secret (hex), never the secret itself."""
+
+    token_id: str
+    name: str
+    token_hash: str
+    created_at: datetime
+    expires_at: datetime | None
+    revoked_at: datetime | None
+
+
+class DuplicateUser(Exception):
+    """A user with that name exists already."""
+
+
+class UserStore(Protocol):
+    """Local users and the API tokens they and automation use."""
+
+    def create_user(self, username: str, password_hash: str) -> str:
+        """Add the user and return the id. Raises `DuplicateUser` when the name is taken."""
+        ...
+
+    def get_user(self, username: str) -> UserRow | None: ...
+    def set_password_hash(self, username: str, password_hash: str) -> None:
+        """Give the user a new password hash. Raises `KeyError` when there is no such user."""
+        ...
+
+    def create_token(self, name: str, token_hash: str, expires_at: datetime | None) -> str:
+        """Add the token, known by the SHA-256 of its secret, and return its id."""
+        ...
+
+    def find_token(self, token_hash: str) -> TokenRow | None:
+        """The token with that hash, expired or revoked or not: the caller judges that."""
+        ...
+
+    def revoke_token(self, token_id: str) -> None:
+        """Revoke the token, from now. Revoking one twice, or one that isn't there, changes nothing."""
+        ...
+
+
+@dataclass(frozen=True)
+class AuditRow:
+    audit_id: str
+    at: datetime
+    actor_type: str  # human, token or system
+    actor: str
+    action: str
+    target: str | None
+    request: Mapping[str, Any]  # what was asked, with the reason
+    result: str
+
+
+class AuditStore(Protocol):
+    """Who did what. Rows are only added."""
+
+    def record(
+        self,
+        actor_type: str,
+        actor: str,
+        action: str,
+        target: str | None,
+        request: Mapping[str, Any],
+        result: str,
+    ) -> str:
+        """Add a row, stamped now, and return its id."""
+        ...
+
+    def list_audit(self, limit: int = 100, cursor: str | None = None) -> list[AuditRow]:
+        """Newest first. `cursor` is the `audit_id` of the last row of the previous page."""
+        ...
+
+
+@dataclass(frozen=True)
 class Store:
     """The ports together. A backend provides one of these."""
 
@@ -440,3 +811,10 @@ class Store:
     state: RecordStateStore
     quarantine: QuarantineStore
     budgets: BudgetStore
+    catalog: CatalogStore
+    workers: WorkerRegistry
+    schedules: ScheduleStore
+    overrides: OverrideStore
+    users: UserStore
+    audit: AuditStore
+    reads: ReadStore

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+<h1>Quarantine</h1>
+<p class="muted">Records a destination turned down, or that could not be read. An entry closes by itself when a later version of the record is delivered; dismiss one when you have dealt with it another way.</p>
+{% if notice %}<p class="notice notice-{{ notice[0] }}" role="{{ 'alert' if notice[0] == 'bad' else 'status' }}">{{ notice[1] }}</p>{% endif %}
+
+<form class="filters" method="get" action="/quarantine">
+  <p><label for="f-route">Route</label><br><input id="f-route" name="route" type="text" value="{{ route }}"></p>
+  <p><button type="submit">Filter</button>{% if route %} <a class="button" href="/quarantine">Clear</a>{% endif %}</p>
+</form>
+
+{% if entries %}
+{% if total > entries | length %}<p class="notice notice-warn" role="status">Showing the first {{ entries | length }} of {{ total }} entries. Filter by route to see the rest.</p>{% endif %}
+<div class="table-wrap"><table>
+  <caption class="sr-only">Open quarantine entries</caption>
+  <thead><tr><th scope="col">Record</th><th scope="col">Route</th><th scope="col">Partition</th><th scope="col">Why</th><th scope="col">Dismiss</th></tr></thead>
+  <tbody>
+  {% for entry in entries %}
+    {% set row = entry.row %}
+    <tr>
+      <th scope="row"><code>{{ row.key }}</code></th>
+      <td>{% if row.route %}<a href="/routes/{{ row.route | urlencode }}/deliveries">{{ row.route }}</a>{% else %}<span class="muted">read from the source</span>{% endif %}</td>
+      <td>{% if entry.dataset and entry.partition %}{{ m.partition_label(entry.dataset, entry.partition) }}{% else %}<span class="muted">&ndash;</span>{% endif %}</td>
+      <td><span class="error-text">{{ row.error }}</span></td>
+      <td>
+        {% if row.route and row.version_id %}
+        <form method="post" action="/quarantine/dismiss">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="route" value="{{ row.route }}">
+          <input type="hidden" name="version_id" value="{{ row.version_id }}">
+          <input type="hidden" name="key" value="{{ row.key }}">
+          <label class="sr-only" for="why-{{ loop.index }}">Reason</label>
+          <input id="why-{{ loop.index }}" name="reason" type="text" maxlength="500" placeholder="Reason">
+          <button type="submit">Dismiss</button>
+        </form>
+        {% else %}<span class="muted">closes when the record is read again</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% else %}
+<p class="empty"><span class="icon" aria-hidden="true">✓</span> No records are in quarantine{% if route %} for {{ route }}{% endif %}.</p>
+{% endif %}
+{% endblock %}

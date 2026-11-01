@@ -12,7 +12,7 @@ from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.partitions import none
 from feather_connect.core.records import Record
-from feather_connect.core.triggers import OnEvent, Trigger
+from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Trigger
 from feather_connect.storage.port import Priority
 
 Overlap = Literal["queue", "skip", "cancel_previous"]
@@ -144,11 +144,24 @@ def _route_problems(route: RouteSpec, datasets: Sequence[Dataset], path: str) ->
     return problems
 
 
+def _trigger_dict(trigger: Trigger) -> dict[str, Any]:
+    match trigger:
+        case Cron(expr, tz):
+            return {"kind": "cron", "expr": expr, "tz": tz}
+        case Every(interval):
+            return {"kind": "every", "seconds": interval.total_seconds()}
+        case Manual():
+            return {"kind": "manual"}
+        case OnEvent(dataset):
+            return {"kind": "on_event", "dataset": dataset.name}
+
+
 class Flow:
     """The deployable unit: the datasets it reads, the routes it delivers to and the triggers that start it.
 
     `overlap` says what happens when a trigger fires while the last run is still going. `catch_up` says
     what happens after downtime: `"latest"` makes one run cover the gap and `"each"` runs every missed tick.
+    `enabled` is True unless an environment's overlay turns the flow off, which leaves its triggers recording skips.
     """
 
     def __init__(
@@ -162,6 +175,7 @@ class Flow:
         tags: Sequence[str] = (),
         overlap: Overlap = "queue",
         catch_up: CatchUp = "latest",
+        enabled: bool = True,
     ) -> None:
         self.name = name
         self.datasets: list[Dataset] = [reads] if isinstance(reads, Dataset) else list(reads)
@@ -171,6 +185,46 @@ class Flow:
         self.tags = tuple(tags)
         self.overlap = overlap
         self.catch_up = catch_up
+        self.enabled = enabled
+
+    def spec_dict(self) -> dict[str, Any]:
+        """Return a description of the flow that is safe as JSON: its datasets, routes, triggers and owner.
+
+        The catalogue stores it for each code version, so it names things (connections, strategies, modes) and
+        holds no code and no secret.
+        """
+        return {
+            "name": self.name,
+            "owner": self.owner,
+            "tags": list(self.tags),
+            "overlap": self.overlap,
+            "catch_up": self.catch_up,
+            "enabled": self.enabled,
+            "datasets": [
+                {
+                    "name": d.name,
+                    "connection": d.source.connection,
+                    "connector": d.source.spec.name,
+                    "key": [d.key] if isinstance(d.key, str) else list(d.key),
+                    "strategy": d.strategy.name,
+                    "complete": d.strategy.complete,
+                    "priority": d.priority,
+                    "keep_state": d.keep_state,
+                }
+                for d in self.datasets
+            ],
+            "routes": [
+                {
+                    "name": r.name,
+                    "connection": r.sink.connection,
+                    "connector": r.sink.spec.name,
+                    "mode": r.mode,
+                    "priority": r.priority,
+                }
+                for r in self.routes
+            ],
+            "triggers": [_trigger_dict(t) for t in self.triggers],
+        }
 
     def validate(self) -> list[Problem]:
         """Return every mistake in the flow that shows without running it. A sound flow has none.

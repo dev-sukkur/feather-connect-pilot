@@ -47,10 +47,10 @@ th { font-size: .78rem; font-weight: 700; color: var(--ink-2); }
 <div class="wrap">
 <header style="display:grid;gap:.8rem">
   <h1>Feather Connect Code Guide</h1>
-  <p class="sub">What each folder and file in the core loop does, what to read first, and what is left to build. It describes <code>main</code> at commit <code>1e7d410</code>.</p>
-  <p>The core loop has 34 source files (about 6,200 lines) and 20 test files (about 5,400 lines, 561 tests passing). It runs entirely in memory. Everything lives under <code>packages/feather-connect/</code>.</p>
+  <p class="sub">What each folder and file does, what to read first, and what is left to build. It describes the <code>stage-2-dashboard</code> branch, <a href="https://github.com/dev-sukkur/feather-connect/pull/3">PR 3</a>. The sections on the core loop keep their line counts from Stage 1, so those counts are approximate now.</p>
+  <p>The project now has four packages: <code>feather-connect</code> (the SDK and runtime), <code>feather-engine-dbos</code>, <code>feather-server</code> and <code>feather-cli</code>. There are 1,068 tests. Stage 2 added about 17,700 lines, and a flow now runs on Postgres and DBOS and shows in a dashboard. Paths in the sections below are under <code>packages/feather-connect/</code>.</p>
   <nav>
-    <a href="#order">Reading order</a><a href="#flow">How a run works</a><a href="#core">core</a><a href="#runtime">runtime</a><a href="#engine">engine</a><a href="#storage">storage</a><a href="#connectors">connectors</a><a href="#testing">testing</a><a href="#top">top-level files</a><a href="#tests">tests</a><a href="#open">Known gaps</a><a href="#remaining">Remaining work</a>
+    <a href="#order">Reading order</a><a href="#stage2">New in Stage 2</a><a href="#flow">How a run works</a><a href="#core">core</a><a href="#runtime">runtime</a><a href="#engine">engine</a><a href="#storage">storage</a><a href="#connectors">connectors</a><a href="#testing">testing</a><a href="#top">top-level files</a><a href="#tests">tests</a><a href="#open">Known gaps</a><a href="#remaining">Remaining work</a>
   </nav>
 </header>
 
@@ -64,6 +64,56 @@ th { font-size: .78rem; font-weight: 700; color: var(--ink-2); }
     <li><b>Check the guarantees:</b> <code>storage/port.py</code> and <code>tests/runtime/test_seal.py</code>.</li>
   </ol>
   <p class="sub">Priority labels: <span class="p high">Read closely</span> can lose or duplicate data. <span class="p mid">Read</span> shapes the public API or later plans. <span class="p low">Skim</span> is small or support code.</p>
+</section>
+
+<section id="stage2">
+  <h2>New in Stage 2</h2>
+  <p class="sub">To run it and operate it, see the operating guide. To read the code, start with <code>worker.py</code> and <code>app.py</code>, then follow one action through <code>web/routes.py</code> into <code>services/actions.py</code>.</p>
+  <h3><code>feather-connect</code>: running for real</h3>
+  <div class="scroll"><table>
+    <tr><th>File</th><th class="n">Lines</th><th>What it does</th><th>Priority</th></tr>
+    <tr><td class="f">src/feather_connect/project.py</td><td class="n">488</td><td>Loads <code>feather.yaml</code> and <code>env/&lt;env&gt;.yaml</code>, layers them, and resolves secrets only when used.</td><td class="p high">Read</td></tr>
+    <tr><td class="f">src/feather_connect/worker.py</td><td class="n">194</td><td>The worker process: loads a project, registers its flows, heartbeats and drains on shutdown.</td><td class="p high">Read</td></tr>
+    <tr><td class="f">src/feather_connect/logs.py</td><td class="n">133</td><td>JSON logs carrying run and task ids, with secrets redacted.</td><td class="p low">Skim</td></tr>
+    <tr><td class="f">runtime/scheduler.py</td><td class="n">158</td><td>Starts runs from cron and interval triggers, and records skipped ticks with a reason.</td><td class="p high">Read</td></tr>
+    <tr><td class="f">runtime/sweeper.py</td><td class="n">107</td><td>Marks dead workers, recovers their tasks and re-submits work left behind.</td><td class="p high">Read</td></tr>
+    <tr><td class="f">runtime/retention.py</td><td class="n">125</td><td>Drops old data, keeping any day with an open delivery and each partition's latest snapshot.</td><td class="p mid">Read</td></tr>
+    <tr><td class="f">runtime/leader.py</td><td class="n">40</td><td>The lock interface that lets one server run each loop.</td><td class="p low">Skim</td></tr>
+    <tr><td class="f">storage/postgres/store.py</td><td class="n">1561</td><td>Every store interface on Postgres. The largest file in the project, so read it by section.</td><td class="p mid">Skim</td></tr>
+    <tr><td class="f">storage/postgres/spool.py</td><td class="n">178</td><td>Keeps version data as zstd Parquet in day-partitioned tables.</td><td class="p mid">Read</td></tr>
+    <tr><td class="f">storage/postgres/migrations/</td><td class="n"></td><td>The schema, in forward-only SQL migrations.</td><td class="p mid">Read</td></tr>
+    <tr><td class="f">storage/postgres/connect.py, migrate.py, leader.py, support.py</td><td class="n">197</td><td>Connection pools with their timeouts, running migrations, advisory locks, creating partitions.</td><td class="p low">Skim</td></tr>
+  </table></div>
+  <h3><code>feather-engine-dbos</code>: the durable engine</h3>
+  <div class="scroll"><table>
+    <tr><th>File</th><th class="n">Lines</th><th>What it does</th><th>Priority</th></tr>
+    <tr><td class="f">engine.py</td><td class="n">107</td><td>Submits tasks to DBOS queues, maps keys and priorities, and recovers a dead worker's tasks.</td><td class="p high">Read</td></tr>
+    <tr><td class="f">runtime.py</td><td class="n">138</td><td>The DBOS workflow that runs a task, with steps and durable retry sleeps.</td><td class="p high">Read</td></tr>
+  </table></div>
+  <h3><code>feather-server</code>: the control plane</h3>
+  <div class="scroll"><table>
+    <tr><th>File</th><th class="n">Lines</th><th>What it does</th><th>Priority</th></tr>
+    <tr><td class="f">app.py</td><td class="n">151</td><td>Builds the FastAPI app and its state, and starts the loops. Has <code>/healthz</code> and <code>/readyz</code>.</td><td class="p high">Read</td></tr>
+    <tr><td class="f">auth.py</td><td class="n">322</td><td>Users, tokens, sessions, CSRF, login throttling and security headers.</td><td class="p high">Read</td></tr>
+    <tr><td class="f">loops.py</td><td class="n">98</td><td>Runs the scheduler, sweeper and retention on threads, one leader each.</td><td class="p mid">Read</td></tr>
+    <tr><td class="f">settings.py</td><td class="n">64</td><td>Reads <code>FEATHER_*</code> environment variables.</td><td class="p low">Skim</td></tr>
+    <tr><td class="f">services/actions.py</td><td class="n">675</td><td>Every operator action, each writing an audit row. Pages call this and contain no logic of their own.</td><td class="p high">Read</td></tr>
+    <tr><td class="f">services/previews.py</td><td class="n">135</td><td>Signed, single-use confirmations for mass actions, valid for 10 minutes.</td><td class="p high">Read</td></tr>
+    <tr><td class="f">services/reads.py</td><td class="n">474</td><td>The data behind each page.</td><td class="p mid">Read</td></tr>
+    <tr><td class="f">web/routes.py</td><td class="n">938</td><td>The HTML pages and form posts.</td><td class="p mid">Skim</td></tr>
+    <tr><td class="f">web/templates/, web/static/</td><td class="n"></td><td>Jinja2 templates, one CSS file and vendored HTMX. No Node toolchain.</td><td class="p low">Skim</td></tr>
+    <tr><td class="f">web/charts.py, web/flow_graph.py</td><td class="n">149</td><td>Sparklines and flow diagrams as inline SVG.</td><td class="p low">Skim</td></tr>
+    <tr><td class="f">testing.py</td><td class="n">160</td><td>Builds an in-memory server for tests.</td><td class="p low">Skim</td></tr>
+  </table></div>
+  <h3><code>feather-cli</code>: the <code>feather</code> command</h3>
+  <div class="scroll"><table>
+    <tr><th>File</th><th class="n">Lines</th><th>What it does</th><th>Priority</th></tr>
+    <tr><td class="f">commands/dev.py</td><td class="n">450</td><td><code>feather dev</code>: starts Postgres, migrates, runs the server and worker, reloads on edits.</td><td class="p high">Read</td></tr>
+    <tr><td class="f">commands/processes.py</td><td class="n">199</td><td><code>feather server</code>, <code>migrate</code>, <code>create-user</code>, <code>create-token</code>, <code>worker</code>.</td><td class="p mid">Read</td></tr>
+    <tr><td class="f">commands/validate.py</td><td class="n">56</td><td><code>feather validate</code>.</td><td class="p low">Skim</td></tr>
+    <tr><td class="f">main.py, options.py, output.py</td><td class="n">88</td><td>The command tree, shared options and JSON or plain output.</td><td class="p low">Skim</td></tr>
+  </table></div>
+  <p class="sub">Also new: <code>examples/demo/</code> (the demo shop), <code>deploy/compose.test.yaml</code> (the test Postgres), and <code>tests/e2e/</code> and <code>tests/dev/</code> (real workers and full stacks).</p>
 </section>
 
 <section id="flow">
@@ -124,7 +174,7 @@ th { font-size: .78rem; font-weight: 700; color: var(--ink-2); }
 
 <section id="storage">
   <h2><code>src/feather_connect/storage/</code></h2>
-  <p class="sub">The run journal, versions, delivery ledger, record state, quarantine, budgets and spool. Only memory versions exist so far. Postgres comes in Plan 2.</p>
+  <p class="sub">The run journal, versions, delivery ledger, record state, quarantine, budgets and spool. The Postgres versions are listed under New in Stage 2.</p>
   <div class="scroll"><table>
     <tr><th>File</th><th class="n">Lines</th><th>What it does</th><th>Priority</th></tr>
     <tr><td class="f">port.py</td><td class="n">442</td><td>The store interfaces and the table of legal delivery state changes.<span class="names">RunJournal, VersionStore, Ledger, RecordStateStore, QuarantineStore, BudgetStore, Version, Delivery, check_transition</span></td><td class="p high">Read closely</td></tr>
@@ -163,7 +213,7 @@ th { font-size: .78rem; font-weight: 700; color: var(--ink-2); }
     <tr><td class="f">src/feather_connect/clock.py</td><td class="n">33</td><td>Time sources, so tests can control time.<span class="names">Clock, SystemClock, FrozenClock</span></td><td class="p low">Skim</td></tr>
     <tr><td class="f">src/feather_connect/ids.py</td><td class="n">45</td><td>New ids, and ids that come out the same every time.<span class="names">new_id, stable_id</span></td><td class="p low">Skim</td></tr>
     <tr><td class="f">pyproject.toml (root and package)</td><td class="n"></td><td>The uv workspace, dependencies, and ruff, pyright and pytest settings.</td><td class="p low">Skim</td></tr>
-    <tr><td class="f">.github/workflows/ci.yml</td><td class="n"></td><td>Checks for Linux and Windows. It has never run, because nothing is pushed.</td><td class="p low">Skim</td></tr>
+    <tr><td class="f">.github/workflows/ci.yml</td><td class="n"></td><td>Lint, types and SDK tests on Linux and Windows, and a Linux job with Postgres that runs every package.</td><td class="p low">Skim</td></tr>
   </table></div>
 </section>
 
@@ -187,26 +237,26 @@ th { font-size: .78rem; font-weight: 700; color: var(--ink-2); }
 </section>
 
 <section id="open">
-  <h2>Known gaps in the core loop</h2>
+  <h2>Known gaps</h2>
   <ul>
-    <li><b>Skipped reviews:</b> Task 14 (<code>budgets.py</code> and its store code) and the overall core-loop review haven't run, to save tokens.</li>
-    <li><b>Budget wait in extraction:</b> a metered source that stays out of budget for 60 s or more fails its extract task. Delivery waits correctly. Stage 2 fixes this.</li>
+    <li><b>Crash safety isn't proved yet.</b> Stage 3 proves it. Review finding F4, where a task running twice could overwrite sealed chunks, must close first.</li>
+    <li><b>Other open review findings:</b> F11 to F14, and 13 minor items, are listed under &ldquo;Open after the Stage 2 review&rdquo; in <code>docs/04-plan/README.md</code>.</li>
+    <li><b>One long test run on Windows:</b> a single pytest process running every package can hang at a random test. Each package passes on its own, and the same run passed on Linux in CI.</li>
+    <li><b>Slow database when the machine is busy:</b> other busy Docker containers slow it down. DBOS's own connections don't have the new timeouts yet.</li>
     <li><b>Moves without <code>keep_state</code>:</b> a record moving between slices read in separate runs can be deleted at the destination. <code>Flow.validate</code> warns about this.</li>
     <li><b>Multi-chunk replace:</b> a sink rejection partway through can leave the destination partial. The delivery fails and says so.</li>
     <li><b>Source with a key in two slices:</b> with <code>keep_state</code>, it re-sends every run. M2 must guard this before side-effect routes.</li>
-    <li><b>CI:</b> it has never run.</li>
   </ul>
-  <p class="sub">Smaller deferred items are in the local ledger, <code>.superpowers/sdd/m1-01-core-loop/progress.md</code>.</p>
 </section>
 
 <section id="remaining">
   <h2>Remaining work</h2>
-  <p>The remaining work now runs in stages, so a dashboard you can run on Postgres comes first. The M1 scope and exit criteria are unchanged. Stage 1 is <span class="done">done</span>, and each remaining stage gets one review at its end. Task details are in <code>docs/04-plan/</code>, where <code>2.3</code> means Plan 2, Task 3.</p>
+  <p>The remaining work runs in stages. Stages 1 and 2 are built, with Stage 2 in review as <a href="https://github.com/dev-sukkur/feather-connect/pull/3">PR 3</a>. Each remaining stage gets one review, at its end.</p>
   <div class="scroll"><table>
     <tr><th>Stage</th><th class="n">Tasks</th><th>What gets built</th><th>What you can do afterwards</th></tr>
     <tr><td><b>1. Core loop</b> <span class="done">Done</span></td><td class="n">14</td><td>SDK, data model, runtime and test harness, in memory</td><td>Write a flow and test it with no database</td></tr>
-    <tr><td><b>2. Runnable dashboard</b> (next)</td><td class="n">24</td><td>Postgres schema, store, spool and budgets; project and secrets loader; DBOS engine; worker and sweeper; server, scheduler, pause and resume; logs, sign-in and service layer; HTML dashboard (overview, flows, partition grid, runs, failures, connections); CLI basics, <code>feather dev</code> and a simulated demo. Also makes extraction wait when a budget runs out.<span class="names">2.1–2.6, 2.8, 2.9, 3.1, 3.2, 3.6, 5.1–5.3, 5.5–5.10, 6.1, 6.5, 6.7, demo task</span></td><td>Start everything with one command, watch runs live, and retry, replay, pause and re-run from the browser. Simulated data only, and crash safety isn't proven yet</td></tr>
-    <tr><td><b>3. Reliability and live events</b></td><td class="n">6</td><td>Engine conformance suite, crash and speed tests, webhook endpoint and inbox, sealer, pollers, latency tests<span class="names">2.7, 2.10, 3.3, 3.4, 3.5, 3.7</span></td><td>Kill -9 a worker with nothing lost or duplicated, and get webhooks to destinations in seconds</td></tr>
+    <tr><td><b>2. Runnable dashboard</b> <span class="done">Built, in review</span></td><td class="n">24</td><td>Postgres schema, store, spool and budgets; project and secrets loader; DBOS engine; worker and sweeper; server, scheduler, pause and resume; logs, sign-in and service layer; HTML dashboard (overview, flows, partition grid, runs, failures, connections); CLI basics, <code>feather dev</code> and a simulated demo. Also makes extraction wait when a budget runs out.<span class="names">2.1–2.6, 2.8, 2.9, 3.1, 3.2, 3.6, 5.1–5.3, 5.5–5.10, 6.1, 6.5, 6.7, demo task</span></td><td>Start everything with one command, watch runs live, and retry, replay, pause and re-run from the browser. Simulated data only, and crash safety isn't proven yet</td></tr>
+    <tr><td><b>3. Reliability and live events</b> (next)</td><td class="n">6</td><td>Engine conformance suite, crash and speed tests, webhook endpoint and inbox, sealer, pollers, latency tests<span class="names">2.7, 2.10, 3.3, 3.4, 3.5, 3.7</span></td><td>Kill -9 a worker with nothing lost or duplicated, and get webhooks to destinations in seconds</td></tr>
     <tr><td><b>4. Connectors</b></td><td class="n">9</td><td>Conformance kit, shared HTTP client, Postgres, S3, REST, GraphQL, webhook and HTTP, DuckDB and MotherDuck, five templates<span class="names">4.1–4.9</span></td><td>Run real integrations from templates</td></tr>
     <tr><td><b>5. API, packaging and M1 exit</b></td><td class="n">9</td><td>JSON API, browser and accessibility tests, the rest of the CLI and scaffolding, images and Compose, full demo, hard-case tests, exit report<span class="names">5.4, 5.11, 6.1 (describe), 6.2–6.4, 6.6, 6.8, 6.9</span></td><td>Run the full demo in under 5 minutes, and prove the M1 exit criteria</td></tr>
   </table></div>
@@ -216,6 +266,6 @@ th { font-size: .78rem; font-weight: 700; color: var(--ink-2); }
     <li><b>Your actions:</b> ask GoFrugal for API docs and a sandbox. Choose the GitHub organisation and PyPI name. Name the maintainers. Confirm 14-day spool retention.</li>
     <li><b>After M1:</b> M2 adds business connectors (SAP, Zakya, Magento, GoFrugal), on-prem agents, approvals, RBAC, MCP and alerts. M3 adds multi-tenancy, SSO and the v1.0 release.</li>
   </ul>
-  <p class="sub">Cost note: Stage 1 reviewed every task, and that used a lot of tokens. The remaining stages get one review each, which costs less but catches problems later. Stage 2 is still a big piece of work at 24 tasks.</p>
+  <p class="sub">Stage 2 had one review at its end: 0 critical, 15 important, 13 minor. Ten of the important ones were fixed before the PR.</p>
 </section>
 </div>

@@ -1,0 +1,27 @@
+{% import "_macros.html" as m with context %}
+<div id="live" hx-get="{{ url() }}" hx-trigger="every 10s" hx-swap="outerHTML">
+  {% if flows %}
+  <div class="table-wrap"><table>
+    <thead><tr>
+      <th scope="col">Flow</th><th scope="col">Status</th><th scope="col">Last run</th><th scope="col">Data fresh</th>
+      <th scope="col">Owner</th><th scope="col">Tags</th><th scope="col">Starts</th><th scope="col">Code</th>
+    </tr></thead>
+    <tbody>
+    {% for flow in flows %}
+      <tr>
+        <th scope="row"><a href="/flows/{{ flow.name | urlencode }}">{{ flow.name }}</a></th>
+        <td>{{ m.status_badge(state_of(flow)) }}</td>
+        <td>{% if flow.last_run %}{{ m.time_ago(flow.last_run.created_at) }}{% else %}<span class="muted">never</span>{% endif %}</td>
+        <td>{{ m.time_ago(flow.last_sealed_at) }}</td>
+        <td>{% if flow.owner %}{{ flow.owner }}{% else %}<span class="muted">none</span>{% endif %}</td>
+        <td><span class="tags">{% for tag in flow.tags %}<span class="tag">{{ tag }}</span>{% endfor %}</span></td>
+        <td>{{ flow.triggers | join(", ") }}</td>
+        <td><code>{{ sha }}</code></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}
+  <p class="empty">No flows match.</p>
+  {% endif %}
+</div>

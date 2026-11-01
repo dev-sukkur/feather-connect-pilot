@@ -22,8 +22,8 @@ class TestMemoryStore(StoreContract):
         return MemoryStore(clock)
 
     @pytest.fixture
-    def spool(self) -> Spool:
-        return MemorySpool()
+    def spool(self, clock: FrozenClock) -> Spool:
+        return MemorySpool(clock)
 
 
 def test_chunks_with_empty_objects_survive_a_parquet_write_with_zstd():
