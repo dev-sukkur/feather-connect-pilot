@@ -1,0 +1,16 @@
+{
+  "version_id": "XYEIV7U4VSM7EWS2IMYOVTWKDF",
+  "dataset": "erp.price",
+  "partition": "store_id=1509/date=2026-10-18",
+  "run_id": "01JD0000000000000000000000",
+  "complete": true,
+  "upserts": 2,
+  "deletes": 1,
+  "content_hash": "0c2f9e69669105b1d6373631079188fd",
+  "schema_hash": null,
+  "watermark": null,
+  "code_sha": "abc1234",
+  "status": "sealed",
+  "seal_seq": 42,
+  "sealed_at": "2026-10-18T10:00:00+00:00"
+}

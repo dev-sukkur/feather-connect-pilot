@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "feather-connect/0.1/delivery.schema.json",
+  "title": "Delivery",
+  "description": "The ledger row of one (route, version).",
+  "type": "object",
+  "required": ["route", "version_id", "dataset", "partition", "seal_seq", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "route": { "type": "string", "minLength": 1 },
+    "version_id": { "type": "string", "pattern": "^[A-Z2-7]{26}$" },
+    "dataset": { "type": "string", "minLength": 1 },
+    "partition": { "type": "string", "minLength": 1 },
+    "seal_seq": { "type": "integer", "minimum": 1 },
+    "status": { "enum": ["pending", "running", "applied", "failed", "held", "skipped", "compensated"] },
+    "attempts": { "type": "integer", "minimum": 0, "description": "The times it started running." },
+    "last_error": { "type": ["string", "null"] },
+    "rows_applied": { "type": "integer", "minimum": 0 },
+    "rows_rejected": { "type": "integer", "minimum": 0 },
+    "replays": { "type": "integer", "minimum": 0 },
+    "retries": { "type": "integer", "minimum": 0 }
+  }
+}

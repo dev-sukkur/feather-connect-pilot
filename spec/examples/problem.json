@@ -1,0 +1,7 @@
+{
+  "severity": "error",
+  "code": "mode_unsupported",
+  "message": "route 'shop': example.shop.prices can't apply in mode 'append'",
+  "path": "deliver[0].mode",
+  "hint": "use one of: upsert"
+}

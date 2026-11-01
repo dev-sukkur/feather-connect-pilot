@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "feather-connect/0.1/problem.schema.json",
+  "title": "Validation problem",
+  "description": "Something wrong with a flow that shows without running it.",
+  "type": "object",
+  "required": ["severity", "code", "message", "path", "hint"],
+  "additionalProperties": false,
+  "properties": {
+    "severity": { "enum": ["error", "warning"] },
+    "code": { "type": "string", "minLength": 1 },
+    "message": { "type": "string" },
+    "path": { "type": "string", "description": "Where, in terms of the flow description, such as deliver[0].mode." },
+    "hint": { "type": "string", "description": "What to do about it." }
+  }
+}

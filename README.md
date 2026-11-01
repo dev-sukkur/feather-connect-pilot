@@ -10,3 +10,5 @@ An open-source, code-first integration hub covering near-real-time one-to-many d
 - **Runs anywhere:** `feather dev` on a laptop; Docker Compose with Postgres as the only required database.
 - **Environments and tenants:** dev, qa, uat and prod; multi-tenant; an MCP server for AI agents.
 - **Licence:** MIT.
+
+The model is also published as a language-neutral [open specification](spec/README.md), with JSON Schemas and conformance vectors.

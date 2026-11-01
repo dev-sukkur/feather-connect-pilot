@@ -13,6 +13,8 @@ The project follows an SDLC flow. Each phase ends at a review gate, and the next
 | 6. Test and release | `06-release/` (to be written) | Not started | Release checklist; go/no-go |
 | 7. Operate | `07-operate/` runbooks (to be written) | Not started | — |
 
+The [open specification](../spec/README.md) is the shareable part of the design: the model and contracts, without the project's business context or technology choices. The code is tested against it.
+
 ## How to review
 
 1. Read discovery §1–§3 (summary, problem, goals) and §11 (decisions). Then check the scope in §5 and the requirements in §7.

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "feather-connect/0.1/connector-spec.schema.json",
+  "title": "Connector spec",
+  "description": "What a connector declares about itself, so that a flow can be checked against it before it runs.",
+  "type": "object",
+  "required": ["name"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string", "minLength": 1 },
+    "config": { "type": "object", "description": "A JSON Schema for the connection's settings." },
+    "strategies": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 },
+      "description": "The strategies a source can serve. Empty for a sink."
+    },
+    "modes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["upsert", "append", "replace_partition", "side_effect"] },
+      "default": ["upsert"],
+      "description": "The route modes a sink can apply."
+    },
+    "deletes": { "type": "string", "default": "none", "description": "How the connector reports deleted records." },
+    "cost": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0 },
+      "description": "Budget units used by each kind of call."
+    }
+  }
+}

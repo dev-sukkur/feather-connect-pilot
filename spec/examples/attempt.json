@@ -1,0 +1,13 @@
+{
+  "route": "shop",
+  "version_id": "XYEIV7U4VSM7EWS2IMYOVTWKDF",
+  "from_status": "running",
+  "to_status": "applied",
+  "actor": "system",
+  "reason": null,
+  "error": null,
+  "rows_applied": 3,
+  "rows_rejected": 0,
+  "code_sha": "abc1234",
+  "at": "2026-10-18T10:00:02+00:00"
+}

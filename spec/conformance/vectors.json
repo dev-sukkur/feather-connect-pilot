@@ -1,0 +1,1314 @@
+{
+ "spec_version": "0.1.0-draft",
+ "notes": "Tagged inputs: $date, $datetime, $decimal, $bytes (base64) and $float (non-finite) stand for values that JSON can't hold. 64-bit hashes are decimal strings, so no reader loses precision. A null expected value means the input is an error.",
+ "canonical_json": [
+  {
+   "input": null,
+   "expected": "null"
+  },
+  {
+   "input": true,
+   "expected": "true"
+  },
+  {
+   "input": false,
+   "expected": "false"
+  },
+  {
+   "input": 0,
+   "expected": "0"
+  },
+  {
+   "input": -1,
+   "expected": "-1"
+  },
+  {
+   "input": 18446744073709551616,
+   "expected": "18446744073709551616"
+  },
+  {
+   "input": 1.0,
+   "expected": "1.0"
+  },
+  {
+   "input": 0.1,
+   "expected": "0.1"
+  },
+  {
+   "input": 1e+16,
+   "expected": "1e+16"
+  },
+  {
+   "input": 1000000000000000.0,
+   "expected": "1000000000000000.0"
+  },
+  {
+   "input": 1.5e-05,
+   "expected": "1.5e-05"
+  },
+  {
+   "input": 0.0001,
+   "expected": "0.0001"
+  },
+  {
+   "input": 1e+100,
+   "expected": "1e+100"
+  },
+  {
+   "input": -0.0,
+   "expected": "-0.0"
+  },
+  {
+   "input": 123456789.125,
+   "expected": "123456789.125"
+  },
+  {
+   "input": "",
+   "expected": "\"\""
+  },
+  {
+   "input": "plain",
+   "expected": "\"plain\""
+  },
+  {
+   "input": "quo\"te",
+   "expected": "\"quo\\\"te\""
+  },
+  {
+   "input": "back\\slash",
+   "expected": "\"back\\\\slash\""
+  },
+  {
+   "input": "a/b",
+   "expected": "\"a/b\""
+  },
+  {
+   "input": "tab\tnl\ncr\rbs\bff\f",
+   "expected": "\"tab\\tnl\\ncr\\rbs\\bff\\f\""
+  },
+  {
+   "input": "\u0001\u007f",
+   "expected": "\"\\u0001\\u007f\""
+  },
+  {
+   "input": "\u00e9",
+   "expected": "\"\\u00e9\""
+  },
+  {
+   "input": "\u65e5\u672c",
+   "expected": "\"\\u65e5\\u672c\""
+  },
+  {
+   "input": "\ud83d\ude00",
+   "expected": "\"\\ud83d\\ude00\""
+  },
+  {
+   "input": [],
+   "expected": "[]"
+  },
+  {
+   "input": {},
+   "expected": "{}"
+  },
+  {
+   "input": [
+    1,
+    [
+     2,
+     [
+      3
+     ]
+    ]
+   ],
+   "expected": "[1,[2,[3]]]"
+  },
+  {
+   "input": {
+    "b": 1,
+    "a": 2
+   },
+   "expected": "{\"a\":2,\"b\":1}"
+  },
+  {
+   "input": {
+    "\u00e9": 1,
+    "z": 2,
+    "\ud83d\ude00": 3,
+    "\uffff": 4
+   },
+   "expected": "{\"z\":2,\"\\u00e9\":1,\"\\uffff\":4,\"\\ud83d\\ude00\":3}"
+  },
+  {
+   "input": {
+    "a": {
+     "d": 1,
+     "c": [
+      {
+       "f": 1,
+       "e": 2
+      }
+     ]
+    }
+   },
+   "expected": "{\"a\":{\"c\":[{\"e\":2,\"f\":1}],\"d\":1}}"
+  },
+  {
+   "input": {
+    "$date": "2026-10-18"
+   },
+   "expected": "\"2026-10-18\""
+  },
+  {
+   "input": {
+    "$datetime": "2026-10-18T10:00:00+05:30"
+   },
+   "expected": "\"2026-10-18T04:30:00+00:00\""
+  },
+  {
+   "input": {
+    "$datetime": "2026-10-18T10:00:00.5+00:00"
+   },
+   "expected": "\"2026-10-18T10:00:00.500000+00:00\""
+  },
+  {
+   "input": {
+    "$datetime": "2026-10-18T10:00:00"
+   },
+   "expected": "\"2026-10-18T10:00:00\""
+  },
+  {
+   "input": {
+    "$decimal": "1.50"
+   },
+   "expected": "\"1.50\""
+  },
+  {
+   "input": {
+    "$decimal": "1.5"
+   },
+   "expected": "\"1.5\""
+  },
+  {
+   "input": {
+    "$decimal": "1E+3"
+   },
+   "expected": "\"1E+3\""
+  },
+  {
+   "input": {
+    "$bytes": "AAEC/w=="
+   },
+   "expected": "\"AAEC/w==\""
+  },
+  {
+   "input": {
+    "$float": "NaN"
+   },
+   "expected": "NaN"
+  },
+  {
+   "input": {
+    "$float": "Infinity"
+   },
+   "expected": "Infinity"
+  },
+  {
+   "input": {
+    "$float": "-Infinity"
+   },
+   "expected": "-Infinity"
+  }
+ ],
+ "row_hash": [
+  {
+   "payload": {},
+   "expected": "137279666008780115"
+  },
+  {
+   "payload": {
+    "a": 1
+   },
+   "expected": "2273192342946969294"
+  },
+  {
+   "payload": {
+    "material": "M1",
+    "price_list": "RET",
+    "amount": 499.0
+   },
+   "expected": "9830497541863870962"
+  },
+  {
+   "payload": {
+    "b": 2,
+    "a": 1
+   },
+   "expected": "4395664687578965830"
+  },
+  {
+   "payload": {
+    "a": 1,
+    "b": 2
+   },
+   "expected": "4395664687578965830"
+  },
+  {
+   "payload": {
+    "name": "\u65e5\u672c",
+    "nested": {
+     "x": [
+      1,
+      2,
+      null
+     ]
+    }
+   },
+   "expected": "4458996060441735018"
+  },
+  {
+   "payload": {
+    "amount": {
+     "$decimal": "10.00"
+    },
+    "day": {
+     "$date": "2026-10-18"
+    },
+    "at": {
+     "$datetime": "2026-10-18T10:00:00+05:30"
+    }
+   },
+   "expected": "9364608819154158205"
+  }
+ ],
+ "record_key": [
+  {
+   "payload": {
+    "id": "A"
+   },
+   "key": "id",
+   "expected": "A"
+  },
+  {
+   "payload": {
+    "id": 7
+   },
+   "key": "id",
+   "expected": "7"
+  },
+  {
+   "payload": {
+    "a": "M1",
+    "b": "RET"
+   },
+   "key": [
+    "a",
+    "b"
+   ],
+   "expected": "[\"M1\",\"RET\"]"
+  },
+  {
+   "payload": {
+    "a": 1,
+    "b": "\u00e9"
+   },
+   "key": [
+    "b",
+    "a"
+   ],
+   "expected": "[\"\\u00e9\",1]"
+  },
+  {
+   "payload": {
+    "a": "x"
+   },
+   "key": "b",
+   "expected": null
+  },
+  {
+   "payload": {
+    "a": null
+   },
+   "key": "a",
+   "expected": null
+  },
+  {
+   "payload": {
+    "a": 1
+   },
+   "key": [
+    "a",
+    "b"
+   ],
+   "expected": null
+  }
+ ],
+ "stable_id": [
+  {
+   "parts": [],
+   "expected": "PBVAF52CAFMQHRWG7WCSKUWSOK"
+  },
+  {
+   "parts": [
+    ""
+   ],
+   "expected": "JAVOLIU7X2CWY4TS6IDRXCYPAN"
+  },
+  {
+   "parts": [
+    "a"
+   ],
+   "expected": "53C3E7LIX7UCZE5RWKX3IIFRYH"
+  },
+  {
+   "parts": [
+    "ab",
+    "c"
+   ],
+   "expected": "OAGHX54QUQNGDNB6HWLMXKRIJD"
+  },
+  {
+   "parts": [
+    "a",
+    "bc"
+   ],
+   "expected": "VGAG7CMCZHDXS4T4XVCUL7LMVF"
+  },
+  {
+   "parts": [
+    "run1",
+    "erp.price",
+    "_"
+   ],
+   "expected": "4UVYOSLRPOLL3U6RAXFC4OFVXA"
+  },
+  {
+   "parts": [
+    "01JD0000000000000000000000",
+    "sales.invoice",
+    "store_id=1509/date=2026-10-18"
+   ],
+   "expected": "KZAUYECEJI7RGLXLD6UYDB7GRP"
+  },
+  {
+   "parts": [
+    "\u65e5\u672c",
+    "\ud83d\ude00"
+   ],
+   "expected": "VKFU7S6WYL3FH7I4UD5AFLYDSK"
+  }
+ ],
+ "content_hash": [
+  {
+   "items": [],
+   "expected": "7ebb3c7c2a87b1a2f8a7ed729ecb040d"
+  },
+  {
+   "items": [
+    [
+     "k1",
+     "upsert",
+     "5"
+    ]
+   ],
+   "expected": "a0874bb1bbb076fe9be4efe2a9d3c5eb"
+  },
+  {
+   "items": [
+    [
+     "k2",
+     "upsert",
+     "7"
+    ],
+    [
+     "k1",
+     "upsert",
+     "5"
+    ],
+    [
+     "k0",
+     "delete",
+     "9223372036854775809"
+    ]
+   ],
+   "expected": "0c2f9e69669105b1d6373631079188fd"
+  },
+  {
+   "items": [
+    [
+     "a",
+     "delete",
+     "9"
+    ],
+    [
+     "a",
+     "upsert",
+     "9"
+    ]
+   ],
+   "expected": "1a07e163c6a56237cfe378c0d7c04393"
+  }
+ ],
+ "partition_key": [
+  {
+   "scheme": {
+    "kind": "none"
+   },
+   "payload": {
+    "a": 1
+   },
+   "key": "_",
+   "label": "All"
+  },
+  {
+   "scheme": {
+    "kind": "by_day",
+    "field": "date",
+    "tz": "Asia/Kolkata"
+   },
+   "payload": {
+    "date": "2026-10-18"
+   },
+   "key": "date=2026-10-18",
+   "label": "18 Oct 2026"
+  },
+  {
+   "scheme": {
+    "kind": "by_day",
+    "field": "date",
+    "tz": "Asia/Kolkata"
+   },
+   "payload": {
+    "date": {
+     "$date": "2026-10-18"
+    }
+   },
+   "key": "date=2026-10-18",
+   "label": "18 Oct 2026"
+  },
+  {
+   "scheme": {
+    "kind": "by_day",
+    "field": "date",
+    "tz": "Asia/Kolkata"
+   },
+   "payload": {
+    "date": "2026-10-18T20:00:00+00:00"
+   },
+   "key": "date=2026-10-19",
+   "label": "19 Oct 2026"
+  },
+  {
+   "scheme": {
+    "kind": "by_day",
+    "field": "date",
+    "tz": "Asia/Kolkata"
+   },
+   "payload": {
+    "date": "2026-10-18T20:00:00"
+   },
+   "key": "date=2026-10-18",
+   "label": "18 Oct 2026"
+  },
+  {
+   "scheme": {
+    "kind": "by_day",
+    "field": "date",
+    "tz": "Asia/Kolkata"
+   },
+   "payload": {
+    "date": {
+     "$datetime": "2026-10-18T18:29:59+00:00"
+    }
+   },
+   "key": "date=2026-10-18",
+   "label": "18 Oct 2026"
+  },
+  {
+   "scheme": {
+    "kind": "by_day",
+    "field": "date",
+    "tz": "Asia/Kolkata"
+   },
+   "payload": {
+    "date": "not a date"
+   },
+   "key": null,
+   "label": null
+  },
+  {
+   "scheme": {
+    "kind": "by_day",
+    "field": "date",
+    "tz": "Asia/Kolkata"
+   },
+   "payload": {},
+   "key": null,
+   "label": null
+  },
+  {
+   "scheme": {
+    "kind": "by_month",
+    "field": "date",
+    "tz": "UTC"
+   },
+   "payload": {
+    "date": "2026-12-31"
+   },
+   "key": "date=2026-12",
+   "label": "Dec 2026"
+  },
+  {
+   "scheme": {
+    "kind": "by_bucket",
+    "field": "id",
+    "n": 8
+   },
+   "payload": {
+    "id": "A"
+   },
+   "key": "bucket=4",
+   "label": "Bucket 4"
+  },
+  {
+   "scheme": {
+    "kind": "by_bucket",
+    "field": "id",
+    "n": 8
+   },
+   "payload": {
+    "id": 7
+   },
+   "key": "bucket=2",
+   "label": "Bucket 2"
+  },
+  {
+   "scheme": {
+    "kind": "by_bucket",
+    "field": "id",
+    "n": 8
+   },
+   "payload": {
+    "id": "\u65e5\u672c"
+   },
+   "key": "bucket=1",
+   "label": "Bucket 1"
+  },
+  {
+   "scheme": {
+    "kind": "by_bucket",
+    "field": "id",
+    "n": 8
+   },
+   "payload": {},
+   "key": null,
+   "label": null
+  },
+  {
+   "scheme": {
+    "kind": "by_fields",
+    "parts": [
+     "store_id",
+     {
+      "kind": "by_day",
+      "field": "date",
+      "tz": "Asia/Kolkata"
+     }
+    ]
+   },
+   "payload": {
+    "store_id": 1509,
+    "date": "2026-10-18"
+   },
+   "key": "store_id=1509/date=2026-10-18",
+   "label": "Store 1509 \u00b7 18 Oct 2026"
+  },
+  {
+   "scheme": {
+    "kind": "by_fields",
+    "parts": [
+     "store_id",
+     {
+      "kind": "by_day",
+      "field": "date",
+      "tz": "Asia/Kolkata"
+     }
+    ]
+   },
+   "payload": {
+    "store_id": "a/b%c",
+    "date": "2026-10-18"
+   },
+   "key": "store_id=a%2Fb%25c/date=2026-10-18",
+   "label": "Store a/b%c \u00b7 18 Oct 2026"
+  },
+  {
+   "scheme": {
+    "kind": "by_fields",
+    "parts": [
+     "store_id",
+     {
+      "kind": "by_day",
+      "field": "date",
+      "tz": "Asia/Kolkata"
+     }
+    ]
+   },
+   "payload": {
+    "date": "2026-10-18"
+   },
+   "key": null,
+   "label": null
+  }
+ ],
+ "partition_window": [
+  {
+   "scheme": {
+    "kind": "none"
+   },
+   "now": "2026-01-01T00:00:00+00:00",
+   "expected": [
+    "_"
+   ]
+  },
+  {
+   "scheme": {
+    "kind": "by_day",
+    "field": "date",
+    "tz": "Asia/Kolkata"
+   },
+   "now": "2026-10-18T20:00:00+00:00",
+   "expected": [
+    "date=2026-10-18",
+    "date=2026-10-19"
+   ]
+  },
+  {
+   "scheme": {
+    "kind": "by_month",
+    "field": "date",
+    "tz": "UTC"
+   },
+   "now": "2026-01-15T00:00:00+00:00",
+   "expected": [
+    "date=2025-12",
+    "date=2026-01"
+   ]
+  },
+  {
+   "scheme": {
+    "kind": "by_bucket",
+    "field": "id",
+    "n": 2
+   },
+   "now": "2026-01-01T00:00:00+00:00",
+   "expected": [
+    "bucket=0",
+    "bucket=1"
+   ]
+  },
+  {
+   "scheme": {
+    "kind": "by_fields",
+    "parts": [
+     "store_id",
+     {
+      "kind": "by_day",
+      "field": "date",
+      "tz": "Asia/Kolkata"
+     }
+    ]
+   },
+   "now": "2026-01-01T00:00:00+00:00",
+   "expected": null
+  },
+  {
+   "scheme": {
+    "kind": "by_fields",
+    "parts": [
+     {
+      "kind": "by_bucket",
+      "field": "id",
+      "n": 2
+     },
+     {
+      "kind": "by_day",
+      "field": "date",
+      "tz": "Asia/Kolkata"
+     }
+    ]
+   },
+   "now": "2026-01-01T00:00:00+00:00",
+   "expected": [
+    "bucket=0/date=2025-12-31",
+    "bucket=0/date=2026-01-01",
+    "bucket=1/date=2025-12-31",
+    "bucket=1/date=2026-01-01"
+   ]
+  }
+ ],
+ "duration": [
+  {
+   "text": "90s",
+   "seconds": 90
+  },
+  {
+   "text": "15m",
+   "seconds": 900
+  },
+  {
+   "text": "2h",
+   "seconds": 7200
+  },
+  {
+   "text": "7d",
+   "seconds": 604800
+  },
+  {
+   "text": "1h30m",
+   "seconds": 5400
+  },
+  {
+   "text": "0s",
+   "seconds": 0
+  },
+  {
+   "text": "1d1h1m1s",
+   "seconds": 90061
+  },
+  {
+   "text": "",
+   "seconds": null
+  },
+  {
+   "text": "5",
+   "seconds": null
+  },
+  {
+   "text": "1.5h",
+   "seconds": null
+  },
+  {
+   "text": "h",
+   "seconds": null
+  },
+  {
+   "text": "1w",
+   "seconds": null
+  },
+  {
+   "text": " 1s",
+   "seconds": null
+  },
+  {
+   "text": "-1s",
+   "seconds": null
+  }
+ ],
+ "limit": [
+  {
+   "text": "90/minute",
+   "units": 90,
+   "seconds": 60
+  },
+  {
+   "text": "24000/day",
+   "units": 24000,
+   "seconds": 86400
+  },
+  {
+   "text": "1/second",
+   "units": 1,
+   "seconds": 1
+  },
+  {
+   "text": "10/hour",
+   "units": 10,
+   "seconds": 3600
+  },
+  {
+   "text": "0/minute",
+   "units": null,
+   "seconds": null
+  },
+  {
+   "text": "x/minute",
+   "units": null,
+   "seconds": null
+  },
+  {
+   "text": "5/week",
+   "units": null,
+   "seconds": null
+  },
+  {
+   "text": "5",
+   "units": null,
+   "seconds": null
+  }
+ ],
+ "strategy_diff": [
+  {
+   "strategy": "by_stamp",
+   "complete": false,
+   "new": [
+    [
+     "a",
+     1
+    ],
+    [
+     "b",
+     2
+    ]
+   ],
+   "old": null,
+   "upserts": [
+    "a",
+    "b"
+   ],
+   "deletes": []
+  },
+  {
+   "strategy": "by_stamp",
+   "complete": false,
+   "new": [
+    [
+     "a",
+     1
+    ],
+    [
+     "b",
+     3
+    ],
+    [
+     "c",
+     4
+    ]
+   ],
+   "old": [
+    [
+     "a",
+     1
+    ],
+    [
+     "b",
+     2
+    ],
+    [
+     "d",
+     5
+    ]
+   ],
+   "upserts": [
+    "b",
+    "c"
+   ],
+   "deletes": []
+  },
+  {
+   "strategy": "by_stamp",
+   "complete": false,
+   "new": [],
+   "old": [
+    [
+     "a",
+     1
+    ]
+   ],
+   "upserts": [],
+   "deletes": []
+  },
+  {
+   "strategy": "snapshot_diff",
+   "complete": true,
+   "new": [
+    [
+     "a",
+     1
+    ],
+    [
+     "b",
+     2
+    ]
+   ],
+   "old": null,
+   "upserts": [
+    "a",
+    "b"
+   ],
+   "deletes": []
+  },
+  {
+   "strategy": "snapshot_diff",
+   "complete": true,
+   "new": [
+    [
+     "a",
+     1
+    ],
+    [
+     "b",
+     3
+    ],
+    [
+     "c",
+     4
+    ]
+   ],
+   "old": [
+    [
+     "a",
+     1
+    ],
+    [
+     "b",
+     2
+    ],
+    [
+     "d",
+     5
+    ]
+   ],
+   "upserts": [
+    "b",
+    "c"
+   ],
+   "deletes": [
+    "d"
+   ]
+  },
+  {
+   "strategy": "snapshot_diff",
+   "complete": true,
+   "new": [],
+   "old": [
+    [
+     "a",
+     1
+    ]
+   ],
+   "upserts": [],
+   "deletes": [
+    "a"
+   ]
+  },
+  {
+   "strategy": "replace",
+   "complete": true,
+   "new": [
+    [
+     "a",
+     1
+    ],
+    [
+     "b",
+     2
+    ]
+   ],
+   "old": null,
+   "upserts": [
+    "a",
+    "b"
+   ],
+   "deletes": []
+  },
+  {
+   "strategy": "replace",
+   "complete": true,
+   "new": [
+    [
+     "a",
+     1
+    ],
+    [
+     "b",
+     3
+    ],
+    [
+     "c",
+     4
+    ]
+   ],
+   "old": [
+    [
+     "a",
+     1
+    ],
+    [
+     "b",
+     2
+    ],
+    [
+     "d",
+     5
+    ]
+   ],
+   "upserts": [
+    "a",
+    "b",
+    "c"
+   ],
+   "deletes": [
+    "d"
+   ]
+  },
+  {
+   "strategy": "replace",
+   "complete": true,
+   "new": [],
+   "old": [
+    [
+     "a",
+     1
+    ]
+   ],
+   "upserts": [],
+   "deletes": [
+    "a"
+   ]
+  },
+  {
+   "strategy": "push",
+   "complete": false,
+   "new": [
+    [
+     "a",
+     1
+    ],
+    [
+     "b",
+     2
+    ]
+   ],
+   "old": null,
+   "upserts": [
+    "a",
+    "b"
+   ],
+   "deletes": []
+  },
+  {
+   "strategy": "push",
+   "complete": false,
+   "new": [
+    [
+     "a",
+     1
+    ],
+    [
+     "b",
+     3
+    ],
+    [
+     "c",
+     4
+    ]
+   ],
+   "old": [
+    [
+     "a",
+     1
+    ],
+    [
+     "b",
+     2
+    ],
+    [
+     "d",
+     5
+    ]
+   ],
+   "upserts": [
+    "b",
+    "c"
+   ],
+   "deletes": []
+  },
+  {
+   "strategy": "push",
+   "complete": false,
+   "new": [],
+   "old": [
+    [
+     "a",
+     1
+    ]
+   ],
+   "upserts": [],
+   "deletes": []
+  }
+ ],
+ "delivery_transitions": {
+  "pending": [
+   "running"
+  ],
+  "running": [
+   "applied",
+   "failed",
+   "held",
+   "pending"
+  ],
+  "held": [
+   "pending",
+   "skipped"
+  ],
+  "failed": [
+   "pending",
+   "skipped"
+  ],
+  "applied": [
+   "compensated",
+   "pending"
+  ],
+  "skipped": [],
+  "compensated": []
+ },
+ "retry_delay": [
+  {
+   "failed_attempt": 1,
+   "rand": 1.0,
+   "seconds": 10.0
+  },
+  {
+   "failed_attempt": 1,
+   "rand": 0.0,
+   "seconds": 5.0
+  },
+  {
+   "failed_attempt": 2,
+   "rand": 1.0,
+   "seconds": 20.0
+  },
+  {
+   "failed_attempt": 3,
+   "rand": 0.5,
+   "seconds": 30.0
+  },
+  {
+   "failed_attempt": 6,
+   "rand": 1.0,
+   "seconds": 320.0
+  },
+  {
+   "failed_attempt": 7,
+   "rand": 0.0,
+   "seconds": 300.0
+  }
+ ],
+ "budget": [
+  {
+   "limits": [
+    "10/minute"
+   ],
+   "reserve": {},
+   "steps": [
+    {
+     "advance_s": 0,
+     "units": 10,
+     "priority": "normal",
+     "granted": true,
+     "wait_us": 0,
+     "error": false
+    },
+    {
+     "advance_s": 0,
+     "units": 1,
+     "priority": "normal",
+     "granted": false,
+     "wait_us": 6000000,
+     "error": false
+    },
+    {
+     "advance_s": 6,
+     "units": 1,
+     "priority": "normal",
+     "granted": true,
+     "wait_us": 0,
+     "error": false
+    },
+    {
+     "advance_s": 0,
+     "units": 11,
+     "priority": "normal",
+     "granted": false,
+     "wait_us": 0,
+     "error": true
+    }
+   ]
+  },
+  {
+   "limits": [
+    "10/minute"
+   ],
+   "reserve": {
+    "high": 0.6
+   },
+   "steps": [
+    {
+     "advance_s": 0,
+     "units": 4,
+     "priority": "low",
+     "granted": true,
+     "wait_us": 0,
+     "error": false
+    },
+    {
+     "advance_s": 0,
+     "units": 1,
+     "priority": "low",
+     "granted": false,
+     "wait_us": 6000000,
+     "error": false
+    },
+    {
+     "advance_s": 0,
+     "units": 6,
+     "priority": "high",
+     "granted": true,
+     "wait_us": 0,
+     "error": false
+    },
+    {
+     "advance_s": 0,
+     "units": 5,
+     "priority": "low",
+     "granted": false,
+     "wait_us": 0,
+     "error": true
+    }
+   ]
+  },
+  {
+   "limits": [
+    "2/second",
+    "3/hour"
+   ],
+   "reserve": {},
+   "steps": [
+    {
+     "advance_s": 0,
+     "units": 2,
+     "priority": "normal",
+     "granted": true,
+     "wait_us": 0,
+     "error": false
+    },
+    {
+     "advance_s": 1,
+     "units": 1,
+     "priority": "normal",
+     "granted": true,
+     "wait_us": 0,
+     "error": false
+    },
+    {
+     "advance_s": 0,
+     "units": 1,
+     "priority": "normal",
+     "granted": false,
+     "wait_us": 1199000000,
+     "error": false
+    }
+   ]
+  }
+ ]
+}
