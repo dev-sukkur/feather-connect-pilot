@@ -93,7 +93,16 @@ def db(pg_url: str) -> Iterator[tuple[Store, Spool]]:
     from feather_connect.storage.postgres.migrate import migrate
 
     migrate(pg_url)
-    yield connect(pg_url)
+    store, spool = connect(pg_url)
+    yield store, spool
+    store.close()
+
+
+@pytest.fixture
+def client_engine(pg_url: str) -> Iterator[DbosEngine]:
+    engine = DbosEngine(pg_url)
+    yield engine
+    engine.close()
 
 
 def start_worker(project: Path, pg_url: str, worker_id: str, sha: str = SHA) -> subprocess.Popen[bytes]:
@@ -152,17 +161,19 @@ def test_worker_registers_catalogue_and_heartbeats(demo_project, pg_url, db, wor
     )
 
 
-def test_a_run_completes_through_a_real_worker(demo_project, pg_url, db, workers):
+def test_a_run_completes_through_a_real_worker(demo_project, pg_url, db, workers, client_engine):
     store, spool = db
     workers.append(start_worker(demo_project, pg_url, "w-run-" + uuid.uuid4().hex[:6]))
-    client = Runtime(load_project(demo_project, "dev").flows, store, spool, DbosEngine(pg_url))
+    client = Runtime(load_project(demo_project, "dev").flows, store, spool, client_engine)
     wait_until(lambda: store.workers.list_workers())
     run = client.start_run("demo")
     wait_until(lambda: store.runs.get_run(run).status == "succeeded", timeout=60)
     assert sim_sink_rows(demo_project) == ROWS
 
 
-def test_a_retry_is_noted_in_the_journal_through_a_real_worker(demo_project, pg_url, db, workers):
+def test_a_retry_is_noted_in_the_journal_through_a_real_worker(
+    demo_project, pg_url, db, workers, client_engine
+):
     """Seed 5 makes the first two reads of the source time out and the third one work."""
     store, spool = db
     flow = demo_project / "flows" / "demo.py"
@@ -173,7 +184,7 @@ def test_a_retry_is_noted_in_the_journal_through_a_real_worker(demo_project, pg_
         )
     )
     workers.append(start_worker(demo_project, pg_url, "w-retry-" + uuid.uuid4().hex[:6]))
-    client = Runtime(load_project(demo_project, "dev").flows, store, spool, DbosEngine(pg_url))
+    client = Runtime(load_project(demo_project, "dev").flows, store, spool, client_engine)
     wait_until(lambda: store.workers.list_workers())
     run = client.start_run("demo")
     wait_until(lambda: store.runs.get_run(run).status == "succeeded", timeout=90)

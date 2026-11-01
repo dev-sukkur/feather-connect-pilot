@@ -23,8 +23,10 @@ from psycopg import sql
 from psycopg.rows import dict_row
 from typer.testing import Result
 
+from feather_cli.commands import processes
 from feather_connect.logs import TaskLogHandler
 from feather_connect.storage.port import Store
+from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import at_head
 from feather_connect.storage.postgres.store import PostgresStore
 from feather_connect.storage.postgres.support import Pool
@@ -246,3 +248,31 @@ def test_a_database_that_is_away_names_the_problem_not_a_traceback(cli, monkeypa
     monkeypatch.setenv("FEATHER_DATABASE_URL", f"postgresql://x:y@127.0.0.1:{free_port()}/none")
     r = cli("server", "migrate")
     assert r.exit_code == 1 and "Traceback" not in r.stderr and "database" in r.stderr
+
+
+@pytest.mark.parametrize("args", [("create-user", "pat"), ("create-token", "ci")])
+def test_a_command_closes_the_store_it_opened(cli, migrated, monkeypatch, args):
+    opened = []
+
+    def recording(url):
+        store, spool = connect(url)
+        opened.append(store)
+        return store, spool
+
+    monkeypatch.setattr(processes, "connect", recording)
+    name = f"{args[1]}-{uuid.uuid4().hex[:6]}"
+    assert cli("server", args[0], name, input="pw-one-two\n").exit_code == 0
+    assert [store.runs._db.pool.closed for store in opened] == [True]
+
+
+def test_a_command_that_fails_closes_its_store_too(cli, migrated, monkeypatch):
+    opened = []
+
+    def recording(url):
+        store, spool = connect(url)
+        opened.append(store)
+        return store, spool
+
+    monkeypatch.setattr(processes, "connect", recording)
+    assert cli("server", "create-user", "nobody", input="\n").exit_code == 1  # an empty password
+    assert [store.runs._db.pool.closed for store in opened] == [True]

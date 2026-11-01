@@ -3,7 +3,8 @@
 
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from typing import Any
 from urllib.parse import urlsplit
 
 import psycopg
@@ -46,6 +47,25 @@ def pool(pg_url: str) -> Iterator[ConnectionPool[psycopg.Connection[DictRow]]]:
         pg_url, min_size=1, max_size=12, kwargs={"row_factory": dict_row}, open=True
     ) as connection_pool:
         yield connection_pool
+
+
+@pytest.fixture
+def pg_connect() -> Iterator[Callable[..., tuple[Any, Any]]]:
+    """`connect`, with what it opened closed when the test ends. A pool left open has four threads and a session for
+    the rest of the run, because `connect` registers its close with `atexit`, which also keeps it from being collected.
+    """
+    from feather_connect.storage.postgres.connect import connect
+
+    stores: list[Any] = []
+
+    def opener(*args: Any, **kwargs: Any) -> tuple[Any, Any]:
+        store, spool = connect(*args, **kwargs)
+        stores.append(store)
+        return store, spool
+
+    yield opener
+    for store in stores:
+        store.close()
 
 
 @pytest.fixture

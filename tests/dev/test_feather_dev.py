@@ -26,7 +26,6 @@ from psycopg import sql
 from typer.testing import CliRunner
 
 from feather_cli.main import app
-from feather_connect.storage.postgres.connect import connect
 
 ROOT = Path(__file__).resolve().parents[2]
 DEMO = ROOT / "examples" / "demo"
@@ -205,10 +204,10 @@ def test_works_with_an_existing_database_url(dev, database):
 
 
 @needs_postgres
-def test_demo_runs_and_reaches_destinations(dev, database):
+def test_demo_runs_and_reaches_destinations(dev, database, pg_connect):
     client = dev.sign_in()
     wait_until(lambda: len(dev.run_ids(client)) >= 2, 90, "two runs on the dashboard")
-    store, _ = connect(database)
+    store, _ = pg_connect(database)
 
     def applied(route: str) -> bool:
         done = store.ledger.list_deliveries(route=route, status="applied")
@@ -229,12 +228,12 @@ def test_demo_runs_and_reaches_destinations(dev, database):
 
 
 @needs_postgres
-def test_editing_a_flow_reloads_it(start_dev, database, tmp_path):
+def test_editing_a_flow_reloads_it(start_dev, database, tmp_path, pg_connect):
     project = tmp_path / "demo"
     shutil.copytree(DEMO, project, ignore=shutil.ignore_patterns("__pycache__"))
     running = start_dev("--project", str(project), env={"FEATHER_DATABASE_URL": database})
     running.wait_ready()
-    store, _ = connect(database)
+    store, _ = pg_connect(database)
     flow_file = project / "flows" / "orders.py"
     assert store.catalog.flow("orders").spec["owner"] == "demo"
 
@@ -420,10 +419,10 @@ faulthandler.dump_traceback_later(100, exit=True, file=sys.stdout)  # within the
 
 def backends():
     with psycopg.connect(url, autocommit=True) as conn:
-        row = conn.execute(
-            "select count(*) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()"
-        ).fetchone()
-    return row[0]
+        return conn.execute(
+            "select application_name, state, left(query, 80) from pg_stat_activity"
+            " where datname = current_database() and pid <> pg_backend_pid()"
+        ).fetchall()
 
 
 migrate(url)
@@ -433,7 +432,9 @@ for _ in range(3):
     stack.start(port)
     stack.stop()
     time.sleep(1)
-    counts.append(backends())
+    found = backends()
+    counts.append(len(found))
+    print("BACKENDS", found, flush=True)
 print("COUNTS " + json.dumps(counts), flush=True)
 """
 
@@ -459,7 +460,7 @@ def test_a_reload_leaves_no_connections_behind(tmp_path: Path, pg_url: str) -> N
         found = re.search(r"COUNTS (\[.*\])", done.stdout)
         assert found, f"{done.stdout[-2000:]}\n{done.stderr[-2000:]}"
         first, _, last = json.loads(found.group(1))
-        assert last <= first, f"backends after each stop: {found.group(1)}"
+        assert last <= first, f"backends after each stop: {found.group(1)}\n{done.stdout[-2000:]}"
     finally:
         with psycopg.connect(pg_url, autocommit=True) as admin:
             admin.execute(sql.SQL("drop database if exists {} with (force)").format(sql.Identifier(name)))

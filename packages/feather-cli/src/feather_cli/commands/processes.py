@@ -2,6 +2,8 @@
 
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -55,8 +57,9 @@ def _reachable(url: str, json_mode: bool) -> None:
         _unreachable(error, json_mode)
 
 
-def _store(url: str | None, json_mode: bool) -> Store:
-    """Open the store of a migrated database, or end the command saying what is wrong."""
+@contextmanager
+def _store(url: str | None, json_mode: bool) -> Iterator[Store]:
+    """Open the store of a migrated database for a block, or end the command saying what is wrong."""
     url = _database(url, json_mode)
     try:
         current = at_head(url)
@@ -64,7 +67,11 @@ def _store(url: str | None, json_mode: bool) -> Store:
         _unreachable(error, json_mode)
     if not current:
         fail("the database schema is not current", hint="run: feather server migrate", json_mode=json_mode)
-    return connect(url)[0]
+    store = connect(url)[0]
+    try:
+        yield store
+    finally:
+        store.close()
 
 
 @server_app.callback()
@@ -129,18 +136,18 @@ def create_user(
     json_mode: Json = False,
 ) -> None:
     """Add a dashboard user. The password comes from a prompt, or from stdin when it is not a terminal."""
-    store = _store(database_url, json_mode)
-    password = _read_password()
-    if not password:
-        fail(
-            "the password is empty",
-            hint="type one at the prompt, or pipe it in on stdin",
-            json_mode=json_mode,
-        )
-    try:
-        store.users.create_user(username, hash_password(password))
-    except DuplicateUser:
-        fail(f"the user {username!r} exists already", json_mode=json_mode)
+    with _store(database_url, json_mode) as store:
+        password = _read_password()
+        if not password:
+            fail(
+                "the password is empty",
+                hint="type one at the prompt, or pipe it in on stdin",
+                json_mode=json_mode,
+            )
+        try:
+            store.users.create_user(username, hash_password(password))
+        except DuplicateUser:
+            fail(f"the user {username!r} exists already", json_mode=json_mode)
     emit({"user": username}, json_mode=json_mode, human=lambda _: typer.echo(f"created user {username}"))
 
 
@@ -157,8 +164,8 @@ def create_token(
         lifetime: timedelta = parse_duration(ttl)
     except ValueError as error:
         fail(str(error), hint="write the lifetime like 90d, 12h or 30m", json_mode=json_mode)
-    store = _store(database_url, json_mode)
-    token = issue_token(store, name, lifetime)
+    with _store(database_url, json_mode) as store:
+        token = issue_token(store, name, lifetime)
 
     def show(data: dict[str, str]) -> None:
         typer.echo(data["token"])

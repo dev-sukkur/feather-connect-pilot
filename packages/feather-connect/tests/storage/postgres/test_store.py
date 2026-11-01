@@ -169,8 +169,10 @@ def test_datetime_watermarks_compare_as_datetimes(store: Store):
     assert [v.version_id for v in store.versions.since_watermark("d", "p", late)] == ["v2"]
 
 
-def test_connect_opens_a_store_and_a_spool_on_one_pool(pg: Pg, pg_url: str, clock: FrozenClock):
-    store, spool = connect(pg_url, clock=clock, tenant="t1", max_size=2)
+def test_connect_opens_a_store_and_a_spool_on_one_pool(
+    pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any
+):
+    store, spool = pg_connect(pg_url, clock=clock, tenant="t1", max_size=2)
     run_id = store.runs.create_run("f", "manual", "ann", {"x": 1})
     spool.put_chunk("v1", 0, "data", records_to_table([Record("a", "upsert", {"x": 1}, 1)]))
     assert store.runs.get_run(run_id).params == {"x": 1} and len(spool.list_chunks("v1")) == 1
@@ -180,8 +182,10 @@ def pool_of(store: Store) -> Any:
     return store.runs._db.pool  # type: ignore[attr-defined]
 
 
-def test_pool_sessions_have_timeouts_and_keepalives(pg: Pg, pg_url: str, clock: FrozenClock):  # F9
-    store, _ = connect(pg_url, clock=clock, max_size=1)
+def test_pool_sessions_have_timeouts_and_keepalives(
+    pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any
+):  # F9
+    store, _ = pg_connect(pg_url, clock=clock, max_size=1)
     with pool_of(store).connection() as conn:
         given = conn.info.get_parameters()
         assert given["connect_timeout"] == str(support.CONNECT_TIMEOUT_S)
@@ -193,10 +197,10 @@ def test_pool_sessions_have_timeouts_and_keepalives(pg: Pg, pg_url: str, clock: 
 
 
 def test_the_statement_timeout_limits_a_statement_and_not_a_transaction(
-    pg: Pg, pg_url: str, clock: FrozenClock, monkeypatch: pytest.MonkeyPatch
+    pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any, monkeypatch: pytest.MonkeyPatch
 ):  # F9
     monkeypatch.setattr(support, "STATEMENT_TIMEOUT_MS", 400)
-    store, _ = connect(pg_url, clock=clock, max_size=1)
+    store, _ = pg_connect(pg_url, clock=clock, max_size=1)
     pool = pool_of(store)
     with pool.connection() as conn:  # longer than the limit in all, in short statements
         for _ in range(3):
@@ -205,9 +209,9 @@ def test_the_statement_timeout_limits_a_statement_and_not_a_transaction(
         conn.execute("select pg_sleep(2)")
 
 
-def test_options_in_the_url_are_kept(pg: Pg, pg_url: str, clock: FrozenClock):  # F9
+def test_options_in_the_url_are_kept(pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any):  # F9
     url = f"{pg_url}?options=-c%20search_path%3Dfeather"
-    store, _ = connect(url, clock=clock, max_size=1)
+    store, _ = pg_connect(url, clock=clock, max_size=1)
     with pool_of(store).connection() as conn:
         assert conn.execute("show search_path").fetchone() == {"search_path": "feather"}
         assert conn.execute("show statement_timeout").fetchone() == {"statement_timeout": "2min"}
