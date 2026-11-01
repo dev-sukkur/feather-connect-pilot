@@ -26,7 +26,6 @@ from feather_server.services.actions import Actions
 from feather_server.services.reads import Reads
 from feather_server.settings import Settings
 
-
 log = logging.getLogger(__name__)
 
 
