@@ -28,6 +28,7 @@ class BudgetHandle:
         self.name = name
         self.priority: Priority = priority
         self._sleep = sleep
+        self._taken = 0
 
     def acquire(self, units: int = 1) -> None:
         """Take `units` from the budget. Returns once they are taken.
@@ -37,7 +38,8 @@ class BudgetHandle:
         while True:
             grant = self._store.acquire(self.name, units, self.priority)
             if grant.granted:
+                self._taken += units
                 return
             if grant.wait >= _SLEEP_BELOW:
-                raise BudgetDeferred(grant.wait, self.name)
+                raise BudgetDeferred(grant.wait, self.name, self._taken)
             self._sleep(grant.wait.total_seconds())

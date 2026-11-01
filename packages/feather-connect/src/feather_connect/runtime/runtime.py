@@ -13,7 +13,7 @@ import logging
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from feather_connect.clock import Clock, SystemClock
@@ -39,6 +39,7 @@ from feather_connect.storage.port import (
     Run,
     Store,
     TaskRow,
+    Window,
     delivery_cursor,
     is_paused,
 )
@@ -50,6 +51,9 @@ _UTC = "UTC"
 _ACTIVE = ("queued", "running")
 _PAUSED = "route paused"  # why a task ended without delivering: the key of its successor ends in `#n`
 _MANY = 10_000
+_READS_IN_VAIN = (
+    5  # reads that spend budget and still come up short, each after the longest wait, before giving up
+)
 
 
 def _no_config(connection: str) -> Mapping[str, Any]:
@@ -80,19 +84,6 @@ class _Extracted:
 
     version_ids: list[str]
     writer: str
-
-
-def _step_through_deferrals[T](ctx: TaskContext, name: str, fn: Callable[[], T]) -> T:
-    """Run a step, and sleep off a budget deferral before running it again, as delivery does.
-
-    A deferral is a wait for budget, not a failure: the sleep is durable, and no attempt is used up however many
-    deferrals there are. A source that is read again after one starts its read afresh (`run_extract`).
-    """
-    while True:
-        try:
-            return ctx.step(name, fn)
-        except BudgetDeferred as deferred:
-            ctx.sleep(deferred.wait)
 
 
 class Runtime:
@@ -540,7 +531,7 @@ class Runtime:
             flow, dataset = self.flow(args["flow"]), self.dataset(args["dataset"])
             sliced = ctx.step("sliced", lambda: bool(versions.slices_for_run(run_id, dataset.name)))
             extract = lambda: self._extract(flow, dataset, run_id, partition, sliced)
-            found = _step_through_deferrals(ctx, "extract", extract)
+            found = self._read_through_deferrals(ctx, dataset, extract)
             if not sliced:
                 ctx.step("submit_applies", lambda: self._submit_applies(flow, run_id, found.version_ids))
             elif ctx.step(
@@ -623,6 +614,58 @@ class Runtime:
     def _fail_step(self, ctx: TaskContext, run_id: str, error: Exception) -> None:
         message = redact(str(error))
         ctx.step("failed", lambda: self._finish_task(ctx.task_ref, run_id, "failed", message))
+
+    def _read_through_deferrals[T](self, ctx: TaskContext, dataset: Dataset, read: Callable[[], T]) -> T:
+        """Run a read as a step, sleeping off each budget deferral, or end it when waiting can't help (design 6.6).
+
+        A deferral is a wait, not a failure: the sleep is durable, and uses up no attempt. But a read has no checkpoint,
+        so it starts afresh after one and has to get every call it needs in one go. So each wait is twice the last, up
+        to the budget's longest window, for the tokens to build up. A read that took all a window holds and wanted more
+        can never finish, and neither can one that keeps failing after waiting that long (a read of low priority sees
+        less than the window holds). Those end as a permanent failure that says why, instead of spending the budget for
+        good. A read that was deferred having taken nothing has spent nothing: it just keeps waiting its turn.
+        """
+        last = timedelta(0)
+        deferrals = in_vain = 0
+        while True:
+            try:
+                return ctx.step("extract", read)
+            except BudgetDeferred as deferred:
+                deferrals += 1
+                windows = self._windows_step(ctx, deferrals, deferred.budget)
+                holds = min((w.units for w in windows if w.seconds / w.units >= 60), default=None)
+                longest = timedelta(seconds=max((w.seconds for w in windows), default=0))
+                too_big = holds is not None and deferred.taken >= holds
+                in_vain += deferred.taken > 0 and bool(windows) and last >= longest
+                if too_big or in_vain >= _READS_IN_VAIN:
+                    size = (
+                        f"holds {holds}" if too_big else f"gave too little after waiting {longest} each time"
+                    )
+                    raise PermanentError(
+                        f"dataset {dataset.name!r}: the read took {deferred.taken} calls and needs more, but budget "
+                        f"{deferred.budget!r} {size}. A read starts again after a deferral, so it needs all its calls "
+                        "in one go: raise the budget's limit, or read less at a time"
+                    ) from deferred
+                wait = max(deferred.wait, min(last * 2, longest))
+                log.warning(
+                    "dataset %s: budget %s is used up after %d calls, and the read starts again in %s",
+                    dataset.name,
+                    deferred.budget,
+                    deferred.taken,
+                    wait,
+                )
+                ctx.sleep(wait)
+                last = wait
+
+    def _windows_step(self, ctx: TaskContext, deferral: int, budget: str) -> list[Window]:
+        return ctx.step(f"budget_windows:{deferral}", lambda: self._windows_of(budget))
+
+    def _windows_of(self, budget: str) -> list[Window]:
+        """The windows of the budget. One the store doesn't know has none, and its wait is taken as it comes."""
+        try:
+            return [usage.window for usage in self._deps.store.budgets.usage(budget)]
+        except KeyError:
+            return []
 
     # What the steps do.
 
