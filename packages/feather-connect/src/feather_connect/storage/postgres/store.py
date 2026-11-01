@@ -979,15 +979,15 @@ class _Quarantine(QuarantineStore):
             )
 
     def open_extraction_keys(self, dataset: str, keys: Iterable[str], outside: str | None = None) -> set[str]:
+        # `keys` can be every row of a read and the open entries are few, so the keys don't go to the server.
         with self._db.tx() as conn:
             rows = conn.execute(
                 """select distinct key from feather.quarantine
                    where tenant_id = %(tenant)s and status = 'open' and route is null and dataset = %(dataset)s
-                     and key = any(%(keys)s)
                      and (%(outside)s::text is null or partition is distinct from %(outside)s)""",
-                {"tenant": self._db.tenant, "dataset": dataset, "keys": list(keys), "outside": outside},
+                {"tenant": self._db.tenant, "dataset": dataset, "outside": outside},
             ).fetchall()
-        return {r["key"] for r in rows}
+        return {r["key"] for r in rows}.intersection(keys)
 
     def close_extraction(self, dataset: str, keys: Iterable[str]) -> int:
         with self._db.tx() as conn:
