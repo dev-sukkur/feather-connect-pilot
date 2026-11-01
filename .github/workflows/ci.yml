@@ -2,12 +2,16 @@ name: CI
 
 on:
   pull_request:
+  schedule:
+    - cron: "17 2 * * *" # the nightly run of the engine conformance suite
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   check:
+    if: github.event_name == 'pull_request'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -25,6 +29,7 @@ jobs:
   # The tests marked `postgres` need a server, which only Linux runners can host. This job runs every test
   # and holds the coverage gate.
   postgres:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -45,3 +50,39 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - run: uv sync --all-extras
       - run: uv run pytest packages/feather-connect/tests packages/feather-engine-dbos/tests packages/feather-server/tests packages/feather-cli/tests tests/e2e tests/dev --cov=feather_connect --cov=feather_engine_dbos --cov=feather_server --cov=feather_cli --cov-fail-under=85
+
+  # The engine conformance suite starts real worker processes and takes minutes. It runs every night, and on a
+  # pull request only when the change touches the engine.
+  engine-conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: feather
+          POSTGRES_PASSWORD: feather
+          POSTGRES_DB: feather_test
+        ports:
+          - 25433:5432
+        options: >-
+          --health-cmd "pg_isready -U feather -d feather_test"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      FEATHER_TEST_DATABASE_URL: postgresql://feather:feather@127.0.0.1:25433/feather_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Decide whether the engine changed
+        id: engine
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]             || ! git diff --quiet "${{ github.event.pull_request.base.sha }}" HEAD -- packages/feather-engine-dbos; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.engine.outputs.run == 'true'
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - if: steps.engine.outputs.run == 'true'
+        run: uv sync --all-extras
+      - if: steps.engine.outputs.run == 'true'
+        run: uv run pytest tests/engine_conformance
