@@ -23,6 +23,7 @@ from feather_connect.core.flow import BatchMap, RouteSpec
 from feather_connect.core.records import Op, Record, canonical_json, decode_key
 from feather_connect.core.transforms import apply_map, is_batch_map
 from feather_connect.engine.port import RetryPolicy, TaskContext
+from feather_connect.logs import redact
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import NOT_DELIVERED
 from feather_connect.storage.port import CLOSED, Delivery, DeliveryStatus, Version, delivery_cursor, is_paused
@@ -175,7 +176,7 @@ def _counting_a_try[T](delivery: Delivery, deps: RuntimeDeps, fn: Callable[[], T
             "pending",
             actor=_ACTOR,
             reason="retryable error",
-            error=str(error),
+            error=redact(str(error)),
             code_sha=deps.code_sha,
         )
         raise
@@ -403,7 +404,7 @@ class _ChunkSender:
                 f"route {name!r}: the sink rejected record {key} and has already applied its batch, "
                 f"so the destination may hold a partial slice: {message}"
             )
-        self._deps.store.quarantine.add(name, self._delivery.version_id, key, message)
+        self._deps.store.quarantine.add(name, self._delivery.version_id, key, redact(message))
 
 
 def _fail(delivery: Delivery, error: str, deps: RuntimeDeps) -> None:
@@ -415,7 +416,7 @@ def _fail(delivery: Delivery, error: str, deps: RuntimeDeps) -> None:
             "failed",
             actor=_ACTOR,
             reason="permanent error",
-            error=error,
+            error=redact(error),
             code_sha=deps.code_sha,
         )
 

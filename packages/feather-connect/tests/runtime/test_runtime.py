@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 import feather_connect as fc
 from feather_connect.clock import FrozenClock
@@ -14,9 +15,9 @@ from feather_connect.core.context import Context
 from feather_connect.core.errors import PermanentError, TransientError
 from feather_connect.engine.local import LocalEngine
 from feather_connect.engine.port import RetryPolicy
-from feather_connect.logs import bound_ids
+from feather_connect.logs import bound_ids, register_secrets
 from feather_connect.runtime.retention import retention_once
-from feather_connect.runtime.runtime import Runtime
+from feather_connect.runtime.runtime import Runtime, RunNotStarted
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.port import InvalidTransition
 from feather_connect.storage.spool import MemorySpool
@@ -682,3 +683,58 @@ def test_a_connector_is_given_the_connections_config_and_the_time_zone():
     h.engine.register(h.rt.tasks())
     h.run()
     assert seen == [(f"for {h.source.connection}", "Asia/Kolkata")]
+
+
+SECRET_F8 = "f8-runtime-api-key"
+
+
+def test_a_map_error_goes_to_quarantine_without_the_secret() -> None:  # F8
+    register_secrets(SECRET_F8)
+
+    def leaky(record: Any, ctx: Any) -> Any:
+        raise ValueError(f"calling with key={SECRET_F8}")
+
+    h = Harness()
+    dataset = fc.Dataset("d", source=h.source, key="id", strategy=fc.strategy.replace())
+    flow = fc.Flow("f", reads=dataset, deliver=[fc.to(Sink("m"), map=leaky)])
+    h.rt = Runtime([flow], h.store, h.spool, h.engine, code_sha="sha", clock=h.clock)
+    h.engine.register(h.rt.tasks())
+    h.run()
+    entries = h.store.quarantine.list_open("m")
+    assert entries and all(SECRET_F8 not in e.error and "***" in e.error for e in entries)
+
+
+def test_a_sink_rejection_goes_to_quarantine_without_the_secret() -> None:  # F8
+    register_secrets(SECRET_F8)
+    h = Harness()
+    h.a.reject("1", f"refused for key={SECRET_F8}")
+    h.run()
+    (entry,) = h.store.quarantine.list_open("a")
+    assert SECRET_F8 not in entry.error and "***" in entry.error
+
+
+def test_a_record_turned_down_at_extraction_goes_to_quarantine_without_the_secret() -> None:  # F8
+    register_secrets(SECRET_F8)
+
+    class Row(BaseModel):
+        id: int
+        v: int
+
+    h = Harness({"schema": Row}, rows=[{"id": 1, "v": SECRET_F8}, {"id": 2, "v": 2}])
+    h.run()
+    entries = h.store.quarantine.list_open(None)
+    assert entries and all(SECRET_F8 not in e.error for e in entries)
+
+
+def test_a_failed_submit_says_so_without_the_secret() -> None:  # F8
+    register_secrets(SECRET_F8)
+    h = Harness()
+
+    def refuse(call: Any) -> str:
+        raise ConnectionError(f"the engine at key={SECRET_F8} is away")
+
+    h.engine.submit = refuse  # type: ignore[method-assign]
+    with pytest.raises(RunNotStarted) as raised:
+        h.rt.start_run("f")
+    assert SECRET_F8 not in raised.value.reason
+    assert SECRET_F8 not in (h.store.runs.get_run(raised.value.run_id).reason or "")

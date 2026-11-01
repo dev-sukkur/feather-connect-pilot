@@ -21,7 +21,7 @@ from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import BudgetDeferred, PermanentError
 from feather_connect.core.flow import Flow, RouteSpec
 from feather_connect.engine.port import Engine, RetryPolicy, TaskCall, TaskContext, TaskFn
-from feather_connect.logs import bind
+from feather_connect.logs import bind, redact
 from feather_connect.runtime.apply import fail_open, oldest_open, replay_gap, run_apply
 from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.deps import RuntimeDeps
@@ -305,7 +305,7 @@ class Runtime:
         try:
             self.submit_plan(flow, run_id)
         except Exception as error:
-            reason = f"could not start: {error}"
+            reason = redact(f"could not start: {error}")
             self._fail_unstarted(run_id, reason)
             raise RunNotStarted(run_id, reason) from error
         return run_id
@@ -601,14 +601,14 @@ class Runtime:
         It is not a step: it sets the row to absolute values, so running it again on a replay changes nothing, and
         a step would be a new path in the journal of a body that failed before its first step.
         """
-        attempt, message = ctx.attempt, str(error) or type(error).__name__
+        attempt, message = ctx.attempt, redact(str(error)) or type(error).__name__
         log.warning(
             "attempt %d of %d failed and will be retried: %s", attempt, self._deps.retry.max_attempts, message
         )
         self._record_attempt(ctx.task_ref, run_id, attempt + 1, message)
 
     def _fail_step(self, ctx: TaskContext, run_id: str, error: Exception) -> None:
-        message = str(error)
+        message = redact(str(error))
         ctx.step("failed", lambda: self._finish_task(ctx.task_ref, run_id, "failed", message))
 
     # What the steps do.

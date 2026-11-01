@@ -8,7 +8,8 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg.rows import DictRow
 
-from feather_connect.core.errors import PermanentError
+from feather_connect.core.errors import PermanentError, TransientError
+from feather_connect.logs import register_secrets
 from feather_connect.engine.local import LocalEngine
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.postgres.connect import connect
@@ -335,3 +336,22 @@ def test_50_000_failures_are_paginated_and_fast(seed_failures: TestClient) -> No
     deliveries = seed_failures.get("/routes/warehouse/deliveries?status=failed").text
     assert len(re.findall(r'name="version_id"', deliveries)) == 100
     assert 'rel="next"' in deliveries
+
+
+def test_a_connector_error_never_shows_a_secret_on_the_pages(client: TestClient, world: World) -> None:  # F8
+    secret = "f8-registered-api-key"
+    register_secrets(secret)
+    message = f"GET https://api/x?key={secret}: 500"
+    world.sink("warehouse").fail_next(PermanentError(message))
+    world.sink("gofrugal").fail_next(TransientError(message))
+    run = world.run([day(17)])
+    pages = [client.get(url).text for url in ("/failures", f"/runs/{run}", "/routes/warehouse/deliveries")]
+    assert "key=***" in pages[0]
+    assert not any(secret in page for page in pages)
+    rows = world.store.ledger.list_deliveries()
+    assert not any(secret in (d.last_error or "") for d in rows)
+    assert any("key=***" in (d.last_error or "") for d in rows)
+    attempts = [a for d in rows for a in world.store.ledger.attempts(d.route, d.version_id)]
+    assert not any(secret in (a.error or "") for a in attempts)
+    assert not any(secret in (t.error or "") for t in world.store.runs.list_tasks(run))
+    assert secret not in (world.store.runs.get_run(run).reason or "")

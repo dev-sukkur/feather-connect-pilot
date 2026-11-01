@@ -24,6 +24,7 @@ from feather_connect.core.flow import RouteSpec
 from feather_connect.core.records import Op, Record, canonical_json, make_key, row_hash
 from feather_connect.core.strategies import ByStamp, read_stamp
 from feather_connect.ids import new_id, stable_id
+from feather_connect.logs import redact
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.storage import spool as spool_settings
 from feather_connect.storage.port import StateRow, Version, VersionDraft
@@ -153,7 +154,9 @@ class _Read:
         if self._dry_run:
             return
         version_id = None if partition is None else self._version_id(partition)
-        self._deps.store.quarantine.add(None, version_id, name, str(error), self._dataset.name, partition)
+        self._deps.store.quarantine.add(
+            None, version_id, name, redact(str(error)), self._dataset.name, partition
+        )
 
     def flush(self) -> None:
         """Write out what is buffered, so that all the slices together hold less than a chunk in memory."""
