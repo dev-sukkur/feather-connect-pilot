@@ -26,6 +26,7 @@ EXPECTED_TABLES = {
     "delivery_attempt",
     "quarantine",
     "inbox",
+    "inbox_event_id",
     "override",
     "budget",
     "budget_window",

@@ -153,6 +153,7 @@ class World:
             users=base.users,
             audit=base.audit,
             reads=base.reads,
+            inbox=base.inbox,
         )
         self.store.budgets.define(spec)
         self.engine = LocalEngine(self.clock)

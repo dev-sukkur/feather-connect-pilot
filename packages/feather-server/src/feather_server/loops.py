@@ -82,6 +82,8 @@ def log_retention(report: RetentionReport) -> None:
     """Say which old days a pass kept and why: they hold disk until whatever keeps them is put right."""
     for day, why in sorted(report.kept_days.items()):
         log.warning("retention kept %s: %s", day, why)
+    for day, why in sorted(report.kept_inbox_days.items()):
+        log.warning("retention kept inbox day %s: %s", day, why)
 
 
 class SweepLog:
@@ -136,6 +138,7 @@ def default_loops(state: "AppState") -> list[LoopRunner]:
 
     def retain() -> None:
         state.spool.ensure_partitions()  # so that the next days' writes find a partition
+        state.store.inbox.ensure_partitions()
         log_retention(retention_once(state.store, state.spool, now=state.clock.now()))
 
     return [

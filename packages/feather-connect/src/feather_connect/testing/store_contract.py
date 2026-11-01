@@ -14,6 +14,7 @@ import pyarrow as pa
 import pytest
 
 from feather_connect.clock import FrozenClock
+from feather_connect.core.connector import InboundRequest
 from feather_connect.core.records import Record, row_hash
 from feather_connect.ids import stable_id
 from feather_connect.storage.port import (
@@ -22,6 +23,7 @@ from feather_connect.storage.port import (
     BudgetSpec,
     DeliveryStatus,
     DuplicateUser,
+    InboxDay,
     InvalidTransition,
     SliceFinished,
     StaleWriter,
@@ -53,6 +55,10 @@ def draft(
 def seal(store: Store, vid: str, routes: list[str], **kw: Any) -> None:
     store.versions.stage(draft(vid, **kw))
     store.versions.seal([vid], routes)
+
+
+def inbound(body: bytes = b"{}", at: datetime = T0, **headers: str) -> InboundRequest:
+    return InboundRequest("POST", "/ingress/default/d", headers, body, at)
 
 
 def upserts(*pairs: tuple[str, dict[str, Any]]) -> list[Record]:
@@ -1245,3 +1251,119 @@ def flow_spec(name: str, routes: list[str], owner: str | None = None) -> dict[st
         "routes": [{"name": route, "connection": route} for route in routes],
         "triggers": [],
     }
+
+    # The inbox.
+
+    def test_inbox_take_is_in_arrival_order(self, store: Store):
+        for n in range(3):
+            assert store.inbox.put("d", inbound(str(n).encode())) is True
+        store.inbox.put("other", inbound(b"x"))
+        events = store.inbox.take("d", 10)
+        assert [e.request.body for e in events] == [b"0", b"1", b"2"]
+        assert events[0].event_seq < events[1].event_seq < events[2].event_seq
+        assert [e.request.body for e in store.inbox.take("d", 2)] == [b"0", b"1"]
+
+    def test_inbox_keeps_a_request_exactly(self, store: Store):
+        body = b'\x00\xff{"not": "text"}'
+        store.inbox.put("d", inbound(body, **{"x-signature": "abc"}), "e1")
+        [event] = store.inbox.take("d", 1)
+        assert (event.dataset, event.event_id, event.received_at) == ("d", "e1", T0)
+        assert event.request == inbound(body, **{"x-signature": "abc"})
+
+    def test_inbox_stores_an_event_id_once_per_dataset(self, store: Store):
+        assert store.inbox.put("d", inbound(b"1"), "e1") is True
+        assert store.inbox.put("d", inbound(b"2"), "e1") is False
+        assert store.inbox.put("other", inbound(b"3"), "e1") is True
+        assert store.inbox.put("d", inbound(b"4")) is True  # no id: nothing to compare
+        assert store.inbox.put("d", inbound(b"5")) is True
+        assert [e.request.body for e in store.inbox.take("d", 10)] == [b"1", b"4", b"5"]
+
+    def test_an_event_id_stays_used_once_sealed(self, store: Store):
+        store.inbox.put("d", inbound(), "e1")
+        store.inbox.seal_batch([e.event_seq for e in store.inbox.take("d", 1)], [], [])
+        assert store.inbox.put("d", inbound(), "e1") is False
+
+    def test_inbox_oldest_age(self, store: Store, clock: FrozenClock):
+        assert store.inbox.oldest_age("d", clock.now()) is None
+        store.inbox.put("d", inbound())
+        store.inbox.put("d", inbound(at=T0 + timedelta(seconds=5)))
+        assert store.inbox.oldest_age("d", T0 + timedelta(seconds=7)) == timedelta(seconds=7)
+        store.inbox.seal_batch([e.event_seq for e in store.inbox.take("d", 1)], [], [])
+        assert store.inbox.oldest_age("d", T0 + timedelta(seconds=7)) == timedelta(seconds=2)
+
+    def test_seal_batch_seals_events_and_versions_together(self, store: Store):
+        store.inbox.put("d", inbound())
+        seqs = [e.event_seq for e in store.inbox.take("d", 1)]
+        [version] = store.inbox.seal_batch(seqs, [draft("v1", complete=False)], ["a"])
+        assert version.status == "sealed" and version.seal_seq is not None
+        assert store.ledger.get("a", "v1").status == "pending"
+        assert store.inbox.take("d", 1) == []
+
+    def test_seal_batch_is_one_transaction(self, store: Store):
+        """Any refusal leaves the events open, the versions unknown and the ledger empty."""
+        store.inbox.put("d", inbound(b"1"))
+        store.inbox.put("d", inbound(b"2"))
+        first, second = (e.event_seq for e in store.inbox.take("d", 2))
+        store.inbox.seal_batch([first], [], [])
+        with pytest.raises(StaleWriter):  # an event already sealed: another sealer got there
+            store.inbox.seal_batch([first, second], [draft("v1", complete=False)], ["a"])
+        with pytest.raises(StaleWriter):  # no such event
+            store.inbox.seal_batch([second, second + 1000], [draft("v1", complete=False)], ["a"])
+        store.versions.claim("v2", "w1", "r1", "d", "p")
+        store.versions.claim("v3", "w1", "r1", "d", "p")
+        store.versions.claim("v3", "later", "r1", "d", "p")
+        drafts = [draft("v2", complete=False), draft("v3", complete=False)]
+        with pytest.raises(StaleWriter):  # the first draft holds its claim, and the second has lost its own
+            store.inbox.seal_batch([second], drafts, ["a"], writer="w1")
+        assert [e.event_seq for e in store.inbox.take("d", 10)] == [second]
+        for version_id in ("v1", "v2", "v3"):
+            with pytest.raises(KeyError):
+                store.versions.get(version_id)
+        assert store.ledger.list_deliveries() == []
+
+    def test_seal_batch_refuses_a_version_already_sealed(self, store: Store):
+        seal(store, "v1", ["a"], complete=False)
+        store.inbox.put("d", inbound())
+        [event] = store.inbox.take("d", 1)
+        with pytest.raises(VersionSealed):
+            store.inbox.seal_batch([event.event_seq], [draft("v1", complete=False)], ["a"])
+        assert store.inbox.take("d", 1) == [event]
+
+    def test_a_sealed_event_cannot_seal_again_with_a_later_first_event(self, store: Store):
+        """Two sealers can see different first events when a commit comes late: an event still seals only once."""
+        store.inbox.put("d", inbound(b"1"))
+        store.inbox.put("d", inbound(b"2"))
+        first, second = (e.event_seq for e in store.inbox.take("d", 2))
+        store.inbox.seal_batch([first, second], [draft("from-first", complete=False)], ["a"])
+        with pytest.raises(StaleWriter):
+            store.inbox.seal_batch([second], [draft("from-second", complete=False)], ["a"])
+        with pytest.raises(KeyError):
+            store.versions.get("from-second")
+
+    def test_inbox_days_say_what_is_on_them(self, store: Store):
+        store.inbox.put("d", inbound())
+        store.inbox.put("d", inbound())
+        [first, _] = store.inbox.take("d", 2)
+        day = T0.date()
+        assert day in store.inbox.days()
+        assert store.inbox.day_status(day) == InboxDay(2, first.event_seq, None)
+        store.inbox.seal_batch([first.event_seq], [], [])
+        status = store.inbox.day_status(day)
+        assert (status.unsealed, status.last_sealed) == (1, T0)
+
+    def test_an_inbox_day_with_an_unsealed_event_is_not_dropped(self, store: Store):
+        store.inbox.put("d", inbound())
+        assert store.inbox.drop_day(T0.date()) is False
+        assert len(store.inbox.take("d", 1)) == 1
+
+    def test_dropping_an_inbox_day_frees_its_event_ids(self, store: Store):
+        store.inbox.put("d", inbound(), "e1")
+        store.inbox.seal_batch([e.event_seq for e in store.inbox.take("d", 1)], [], [])
+        assert store.inbox.drop_day(T0.date()) is True
+        assert T0.date() not in store.inbox.days()
+        assert store.inbox.put("d", inbound(), "e1") is True
+
+    def test_an_inbox_day_with_nothing_in_it_can_be_dropped(self, store: Store):
+        store.inbox.ensure_partitions()
+        assert store.inbox.drop_day(T0.date()) is True
+        assert store.inbox.drop_day(T0.date()) is True

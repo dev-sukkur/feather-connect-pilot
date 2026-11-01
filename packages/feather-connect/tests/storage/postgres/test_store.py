@@ -9,8 +9,9 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from feather_connect.clock import FrozenClock
+from feather_connect.core.connector import InboundRequest
 from feather_connect.core.records import Record
-from feather_connect.storage.port import InvalidTransition, Store
+from feather_connect.storage.port import InvalidTransition, StaleWriter, Store
 from feather_connect.storage.postgres import support
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.leader import PostgresLeaderLock
@@ -235,3 +236,58 @@ def test_closing_a_store_closes_its_pool(pg: Pg, pg_url: str, clock: FrozenClock
     store.close()
     assert pool.closed
     store.close()  # closing again is harmless
+
+
+def test_seal_batch_undoes_all_of_it_when_the_last_write_fails(store: Store, pg: Pg):
+    """The events, the version and the deliveries are one transaction, whichever write it is that fails."""
+    store.inbox.put("d", InboundRequest("POST", "/", {}, b"{}", T0))
+    [event] = store.inbox.take("d", 1)
+    pg.execute(
+        """create function feather.refuse() returns trigger language plpgsql as
+           $$ begin if new.route = 'second' then raise exception 'refused'; end if; return new; end $$"""
+    )
+    pg.execute(
+        "create trigger refuse before insert on feather.delivery for each row execute function feather.refuse()"
+    )
+    try:
+        with pytest.raises(psycopg.errors.RaiseException):
+            store.inbox.seal_batch([event.event_seq], [draft("v1", complete=False)], ["first", "second"])
+    finally:
+        pg.execute("drop trigger refuse on feather.delivery")
+        pg.execute("drop function feather.refuse()")
+    assert store.inbox.take("d", 1) == [event]
+    with pytest.raises(KeyError):
+        store.versions.get("v1")
+    assert store.ledger.list_deliveries() == []
+
+
+def test_inbox_is_partitioned_by_day_a_week_ahead(store: Store, pg: Pg, clock: FrozenClock):
+    store.inbox.ensure_partitions()
+    days = store.inbox.days()
+    assert all(T0.date() + timedelta(days=n) in days for n in range(8))
+    clock.advance(timedelta(days=30))  # a day nobody made room for
+    store.inbox.put("d", InboundRequest("POST", "/", {}, b"{}", clock.now()))
+    assert clock.now().date() in store.inbox.days()
+    plan = pg.execute(
+        "explain select * from feather.inbox where tenant_id = 'default' and day = %s", (T0.date(),)
+    ).fetchall()
+    assert "inbox_20261018" in str(plan) and "inbox_20261117" not in str(plan)
+
+
+def test_inbox_keeps_tenants_apart(pool: ConnectionPool[Pg], pg: Pg, clock: FrozenClock):
+    mine, other = PostgresStore(pool, clock, "mine"), PostgresStore(pool, clock, "other")
+    request = InboundRequest("POST", "/", {}, b"{}", T0)
+    assert mine.inbox.put("d", request, "e1") and other.inbox.put("d", request, "e1")
+    [event] = mine.inbox.take("d", 10)
+    with pytest.raises(StaleWriter):
+        other.inbox.seal_batch([event.event_seq], [], [])
+    other.inbox.seal_batch([other.inbox.take("d", 1)[0].event_seq], [], [])
+    assert mine.inbox.take("d", 10) == [event]
+    assert other.inbox.drop_day(T0.date()) is False  # the partition holds the other tenant's event too
+
+
+def test_inbox_event_ids_hold_across_threads(store: Store):
+    results = in_threads(
+        8, lambda n: store.inbox.put("d", InboundRequest("POST", "/", {}, b"{}", T0), "same")
+    )
+    assert sorted(results) == [False] * 7 + [True] and len(store.inbox.take("d", 10)) == 1

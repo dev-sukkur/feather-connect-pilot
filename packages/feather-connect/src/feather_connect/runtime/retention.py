@@ -2,7 +2,8 @@
 
 Spool chunks go by whole days, and a day that still holds a version somebody may need is kept, with the reason. Only
 the newest snapshot of each partition outlives its day, since `snapshot_diff` needs it. Journal rows, deliveries and
-version manifests go by age. The inbox is not here, because nothing writes one yet.
+version manifests go by age. Inbox days go seven days after their last event was sealed, and a day with an event still
+waiting to be sealed stays for as long as that takes, with the reason.
 """
 
 from collections.abc import Iterator, Mapping, Sequence
@@ -15,6 +16,7 @@ from feather_connect.storage.spool import Spool
 _LOGS = timedelta(days=30)
 _JOURNAL = timedelta(days=180)  # runs, tasks, deliveries and their attempts
 _MANIFESTS = timedelta(days=400)
+_INBOX = timedelta(days=7)
 _BATCH = 500
 
 
@@ -29,6 +31,8 @@ class RetentionReport:
     deleted_deliveries: int = 0
     deleted_snapshots: int = 0
     deleted_versions: int = 0
+    dropped_inbox_days: list[date] = field(default_factory=list[date])
+    kept_inbox_days: Mapping[date, str] = field(default_factory=dict[date, str])
 
 
 def _batches(items: Sequence[str]) -> Iterator[Sequence[str]]:
@@ -79,6 +83,43 @@ def kept_days(store: Store, spool: Spool, *, now: datetime, keep_days: int = 14)
     return {day: why for day, why in found.items() if why is not None}
 
 
+def _unsealed_note(unsealed: int, first: int | None) -> str:
+    return f"{unsealed} events not sealed, such as event {first}" if first else "events not sealed"
+
+
+def kept_inbox_days(store: Store, *, now: datetime) -> dict[date, str]:
+    """Return the inbox days old enough to drop that hold events not yet sealed, each with why. Changes nothing."""
+    last_kept = (now - _INBOX).date()
+    found: dict[date, str] = {}
+    for day in store.inbox.days():
+        if day < last_kept:
+            status = store.inbox.day_status(day)
+            if status.unsealed:
+                found[day] = _unsealed_note(status.unsealed, status.first_unsealed)
+    return found
+
+
+def _drop_old_inbox_days(store: Store, now: datetime) -> tuple[list[date], dict[date, str]]:
+    """Drop the days whose events were all sealed at least seven days ago, or that hold none.
+
+    A day that has events sealed more recently is no one's concern yet, so it is not reported. `drop_day` looks again as
+    it drops, and only it can say that a day is free of unsealed events.
+    """
+    dropped: list[date] = []
+    kept = kept_inbox_days(store, now=now)
+    for day in store.inbox.days():
+        if day >= (now - _INBOX).date() or day in kept:
+            continue
+        status = store.inbox.day_status(day)
+        if status.last_sealed is not None and status.last_sealed > now - _INBOX:
+            continue
+        if store.inbox.drop_day(day):
+            dropped.append(day)
+        else:
+            kept[day] = _unsealed_note(store.inbox.day_status(day).unsealed, None)
+    return dropped, kept
+
+
 def _drop_old_snapshots(store: Store, spool: Spool, cutoff: datetime) -> int:
     """Delete the snapshots that a newer one of the same partition has replaced, once they are old and unneeded.
 
@@ -121,7 +162,8 @@ def retention_once(store: Store, spool: Spool, *, now: datetime, keep_days: int 
 
     Chunk days older than `keep_days` are dropped, unless a version on the day has a delivery that isn't closed or isn't
     sealed. Older snapshots are deleted, keeping the latest per (dataset, partition). Runs, tasks and deliveries go after
-    180 days, task logs after 30 and version manifests after 400. Doing it again changes nothing.
+    180 days, task logs after 30 and version manifests after 400. Inbox days go seven days after sealing, and never
+    while they hold an event not yet sealed. Doing it again changes nothing.
     """
     dropped, kept = _drop_old_days(store, spool, (now - timedelta(days=keep_days)).date())
     snapshots = _drop_old_snapshots(store, spool, now - timedelta(days=keep_days))
@@ -129,4 +171,7 @@ def retention_once(store: Store, spool: Spool, *, now: datetime, keep_days: int 
     deliveries = store.ledger.delete_closed_before(now - _JOURNAL)
     runs = store.runs.delete_runs_before(now - _JOURNAL)
     versions = _drop_old_manifests(store, spool, now - _MANIFESTS)
-    return RetentionReport(dropped, kept, runs, logs, deliveries, snapshots, versions)
+    inbox_dropped, inbox_kept = _drop_old_inbox_days(store, now)
+    return RetentionReport(
+        dropped, kept, runs, logs, deliveries, snapshots, versions, inbox_dropped, inbox_kept
+    )

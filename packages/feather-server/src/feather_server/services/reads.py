@@ -14,7 +14,7 @@ from cronsim import CronSim
 from feather_connect.core.flow import Flow
 from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Trigger
 from feather_connect.project import ConfigValue, effective_config
-from feather_connect.runtime.retention import kept_days
+from feather_connect.runtime.retention import kept_days, kept_inbox_days
 from feather_connect.storage.port import (
     Delivery,
     DeliveryStatus,
@@ -333,7 +333,9 @@ class Reads:
         now = self._state.clock.now()
         if self._kept_days is None or now - self._kept_days[0] >= _KEPT_DAYS_FOR:
             days = kept_days(self._store, self._state.spool, now=now)
-            self._kept_days = (now, tuple(KeptDay(day, why) for day, why in sorted(days.items())))
+            inbox = kept_inbox_days(self._store, now=now)
+            found = [*days.items(), *((day, f"inbox: {why}") for day, why in inbox.items())]
+            self._kept_days = (now, tuple(KeptDay(day, why) for day, why in sorted(found)))
         return self._kept_days[1]
 
     def overview(self) -> Overview:

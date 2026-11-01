@@ -8,8 +8,11 @@ import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import Any, Literal, Protocol
+from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+if TYPE_CHECKING:  # only as a type: the connector module reaches this one through the context's budget handle
+    from feather_connect.core.connector import InboundRequest
 
 Priority = Literal["low", "normal", "high"]
 VersionStatus = Literal["staged", "sealed"]
@@ -471,6 +474,73 @@ class QuarantineStore(Protocol):
 
 
 @dataclass(frozen=True)
+class InboxEvent:
+    """A push event in the inbox. `event_seq` says the order of arrival, and `event_id` is what the sender calls it."""
+
+    event_seq: int
+    dataset: str
+    event_id: str | None
+    request: "InboundRequest"
+    received_at: datetime
+
+
+@dataclass(frozen=True)
+class InboxDay:
+    """How a day of the inbox stands: how many events wait to be sealed, the first of them, and when the last sealed."""
+
+    unsealed: int
+    first_unsealed: int | None
+    last_sealed: datetime | None
+
+
+class InboxStore(Protocol):
+    """Push events between arriving and being sealed, kept by the day of their arrival (design 6.3 and 7.4)."""
+
+    def put(self, dataset: str, request: "InboundRequest", event_id: str | None = None) -> bool:
+        """Store an event. False, storing nothing, when the dataset has had this `event_id` on a day it still holds."""
+        ...
+
+    def take(self, dataset: str, limit: int) -> list[InboxEvent]:
+        """The dataset's oldest events not yet sealed, in arrival order. They stay there until `seal_batch`."""
+        ...
+
+    def oldest_age(self, dataset: str, now: datetime) -> timedelta | None:
+        """How long the oldest event not yet sealed has waited, or None when none waits."""
+        ...
+
+    def seal_batch(
+        self,
+        event_seqs: Sequence[int],
+        drafts: Sequence[VersionDraft],
+        routes: Sequence[str],
+        writer: str | None = None,
+    ) -> list["Version"]:
+        """Mark the events sealed, then stage and seal the versions with a pending delivery per route, in one transaction.
+
+        Either all of it happens or none. Raises `StaleWriter` if any event is unknown or already sealed, since another
+        sealer has dealt with it, or if a `writer` doesn't hold the claim of a draft, and `VersionSealed` if a draft is
+        sealed already. `drafts` can be empty, for events that gave no records.
+        """
+        ...
+
+    def days(self) -> list[date]:
+        """The days the inbox holds a place for, oldest first, with or without events."""
+        ...
+
+    def day_status(self, day: date) -> InboxDay: ...
+    def drop_day(self, day: date) -> bool:
+        """Forget the day's events and event ids, unless one of its events is not sealed, and return whether it did.
+
+        This is the one check that counts: an unsealed event is never dropped, whatever was read before.
+        """
+        ...
+
+    def ensure_partitions(self, days_ahead: int = 7) -> None:
+        """Make room for writes from today to `days_ahead` days on, for a backend that needs it."""
+        ...
+
+
+@dataclass(frozen=True)
 class Window:
     """A limit of `units` per `seconds`."""
 
@@ -861,3 +931,4 @@ class Store:
     users: UserStore
     audit: AuditStore
     reads: ReadStore
+    inbox: InboxStore

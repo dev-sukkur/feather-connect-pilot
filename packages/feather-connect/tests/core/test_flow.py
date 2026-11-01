@@ -321,6 +321,8 @@ def test_the_public_api_has_what_flow_authors_import():
         "CheckResult",
         "Source",
         "PushSource",
+        "InboundRequest",
+        "Deleted",
         "Sink",
         "PermanentError",
         "TransientError",

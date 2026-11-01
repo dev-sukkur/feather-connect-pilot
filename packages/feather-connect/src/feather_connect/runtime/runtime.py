@@ -166,6 +166,15 @@ class Runtime:
     def store(self) -> Store:
         return self._deps.store
 
+    @property
+    def deps(self) -> RuntimeDeps:
+        return self._deps
+
+    def make_context(self, connection: str) -> Context:
+        """Return the context to call the connection's connector with. It holds the secrets of the connection, and
+        raises `PermanentError` if one can't be resolved."""
+        return self._deps.make_context(connection)
+
     def flows(self) -> list[Flow]:
         """Return the flows, in the order they were given."""
         return list(self._flows.values())

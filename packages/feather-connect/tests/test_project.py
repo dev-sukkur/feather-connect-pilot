@@ -5,7 +5,13 @@ from textwrap import dedent
 import pytest
 
 from feather_connect.core.triggers import Cron, Every
-from feather_connect.project import ProjectError, effective_config, load_project, resolve_secret
+from feather_connect.project import (
+    ProjectError,
+    effective_config,
+    load_project,
+    resolve_secret,
+    validate_project,
+)
 
 FLOW_MODULE = """
     import feather_connect as fc
@@ -139,6 +145,62 @@ def test_missing_flow_module_names_the_file(tmp_path):  # Review Focus 5
     write(tmp_path, "env/dev.yaml", "")
     with pytest.raises(ProjectError, match=r"feather\.yaml.*modules.*flows\.nope"):
         load_project(tmp_path, "dev")
+
+
+PUSH_FLOW = """
+    import feather_connect as fc
+    from feather_connect.connectors import memory, simulation
+
+    hooks = fc.Dataset("hooks", source=SOURCE, key="id", strategy=fc.strategy.push())
+    demo = fc.Flow("demo", reads=hooks, deliver=[fc.to(memory.Sink("dst"))])
+"""
+SIMULATED = 'simulation.Source("hooks", generator={"id": simulation.seq()}%s)'
+
+
+def push_project(root: Path, source: str, connection: str) -> None:
+    write(
+        root,
+        "feather.yaml",
+        f"name: p\nmodules: [flows.demo]\nconnections:\n  dst: {{connector: memory.sink}}\n{connection}",
+    )
+    write(root, "env/dev.yaml", "")
+    write(root, "flows/__init__.py", "")
+    write(root, "flows/demo.py", PUSH_FLOW.replace("SOURCE", source))
+
+
+SIGNED = "  hooks: {connector: simulation.source, auth: {signature_secret: '${secret:env:HOOK_SECRET}'}}\n"
+BARE = "  hooks: {connector: simulation.source}\n"
+
+
+def test_a_push_source_with_its_secret_configured_loads_without_resolving_it(tmp_path, monkeypatch):
+    monkeypatch.delenv("HOOK_SECRET", raising=False)
+    push_project(tmp_path, SIMULATED % "", SIGNED)
+    project = load_project(tmp_path, "dev")
+    assert project.connections["hooks"].secret_refs["signature_secret"] == "${secret:env:HOOK_SECRET}"
+    assert validate_project(project) == []
+
+
+def test_a_push_source_whose_connection_has_no_secret_is_refused(tmp_path):
+    push_project(tmp_path, SIMULATED % "", BARE)
+    with pytest.raises(ProjectError, match=r"dataset 'hooks'.*auth\.signature_secret.*unsigned=True"):
+        load_project(tmp_path, "dev")
+
+
+def test_a_push_source_on_an_undefined_connection_is_refused(tmp_path):
+    push_project(tmp_path, SIMULATED % "", "")
+    with pytest.raises(ProjectError, match=r"auth\.signature_secret of connection 'hooks'"):
+        load_project(tmp_path, "dev")
+
+
+def test_a_source_that_can_not_verify_is_refused_as_a_push_source(tmp_path):
+    push_project(tmp_path, 'memory.Source("hooks")', "  hooks: {connector: memory.source}\n")
+    with pytest.raises(ProjectError, match=r"no signature to verify them by"):
+        load_project(tmp_path, "dev")
+
+
+def test_a_push_source_marked_unsigned_loads(tmp_path):
+    push_project(tmp_path, SIMULATED % ", unsigned=True", BARE)
+    assert validate_project(load_project(tmp_path, "dev")) == []
 
 
 def test_a_missing_overlay_and_a_bad_env_name_are_refused(project_dir):

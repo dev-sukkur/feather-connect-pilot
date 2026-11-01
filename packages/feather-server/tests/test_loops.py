@@ -285,3 +285,11 @@ def test_the_retention_loop_logs_its_report(
         wait_until(lambda: retention.count >= 1)
         retention.stop()
     assert any(r.levelname == "WARNING" and "retention kept" in r.getMessage() for r in caplog.records)
+
+
+def test_a_kept_inbox_day_is_logged_with_its_reason(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING):
+        log_retention(
+            RetentionReport(kept_inbox_days={date(2026, 10, 1): "2 events not sealed, such as event 5"})
+        )
+    assert "inbox day 2026-10-01: 2 events not sealed, such as event 5" in caplog.text

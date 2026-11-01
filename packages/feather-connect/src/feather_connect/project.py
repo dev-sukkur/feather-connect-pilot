@@ -25,6 +25,7 @@ from typing import Any, cast
 
 import yaml
 
+from feather_connect.core.connector import is_unsigned, signature_secret_of
 from feather_connect.core.flow import Flow, Problem, RouteSpec
 from feather_connect.core.triggers import OnEvent, Trigger, cron, every, manual
 from feather_connect.storage.port import BudgetSpec, parse_limits
@@ -148,6 +149,7 @@ def load_project(root: Path, env: str) -> Project:
     connections = _connections(config, layers, budgets)
     settings: Mapping[str, Any] = config.get("settings", {})
     flows = _apply_overlay(_import_flows(root, config, layers), config, layers, str(settings["timezone"]))
+    _check_push_sources(flows, connections, env)
     return Project(
         name, root, env, flows, connections, budgets, settings, _code_sha(root), copy.deepcopy(config), layers
     )
@@ -416,6 +418,33 @@ def _triggers(raw: Any, path: str, layers: Mapping[str, str], timezone: str) -> 
     except (ValueError, KeyError) as error:  # a bad duration, or a time zone that doesn't exist
         raise ProjectError(f"{_where(layers, path)}: {error}") from None
     return tuple(found)
+
+
+def _check_push_sources(flows: Sequence[Flow], connections: Mapping[str, ConnectionConfig], env: str) -> None:
+    """Refuse a push source that would take events from anybody, unless it says that is what it means (design 13.5).
+
+    It must be able to verify, and the secret it verifies against must be a reference under its connection's `auth`. The
+    reference is not resolved here: one that doesn't resolve is found when an event arrives, which is then told to retry.
+    """
+    for flow in flows:
+        for dataset in flow.datasets:
+            source = dataset.source
+            if dataset.strategy.name != "push" or is_unsigned(source):
+                continue
+            where = f"flow {flow.name!r}, dataset {dataset.name!r}"
+            secret = signature_secret_of(source)
+            if secret is None or not callable(getattr(source, "verify", None)):
+                raise ProjectError(
+                    f"{where}: {source.spec.name} takes events but has no signature to verify them by. "
+                    "Give it a signature_secret, or mark it unsigned=True if anybody may really send them"
+                )
+            connection = connections.get(source.connection)
+            if connection is None or secret not in connection.secret_refs:
+                raise ProjectError(
+                    f"{where}: events are verified with auth.{secret} of connection {source.connection!r}, which "
+                    f"{env!r} does not define. Add it as a reference such as ${{secret:env:NAME}}, or mark the "
+                    "source unsigned=True if anybody may really send them"
+                )
 
 
 # The code.

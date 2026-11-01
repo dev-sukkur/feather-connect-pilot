@@ -6,11 +6,12 @@ import math
 import threading
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from fractions import Fraction
 from typing import Any
 
 from feather_connect.clock import Clock, SystemClock
+from feather_connect.core.connector import InboundRequest
 from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
@@ -26,6 +27,9 @@ from feather_connect.storage.port import (
     FailureGroup,
     FlowRow,
     Grant,
+    InboxDay,
+    InboxEvent,
+    InboxStore,
     Ledger,
     Override,
     OverrideStore,
@@ -1036,14 +1040,102 @@ class _Reads(ReadStore):
             return found
 
 
+@dataclass
+class _InboxRow:
+    event: InboxEvent
+    day: date
+    sealed_at: datetime | None = None
+
+
+class _Inbox(InboxStore):
+    def __init__(self, data: _Data, versions: _Versions) -> None:
+        self._d = data
+        self._versions = versions
+        self._rows: dict[int, _InboxRow] = {}
+        self._seen: dict[tuple[str, str], date] = {}
+        self._seq = 0
+
+    def ensure_partitions(self, days_ahead: int = 7) -> None:
+        """Memory needs no partitions."""
+
+    def put(self, dataset: str, request: InboundRequest, event_id: str | None = None) -> bool:
+        with self._d.lock:
+            day = self._d.clock.now().date()
+            if event_id is not None:
+                if (dataset, event_id) in self._seen:
+                    return False
+                self._seen[(dataset, event_id)] = day
+            self._seq += 1
+            event = InboxEvent(self._seq, dataset, event_id, request, request.received_at)
+            self._rows[self._seq] = _InboxRow(event, day)
+            return True
+
+    def _open(self, dataset: str) -> list[InboxEvent]:
+        rows = (r for r in self._rows.values() if r.sealed_at is None and r.event.dataset == dataset)
+        return sorted((r.event for r in rows), key=lambda event: event.event_seq)
+
+    def take(self, dataset: str, limit: int) -> list[InboxEvent]:
+        with self._d.lock:
+            return self._open(dataset)[:limit]
+
+    def oldest_age(self, dataset: str, now: datetime) -> timedelta | None:
+        with self._d.lock:
+            found = self._open(dataset)
+        return now - found[0].received_at if found else None
+
+    def seal_batch(
+        self,
+        event_seqs: Sequence[int],
+        drafts: Sequence[VersionDraft],
+        routes: Sequence[str],
+        writer: str | None = None,
+    ) -> list[Version]:
+        with (
+            self._d.lock
+        ):  # every check comes before the first change, which is what one transaction amounts to here
+            for seq in event_seqs:
+                row = self._rows.get(seq)
+                if row is None or row.sealed_at is not None:
+                    raise StaleWriter("another sealer has dealt with an event of this batch")
+            for draft in drafts:
+                self._versions.check_writable(draft.version_id, writer)
+            for seq in event_seqs:
+                self._rows[seq].sealed_at = self._d.clock.now()
+            for draft in drafts:
+                self._versions.stage(draft, writer)
+            return self._versions.seal([draft.version_id for draft in drafts], routes, writer)
+
+    def days(self) -> list[date]:
+        with self._d.lock:
+            return sorted({row.day for row in self._rows.values()})
+
+    def day_status(self, day: date) -> InboxDay:
+        with self._d.lock:
+            rows = [row for row in self._rows.values() if row.day == day]
+        waiting = [row.event.event_seq for row in rows if row.sealed_at is None]
+        sealed = [row.sealed_at for row in rows if row.sealed_at is not None]
+        return InboxDay(len(waiting), min(waiting, default=None), max(sealed, default=None))
+
+    def drop_day(self, day: date) -> bool:
+        with self._d.lock:
+            rows = {seq: row for seq, row in self._rows.items() if row.day == day}
+            if any(row.sealed_at is None for row in rows.values()):
+                return False
+            for seq in rows:
+                del self._rows[seq]
+            self._seen = {key: seen for key, seen in self._seen.items() if seen != day}
+            return True
+
+
 class MemoryStore(Store):
     """A `Store` that keeps everything in memory. `clock` defaults to the system clock."""
 
     def __init__(self, clock: Clock | None = None) -> None:
         data = _Data(clock or SystemClock())
+        versions = _Versions(data)
         super().__init__(
             runs=_Runs(data),
-            versions=_Versions(data),
+            versions=versions,
             ledger=_Ledger(data),
             state=_State(data),
             quarantine=_Quarantine(data),
@@ -1055,4 +1147,5 @@ class MemoryStore(Store):
             users=_Users(data),
             audit=_Audit(data),
             reads=_Reads(data),
+            inbox=_Inbox(data, versions),
         )

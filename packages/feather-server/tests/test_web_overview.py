@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from feather_connect.clock import FrozenClock
+from feather_connect.core.connector import InboundRequest
 from feather_connect.core.errors import PermanentError
 from feather_connect.core.records import Record
 from feather_connect.storage.port import VersionDraft
@@ -196,3 +198,13 @@ def test_overview_keeps_the_reasons_for_a_short_while(world: World) -> None:  # 
     assert world.reads.overview().kept_days == found
     world.clock.advance(timedelta(seconds=1))
     assert world.reads.overview().kept_days == ()
+
+
+def test_an_inbox_day_kept_for_an_unsealed_event_shows_on_the_overview(
+    world: World, clock: FrozenClock
+) -> None:
+    world.store.inbox.put("d", InboundRequest("POST", "/", {}, b"{}", clock.now()))
+    old = clock.now().date()
+    clock.advance(timedelta(days=30))
+    [kept] = world.reads.overview().kept_days
+    assert kept.day == old and kept.why.startswith("inbox: 1 events not sealed")

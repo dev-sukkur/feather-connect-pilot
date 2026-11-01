@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import psycopg
 import pytest
@@ -8,12 +8,13 @@ from psycopg_pool import ConnectionPool
 import feather_connect as fc
 from feather_connect.clock import FrozenClock
 from feather_connect.connectors.memory import Sink, Source
+from feather_connect.core.connector import InboundRequest
 from feather_connect.core.records import Record
 from feather_connect.engine.local import LocalEngine
-from feather_connect.runtime.retention import kept_days, retention_once
+from feather_connect.runtime.retention import kept_days, kept_inbox_days, retention_once
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.memory import MemoryStore
-from feather_connect.storage.port import Store, VersionDraft
+from feather_connect.storage.port import InboxDay, Store, VersionDraft
 from feather_connect.storage.postgres.spool import PostgresSpool
 from feather_connect.storage.postgres.store import PostgresStore
 from feather_connect.storage.spool import MemorySpool, Spool, records_to_table, snapshot_table
@@ -175,6 +176,64 @@ class RetentionTests:
         assert store.versions.sealed_for_run(second, "d") != []
         assert store.versions.sealed_for_run(third, "d") == []  # no changes, so no version
         assert len(sink.calls) == 2
+
+    # The inbox.
+
+    def _event(self, store: Store, at: datetime) -> int:
+        store.inbox.put("d", InboundRequest("POST", "/", {}, b"{}", at))
+        return store.inbox.take("d", 1000)[-1].event_seq
+
+    def test_an_unsealed_event_keeps_its_day_for_as_long_as_it_takes(  # the promise of ingress
+        self, store: Store, spool: Spool, clock: FrozenClock
+    ):
+        seq = self._event(store, T0)
+        clock.advance(timedelta(days=400))
+        r = retention_once(store, spool, now=clock.now())
+        assert r.dropped_inbox_days == []
+        assert f"1 events not sealed, such as event {seq}" in r.kept_inbox_days[T0.date()]
+        assert kept_inbox_days(store, now=clock.now()) == r.kept_inbox_days
+        assert [e.event_seq for e in store.inbox.take("d", 10)] == [seq]
+
+    def test_one_unsealed_event_keeps_a_day_of_sealed_ones(
+        self, store: Store, spool: Spool, clock: FrozenClock
+    ):
+        first = self._event(store, T0)
+        second = self._event(store, T0)
+        store.inbox.seal_batch([first], [], [])
+        clock.advance(timedelta(days=30))
+        r = retention_once(store, spool, now=clock.now())
+        assert r.dropped_inbox_days == [] and str(second) in r.kept_inbox_days[T0.date()]
+
+    def test_a_sealed_day_goes_seven_days_after_sealing_not_after_arriving(
+        self, store: Store, spool: Spool, clock: FrozenClock
+    ):
+        seq = self._event(store, T0)
+        clock.advance(timedelta(days=10))
+        store.inbox.seal_batch([seq], [], [])  # a long outage: sealed ten days late
+        clock.advance(timedelta(days=6))
+        r = retention_once(store, spool, now=clock.now())
+        assert r.dropped_inbox_days == [] and r.kept_inbox_days == {}
+        assert T0.date() in store.inbox.days()
+        clock.advance(timedelta(days=2))
+        assert retention_once(store, spool, now=clock.now()).dropped_inbox_days == [T0.date()]
+        assert T0.date() not in store.inbox.days()
+
+    def test_a_recent_day_stays(self, store: Store, spool: Spool, clock: FrozenClock):
+        store.inbox.seal_batch([self._event(store, T0)], [], [])
+        clock.advance(timedelta(days=6))
+        assert retention_once(store, spool, now=clock.now()).dropped_inbox_days == []
+        assert T0.date() in store.inbox.days()
+
+    def test_an_event_that_turns_up_after_the_check_is_not_dropped(
+        self, store: Store, spool: Spool, clock: FrozenClock, monkeypatch: pytest.MonkeyPatch
+    ):
+        """`drop_day` looks again, in the transaction that drops: it has the last word."""
+        self._event(store, T0)
+        clock.advance(timedelta(days=30))
+        monkeypatch.setattr(store.inbox, "day_status", lambda day: InboxDay(0, None, None))
+        r = retention_once(store, spool, now=clock.now())
+        assert r.dropped_inbox_days == [] and "not sealed" in r.kept_inbox_days[T0.date()]
+        assert len(store.inbox.take("d", 10)) == 1
 
 
 class TestMemoryRetention(RetentionTests):
