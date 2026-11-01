@@ -87,7 +87,9 @@ def _free_port() -> int:
 
 
 def _docker(*args: str, timeout: float = 60) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["docker", *args], check=False, capture_output=True, text=True, timeout=timeout)
+    # The docker that `shutil.which` finds is the one to run: on Windows a bare name is looked up differently.
+    docker = shutil.which("docker") or "docker"
+    return subprocess.run([docker, *args], check=False, capture_output=True, text=True, timeout=timeout)
 
 
 def _check_docker(json_mode: bool) -> None:
