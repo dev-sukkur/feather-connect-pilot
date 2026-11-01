@@ -657,10 +657,24 @@ class _Versions(VersionStore):
                      and not exists (select 1 from feather.run_slice s
                                      where s.tenant_id = v.tenant_id and s.run_id = v.run_id
                                        and s.dataset = v.dataset and not s.done)
+                     and not exists (select 1 from feather.run r
+                                     where r.tenant_id = v.tenant_id and r.run_id = v.run_id
+                                       and r.status in ('failed', 'cancelled'))
                    order by v.run_id, v.dataset""",
                 {"tenant": self._db.tenant},
             ).fetchall()
         return [(r["run_id"], r["dataset"]) for r in rows]
+
+    def abandoned(self, limit: int = 1000) -> list[Version]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select v.* from feather.version v join feather.run r
+                     on r.tenant_id = v.tenant_id and r.run_id = v.run_id
+                   where v.tenant_id = %s and v.status = 'staged' and r.status in ('failed', 'cancelled')
+                   order by v.stage_seq limit %s""",
+                (self._db.tenant, limit),
+            ).fetchall()
+        return [_version(r) for r in rows]
 
     def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:
         with self._db.tx() as conn:

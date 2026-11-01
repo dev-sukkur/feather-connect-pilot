@@ -27,7 +27,7 @@ from feather_connect.logs import bind, redact
 from feather_connect.runtime.apply import fail_open, oldest_open, replay_gap, run_apply
 from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.deps import RuntimeDeps
-from feather_connect.runtime.extract import ExtractFailed, VerifyResult, run_extract
+from feather_connect.runtime.extract import ExtractFailed, VerifyResult, discard_abandoned, run_extract
 from feather_connect.runtime.plan import run_plan
 from feather_connect.runtime.seal import run_seal
 from feather_connect.storage.port import (
@@ -465,6 +465,10 @@ class Runtime:
             deps.store.runs.finish_task(row.task_id, "failed", why)
         self._settle_run(run_id)
         return True
+
+    def discard_abandoned(self, version_id: str) -> None:
+        """Remove a staged version of a run that failed or was cancelled, with its chunks, which frees its day."""
+        discard_abandoned(version_id, self._deps)
 
     def submit_seal(self, flow: str, dataset: str, run_id: str) -> None:
         """Submit the task that seals the run's slices of `dataset`."""

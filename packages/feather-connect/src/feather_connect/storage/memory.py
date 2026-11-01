@@ -398,10 +398,24 @@ class _Versions(VersionStore):
 
     def runs_ready_to_seal(self) -> list[tuple[str, str]]:
         with self._d.lock:
-            staged = {(v.run_id, v.dataset) for v in self._d.versions.values() if v.status == "staged"}
+            staged = {
+                (v.run_id, v.dataset)
+                for v in self._d.versions.values()
+                if v.status == "staged" and not self._ended_badly(v.run_id)
+            }
             return sorted(
                 key for key, slices in self._d.slices.items() if key in staged and all(slices.values())
             )
+
+    def _ended_badly(self, run_id: str) -> bool:
+        run = self._d.runs.get(run_id)
+        return run is not None and run.status in ("failed", "cancelled")
+
+    def abandoned(self, limit: int = 1000) -> list[Version]:
+        with self._d.lock:
+            return [
+                v for v in self._d.versions.values() if v.status == "staged" and self._ended_badly(v.run_id)
+            ][:limit]
 
     def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:
         with self._d.lock:

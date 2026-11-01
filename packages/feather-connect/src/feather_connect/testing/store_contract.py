@@ -1130,6 +1130,22 @@ class StoreContract(SpoolContract):
         found = store.ledger.pending_older_than(timedelta(minutes=1), limit=2)
         assert [d.version_id for d in found] == ["v0", "v1"]
 
+    def test_a_run_that_ended_badly_has_no_seal_to_wait_for_and_its_staged_versions_are_abandoned(
+        self, store: Store
+    ):
+        run = store.runs.create_run("f", "manual", "ann", {})
+        store.versions.stage(draft("v1", run=run))
+        store.versions.register_slices(run, "d", ["p"])
+        store.versions.finish_slice(run, "d", "p")
+        assert store.versions.runs_ready_to_seal() == [(run, "d")]
+        assert store.versions.abandoned() == []
+        for status in ("failed", "cancelled"):
+            store.runs.set_run_status(run, status)
+            assert store.versions.runs_ready_to_seal() == []
+            assert [v.version_id for v in store.versions.abandoned()] == ["v1"]
+        store.versions.seal(["v1"], ["a"])
+        assert store.versions.abandoned() == []
+
     def test_open_versions_are_those_with_a_delivery_that_is_not_closed(self, store: Store):
         for vid, part in (("v1", "p"), ("v2", "q"), ("v3", "r")):
             seal(store, vid, ["a", "b"], part=part)

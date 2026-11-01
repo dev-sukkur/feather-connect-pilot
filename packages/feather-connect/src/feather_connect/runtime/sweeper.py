@@ -4,7 +4,8 @@ A worker that stops sending heartbeats has its tasks re-queued and is then marke
 tried again. A pending delivery that has sat for a while may have lost the submit that follows sealing, a run still
 queued may have lost the submit of its plan, and a run whose slices are all read may have lost its seal task. These are
 submitted again under the same idempotency key, so one that exists is not run twice. A delivery still open when its task
-has ended can't be helped by that, so it is failed, which lets an operator retry or skip it.
+has ended can't be helped by that, so it is failed, which lets an operator retry or skip it. A staged version of a run
+that failed or was cancelled will never be sealed, so it goes, or it would keep its day's chunks for good.
 """
 
 import logging
@@ -30,6 +31,7 @@ class SweepReport:
     resubmitted_seals: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     resubmitted_runs: list[str] = field(default_factory=list[str])
     stranded_deliveries: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    discarded_versions: list[str] = field(default_factory=list[str])
 
 
 def sweep_once(
@@ -93,12 +95,17 @@ def sweep_once(
     seals: list[tuple[str, str]] = []
     for run_id, dataset in store.versions.runs_ready_to_seal():
         try:
-            run = store.runs.get_run(run_id)
-            if run.status == "cancelled":  # somebody stopped the run on purpose
-                continue
-            runtime.submit_seal(run.flow, dataset, run_id)
+            runtime.submit_seal(store.runs.get_run(run_id).flow, dataset, run_id)
         except Exception:
             log.exception("could not submit the seal of dataset %s for run %s", dataset, run_id)
         else:
             seals.append((run_id, dataset))
-    return SweepReport(dead, recovered, deliveries, seals, runs, stranded)
+    discarded: list[str] = []
+    for version in store.versions.abandoned():
+        try:
+            runtime.discard_abandoned(version.version_id)
+        except Exception:
+            log.exception("could not discard version %s of run %s", version.version_id, version.run_id)
+        else:
+            discarded.append(version.version_id)
+    return SweepReport(dead, recovered, deliveries, seals, runs, stranded, discarded)

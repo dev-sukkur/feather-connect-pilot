@@ -340,8 +340,13 @@ class VersionStore(Protocol):
     def runs_ready_to_seal(self) -> list[tuple[str, str]]:
         """The `(run_id, dataset)` pairs whose slices are all finished and that still have a staged version.
 
-        Their seal task has not run to the end: it was never submitted, or it was lost.
+        Their seal task has not run to the end: it was never submitted, or it was lost. A run that failed or was
+        cancelled is not one: nothing will seal it (see `abandoned`).
         """
+        ...
+
+    def abandoned(self, limit: int = 1000) -> list[Version]:
+        """Staged versions of runs that failed or were cancelled, which nothing will seal, oldest staged first."""
         ...
 
     def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:

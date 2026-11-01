@@ -336,6 +336,13 @@ def _discard(version_id: str, writer: str, deps: RuntimeDeps) -> None:
     deps.spool.delete_version(version_id, writer)
 
 
+def discard_abandoned(version_id: str, deps: RuntimeDeps) -> None:
+    """Remove a staged version that nothing will seal, shutting out any execution of it that is still going."""
+    writer = new_id()
+    deps.store.versions.take_over([version_id], writer)
+    _discard(version_id, writer, deps)
+
+
 def _moved_here(dataset: Dataset, partition: str, keys: Iterable[str], deps: RuntimeDeps) -> set[str]:
     """Return the keys read in `partition` whose record state names another one, which must upsert even if unchanged.
 
