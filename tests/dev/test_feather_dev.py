@@ -399,7 +399,7 @@ def test_reset_password_gives_a_new_password_and_keeps_the_data(start_dev, datab
 
 
 RELOADS = """
-import json, sys, time
+import faulthandler, json, sys, time
 from pathlib import Path
 
 import psycopg
@@ -409,6 +409,7 @@ from feather_connect.storage.postgres.migrate import migrate
 from feather_server.settings import Settings
 
 url, project, port = sys.argv[1], Path(sys.argv[2]), int(sys.argv[3])
+faulthandler.dump_traceback_later(100, exit=True, file=sys.stdout)  # within the test's limit, and it says where
 
 
 def backends():
@@ -446,7 +447,7 @@ def test_a_reload_leaves_no_connections_behind(tmp_path: Path, pg_url: str) -> N
             check=False,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=110,
             cwd=tmp_path,
         )
         found = re.search(r"COUNTS (\[.*\])", done.stdout)
