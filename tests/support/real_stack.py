@@ -1,0 +1,106 @@
+"""What the tests that run the real stack share: scratch databases, and worker processes running Feather's `Runtime`.
+
+The fixtures built on these are in the root `conftest.py`. This folder is on the path through `pythonpath` in
+`pyproject.toml`, as test files can't import each other under `--import-mode=importlib`.
+"""
+
+import os
+import signal
+import subprocess
+import sys
+import time
+import uuid
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from pathlib import Path
+from typing import IO, Any
+from urllib.parse import urlsplit
+
+import psycopg
+from psycopg import sql
+
+DEFAULT_URL = "postgresql://feather:feather@127.0.0.1:25433/feather_test"
+
+
+def server_url() -> str:
+    """Return the URL of the test server's admin database."""
+    return os.environ.get("FEATHER_TEST_DATABASE_URL", DEFAULT_URL)
+
+
+@contextmanager
+def scratch_database(admin_url: str) -> Iterator[str]:
+    """Create an empty database on the server of `admin_url`, give its URL, and drop it at the end."""
+    name = f"feather_{uuid.uuid4().hex[:12]}"
+    create = sql.SQL("create database {}").format(sql.Identifier(name))
+    drop = sql.SQL("drop database if exists {} with (force)").format(sql.Identifier(name))
+    with psycopg.connect(admin_url, autocommit=True, connect_timeout=5) as admin:
+        admin.execute(create)
+    try:
+        yield urlsplit(admin_url)._replace(path=f"/{name}").geturl()
+    finally:  # on a session of its own, as a test may have restarted the server
+        with psycopg.connect(admin_url, autocommit=True, connect_timeout=5) as admin:
+            admin.execute(drop)
+
+
+def wait_until(check: Callable[[], Any], timeout: float = 30) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if check():
+                return
+        except KeyError:
+            pass
+        time.sleep(0.2)
+    raise AssertionError("timed out waiting")
+
+
+def start_worker(
+    project: Path,
+    pg_url: str,
+    worker_id: str,
+    sha: str = "testsha",
+    *,
+    env: Mapping[str, str] | None = None,
+    log: IO[bytes] | None = None,
+) -> subprocess.Popen[bytes]:
+    """Start `python -m feather_connect.worker`. `env` adds to the environment, and `log` takes its output."""
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0  # type: ignore[attr-defined]
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "feather_connect.worker",
+            str(project),
+            "dev",
+            "--database-url",
+            pg_url,
+            "--worker-id",
+            worker_id,
+            "--poll-s",
+            "0.1",
+        ],
+        env={**os.environ, "FEATHER_CODE_SHA": sha, **(env or {})},
+        creationflags=flags,
+        stdout=log,
+        stderr=log,
+    )
+
+
+def kill_abruptly(proc: subprocess.Popen[bytes]) -> None:
+    """Kill the worker at once, as `kill -9` does, and wait for it.
+
+    On Windows `sys.executable` in a virtual environment is a launcher, whose child is the real Python: `proc.pid` is
+    the launcher's, so it takes the tree.
+    """
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], check=False, capture_output=True)
+    else:
+        proc.kill()
+    proc.wait(timeout=30)
+
+
+def stop_gracefully(proc: subprocess.Popen[bytes]) -> None:
+    if sys.platform == "win32":
+        proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
+    else:
+        proc.terminate()

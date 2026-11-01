@@ -1,40 +1,30 @@
 """Fixtures shared by the tests that need Postgres. Start it with
 `docker compose -f deploy/compose.test.yaml up -d`."""
 
-import os
-import uuid
+import subprocess
 from collections.abc import Callable, Iterator
 from typing import Any
-from urllib.parse import urlsplit
 
 import psycopg
 import pytest
 from psycopg import sql
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
-
-DEFAULT_URL = "postgresql://feather:feather@127.0.0.1:25433/feather_test"
+from real_stack import scratch_database, server_url, stop_gracefully
 
 
 @pytest.fixture(scope="session")
 def pg_url() -> Iterator[str]:
     """A fresh, empty database on the test server, dropped when the session ends."""
-    admin_url = os.environ.get("FEATHER_TEST_DATABASE_URL", DEFAULT_URL)
-    name = f"feather_{uuid.uuid4().hex[:12]}"
     try:
-        admin = psycopg.connect(admin_url, autocommit=True, connect_timeout=5)
+        with scratch_database(server_url()) as url:
+            yield url
     except psycopg.OperationalError as error:
         pytest.fail(
             f"the test Postgres is not reachable ({error}). "
             "Start it with: docker compose -f deploy/compose.test.yaml up -d",
             pytrace=False,
         )
-    with admin:
-        admin.execute(sql.SQL("create database {}").format(sql.Identifier(name)))
-        try:
-            yield urlsplit(admin_url)._replace(path=f"/{name}").geturl()
-        finally:
-            admin.execute(sql.SQL("drop database if exists {} with (force)").format(sql.Identifier(name)))
 
 
 @pytest.fixture(scope="session")
@@ -83,3 +73,44 @@ def pg(
         conn.execute(sql.SQL("truncate {} restart identity cascade").format(names))
         conn.execute("alter sequence feather.seal_seq restart")
         yield conn
+
+
+@pytest.fixture
+def db(pg_url: str) -> Iterator[tuple[Any, Any]]:
+    """A store and a spool on the migrated test database."""
+    from feather_connect.storage.postgres.connect import connect
+    from feather_connect.storage.postgres.migrate import migrate
+
+    migrate(pg_url)
+    store, spool = connect(pg_url)
+    yield store, spool
+    store.close()
+
+
+@pytest.fixture
+def client_engine(pg_url: str) -> Iterator[Any]:
+    """An engine to submit tasks with, as a server does."""
+    from feather_engine_dbos import DbosEngine
+
+    engine = DbosEngine(pg_url)
+    yield engine
+    engine.close()
+
+
+@pytest.fixture
+def workers() -> Iterator[list[subprocess.Popen[bytes]]]:
+    """A list for a test to put its worker processes in. They are stopped when it ends."""
+    procs: list[subprocess.Popen[bytes]] = []
+    yield procs
+    # Let each drain, since the next test shares the database. A run reads succeeded a moment before its last task's
+    # workflow ends: killed in that moment, the workflow stays PENDING, and with no sweeper here it holds the one slot
+    # of its concurrency key, so that the next test's delivery on the same route waits for good.
+    for proc in procs:
+        if proc.poll() is None:
+            stop_gracefully(proc)
+    for proc in procs:
+        try:
+            proc.wait(timeout=45)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()

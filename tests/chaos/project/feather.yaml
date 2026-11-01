@@ -1,0 +1,14 @@
+name: chaos-project
+modules: [flows.chaos]
+budgets:
+  fits_budget: {limits: [5/hour]} # the test replaces this with a window short enough to wait out
+  small_budget: {limits: [3/hour]}
+connections:
+  source: {connector: chaos.source}
+  fits_source: {connector: chaos.source, budget: fits_budget}
+  big_source: {connector: chaos.source, budget: small_budget}
+  slow_a: {connector: chaos.slow_sink}
+  slow_b: {connector: chaos.slow_sink}
+  slow_c: {connector: chaos.slow_sink}
+  fits_sink: {connector: chaos.slow_sink}
+  big_sink: {connector: chaos.slow_sink}
