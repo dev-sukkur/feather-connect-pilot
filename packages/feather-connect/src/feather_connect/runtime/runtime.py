@@ -22,7 +22,7 @@ from feather_connect.core.errors import BudgetDeferred, PermanentError
 from feather_connect.core.flow import Flow, RouteSpec
 from feather_connect.engine.port import Engine, RetryPolicy, TaskCall, TaskContext, TaskFn
 from feather_connect.logs import bind
-from feather_connect.runtime.apply import oldest_open, run_apply
+from feather_connect.runtime.apply import oldest_open, replay_gap, run_apply
 from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import ExtractFailed, VerifyResult, run_extract
@@ -349,18 +349,50 @@ class Runtime:
     def replay(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
         """Send an applied delivery back to be applied again, as a new task.
 
-        Raises `InvalidTransition` while a newer delivery of the route's partition is open: a task of that delivery
-        could find the replay failed in front of it and end, using up its key. Replay once the stream has drained.
+        Raises `InvalidTransition`, changing nothing, for each reason `replay_refusal` gives.
         """
         self._require(route, version_id, "applied", "replay")
-        delivery = self._deps.store.ledger.get(route, version_id)
-        newer = self._newer_open(delivery)
-        if newer is not None:
-            raise InvalidTransition(
-                f"version {version_id} can't replay on route {route!r} while newer version {newer.version_id} is "
-                f"{newer.status} in partition {delivery.partition!r}: replay once that has drained"
-            )
+        refusal = self.replay_refusal(route, version_id)
+        if refusal is not None:
+            raise InvalidTransition(refusal)
         self._reopen(route, version_id, "pending", actor, reason)
+
+    def replay_refusal(self, route: str, version_id: str) -> str | None:
+        """Say why the delivery may not replay now, or None if it may.
+
+        Only the latest version of a stream that wasn't skipped replays. An older one would leave older data in the
+        destination, which a later version that carries only changes would not correct (I2). A newer delivery of the
+        route's partition that is still open also refuses it: its task could find the replay failed in front of it
+        and end, using up its key. So does a version with nothing left to send (`replay_gap`).
+        """
+        delivery = self._deps.store.ledger.get(route, version_id)
+        return self._newer_than(delivery) or replay_gap(
+            self.route(route), self._deps.store.versions.get(version_id), self._deps
+        )
+
+    def _newer_than(self, delivery: Delivery) -> str | None:
+        """Say what, sealed after `delivery` in its route's partition, stops it from replaying."""
+        route, version_id, partition = delivery.route, delivery.version_id, delivery.partition
+        ledger = self._deps.store.ledger
+        latest: Delivery | None = None
+        page = ledger.list_deliveries(route=route, partition=partition, cursor=delivery_cursor(delivery))
+        while page:
+            for other in page:
+                if other.status not in CLOSED:
+                    return (
+                        f"version {version_id} can't replay on route {route!r} while newer version "
+                        f"{other.version_id} is {other.status} in partition {partition!r}: replay once that has "
+                        "drained"
+                    )
+                if other.dataset == delivery.dataset and other.status != "skipped":
+                    latest = other
+            page = ledger.list_deliveries(route=route, partition=partition, cursor=delivery_cursor(page[-1]))
+        if latest is None:
+            return None
+        return (
+            f"version {version_id} is older than version {latest.version_id}, the latest of partition {partition!r}, "
+            f"and replaying it would put older data in route {route!r}: replay {latest.version_id} instead"
+        )
 
     def skip(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
         """Give up on a failed delivery, so that the versions behind it can go ahead."""
@@ -591,19 +623,6 @@ class Runtime:
             self._open_apply_row(delivery, run_id)
         for delivery in deliveries:
             self.submit_apply(delivery.route, delivery.version_id)
-
-    def _newer_open(self, delivery: Delivery) -> Delivery | None:
-        """Return the first open delivery sealed after `delivery` in its route's partition, of any dataset."""
-        ledger = self._deps.store.ledger
-        page = ledger.list_deliveries(route=delivery.route, partition=delivery.partition)
-        while page:
-            for other in page:
-                if other.seal_seq > delivery.seal_seq and other.status not in CLOSED:
-                    return other
-            page = ledger.list_deliveries(
-                route=delivery.route, partition=delivery.partition, cursor=delivery_cursor(page[-1])
-            )
-        return None
 
     def _apply_ref(self, delivery: Delivery, run_id: str) -> str:
         """Return the key of the delivery's next apply task: `_apply_key`, and `#n` after it once `n` tasks of it ended

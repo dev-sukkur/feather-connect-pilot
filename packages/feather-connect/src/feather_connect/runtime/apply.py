@@ -123,6 +123,28 @@ def _plan_of(route: RouteSpec, version: Version, deps: RuntimeDeps) -> _Plan:
     return _Plan("full", chunks)
 
 
+def replay_gap(route: RouteSpec, version: Version, deps: RuntimeDeps) -> str | None:
+    """Say why a replay of `version` on `route` would send nothing, or None if it has something to send.
+
+    Retention drops a version's chunks long before its ledger row, and a plan with no chunks would pass for applied.
+    """
+    version_id = version.version_id
+    try:
+        plan = _plan_of(route, version, deps)
+    except PermanentError as error:
+        if deps.spool.list_chunks(version_id, "full"):
+            return str(error)
+        plan = _Plan("full", ())  # the records the snapshot names are gone from the `full` chunks
+    if plan.chunks:
+        return None
+    if version.upserts or version.deletes or route.mode == "replace_partition":
+        return (
+            f"version {version_id} can't replay on route {route.name!r}: its data has aged out of retention, though "
+            "its ledger row remains. Read the partition again from its source to deliver it afresh"
+        )
+    return f"version {version_id} can't replay on route {route.name!r}: it has nothing to send"
+
+
 def _tries(delivery: Delivery, deps: RuntimeDeps) -> int:
     """Return how many times the delivery has started running since an operator last sent it back."""
     tries = 0

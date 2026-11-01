@@ -8,7 +8,7 @@ whether it worked or not, with the actor and the reason.
 import logging
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from zoneinfo import ZoneInfo
@@ -54,7 +54,11 @@ _SIMULATED = ("simulation.", "memory.")  # connectors of tests and demos, which 
 @dataclass(frozen=True)
 class DeliverySelection:
     """Which deliveries a bulk action is about. Every field given narrows the selection; `error` and `error_class` are
-    those of one failure group, and `version_ids` names the versions to take."""
+    those of one failure group, and `version_ids` names the versions to take.
+
+    `follow_latest` is what a replay preview sets when it wasn't given versions: `version_ids` holds the latest version
+    of each stream as the preview saw it, and the replay itself goes to whatever is the latest by then. So new versions
+    don't make the preview stale, and no older data goes out because of them."""
 
     route: str | None = None
     dataset: str | None = None
@@ -62,6 +66,7 @@ class DeliverySelection:
     error: str | None = None
     error_class: str | None = None
     version_ids: tuple[str, ...] | None = None
+    follow_latest: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +76,7 @@ class DeliverySelection:
             "error": self.error,
             "error_class": self.error_class,
             "version_ids": None if self.version_ids is None else list(self.version_ids),
+            "follow_latest": self.follow_latest,
         }
 
     @classmethod
@@ -83,6 +89,7 @@ class DeliverySelection:
             found.get("error"),
             found.get("error_class"),
             None if versions is None else tuple(versions),
+            bool(found.get("follow_latest")),
         )
 
 
@@ -410,6 +417,28 @@ class Actions:
         return sorted(found, key=lambda d: (d.seal_seq, d.route))
 
     @staticmethod
+    def _latest_of_each_stream(found: Sequence[Delivery]) -> list[Delivery]:
+        """Keep the newest of each (route, dataset, partition). `found` is in seal order."""
+        latest = {(d.route, d.dataset, d.partition): d for d in found}
+        return sorted(latest.values(), key=lambda d: (d.seal_seq, d.route))
+
+    def _chosen(self, action: str, selection: DeliverySelection) -> list[Delivery]:
+        found = self._resolve(action, selection)
+        return self._latest_of_each_stream(found) if selection.follow_latest else found
+
+    def _newest_now(self, delivery: Delivery) -> Delivery:
+        """Return the applied delivery of the stream's latest version, or `delivery` if the latest isn't applied, which
+        the runtime then refuses, or takes if the newer ones were skipped."""
+        latest = self._store.versions.latest_sealed(delivery.dataset, delivery.partition)
+        if latest is None:
+            return delivery
+        try:
+            newest = self._store.ledger.get(delivery.route, latest.version_id)
+        except KeyError:
+            return delivery
+        return newest if newest.status == "applied" else delivery
+
+    @staticmethod
     def _deliveries_print(action: str, found: Sequence[Delivery]) -> str:
         return fingerprint(
             action,
@@ -426,6 +455,17 @@ class Actions:
         found = self._resolve(action, selection)
         if not found:
             raise ValueError("the selection matches nothing")
+        if action == "replay":
+            if selection.version_ids is None:
+                found = self._latest_of_each_stream(found)
+                selection = replace(
+                    selection, version_ids=tuple(d.version_id for d in found), follow_latest=True
+                )
+                found = self._chosen(action, selection)
+            for d in found:
+                refusal = self._rt.replay_refusal(d.route, d.version_id)
+                if refusal is not None:
+                    raise ValueError(refusal)
         token = self._tokens.issue(
             f"{action}_deliveries", actor.name, selection.as_dict(), self._deliveries_print(action, found)
         )
@@ -448,13 +488,18 @@ class Actions:
             len({(d.dataset, d.partition) for d in found}),
             len(found),
             units,
-            tuple(f"{d.route} · {_label(by_dataset[d.dataset], d.partition)}" for d in found[:_SAMPLES]),
+            tuple(
+                f"{d.route} · {_label(by_dataset[d.dataset], d.partition)}"
+                + (f" · version {d.version_id}" if action == "replay" else "")
+                for d in found[:_SAMPLES]
+            ),
         )
 
     def apply_deliveries(self, actor: Actor, token: str, *, reason: str | None = None) -> list[str]:
         """Do the previewed retry, skip or replay. Returns `route:version` for each delivery it moved.
 
-        A delivery the runtime refuses to move is left as it is and named in the audit row; the others go ahead.
+        A delivery the runtime refuses to move is left as it is and named in the audit row; the others go ahead. When
+        it refuses them all, this raises `ValueError` with the reason, since nothing was done to report as done.
         """
         confirmed = self._tokens.action_of(token)
         action = confirmed.removesuffix("_deliveries")
@@ -468,11 +513,13 @@ class Actions:
             token,
             reason,
             lambda stored: self._deliveries_print(
-                action, self._resolve(action, DeliverySelection.from_dict(stored))
+                action, self._chosen(action, DeliverySelection.from_dict(stored))
             ),
         )
         wanted = DeliverySelection.from_dict(selection)
-        found = self._resolve(action, wanted)
+        found = self._chosen(action, wanted)
+        if wanted.follow_latest:
+            found = self._latest_of_each_stream([self._newest_now(d) for d in found])
         runtime_call = {"retry": self._rt.retry, "skip": self._rt.skip, "replay": self._rt.replay}[action]
         refused: list[str] = []
 
@@ -484,6 +531,8 @@ class Actions:
                     moved.append(f"{d.route}:{d.version_id}")
                 except (InvalidTransition, PermanentError) as error:
                     refused.append(f"{d.route}:{d.version_id}: {error}")
+            if refused and not moved:
+                raise ValueError(refused[0])
             return moved
 
         def note(moved: list[str]) -> str:

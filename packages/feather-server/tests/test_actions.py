@@ -158,6 +158,21 @@ def test_bulk_retry_skip_and_replay_affect_only_the_selection(world: World) -> N
     assert [d.replays for d in world.store.ledger.list_deliveries(route="warehouse")] == [0, 0]
 
 
+def test_replay_of_a_named_older_version_is_refused_at_the_preview(world: World) -> None:
+    world.run([day(17)])
+    older = world.store.versions.latest_sealed("orders", day(17))
+    assert older is not None
+    source: Any = world.state.runtime.dataset("orders").source
+    source.load([{**dict(row), "note": "changed"} for row in source._rows])
+    world.run([day(17)])
+    newer = world.store.versions.latest_sealed("orders", day(17))
+    assert newer is not None and newer.version_id != older.version_id
+    with pytest.raises(ValueError, match=f"older.*replay {newer.version_id}"):
+        world.actions.preview_deliveries(
+            ANN, "replay", DeliverySelection(route="gofrugal", version_ids=(older.version_id,))
+        )
+
+
 def test_a_selection_by_error_takes_one_failure_group(world: World) -> None:
     world.sink("warehouse").fail_next(PermanentError("no such table"))
     world.sink("warehouse").fail_next(PermanentError("quota exceeded"))

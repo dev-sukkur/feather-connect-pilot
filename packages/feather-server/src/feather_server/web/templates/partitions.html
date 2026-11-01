@@ -42,7 +42,7 @@
         <td class="cell">
           {% if cell.status %}
             <a href="/routes/{{ cell.route | urlencode }}/deliveries?partition={{ row.partition | urlencode }}" title="Show the deliveries of {{ row.label }} to {{ cell.route }}">{{ m.status_badge(cell.status) }}</a>
-            {% if cell.status == "applied" %}<button type="submit" class="link" formaction="/routes/{{ cell.route | urlencode }}/partitions/{{ row.partition | urlencode }}/replay/preview" title="Send {{ row.label }} to {{ cell.route }} again">Replay</button>{% endif %}
+            {% if cell.status == "applied" %}<button type="submit" class="link" formaction="/routes/{{ cell.route | urlencode }}/partitions/{{ row.partition | urlencode }}/replay/preview" title="Send the latest version of {{ row.label }} to {{ cell.route }} again">Replay</button>{% endif %}
           {% else %}
             <span class="muted" aria-hidden="true">&ndash;</span><span class="visually-hidden">No delivery</span>
           {% endif %}

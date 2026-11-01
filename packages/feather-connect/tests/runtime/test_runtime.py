@@ -15,6 +15,7 @@ from feather_connect.core.errors import PermanentError, TransientError
 from feather_connect.engine.local import LocalEngine
 from feather_connect.engine.port import RetryPolicy
 from feather_connect.logs import bound_ids
+from feather_connect.runtime.retention import retention_once
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.port import InvalidTransition
@@ -39,7 +40,8 @@ class Harness:
         kw: dict[str, Any] = {"strategy": fc.strategy.replace(), **(reads_kw or {})}
         self.dataset = fc.Dataset("d", source=self.source, key="id", **kw)
         flow = fc.Flow("f", reads=self.dataset, deliver=[fc.to(self.a), fc.to(self.b)])
-        self.rt = Runtime([flow], self.store, MemorySpool(), self.engine, code_sha="sha", clock=self.clock)
+        self.spool = MemorySpool(self.clock)
+        self.rt = Runtime([flow], self.store, self.spool, self.engine, code_sha="sha", clock=self.clock)
         self.engine.register(self.rt.tasks())
 
     def run(self, **kw: Any) -> str:
@@ -541,14 +543,76 @@ def test_replay_waits_for_a_newer_open_delivery() -> None:
     assert h.delivery("a", v1) == "applied"
     h.engine.run_until_idle()
 
-    # Drained, the older one replays, and a failure of it strands nothing.
+    # Drained, the newest replays, and a failure of it strands nothing.
     h.a.fail_next(PermanentError("boom"))
-    h.rt.replay("a", v1, actor="op")
+    h.rt.replay("a", v2, actor="op")
     h.engine.run_until_idle()
-    assert (h.delivery("a", v1), h.delivery("a", v2)) == ("failed", "applied")
-    h.rt.retry("a", v1, actor="op")
+    assert (h.delivery("a", v1), h.delivery("a", v2)) == ("applied", "failed")
+    h.rt.retry("a", v2, actor="op")
     h.engine.run_until_idle()
     assert (h.delivery("a", v1), h.delivery("a", v2)) == ("applied", "applied")
+
+
+def test_replay_of_an_older_version_is_refused_and_names_the_latest() -> None:
+    h, _, _, v1, v2 = two_versions()
+    calls = len(h.a.calls)
+    with pytest.raises(InvalidTransition, match=f"older.*replay {v2}"):
+        h.rt.replay("a", v1, actor="op")
+    h.engine.run_until_idle()
+    assert h.delivery("a", v1) == "applied" and len(h.a.calls) == calls
+    assert h.a.rows == [{"id": 1, "v": "new"}]
+
+
+def test_a_skipped_newer_version_does_not_stop_a_replay() -> None:
+    h = Harness()
+    v1 = h.version_of(h.run())
+    h.a.fail_next(PermanentError("bad"))
+    h.source.load([{"id": 1, "v": "new"}])
+    v2 = h.version_of(h.run())
+    h.rt.skip("a", v2, actor="op")
+    h.rt.replay("a", v1, actor="op")
+    h.engine.run_until_idle()
+    assert h.ledger.get("a", v1).replays == 1 and h.delivery("a", v1) == "applied"
+
+
+def test_replay_of_a_version_aged_out_of_retention_is_refused_up_front() -> None:
+    h = Harness()
+    v1 = h.version_of(h.run())
+    calls = len(h.a.calls)
+    h.clock.advance(timedelta(days=20))
+    assert retention_once(h.store, h.spool, now=h.clock.now()).dropped_days
+    with pytest.raises(InvalidTransition, match="aged out"):
+        h.rt.replay("a", v1, actor="op")
+    assert h.delivery("a", v1) == "applied" and h.ledger.get("a", v1).replays == 0
+    h.engine.run_until_idle()
+    assert len(h.a.calls) == calls
+
+
+def replace_route_harness() -> tuple[Harness, str]:
+    h = Harness()
+    dataset = fc.Dataset("d", source=h.source, key="id", strategy=fc.strategy.replace())
+    flow = fc.Flow("f", reads=dataset, deliver=[fc.to(Sink("r"), mode="replace_partition")])
+    h.rt = Runtime([flow], h.store, h.spool, h.engine, code_sha="sha", clock=h.clock)
+    h.engine.register(h.rt.tasks())
+    return h, h.version_of(h.run())
+
+
+def test_replay_on_a_replace_route_is_refused_when_only_the_snapshot_is_left() -> None:
+    h, v1 = replace_route_harness()
+    h.clock.advance(timedelta(days=20))
+    retention_once(h.store, h.spool, now=h.clock.now())
+    assert h.spool.list_chunks(v1, "snapshot") and not h.spool.list_chunks(v1, "full")
+    with pytest.raises(InvalidTransition, match="aged out"):
+        h.rt.replay("r", v1, actor="op")
+    assert h.delivery("r", v1) == "applied"  # not failed, so it blocks nothing
+
+
+def test_replay_on_a_replace_route_is_refused_when_the_snapshot_is_gone_too() -> None:
+    h, v1 = replace_route_harness()
+    h.spool.delete_chunks(v1, "full")
+    h.spool.delete_chunks(v1, "snapshot")
+    with pytest.raises(InvalidTransition, match="aged out"):
+        h.rt.replay("r", v1, actor="op")
 
 
 def test_replay_ignores_an_open_delivery_of_another_partition_or_route() -> None:

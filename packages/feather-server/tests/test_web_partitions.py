@@ -1,6 +1,7 @@
 import re
 import time
 from collections.abc import Callable
+from typing import Any
 from urllib.parse import quote
 
 import psycopg
@@ -8,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg.rows import DictRow
 
+from feather_connect.core.errors import PermanentError
 from feather_connect.engine.local import LocalEngine
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.postgres.connect import connect
@@ -160,6 +162,86 @@ def test_replay_to_one_route_leaves_others_alone(client: TestClient, world: Worl
     assert replays[("warehouse", day(17))] == 1
     assert replays[("gofrugal", day(17))] == 0 and replays[("warehouse", day(18))] == 0
     assert "Replay started for 1 delivery" in client.get(done.headers["location"]).text
+
+
+def grid_preview(client: TestClient, csrf: Csrf, partition: str) -> tuple[str, str]:
+    preview = client.post(
+        f"/routes/warehouse/partitions/{quote(partition, safe='')}/replay/preview",
+        data={"csrf_token": csrf(), "dataset": "orders"},
+    )
+    assert preview.status_code == 200, preview.text
+    assert "<dt>Deliveries</dt><dd>1</dd>" in preview.text  # one version, however many came before it
+    token = re.search(r'name="token" value="([^"]+)"', preview.text)
+    action = re.search(r'<form method="post" action="([^"]*replay/confirm[^"]*)"', preview.text)
+    assert token and action
+    return action.group(1).replace("&amp;", "&"), token.group(1)
+
+
+def new_version_of_day_17(world: World, value: str) -> str:
+    source: Any = world.state.runtime.dataset("orders").source
+    source.load([{**dict(row), "note": value} for row in source._rows])
+    world.run([day(17)])
+    latest = world.store.versions.latest_sealed("orders", day(17))
+    assert latest is not None
+    return latest.version_id
+
+
+def test_grid_replay_takes_only_the_latest_version_of_a_partition(
+    client: TestClient, world: World, csrf: Csrf
+) -> None:
+    world.run()
+    first = world.store.versions.latest_sealed("orders", day(17))
+    assert first is not None
+    second = new_version_of_day_17(world, "second")
+    assert second != first.version_id
+    action, token = grid_preview(client, csrf, day(17))
+    done = client.post(action, data={"csrf_token": csrf(), "token": token})
+    assert done.status_code == 303 and "replayed=1" in done.headers["location"]
+    world.engine.run_until_idle()
+    assert world.store.ledger.get("warehouse", first.version_id).replays == 0
+    assert world.store.ledger.get("warehouse", second).replays == 1
+
+
+def test_grid_preview_survives_a_new_version_and_replays_the_latest(
+    client: TestClient, world: World, csrf: Csrf
+) -> None:
+    world.run()
+    before = world.store.versions.latest_sealed("orders", day(17))
+    assert before is not None
+    action, token = grid_preview(client, csrf, day(17))
+    newer = new_version_of_day_17(world, "landed meanwhile")
+    done = client.post(action, data={"csrf_token": csrf(), "token": token})
+    assert done.status_code == 303 and "replayed=1" in done.headers["location"]
+    world.engine.run_until_idle()
+    assert world.store.ledger.get("warehouse", before.version_id).replays == 0  # no older data goes out
+    assert world.store.ledger.get("warehouse", newer).replays == 1
+
+
+def test_a_confirm_that_moves_nothing_says_why_and_not_success(
+    client: TestClient, world: World, csrf: Csrf
+) -> None:
+    world.run()
+    action, token = grid_preview(client, csrf, day(17))
+    world.sink("warehouse").fail_next(PermanentError("no such table"))
+    newer = new_version_of_day_17(world, "failed meanwhile")
+    assert world.store.ledger.get("warehouse", newer).status == "failed"
+    done = client.post(action, data={"csrf_token": csrf(), "token": token})
+    assert done.status_code == 409 and newer in done.text and "Replay started" not in done.text
+
+
+def test_grid_replay_of_an_aged_out_version_is_refused_at_the_preview(
+    client: TestClient, world: World, csrf: Csrf
+) -> None:
+    world.run()
+    latest = world.store.versions.latest_sealed("orders", day(17))
+    assert latest is not None
+    world.state.spool.delete_chunks(latest.version_id, "data")
+    response = client.post(
+        f"/routes/warehouse/partitions/{quote(day(17), safe='')}/replay/preview",
+        data={"csrf_token": csrf(), "dataset": "orders"},
+    )
+    assert response.status_code == 422 and "aged out" in response.text
+    assert world.store.ledger.get("warehouse", latest.version_id).status == "applied"
 
 
 def test_replay_of_a_partition_that_was_never_delivered_is_refused(

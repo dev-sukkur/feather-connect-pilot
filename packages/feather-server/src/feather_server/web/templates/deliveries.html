@@ -49,7 +49,7 @@
     <button type="submit" name="action" value="skip">Skip picked&hellip;</button>
     <button type="submit" name="action" value="replay">Replay picked&hellip;</button>
   </p>
-  <p class="muted">Retry works on failed deliveries, skip on failed or held ones, replay on applied ones. You see what it would touch before anything changes.</p>
+  <p class="muted">Retry works on failed deliveries, skip on failed or held ones, replay on the latest applied version of a partition. You see what it would touch before anything changes.</p>
 </form>
 {{ m.pagination(next_cursor) }}
 {% else %}
