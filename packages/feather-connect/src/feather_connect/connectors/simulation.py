@@ -209,15 +209,32 @@ class Sink(memory.Sink):
     """The in-memory sink, which also writes each record it applies to `capture_to` as a line of JSON.
 
     A line holds the record's `op`, `key` and `payload`. A batch that is applied again is not written again.
+
+    `fail_rate` is the chance, from 0 to 1, that a version is refused with a `PermanentError` on its first delivery.
+    The verdict for a version comes from `seed` and its id, so the same sink refuses the same versions every time.
+    A refused version is let through when it is delivered again, so that an operator's retry can succeed. The sink
+    remembers which it refused in memory only, so a sink that is built anew refuses them once more.
     """
 
     spec = ConnectorSpec(name="simulation.sink", modes=memory.Sink.spec.modes)
 
-    def __init__(self, connection: str = "simulation", capture_to: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        connection: str = "simulation",
+        capture_to: str | Path | None = None,
+        fail_rate: float = 0.0,
+        seed: int = 42,
+    ) -> None:
         super().__init__(connection)
+        if not 0.0 <= fail_rate <= 1.0:
+            raise ValueError(f"fail_rate is a chance from 0 to 1, not {fail_rate}")
         self.capture_to = None if capture_to is None else Path(capture_to)
+        self.fail_rate = fail_rate
+        self.seed = seed
+        self._refused: set[str] = set()  # the versions that were refused once
 
     def apply(self, ctx: Context, batch: ApplyBatch) -> ApplyResult:
+        self._maybe_refuse(batch)
         is_repeat = batch.idempotency_key in self._results
         result = super().apply(ctx, batch)
         if self.capture_to is not None and not is_repeat:
@@ -229,3 +246,11 @@ class Sink(memory.Sink):
             with self.capture_to.open("a", encoding="utf-8", newline="\n") as out:
                 out.writelines(line + "\n" for line in lines)
         return result
+
+    def _maybe_refuse(self, batch: ApplyBatch) -> None:
+        """Refuse the first delivery of a version that the seed marks, before anything is written."""
+        if not batch.is_first or batch.version_id in self._refused:
+            return
+        if random.Random(f"{self.seed}:{batch.version_id}").random() < self.fail_rate:
+            self._refused.add(batch.version_id)
+            raise PermanentError(f"simulated delivery failure to {self.connection}")

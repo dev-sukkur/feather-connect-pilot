@@ -211,3 +211,53 @@ def test_sink_without_capture_behaves_like_the_memory_sink() -> None:
     k = sim.Sink()
     assert k.capture_to is None and isinstance(k, memory.Sink)
     assert k.spec.modes == memory.Sink.spec.modes
+
+
+def _first_chunk(version_id: str) -> ApplyBatch:
+    records = [ApplyRecord("k1", "upsert", {"a": 1})]
+    return ApplyBatch("r", version_id, 0, "_", "upsert", records, f"r:{version_id}:0", True, True)
+
+
+def _fails(k: sim.Sink, version_id: str) -> bool:
+    try:
+        k.apply(CTX, _first_chunk(version_id))
+    except PermanentError:
+        return True
+    return False
+
+
+def test_a_sink_with_no_fail_rate_never_fails() -> None:
+    k = sim.Sink(fail_rate=0.0, seed=1)
+    assert not any(_fails(k, f"v{n}") for n in range(200))
+
+
+def test_a_sink_fails_a_version_once_with_a_permanent_error_and_then_lets_it_through() -> None:
+    k = sim.Sink(fail_rate=1.0)
+    with pytest.raises(PermanentError, match="simulated delivery failure"):
+        k.apply(CTX, _first_chunk("v1"))
+    assert k.rows == []  # nothing was written
+    k.apply(CTX, _first_chunk("v1"))  # a retry of the same version goes through
+    assert k.rows == [{"a": 1}]
+    assert _fails(k, "v2")  # another version is still failed once
+
+
+def test_only_the_first_chunk_of_a_version_can_fail() -> None:
+    k = sim.Sink(fail_rate=1.0)
+    later = ApplyBatch("r", "v1", 1, "_", "upsert", [ApplyRecord("k", "upsert", {})], "r:v1:1", False, True)
+    k.apply(CTX, later)
+    assert k.rows == [{}]
+
+
+def test_the_failures_of_a_sink_repeat_with_the_seed() -> None:
+    def verdicts(seed: int) -> list[bool]:
+        k = sim.Sink(fail_rate=0.3, seed=seed)
+        return [_fails(k, f"v{n}") for n in range(60)]
+
+    assert verdicts(3) == verdicts(3)
+    assert verdicts(3) != verdicts(4)
+    assert 5 < sum(verdicts(3)) < 35  # about three in ten
+
+
+def test_a_fail_rate_outside_zero_to_one_is_refused() -> None:
+    with pytest.raises(ValueError, match="fail_rate"):
+        sim.Sink(fail_rate=1.5)

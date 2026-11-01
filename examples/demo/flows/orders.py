@@ -2,6 +2,12 @@
 
 The source misbehaves a little on purpose (a failed or slow read now and then, a duplicated row, a rewritten key),
 so the dashboard shows steady runs, the odd retry, and deliveries that have something to move.
+
+The archive destination also refuses a delivery now and then (about one version in twenty, so every few minutes at
+one run every 10 seconds). Retries absorb the source's faults, so this is what puts something on the failures page.
+A failed delivery blocks the later versions of its stream on that route: they wait, pending, until someone acts. That
+is the story to try from the browser: open the failure and retry it (it goes through the second time), skip it, or
+replay it, and watch the queued versions follow. The warehouse route carries on throughout.
 """
 
 import feather_connect as fc
@@ -31,7 +37,7 @@ demo = fc.Flow(
     reads=orders,
     deliver=[
         fc.to(simulation.Sink("warehouse")),
-        fc.to(simulation.Sink("archive")),
+        fc.to(simulation.Sink("archive", fail_rate=0.05, seed=7)),
     ],
     triggers=[fc.every("10s")],
     owner="demo",

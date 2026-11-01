@@ -206,14 +206,20 @@ def test_demo_runs_and_reaches_destinations(dev, database):
     client = dev.sign_in()
     wait_until(lambda: len(dev.run_ids(client)) >= 2, 90, "two runs on the dashboard")
     store, _ = connect(database)
+
+    def applied(route: str) -> bool:
+        done = store.ledger.list_deliveries(route=route, status="applied")
+        return bool(done) and sum(d.rows_applied for d in done) > 0
+
+    def failed(route: str) -> bool:
+        return bool(store.ledger.list_deliveries(route=route, status="failed"))
+
+    # The archive route refuses a delivery now and then on purpose (examples/demo/flows/orders.py), so a failure on
+    # it, which the dashboard shows, is as good here as rows applied.
     wait_until(
-        lambda: all(
-            store.ledger.list_deliveries(route=route, status="applied")
-            and sum(d.rows_applied for d in store.ledger.list_deliveries(route=route, status="applied")) > 0
-            for route in ("warehouse", "archive")
-        ),
+        lambda: applied("warehouse") and (applied("archive") or failed("archive")),
         90,
-        "rows applied on both routes",
+        "rows applied on the warehouse route, and the archive route reached",
     )
     page = client.get("/flows").text
     assert "orders" in page
@@ -347,7 +353,9 @@ def test_ctrl_c_then_restart_keeps_data_and_leaves_no_processes(dev_clean, start
 
     second = start_dev()
     second.wait_ready(FIVE_MINUTES)
-    assert "the user dev already exists" in second.output() and second.password() is None  # the password is shown once
+    assert (
+        "the user dev already exists" in second.output() and second.password() is None
+    )  # the password is shown once
     again = httpx.Client(base_url=second.base, follow_redirects=False, timeout=10)
     csrf = re.search(r'name="csrf_token" value="([^"]+)"', again.get("/login").text)
     assert csrf
