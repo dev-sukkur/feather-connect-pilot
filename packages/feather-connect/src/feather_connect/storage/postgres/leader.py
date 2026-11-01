@@ -6,6 +6,7 @@ from typing import Any
 import psycopg
 
 from feather_connect.runtime.leader import LeaderLock
+from feather_connect.storage.postgres.support import session_options
 
 
 class PostgresLeaderLock(LeaderLock):
@@ -23,7 +24,7 @@ class PostgresLeaderLock(LeaderLock):
             try:
                 if self._conn is None or self._conn.closed:
                     self._conn, self._held = (
-                        psycopg.connect(self._url, autocommit=True, connect_timeout=5),
+                        psycopg.connect(self._url, autocommit=True, **session_options(self._url)),
                         False,
                     )
                 if self._held:

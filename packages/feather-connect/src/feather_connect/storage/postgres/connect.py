@@ -8,7 +8,7 @@ from feather_connect.clock import Clock
 from feather_connect.storage.port import Store
 from feather_connect.storage.postgres.spool import PostgresSpool
 from feather_connect.storage.postgres.store import PostgresStore
-from feather_connect.storage.postgres.support import Pool
+from feather_connect.storage.postgres.support import Pool, session_options
 
 
 def connect(
@@ -24,7 +24,12 @@ def connect(
     The pool closes when the process exits.
     """
     pool = Pool(
-        database_url, min_size=min_size, max_size=max_size, kwargs={"row_factory": dict_row}, open=True
+        database_url,
+        min_size=min_size,
+        max_size=max_size,
+        kwargs={"row_factory": dict_row, **session_options(database_url)},
+        check=Pool.check_connection,
+        open=True,
     )
     atexit.register(pool.close)
     return PostgresStore(pool, clock, tenant), PostgresSpool(pool, clock, tenant)

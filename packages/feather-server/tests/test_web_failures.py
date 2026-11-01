@@ -9,8 +9,8 @@ from fastapi.testclient import TestClient
 from psycopg.rows import DictRow
 
 from feather_connect.core.errors import PermanentError, TransientError
-from feather_connect.logs import register_secrets
 from feather_connect.engine.local import LocalEngine
+from feather_connect.logs import register_secrets
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.postgres.connect import connect
 from feather_server.app import AppState, create_app

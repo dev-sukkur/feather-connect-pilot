@@ -11,7 +11,9 @@ from psycopg_pool import ConnectionPool
 from feather_connect.clock import FrozenClock
 from feather_connect.core.records import Record
 from feather_connect.storage.port import InvalidTransition, Store
+from feather_connect.storage.postgres import support
 from feather_connect.storage.postgres.connect import connect
+from feather_connect.storage.postgres.leader import PostgresLeaderLock
 from feather_connect.storage.postgres.spool import PostgresSpool
 from feather_connect.storage.postgres.store import OLDEST_OPEN_SQL, PostgresStore
 from feather_connect.storage.spool import Spool, records_to_table
@@ -172,3 +174,52 @@ def test_connect_opens_a_store_and_a_spool_on_one_pool(pg: Pg, pg_url: str, cloc
     run_id = store.runs.create_run("f", "manual", "ann", {"x": 1})
     spool.put_chunk("v1", 0, "data", records_to_table([Record("a", "upsert", {"x": 1}, 1)]))
     assert store.runs.get_run(run_id).params == {"x": 1} and len(spool.list_chunks("v1")) == 1
+
+
+def pool_of(store: Store) -> Any:
+    return store.runs._db.pool  # type: ignore[attr-defined]
+
+
+def test_pool_sessions_have_timeouts_and_keepalives(pg: Pg, pg_url: str, clock: FrozenClock):  # F9
+    store, _ = connect(pg_url, clock=clock, max_size=1)
+    with pool_of(store).connection() as conn:
+        given = conn.info.get_parameters()
+        assert given["connect_timeout"] == str(support.CONNECT_TIMEOUT_S)
+        assert given["keepalives"] == "1"
+        assert given["keepalives_idle"] == str(support.KEEPALIVES_IDLE_S)
+        assert given["application_name"] == "feather"
+        shown = conn.execute("show statement_timeout").fetchone()
+        assert shown == {"statement_timeout": "2min"}
+
+
+def test_the_statement_timeout_limits_a_statement_and_not_a_transaction(
+    pg: Pg, pg_url: str, clock: FrozenClock, monkeypatch: pytest.MonkeyPatch
+):  # F9
+    monkeypatch.setattr(support, "STATEMENT_TIMEOUT_MS", 400)
+    store, _ = connect(pg_url, clock=clock, max_size=1)
+    pool = pool_of(store)
+    with pool.connection() as conn:  # longer than the limit in all, in short statements
+        for _ in range(3):
+            conn.execute("select pg_sleep(0.2)")
+    with pytest.raises(psycopg.errors.QueryCanceled), pool.connection() as conn:
+        conn.execute("select pg_sleep(2)")
+
+
+def test_options_in_the_url_are_kept(pg: Pg, pg_url: str, clock: FrozenClock):  # F9
+    url = f"{pg_url}?options=-c%20search_path%3Dfeather"
+    store, _ = connect(url, clock=clock, max_size=1)
+    with pool_of(store).connection() as conn:
+        assert conn.execute("show search_path").fetchone() == {"search_path": "feather"}
+        assert conn.execute("show statement_timeout").fetchone() == {"statement_timeout": "2min"}
+
+
+def test_the_leader_lock_session_has_the_same_settings(pg_url: str):  # F9
+    lock = PostgresLeaderLock(pg_url, 7_262_410_909)
+    assert lock.try_acquire()
+    try:
+        session = lock._conn
+        assert session is not None
+        assert session.info.get_parameters()["keepalives_idle"] == str(support.KEEPALIVES_IDLE_S)
+        assert session.execute("show statement_timeout").fetchone() == ("2min",)
+    finally:
+        lock.release()

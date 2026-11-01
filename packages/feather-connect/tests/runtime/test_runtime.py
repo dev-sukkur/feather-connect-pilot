@@ -17,7 +17,7 @@ from feather_connect.engine.local import LocalEngine
 from feather_connect.engine.port import RetryPolicy
 from feather_connect.logs import bound_ids, register_secrets
 from feather_connect.runtime.retention import retention_once
-from feather_connect.runtime.runtime import Runtime, RunNotStarted
+from feather_connect.runtime.runtime import RunNotStarted, Runtime
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.port import InvalidTransition
 from feather_connect.storage.spool import MemorySpool
