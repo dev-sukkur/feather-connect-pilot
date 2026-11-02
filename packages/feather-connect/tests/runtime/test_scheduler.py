@@ -155,11 +155,11 @@ def test_catch_up_each_runs_every_missed_tick() -> None:
 
 
 def test_catch_up_each_is_capped_at_1000_and_the_cap_is_recorded() -> None:
-    w = World(fc.every("1m"), catch_up="each")
+    w = World(fc.every("5m"), catch_up="each")
     w.tick()
-    results = w.go(timedelta(minutes=1500))
+    results = w.go(timedelta(minutes=7500))
     assert [r.status for r in results].count("queued") == 1000
-    assert results[-1].due_at == T0 + timedelta(minutes=1500)
+    assert results[-1].due_at == T0 + timedelta(minutes=7500)
     skipped = [r for r in w.runs() if r.status == "skipped"]
     assert [r.reason for r in skipped] == ["catch_up_collapsed"] and skipped[0].params["collapsed"] == 500
 

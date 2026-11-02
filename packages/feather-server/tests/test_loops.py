@@ -121,7 +121,7 @@ def test_the_sweeper_and_retention_loops_do_their_work(state: AppState, clock: F
 def test_the_scheduler_loop_starts_the_runs_that_are_due(clock: FrozenClock) -> None:
     store, spool, engine = MemoryStore(clock), MemorySpool(clock), LocalEngine(clock)
     dataset = fc.Dataset("d", source=Source(rows=[{"id": 1}]), key="id", strategy=fc.strategy.replace())
-    flow = fc.Flow("f", reads=dataset, deliver=[fc.to(Sink("a"))], triggers=[fc.every("1m")])
+    flow = fc.Flow("f", reads=dataset, deliver=[fc.to(Sink("a"))], triggers=[fc.every("5m")])
     runtime = Runtime([flow], store, spool, engine, code_sha="sha", clock=clock)
     state = AppState(
         Settings(),
@@ -135,10 +135,10 @@ def test_the_scheduler_loop_starts_the_runs_that_are_due(clock: FrozenClock) -> 
     scheduler = next(loop for loop in default_loops(state) if loop.name == "scheduler")
     scheduler.start()
     wait_until(lambda: scheduler.count >= 1)  # the first pass only notes the time
-    clock.advance(timedelta(minutes=1))
+    clock.advance(timedelta(minutes=5))
     wait_until(lambda: store.runs.list_runs(flow="f") != [])
     scheduler.stop()
-    assert store.runs.list_runs(flow="f")[0].trigger == "every:60s"
+    assert store.runs.list_runs(flow="f")[0].trigger == "every:300s"
 
 
 @pytest.mark.postgres
