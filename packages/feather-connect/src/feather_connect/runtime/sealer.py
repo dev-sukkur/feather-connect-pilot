@@ -139,7 +139,6 @@ class _Batch:
                 validate_row(dataset.schema, payload)
             check_columns(payload)
             record = Record(name, "delete" if deleted else "upsert", payload, row_hash(payload))
-            records_to_table([record])  # Arrow has limits of its own, such as the size of an integer
         except Exception as error:  # noqa: BLE001 - a bad record of a push source can fail in any way at all
             log.warning(
                 "sealer: a record of event %s of %s rejected: %s", seq, dataset.name, type(error).__name__
@@ -149,6 +148,31 @@ class _Batch:
             return
         self.parts.setdefault(partition, _Part(seq)).records.append(record)
         self.settled.add(name)
+
+    def drop_what_arrow_refuses(self) -> None:
+        """Arrow has limits of its own, such as the size of an integer. A table per record would be most of the cost of a
+        batch, so each part is tried whole, and only a part that is refused is gone through a record at a time."""
+        for partition, part in list(self.parts.items()):
+            try:
+                records_to_table(part.records)
+            except Exception:  # noqa: BLE001 - see `_keep_what_arrow_takes`
+                self._keep_what_arrow_takes(partition, part)
+
+    def _keep_what_arrow_takes(self, partition: str, part: _Part) -> None:
+        kept: list[Record] = []
+        for record in part.records:
+            try:
+                records_to_table([record])
+            except Exception as error:  # noqa: BLE001 - a bad record of a push source can fail in any way at all
+                log.warning("sealer: a record of %s rejected: %s", self._dataset.name, type(error).__name__)
+                self._reject(record.key, partition, error)
+                self.settled.discard(record.key)
+            else:
+                kept.append(record)
+                self.settled.add(record.key)
+        part.records = kept
+        if not kept:
+            del self.parts[partition]
 
 
 def _with_moves(dataset: Dataset, parts: Mapping[str, _Part], deps: Any) -> None:
@@ -244,6 +268,7 @@ def _seal_batch(
     batch = _Batch(dataset, deps)
     for event in events:
         batch.read(source, ctx, event)
+    batch.drop_what_arrow_refuses()
     _with_moves(dataset, batch.parts, deps)
     routes = list(dict.fromkeys(route.name for flow in flows for route in flow.routes))
     run_id = runtime.stream_run(flows[0].name, now) if batch.parts else ""
