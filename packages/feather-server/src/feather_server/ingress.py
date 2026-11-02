@@ -344,9 +344,24 @@ async def ingress(request: Request, tenant: str, source: str) -> Response:
     return await cast(IngressWorker, request.app.state.ingress_worker).handle(dataset, inbound)
 
 
+class _NoLineForAnAcceptedEvent(logging.Filter):
+    """Leaves out uvicorn's access line for an event that was accepted, which a burst has hundreds of a second, at a cost
+    the server feels. A refusal keeps its line. What was accepted can be seen in the inbox."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5:
+            return not (args[4] == 202 and str(args[2]).startswith("/ingress/"))
+        return True
+
+
+_ACCESS_FILTER = _NoLineForAnAcceptedEvent()
+
+
 def install(app: FastAPI, state: "AppState") -> None:
     """Add the ingress route to `app`."""
     app.state.ingress_rate = RateLimiter(state.settings.ingress_rate_per_s, state.clock)
     app.state.ingress_worker = IngressWorker(state)
     state.closers.append(app.state.ingress_worker.close)
+    logging.getLogger("uvicorn.access").addFilter(_ACCESS_FILTER)
     app.include_router(router)

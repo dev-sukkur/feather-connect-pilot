@@ -322,6 +322,27 @@ def test_a_batch_that_fails_costs_only_the_event_that_fails_it(h: Harness, monke
     assert [response.status_code for _, response in answers] == [202, 503, 202]
 
 
+@pytest.mark.parametrize(
+    ("path", "status", "kept"),
+    [
+        ("/ingress/default/events", 202, False),
+        ("/ingress/default/events", 401, True),
+        ("/runs", 200, True),
+    ],
+)
+def test_the_access_log_leaves_out_only_accepted_events(h: Harness, path: str, status: int, kept: bool):
+    record = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        "",
+        0,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:1", "POST", path, "1.1", status),
+        None,
+    )
+    assert bool(logging.getLogger("uvicorn.access").filter(record)) is kept
+
+
 def test_no_secret_or_body_is_logged_or_answered(h: Harness, caplog: pytest.LogCaptureFixture):
     body = json.dumps({"id": BODY_MARK}).encode()
     with caplog.at_level(logging.DEBUG):
