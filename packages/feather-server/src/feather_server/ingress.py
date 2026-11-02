@@ -11,16 +11,17 @@ neither a secret nor a body ever is: a connector's or a database's message can q
 of the error is logged.
 """
 
+import asyncio
 import json
 import logging
 import math
+import queue
 import threading
-from collections.abc import Mapping
-from dataclasses import replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from fastapi import APIRouter, FastAPI, Request, Response
-from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from starlette.requests import ClientDisconnect
 
@@ -55,6 +56,8 @@ _TITLES = {
 # What a request carries that vouches for its sender. `verify` may need it, and the inbox has no use for it.
 _NOT_KEPT = frozenset({"authorization", "cookie", "proxy-authorization"})
 _MAX_EVENT_ID = 255
+_MAX_BATCH = 200
+_JOIN_S = 10.0
 
 router = APIRouter()
 
@@ -169,8 +172,8 @@ def _event_id(dataset: Dataset, source: PushSource, request: InboundRequest) -> 
     return None
 
 
-def _accept(state: "AppState", dataset: Dataset, request: InboundRequest) -> Response:
-    """Verify and store. Off the event loop, since the check and the store block."""
+def _refusal(state: "AppState", dataset: Dataset, request: InboundRequest) -> Response | None:
+    """Return why this request is refused, or None if it is to be stored."""
     source = cast(PushSource, dataset.source)
     refused = _verified(state, dataset, source, request)
     if refused is not None:
@@ -178,19 +181,132 @@ def _accept(state: "AppState", dataset: Dataset, request: InboundRequest) -> Res
     if not _is_json(request.body):
         log.warning("ingress %s: refused: the body is not JSON", dataset.name)
         return _problem(400)
+    return None
+
+
+def _as_stored(dataset: Dataset, request: InboundRequest) -> tuple[str, InboundRequest, str | None]:
+    """Return the event as the inbox takes it, without what a request carries to vouch for its sender."""
     kept = {
         name: value
         for name, value in request.headers.items()
         if name not in _NOT_KEPT and "\x00" not in value
     }
-    try:
-        state.store.inbox.put(
-            dataset.name, replace(request, headers=kept), _event_id(dataset, source, request)
-        )
-    except Exception as error:  # noqa: BLE001 - the message of a database's error may quote the row
-        log.error("ingress %s: could not store an event: %s", dataset.name, type(error).__name__)
-        return _problem(503)
-    return JSONResponse(_ACCEPTED, 202)
+    source = cast(PushSource, dataset.source)
+    return dataset.name, replace(request, headers=kept), _event_id(dataset, source, request)
+
+
+@dataclass
+class _Arrival:
+    """A request waiting for its answer, on the event loop that will give it."""
+
+    dataset: Dataset
+    request: InboundRequest
+    loop: asyncio.AbstractEventLoop
+    answer: asyncio.Future[Response]
+
+
+def _give_answers(answers: Sequence[tuple[_Arrival, Response]]) -> None:
+    for arrival, response in answers:
+        if not arrival.answer.done():  # the sender may have gone
+            arrival.answer.set_result(response)
+
+
+class IngressWorker:
+    """Verifies and stores requests on one thread, off the event loop since those block, in shared transactions.
+
+    A transaction and two thread switches per event would leave a server at hundreds a second doing little else, so
+    this takes what has come in while it was busy, stores that in one transaction and wakes the event loop once for all of
+    it. Nothing waits to fill a batch: a lone event goes straight away. If a batch can't be stored, its events are tried one
+    at a time, so that one bad event costs only its own sender an error.
+    """
+
+    def __init__(self, state: "AppState") -> None:
+        self._state = state
+        self._queue: queue.SimpleQueue[_Arrival | None] = queue.SimpleQueue()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    async def handle(self, dataset: Dataset, request: InboundRequest) -> Response:
+        """Verify and store the request, and return what to answer."""
+        with self._lock:  # started by the first event, as most apps get none
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="ingress", daemon=True)
+                self._thread.start()
+        loop = asyncio.get_running_loop()
+        arrival = _Arrival(dataset, request, loop, loop.create_future())
+        self._queue.put(arrival)
+        return await arrival.answer
+
+    def close(self) -> None:
+        with self._lock:
+            if self._thread is not None:
+                self._queue.put(None)
+                self._thread.join(_JOIN_S)
+                self._thread = None
+
+    def _run(self) -> None:
+        closing = False
+        while not closing:
+            first = self._queue.get()
+            if first is None:
+                return
+            batch = [first]
+            while len(batch) < _MAX_BATCH:
+                try:
+                    more = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if more is None:
+                    closing = True
+                    break
+                batch.append(more)
+            answers = self._answers(batch)
+            for loop in {arrival.loop for arrival in batch}:
+                ours = [(arrival, response) for arrival, response in answers if arrival.loop is loop]
+                try:
+                    loop.call_soon_threadsafe(_give_answers, ours)
+                except RuntimeError:  # the loop has closed, and nobody is waiting
+                    log.info("ingress: an event loop closed with requests on it")
+
+    def _answers(self, batch: Sequence[_Arrival]) -> list[tuple[_Arrival, Response]]:
+        answers: list[tuple[_Arrival, Response]] = []
+        to_store: list[_Arrival] = []
+        for arrival in batch:
+            try:
+                refused = _refusal(self._state, arrival.dataset, arrival.request)
+            except Exception as error:  # noqa: BLE001 - the message may quote the body
+                log.error(
+                    "ingress %s: could not check an event: %s", arrival.dataset.name, type(error).__name__
+                )
+                refused = _problem(503)
+            if refused is None:
+                to_store.append(arrival)
+            else:
+                answers.append((arrival, refused))
+        if to_store:
+            answers += self._stored(to_store)
+        return answers
+
+    def _stored(self, arrivals: Sequence[_Arrival]) -> list[tuple[_Arrival, Response]]:
+        inbox = self._state.store.inbox
+        events = [_as_stored(arrival.dataset, arrival.request) for arrival in arrivals]
+        try:
+            inbox.put_many(events)
+        except Exception:  # noqa: BLE001 - whose fault it is shows below, one at a time
+            return [
+                self._stored_alone(arrival, event) for arrival, event in zip(arrivals, events, strict=True)
+            ]
+        return [(arrival, JSONResponse(_ACCEPTED, 202)) for arrival in arrivals]
+
+    def _stored_alone(
+        self, arrival: _Arrival, event: tuple[str, InboundRequest, str | None]
+    ) -> tuple[_Arrival, Response]:
+        try:
+            self._state.store.inbox.put(*event)
+        except Exception as error:  # noqa: BLE001 - the message of a database's error may quote the row
+            log.error("ingress %s: could not store an event: %s", event[0], type(error).__name__)
+            return arrival, _problem(503)
+        return arrival, JSONResponse(_ACCEPTED, 202)
 
 
 @router.post("/ingress/{tenant}/{source}")
@@ -225,10 +341,12 @@ async def ingress(request: Request, tenant: str, source: str) -> Response:
         body,
         state.clock.now(),
     )
-    return await run_in_threadpool(_accept, state, dataset, inbound)
+    return await cast(IngressWorker, request.app.state.ingress_worker).handle(dataset, inbound)
 
 
 def install(app: FastAPI, state: "AppState") -> None:
     """Add the ingress route to `app`."""
     app.state.ingress_rate = RateLimiter(state.settings.ingress_rate_per_s, state.clock)
+    app.state.ingress_worker = IngressWorker(state)
+    state.closers.append(app.state.ingress_worker.close)
     app.include_router(router)

@@ -1778,6 +1778,52 @@ class _Inbox(InboxStore):
             )
         return True
 
+    def put_many(self, events: Sequence[tuple[str, InboundRequest, str | None]]) -> list[bool]:
+        """One transaction and few round trips however many events, which is what lets ingress keep up with a burst."""
+        day = self._db.clock.now().date()
+        self._ensure_day(day)
+        named = [(dataset, event_id) for dataset, _, event_id in events if event_id is not None]
+        with self._db.tx() as conn:
+            new: set[tuple[str, str]] = set()
+            if named:
+                rows = conn.execute(
+                    """insert into feather.inbox_event_id (tenant_id, dataset, event_id, day)
+                       select %s, n.dataset, n.event_id, %s from unnest(%s::text[], %s::text[]) n(dataset, event_id)
+                       on conflict do nothing returning dataset, event_id""",
+                    (self._db.tenant, day, [n[0] for n in named], [n[1] for n in named]),
+                ).fetchall()
+                new = {(row["dataset"], row["event_id"]) for row in rows}
+            stored: list[bool] = []
+            kept: list[tuple[str, InboundRequest, str | None]] = []
+            for dataset, request, event_id in events:
+                is_new = event_id is None or (dataset, event_id) in new
+                if event_id is not None:
+                    new.discard((dataset, event_id))  # a repeat within these events is a repeat too
+                stored.append(is_new)
+                if is_new:
+                    kept.append((dataset, request, event_id))
+            if kept:
+                conn.execute(
+                    """insert into feather.inbox (tenant_id, day, dataset, event_id, method, path, headers, body, received_at)
+                       select %s, %s, t.dataset, t.event_id, t.method, t.path, t.headers, t.body, t.received_at
+                       from unnest(
+                         %s::text[], %s::text[], %s::text[], %s::text[], %s::jsonb[], %s::bytea[], %s::timestamptz[])
+                       with ordinality as t(dataset, event_id, method, path, headers, body, received_at, n)
+                       order by t.n""",
+                    (
+                        self._db.tenant,
+                        day,
+                        [k[0] for k in kept],
+                        [k[2] for k in kept],
+                        [k[1].method for k in kept],
+                        [k[1].path for k in kept],
+                        [Jsonb(dict(k[1].headers)) for k in kept],
+                        [k[1].body for k in kept],
+                        [k[1].received_at for k in kept],
+                    ),
+                )
+        return stored
+
     def take(self, dataset: str, limit: int) -> list[InboxEvent]:
         with self._db.tx() as conn:
             rows = conn.execute(

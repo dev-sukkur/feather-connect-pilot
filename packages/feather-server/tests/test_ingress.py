@@ -24,6 +24,7 @@ from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.spool import MemorySpool
 from feather_server.app import AppState, create_app
 from feather_server.auth import require_csrf
+from feather_server.ingress import _Arrival
 from feather_server.settings import Settings
 
 SECRET = "ingress-secret-value"
@@ -79,6 +80,12 @@ class Harness:
 @pytest.fixture
 def h(clock: FrozenClock) -> Harness:
     return Harness(clock)
+
+
+def _arrival(h: Harness, body: bytes) -> Any:
+    headers = {name.lower(): value for name, value in h.signed(body).items()}
+    request = InboundRequest("POST", URL, headers, body, h.clock.now())
+    return _Arrival(h.runtime.dataset("events"), request, None, None)  # type: ignore[arg-type]
 
 
 UNAUTHORIZED = {"title": "Unauthorized", "status": 401}
@@ -285,9 +292,34 @@ def test_a_store_that_fails_is_503_and_logs_no_body(
         raise RuntimeError(f"failing row {BODY_MARK}")
 
     monkeypatch.setattr(h.store.inbox, "put", down)
+    monkeypatch.setattr(h.store.inbox, "put_many", down)
     with caplog.at_level(logging.DEBUG):
         r = h.post(json.dumps({"id": BODY_MARK}).encode())
     assert r.status_code == 503 and BODY_MARK not in r.text and BODY_MARK not in caplog.text
+
+
+def test_a_batch_that_fails_costs_only_the_event_that_fails_it(h: Harness, monkeypatch: pytest.MonkeyPatch):
+    put = h.store.inbox.put
+
+    def batch_down(events: Any) -> list[bool]:
+        raise RuntimeError("the batch")
+
+    def poisoned(dataset: str, request: Any, event_id: Any = None) -> bool:
+        if b"poison" in request.body:
+            raise RuntimeError("the row")
+        return put(dataset, request, event_id)
+
+    monkeypatch.setattr(h.store.inbox, "put_many", batch_down)
+    monkeypatch.setattr(h.store.inbox, "put", poisoned)
+    worker = h.app.state.ingress_worker
+    answers = worker._answers(  # in one batch, which requests sent one by one would not make
+        [
+            _arrival(h, json.dumps({"id": 1}).encode()),
+            _arrival(h, json.dumps({"id": "poison"}).encode()),
+            _arrival(h, json.dumps({"id": 3}).encode()),
+        ]
+    )
+    assert [response.status_code for _, response in answers] == [202, 503, 202]
 
 
 def test_no_secret_or_body_is_logged_or_answered(h: Harness, caplog: pytest.LogCaptureFixture):

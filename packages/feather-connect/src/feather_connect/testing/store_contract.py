@@ -1332,6 +1332,29 @@ def flow_spec(name: str, routes: list[str], owner: str | None = None) -> dict[st
         assert (event.dataset, event.event_id, event.received_at) == ("d", "e1", T0)
         assert event.request == inbound(body, **{"x-signature": "abc"})
 
+    def test_inbox_put_many_stores_in_order_and_says_what_put_would(self, store: Store):
+        store.inbox.put("d", inbound(b"old"), "seen")
+        request = inbound(b"\x00raw", **{"x-signature": "abc"})
+        stored = store.inbox.put_many(
+            [
+                ("d", request, "e1"),
+                ("d", inbound(b"seen again"), "seen"),
+                ("d", inbound(b"no id"), None),
+                ("d", inbound(b"repeat within"), "e1"),
+                ("other", inbound(b"other dataset"), "e1"),
+                ("d", inbound(b"last"), "e2"),
+            ]
+        )
+        assert stored == [True, False, True, False, True, True]
+        events = store.inbox.take("d", 10)
+        assert [e.request.body for e in events] == [b"old", b"\x00raw", b"no id", b"last"]
+        assert events[1].event_id == "e1" and events[1].request.headers == request.headers
+        assert [e.request.body for e in store.inbox.take("other", 10)] == [b"other dataset"]
+
+    def test_inbox_put_many_of_nothing_stores_nothing(self, store: Store):
+        assert store.inbox.put_many([]) == []
+        assert store.inbox.take("d", 10) == []
+
     def test_inbox_stores_an_event_id_once_per_dataset(self, store: Store):
         assert store.inbox.put("d", inbound(b"1"), "e1") is True
         assert store.inbox.put("d", inbound(b"2"), "e1") is False

@@ -1123,6 +1123,9 @@ class _Inbox(InboxStore):
             self._rows[self._seq] = _InboxRow(event, day)
             return True
 
+    def put_many(self, events: Sequence[tuple[str, InboundRequest, str | None]]) -> list[bool]:
+        return [self.put(dataset, request, event_id) for dataset, request, event_id in events]
+
     def _open(self, dataset: str) -> list[InboxEvent]:
         rows = (r for r in self._rows.values() if r.sealed_at is None and r.event.dataset == dataset)
         return sorted((r.event for r in rows), key=lambda event: event.event_seq)

@@ -543,6 +543,10 @@ class InboxStore(Protocol):
         """Store an event. False, storing nothing, when the dataset has had this `event_id` on a day it still holds."""
         ...
 
+    def put_many(self, events: "Sequence[tuple[str, InboundRequest, str | None]]") -> list[bool]:
+        """Store (dataset, request, event id) in that order, all or none, and say of each what `put` would have."""
+        ...
+
     def take(self, dataset: str, limit: int) -> list[InboxEvent]:
         """The dataset's oldest events not yet sealed, in arrival order. They stay there until `seal_batch`."""
         ...
