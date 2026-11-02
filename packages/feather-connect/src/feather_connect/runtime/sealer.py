@@ -267,13 +267,19 @@ def _is_due(age: timedelta, count: int, max_events: int, max_age: timedelta) -> 
 
 
 def _seal_dataset(
-    runtime: Runtime, dataset: Dataset, *, now: datetime, max_events: int, max_age: timedelta
-) -> list[Version]:
+    runtime: Runtime,
+    dataset: Dataset,
+    sealed: list[Version],
+    *,
+    now: datetime,
+    max_events: int,
+    max_age: timedelta,
+) -> None:
+    """Add to `sealed` as each batch seals, so that a later batch failing doesn't lose sight of the earlier ones."""
     flows = _flows_of(runtime, dataset)
     if not flows or any(runtime.is_flow_paused(flow.name) for flow in flows):
-        return []  # the events keep, and retention keeps their days
+        return  # the events keep, and retention keeps their days
     inbox = runtime.deps.store.inbox
-    sealed: list[Version] = []
     for _ in range(_MAX_BATCHES):
         age = inbox.oldest_age(dataset.name, now)
         if age is None:
@@ -284,7 +290,6 @@ def _seal_dataset(
         sealed += _seal_batch(runtime, dataset, flows, events, now)
         if len(events) < max_events:
             break
-    return sealed
 
 
 def _push_datasets(runtime: Runtime) -> list[Dataset]:
@@ -303,7 +308,7 @@ def seal_once(
     sealed: list[Version] = []
     for dataset in _push_datasets(runtime):
         try:
-            sealed += _seal_dataset(runtime, dataset, now=now, max_events=max_events, max_age=max_age)
+            _seal_dataset(runtime, dataset, sealed, now=now, max_events=max_events, max_age=max_age)
         except (StaleWriter, VersionSealed) as error:
             log.info("sealer: another sealer is at dataset %s: %s", dataset.name, type(error).__name__)
         except Exception as error:  # noqa: BLE001 - the next tick tries again, and the other datasets mustn't wait
