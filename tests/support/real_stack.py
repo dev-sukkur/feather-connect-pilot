@@ -6,9 +6,11 @@ The fixtures built on these are in the root `conftest.py`. This folder is on the
 
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
+import urllib.request
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -62,6 +64,7 @@ def start_worker(
     *,
     env: Mapping[str, str] | None = None,
     log: IO[bytes] | None = None,
+    poll_s: float = 0.1,
 ) -> subprocess.Popen[bytes]:
     """Start `python -m feather_connect.worker`. `env` adds to the environment, and `log` takes its output."""
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0  # type: ignore[attr-defined]
@@ -77,7 +80,7 @@ def start_worker(
             "--worker-id",
             worker_id,
             "--poll-s",
-            "0.1",
+            str(poll_s),
         ],
         env={**os.environ, "FEATHER_CODE_SHA": sha, **(env or {})},
         creationflags=flags,
@@ -104,3 +107,43 @@ def stop_gracefully(proc: subprocess.Popen[bytes]) -> None:
         proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
     else:
         proc.terminate()
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def start_server(
+    project: Path,
+    pg_url: str,
+    port: int,
+    *,
+    env: Mapping[str, str] | None = None,
+    log: IO[bytes] | None = None,
+) -> subprocess.Popen[bytes]:
+    """Start `feather server` on `port`. `env` adds to the environment, and `log` takes its output."""
+    return subprocess.Popen(
+        [sys.executable, "-m", "feather_cli.main", "server", "--port", str(port)],
+        env={
+            **os.environ,
+            "FEATHER_DATABASE_URL": pg_url,
+            "FEATHER_PROJECT": str(project),
+            "FEATHER_ENV": "dev",
+            "FEATHER_SECRET_KEY": "a-test-secret-key",
+            **(env or {}),
+        },
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+
+
+def server_is_ready(proc: subprocess.Popen[bytes], url: str, log_file: Path) -> bool:
+    """Whether the server answers `/readyz`. One that has died fails the check, with what it logged."""
+    assert proc.poll() is None, log_file.read_text(errors="replace")
+    try:
+        with urllib.request.urlopen(f"{url}/readyz", timeout=2) as response:
+            return response.status == 200
+    except OSError:
+        return False

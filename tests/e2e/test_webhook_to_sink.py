@@ -2,10 +2,6 @@
 Postgres, and reaches a sink. A repeat of the event's id reaches an append route once."""
 
 import json
-import os
-import socket
-import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -16,7 +12,16 @@ from textwrap import dedent
 from typing import Any
 
 import pytest
-from real_stack import kill_abruptly, scratch_database, server_url, start_worker, wait_until
+from real_stack import (
+    free_port,
+    kill_abruptly,
+    scratch_database,
+    server_is_ready,
+    server_url,
+    start_server,
+    start_worker,
+    wait_until,
+)
 
 from feather_connect.connectors.simulation import SIGNATURE_HEADER, TIMESTAMP_HEADER
 from feather_connect.core.webhooks import sign
@@ -84,43 +89,17 @@ def push_project(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 @pytest.fixture
 def server(push_project: Path, pg_url: str, db: Any) -> Iterator[str]:
     """Start `feather server` as a process, give its address, and stop it at the end. It runs no task, so killing it
     can't leave one hanging."""
     port = free_port()
-    with (push_project / "server.log").open("wb") as log:
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "feather_cli.main", "server", "--port", str(port)],
-            env={
-                **os.environ,
-                **ENV,
-                "FEATHER_DATABASE_URL": pg_url,
-                "FEATHER_PROJECT": str(push_project),
-                "FEATHER_ENV": "dev",
-                "FEATHER_SECRET_KEY": "a-test-secret-key",
-            },
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
+    log_file = push_project / "server.log"
+    with log_file.open("wb") as log:
+        proc = start_server(push_project, pg_url, port, env=ENV, log=log)
     url = f"http://127.0.0.1:{port}"
-
-    def ready() -> bool:
-        assert proc.poll() is None, (push_project / "server.log").read_text(errors="replace")
-        try:
-            with urllib.request.urlopen(f"{url}/readyz", timeout=2) as response:
-                return response.status == 200
-        except OSError:
-            return False
-
     try:
-        wait_until(ready, GENEROUS)
+        wait_until(lambda: server_is_ready(proc, url, log_file), GENEROUS)
         yield url
     finally:
         kill_abruptly(proc)
