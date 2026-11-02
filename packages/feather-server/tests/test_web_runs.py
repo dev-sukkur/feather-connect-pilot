@@ -1,5 +1,6 @@
 import re
 from collections.abc import Callable
+from datetime import timedelta
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -163,3 +164,72 @@ def test_rerun_with_new_inputs_starts_a_new_run(
     paused = client.post(f"/runs/{run_id}/rerun", data={"csrf_token": csrf()})
     assert paused.status_code == 409 and "paused" in paused.text
     assert client.post(f"/runs/{run_id}/rerun", data={}).status_code == 403
+
+
+def _stream_run(world: World, tasks: int = 0) -> str:
+    runs = world.store.runs
+    run_id = world.state.runtime.stream_run("orders", world.clock.now())
+    for n in range(tasks):
+        runs.finish_task(runs.start_task(run_id, "plan", f"tick:{run_id}:{n}:plan"), "succeeded")
+    return run_id
+
+
+def test_a_stream_runs_page_shows_a_page_of_tasks_newest_first_and_counts_them_all(
+    client: TestClient, world: World
+) -> None:
+    run_id = _stream_run(world, 250)
+    runs = world.store.runs
+    runs.finish_task(runs.start_task(run_id, "skip", f"tick:{run_id}:s:skip"), "skipped", "overlap")
+    runs.finish_task(runs.start_task(run_id, "plan", f"tick:{run_id}:f:plan"), "failed", "no")
+    detail = world.reads.run_detail(run_id)
+    assert len(detail.tasks) == 100 and detail.tasks[0].kind == "plan" and detail.tasks[1].kind == "skip"
+    assert detail.task_total == 252 and detail.tasks_failed == 1
+    assert detail.ticks is not None
+    assert (detail.ticks.total, detail.ticks.skipped, detail.ticks.failed) == (252, 1, 1)
+    page = client.get(f"/runs/{run_id}").text
+    assert "Ticks: 252" in page and "1 skipped" in page and "Next page" in page
+    assert page.count("/logs?run=") == 100
+    second = world.reads.run_detail(run_id, detail.next_task)
+    assert len(second.tasks) == 100 and not {t.task_id for t in second.tasks} & {
+        t.task_id for t in detail.tasks
+    }
+    assert client.get(f"/runs/{run_id}?cursor={detail.next_task}").text.count("/logs?run=") == 100
+
+
+def test_a_skipped_tick_shows_its_reason(client: TestClient, world: World) -> None:
+    world.state.runtime.skip_stream_tick(
+        "orders", trigger_id="every:30s", at=world.clock.now(), reason="paused"
+    )
+    page = client.get(f"/runs/{_stream_run(world)}").text
+    assert "Skipped: paused" in page
+
+
+def test_a_stream_run_says_what_can_be_done_and_refuses_cancel_and_rerun(
+    client: TestClient, world: World, csrf: Callable[[], str]
+) -> None:
+    run_id = _stream_run(world)
+    world.store.runs.set_run_status(run_id, "running")
+    page = client.get(f"/runs/{run_id}").text
+    assert "/cancel" not in page and "/rerun" not in page and "pause the flow" in page
+    assert 'hx-trigger="every 3s"' in page
+    token = csrf()
+    cancelled = client.post(f"/runs/{run_id}/cancel", data={"csrf_token": token, "confirm": "yes"})
+    assert cancelled.status_code == 409 and "pause the flow" in cancelled.text
+    assert world.store.runs.get_run(run_id).status == "running"
+    before = len(world.store.runs.list_runs())
+    rerun = client.post(f"/runs/{run_id}/rerun", data={"csrf_token": token})
+    assert rerun.status_code == 409 and "no inputs to run again" in rerun.text
+    assert len(world.store.runs.list_runs()) == before
+
+
+def test_a_stream_run_lists_its_day_and_no_duration(client: TestClient, world: World) -> None:
+    run_id = _stream_run(world)
+    day = world.store.runs.get_run(run_id).params["day"]
+    assert f"stream · system · {day}" in client.get("/runs").text
+
+
+def test_a_stream_run_of_a_past_day_is_closed_and_stops_refreshing(client: TestClient, world: World) -> None:
+    run_id = _stream_run(world)
+    world.clock.advance(timedelta(days=1))
+    page = client.get(f"/runs/{run_id}").text
+    assert "closed" in page and 'hx-trigger="every 3s"' not in page
