@@ -4,6 +4,7 @@ import copy
 import json
 import math
 import threading
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
@@ -15,6 +16,7 @@ from feather_connect.core.connector import InboundRequest
 from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
+    STREAM_TRIGGER,
     Attempt,
     AuditRow,
     AuditStore,
@@ -72,6 +74,7 @@ class _Data:
     lock: threading.RLock = field(default_factory=threading.RLock)
     runs: dict[str, Run] = field(default_factory=dict[str, Run])
     tasks: dict[str, TaskRow] = field(default_factory=dict[str, TaskRow])
+    stream_runs: dict[tuple[str, str], str] = field(default_factory=dict[tuple[str, str], str])
     logs: dict[str, list[tuple[datetime, str]]] = field(default_factory=dict[str, list[tuple[datetime, str]]])
     versions: dict[str, Version] = field(default_factory=dict[str, Version])
     seal_seq: int = 0
@@ -195,9 +198,44 @@ class _Runs(RunJournal):
                 finished_at=self._d.clock.now(),
             )
 
-    def list_tasks(self, run_id: str) -> list[TaskRow]:
+    def stream_run(self, flow: str, day: str) -> str:
         with self._d.lock:
-            return [t for t in self._d.tasks.values() if t.run_id == run_id]
+            found = self._d.stream_runs.get((flow, day))
+            if found is None:
+                found = self.create_run(flow, STREAM_TRIGGER, "system", {"day": day}, status="succeeded")
+                self._d.stream_runs[(flow, day)] = found
+            return found
+
+    def list_tasks(
+        self,
+        run_id: str,
+        *,
+        status: str | None = None,
+        kinds: Sequence[str] | None = None,
+        limit: int | None = None,
+        after_task: str | None = None,
+        newest_first: bool = False,
+    ) -> list[TaskRow]:
+        with self._d.lock:
+            rows = [t for t in self._d.tasks.values() if t.run_id == run_id]
+        if newest_first:
+            rows.reverse()
+        if after_task is not None:
+            at = next((i for i, row in enumerate(rows) if row.task_id == after_task), None)
+            rows = [] if at is None else rows[at + 1 :]
+        rows = [
+            t for t in rows if (status is None or t.status == status) and (kinds is None or t.kind in kinds)
+        ]
+        return rows if limit is None else rows[:limit]
+
+    def task_by_ref(self, run_id: str, ref: str) -> TaskRow | None:
+        return next((t for t in self.list_tasks(run_id) if t.ref == ref), None)
+
+    def tasks_by_ref(self, run_id: str, prefix: str) -> list[TaskRow]:
+        return [t for t in self.list_tasks(run_id) if t.ref.startswith(prefix)]
+
+    def count_tasks(self, run_id: str) -> Mapping[tuple[str, str], int]:
+        return Counter((t.kind, t.status) for t in self.list_tasks(run_id))
 
     def log(self, task_id: str, level: str, message: str) -> None:
         with self._d.lock:
@@ -374,17 +412,28 @@ class _Versions(VersionStore):
         with self._d.lock:
             return list(self._d.slices.get((run_id, dataset), {}))
 
-    def staged_for_run(self, run_id: str, dataset: str) -> list[Version]:
+    def staged_for_run(self, run_id: str, dataset: str, tick: str | None = None) -> list[Version]:
         with self._d.lock:
             return [
                 v
                 for v in self._d.versions.values()
-                if v.status == "staged" and v.run_id == run_id and v.dataset == dataset
+                if v.status == "staged"
+                and v.run_id == run_id
+                and v.dataset == dataset
+                and (tick is None or v.tick == tick)
             ]
 
-    def sealed_for_run(self, run_id: str, dataset: str) -> list[Version]:
+    def newest_sealed_for_run(self, run_id: str, dataset: str, limit: int) -> list[Version]:
         with self._d.lock:
-            found = [v for v in self._sealed(dataset, None) if v.run_id == run_id]
+            return [v for v in self._sealed(dataset, None) if v.run_id == run_id][:limit]
+
+    def sealed_for_run(self, run_id: str, dataset: str, tick: str | None = None) -> list[Version]:
+        with self._d.lock:
+            found = [
+                v
+                for v in self._sealed(dataset, None)
+                if v.run_id == run_id and (tick is None or v.tick == tick)
+            ]
         return found[::-1]  # `_sealed` is newest first
 
     def list_versions(self, dataset: str, partition: str | None = None, limit: int = 100) -> list[Version]:
@@ -418,7 +467,11 @@ class _Versions(VersionStore):
     def abandoned(self, limit: int = 1000) -> list[Version]:
         with self._d.lock:
             return [
-                v for v in self._d.versions.values() if v.status == "staged" and self._ended_badly(v.run_id)
+                v
+                for v in self._d.versions.values()
+                if v.status == "staged"
+                and self._ended_badly(v.run_id)
+                and self._d.runs[v.run_id].trigger != STREAM_TRIGGER
             ][:limit]
 
     def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:

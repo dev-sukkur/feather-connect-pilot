@@ -23,6 +23,7 @@ from feather_connect.core.connector import InboundRequest
 from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
+    STREAM_TRIGGER,
     Attempt,
     AuditRow,
     AuditStore,
@@ -99,6 +100,9 @@ def _unjson(value: Any) -> Any:
     return json.loads(json.dumps(value), object_hook=decode_json_value)
 
 
+_HIGHEST_CHARACTER = "\U0010ffff"  # sorts after any text that starts with a prefix, in the C collation
+
+
 class _Db:
     """The pool, the clock and the tenant, shared by the repositories."""
 
@@ -168,6 +172,7 @@ def _version(r: Row) -> Version:
         r["schema_hash"],
         None if r["watermark"] is None else _unjson(r["watermark"]),
         r["code_sha"],
+        r["tick"],
         r["status"],
         r["seal_seq"],
         r["sealed_at"],
@@ -319,13 +324,92 @@ class _Runs(RunJournal):
         if changed.rowcount == 0:
             raise KeyError(task_id)
 
-    def list_tasks(self, run_id: str) -> list[TaskRow]:
+    def stream_run(self, flow: str, day: str) -> str:
+        now = self._db.clock.now()
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """insert into feather.run (tenant_id, run_id, flow, trigger, actor, params, status, created_at,
+                                            updated_at, stream_day)
+                   values (%s, %s, %s, %s, 'system', %s, 'succeeded', %s, %s, %s)
+                   on conflict (tenant_id, flow, stream_day) where stream_day is not null do nothing
+                   returning run_id""",
+                (self._db.tenant, new_id(), flow, STREAM_TRIGGER, _json({"day": day}), now, now, day),
+            ).fetchone()
+            if row is None:  # it was made earlier, or by a replica that won the race
+                row = conn.execute(
+                    "select run_id from feather.run where tenant_id = %s and flow = %s and stream_day = %s",
+                    (self._db.tenant, flow, day),
+                ).fetchone()
+        assert row is not None
+        return row["run_id"]
+
+    def list_tasks(
+        self,
+        run_id: str,
+        *,
+        status: str | None = None,
+        kinds: Sequence[str] | None = None,
+        limit: int | None = None,
+        after_task: str | None = None,
+        newest_first: bool = False,
+    ) -> list[TaskRow]:
+        # Each condition is there only when asked for, and the two statuses with a partial index are spelled out, so
+        # that the plan can use the indexes of 0007 whatever psycopg prepares.
+        query = "select * from feather.task where tenant_id = %(tenant)s and run_id = %(run)s"
+        if status == "running":
+            query += " and status = 'running'"
+        elif status == "failed":
+            query += " and status = 'failed'"
+        elif status is not None:
+            query += " and status = %(status)s"
+        if kinds is not None:
+            query += " and kind = any(%(kinds)s)"
+        if after_task is not None:
+            query += " and seq < " if newest_first else " and seq > "
+            query += "(select seq from feather.task where tenant_id = %(tenant)s and task_id = %(after)s)"
+        query += " order by seq desc" if newest_first else " order by seq"
+        if limit is not None:
+            query += " limit %(limit)s"
         with self._db.tx() as conn:
             rows = conn.execute(
-                "select * from feather.task where tenant_id = %s and run_id = %s order by seq",
-                (self._db.tenant, run_id),
+                query,
+                {
+                    "tenant": self._db.tenant,
+                    "run": run_id,
+                    "status": status,
+                    "kinds": None if kinds is None else list(kinds),
+                    "after": after_task,
+                    "limit": limit,
+                },
             ).fetchall()
         return [_task(r) for r in rows]
+
+    def task_by_ref(self, run_id: str, ref: str) -> TaskRow | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                "select * from feather.task where tenant_id = %s and run_id = %s and ref = %s",
+                (self._db.tenant, run_id, ref),
+            ).fetchone()
+        return None if row is None else _task(row)
+
+    def tasks_by_ref(self, run_id: str, prefix: str) -> list[TaskRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.task
+                   where tenant_id = %s and run_id = %s and ref collate "C" >= %s and ref collate "C" < %s
+                   order by seq""",
+                (self._db.tenant, run_id, prefix, prefix + _HIGHEST_CHARACTER),
+            ).fetchall()
+        return [_task(r) for r in rows]
+
+    def count_tasks(self, run_id: str) -> Mapping[tuple[str, str], int]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select kind, status, count(*) as n from feather.task
+                   where tenant_id = %s and run_id = %s group by kind, status""",
+                (self._db.tenant, run_id),
+            ).fetchall()
+        return {(r["kind"], r["status"]): r["n"] for r in rows}
 
     def log(self, task_id: str, level: str, message: str) -> None:
         now = self._db.clock.now()
@@ -426,14 +510,14 @@ class _Versions(VersionStore):
             guard_version(conn, self._db.tenant, draft.version_id, writer)
         row = conn.execute(
             """insert into feather.version as v (tenant_id, version_id, dataset, partition, run_id, complete,
-                                            upserts, deletes, content_hash, schema_hash, watermark, code_sha)
+                                            upserts, deletes, content_hash, schema_hash, watermark, code_sha, tick)
                values (%(tenant)s, %(id)s, %(dataset)s, %(partition)s, %(run)s, %(complete)s, %(upserts)s,
-                       %(deletes)s, %(content)s, %(schema)s, %(watermark)s, %(sha)s)
+                       %(deletes)s, %(content)s, %(schema)s, %(watermark)s, %(sha)s, %(tick)s)
                on conflict (tenant_id, version_id) do update set
                    dataset = excluded.dataset, partition = excluded.partition, run_id = excluded.run_id,
                    complete = excluded.complete, upserts = excluded.upserts, deletes = excluded.deletes,
                    content_hash = excluded.content_hash, schema_hash = excluded.schema_hash,
-                   watermark = excluded.watermark, code_sha = excluded.code_sha
+                   watermark = excluded.watermark, code_sha = excluded.code_sha, tick = excluded.tick
                where v.status = 'staged'
                returning *""",
             {
@@ -449,6 +533,7 @@ class _Versions(VersionStore):
                 "schema": draft.schema_hash,
                 "watermark": None if draft.watermark is None else _json(draft.watermark),
                 "sha": draft.code_sha,
+                "tick": draft.tick,
             },
         ).fetchone()
         if row is None:  # the conflicting row is sealed, so the update did not apply
@@ -629,24 +714,37 @@ class _Versions(VersionStore):
             ).fetchall()
         return [r["partition"] for r in rows]
 
-    def staged_for_run(self, run_id: str, dataset: str) -> list[Version]:
-        with self._db.tx() as conn:
-            rows = conn.execute(
-                """select * from feather.version
-                   where tenant_id = %s and run_id = %s and dataset = %s and status = 'staged'
-                   order by stage_seq""",
-                (self._db.tenant, run_id, dataset),
-            ).fetchall()
-        return [_version(r) for r in rows]
+    def staged_for_run(self, run_id: str, dataset: str, tick: str | None = None) -> list[Version]:
+        return self._of_run("staged", "stage_seq", run_id, dataset, tick)
 
-    def sealed_for_run(self, run_id: str, dataset: str) -> list[Version]:
+    def newest_sealed_for_run(self, run_id: str, dataset: str, limit: int) -> list[Version]:
         with self._db.tx() as conn:
             rows = conn.execute(
                 """select * from feather.version
                    where tenant_id = %s and run_id = %s and dataset = %s and status = 'sealed'
-                   order by seal_seq""",
-                (self._db.tenant, run_id, dataset),
+                   order by seal_seq desc limit %s""",
+                (self._db.tenant, run_id, dataset, limit),
             ).fetchall()
+        return [_version(r) for r in rows]
+
+    def sealed_for_run(self, run_id: str, dataset: str, tick: str | None = None) -> list[Version]:
+        return self._of_run("sealed", "seal_seq", run_id, dataset, tick)
+
+    def _of_run(
+        self,
+        status: Literal["staged", "sealed"],
+        order: Literal["stage_seq", "seal_seq"],
+        run_id: str,
+        dataset: str,
+        tick: str | None,
+    ) -> list[Version]:
+        query = "select * from feather.version where tenant_id = %s and run_id = %s and dataset = %s"
+        query += " and status = 'staged'" if status == "staged" else " and status = 'sealed'"
+        query += "" if tick is None else " and tick is not null and tick = %s"
+        query += " order by stage_seq" if order == "stage_seq" else " order by seal_seq"
+        params = (self._db.tenant, run_id, dataset, *(() if tick is None else (tick,)))
+        with self._db.tx() as conn:
+            rows = conn.execute(query, params).fetchall()
         return [_version(r) for r in rows]
 
     def list_versions(self, dataset: str, partition: str | None = None, limit: int = 100) -> list[Version]:
@@ -692,8 +790,9 @@ class _Versions(VersionStore):
                 """select v.* from feather.version v join feather.run r
                      on r.tenant_id = v.tenant_id and r.run_id = v.run_id
                    where v.tenant_id = %s and v.status = 'staged' and r.status in ('failed', 'cancelled')
+                     and r.trigger <> %s
                    order by v.stage_seq limit %s""",
-                (self._db.tenant, limit),
+                (self._db.tenant, STREAM_TRIGGER, limit),
             ).fetchall()
         return [_version(r) for r in rows]
 

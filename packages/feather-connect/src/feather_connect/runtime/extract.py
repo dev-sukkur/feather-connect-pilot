@@ -44,6 +44,13 @@ NOT_DELIVERED = 0
 _RECORD_ERRORS = (MissingKeyError, PartitionError, pa.ArrowException, TypeError, ValueError)
 
 
+def version_id_of(run_id: str, dataset: str, partition: str, tick: str | None = None) -> str:
+    """Return the id of what a run reads of a partition. The ticks of a stream run each read anew, so each has its own."""
+    if tick is None:
+        return stable_id(run_id, dataset, partition)
+    return stable_id(run_id, dataset, partition, tick)
+
+
 class ExtractFailed(Exception):
     """A version can't be produced, so nothing of it is sealed. The message says why, and what to change."""
 
@@ -75,8 +82,10 @@ class _Read:
         deps: RuntimeDeps,
         *,
         writer: str | None = None,
+        tick: str | None = None,
     ) -> None:
         self.writer = writer  # None for a dry run, which claims nothing and turns no record down in the store
+        self.tick = tick
         self._dataset = dataset
         self._run_id = run_id
         self._partition = partition  # None when each row's partition comes from the row
@@ -90,7 +99,7 @@ class _Read:
             self._slice(partition)
 
     def _version_id(self, partition: str) -> str:
-        return stable_id(self._run_id, self._dataset.name, partition)
+        return version_id_of(self._run_id, self._dataset.name, partition, self.tick)
 
     def _slice(self, partition: str) -> _Slice:
         found = self.slices.get(partition)
@@ -424,20 +433,23 @@ def _stage_slice(
             schema_hash=schema_hash(target.version_id, deps),
             watermark=target.watermark,
             code_sha=deps.code_sha,
+            tick=read.tick,
         ),
         writer,
     )
 
 
-def _sealed_earlier(dataset: Dataset, run_id: str, partition: str | None, deps: RuntimeDeps) -> list[Version]:
+def _sealed_earlier(
+    dataset: Dataset, run_id: str, partition: str | None, tick: str | None, deps: RuntimeDeps
+) -> list[Version]:
     """Return what an earlier attempt at this extract already sealed. Sealing is all or nothing, so it did it all.
 
     `partition` is None for a read across partitions, which can have sealed any number of versions.
     """
     if partition is None:
-        return deps.store.versions.sealed_for_run(run_id, dataset.name)
+        return deps.store.versions.sealed_for_run(run_id, dataset.name, tick)
     try:
-        version = deps.store.versions.get(stable_id(run_id, dataset.name, partition))
+        version = deps.store.versions.get(version_id_of(run_id, dataset.name, partition, tick))
     except KeyError:
         return []
     return [version] if version.status == "sealed" else []
@@ -488,6 +500,7 @@ def _read_and_stage(
     stage_only: bool,
     writer: str,
     deps: RuntimeDeps,
+    tick: str | None,
 ) -> tuple[list[str], list[Version]]:
     """Read the source and stage a version per slice. Return the partitions read and the versions staged."""
     strategy = dataset.strategy
@@ -495,10 +508,10 @@ def _read_and_stage(
     watermark = None if by_stamp is None else deps.store.versions.latest_watermark(dataset.name)
     since = None if by_stamp is None else _read_since(dataset, by_stamp, watermark)
     stamp_kind = None if watermark is None else _stamp_kind(watermark)
-    read = _Read(dataset, run_id, None if by_stamp else partition, stamp_kind, deps, writer=writer)
+    read = _Read(dataset, run_id, None if by_stamp else partition, stamp_kind, deps, writer=writer, tick=tick)
     _read_source(dataset, read, since, deps, _ALL_PARTITIONS if by_stamp else partition)
     if by_stamp:  # an earlier attempt may have staged a partition that this read no longer touches
-        for stale in deps.store.versions.staged_for_run(run_id, dataset.name):
+        for stale in deps.store.versions.staged_for_run(run_id, dataset.name, tick):
             if stale.partition not in read.slices:
                 deps.store.versions.claim(stale.version_id, writer, run_id, dataset.name, stale.partition)
                 _discard(stale.version_id, writer, deps)
@@ -542,6 +555,7 @@ def run_extract(
     deps: RuntimeDeps,
     dry_run: Literal[False] = False,
     writer: str | None = None,
+    tick: str | None = None,
 ) -> list[Version]: ...
 
 
@@ -556,6 +570,7 @@ def run_extract(
     deps: RuntimeDeps,
     dry_run: Literal[True],
     writer: str | None = None,
+    tick: str | None = None,
 ) -> VerifyResult: ...
 
 
@@ -569,6 +584,7 @@ def run_extract(
     deps: RuntimeDeps,
     dry_run: bool = False,
     writer: str | None = None,
+    tick: str | None = None,
 ) -> list[Version] | VerifyResult:
     """Read one partition of a dataset and return the versions it produced, or an empty list if nothing changed.
 
@@ -583,24 +599,27 @@ def run_extract(
     under `writer`, which identifies this call, and the store and spool hold it to that (`VersionStore.claim`). One that
     finds its version sealed, or its slice done, stops and answers as a repeat would. One whose version was claimed after
     it raises `StaleWriter`, and it is the engine's next attempt that decides.
+
+    `tick` names the tick of a daily stream run that this read belongs to. A stream run reads many times, so the tick goes
+    into the version ids, and "what an earlier attempt sealed" means of this tick and not of the day.
     """
     if dry_run:
         return _verify(dataset, partition, deps)
     earlier_of = None if isinstance(dataset.strategy, ByStamp) else partition
-    versions = _sealed_earlier(dataset, run_id, earlier_of, deps)
+    versions = _sealed_earlier(dataset, run_id, earlier_of, tick, deps)
     read_partitions: list[str] = []
     writer = writer or new_id()
     if not versions:
         try:
             read_partitions, versions = _read_and_stage(
-                dataset, run_id, partition, routes, stage_only, writer, deps
+                dataset, run_id, partition, routes, stage_only, writer, deps, tick
             )
         except (VersionSealed, SliceFinished):
-            versions = _sealed_earlier(dataset, run_id, earlier_of, deps)
+            versions = _sealed_earlier(dataset, run_id, earlier_of, tick, deps)
     if stage_only:
         return versions
     sealed = finalize_versions(dataset, versions, routes, deps, writer)
-    settle_quarantine(dataset, run_id, {*read_partitions, *(v.partition for v in sealed)}, deps)
+    settle_quarantine(dataset, run_id, {*read_partitions, *(v.partition for v in sealed)}, deps, tick)
     return sealed
 
 
@@ -670,13 +689,15 @@ def _write_settled(version_id: str, keys: Iterable[str], writer: str, deps: Runt
         )
 
 
-def settle_quarantine(dataset: Dataset, run_id: str, partitions: Iterable[str], deps: RuntimeDeps) -> None:
+def settle_quarantine(
+    dataset: Dataset, run_id: str, partitions: Iterable[str], deps: RuntimeDeps, tick: str | None = None
+) -> None:
     """Close the extraction entries of keys that the run, now sealed, settled, and clear what said so.
 
     A key is settled by an accepted row, or by leaving a slice that held it as turned down, unless a slice of this run
     turned it down. It comes after sealing, and works from chunks that stay until it is done, so it can be repeated.
     """
-    version_ids = [stable_id(run_id, dataset.name, partition) for partition in partitions]
+    version_ids = [version_id_of(run_id, dataset.name, partition, tick) for partition in partitions]
     settled: set[str] = set()
     rejected: set[str] = set()
     for version_id in version_ids:
@@ -724,16 +745,16 @@ def _held_without_a_version(
     """
     if not keys:
         return set(), set(), set()
-    run_id = versions[0].run_id
+    run_id, tick = versions[0].run_id, versions[0].tick
     registered = set(deps.store.versions.slices_for_run(run_id, dataset.name))
     with_version = {version.partition for version in versions}
     turned_down: set[str] = set()
     unchanged: set[str] = set()
     for partition in registered | with_version:
-        turned_down |= keys & _rejected_keys(stable_id(run_id, dataset.name, partition), deps)
+        turned_down |= keys & _rejected_keys(version_id_of(run_id, dataset.name, partition, tick), deps)
     repeated: set[str] = set()
     for partition in registered - with_version:
-        repeated |= keys & _rejected_keys(stable_id(run_id, dataset.name, partition), deps)
+        repeated |= keys & _rejected_keys(version_id_of(run_id, dataset.name, partition, tick), deps)
         old = _last_snapshot(dataset, partition, deps)
         if old is not None:
             unchanged.update(key for key, hash_ in _pairs(old) if key in keys and hash_ != NOT_DELIVERED)

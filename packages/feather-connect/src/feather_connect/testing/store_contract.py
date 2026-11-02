@@ -6,6 +6,7 @@ record. A backend with only a spool subclasses `SpoolContract`, which needs `spo
 """
 
 import pickle
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -717,6 +718,67 @@ class StoreContract(SpoolContract):
         assert (tasks[1].status, tasks[1].route, tasks[1].dataset) == ("running", "a", None)
         assert store.runs.task_logs(t1) == ["info: started", "error: bad row"]
         assert store.runs.task_logs(t2) == []
+
+    def test_listing_tasks_narrowed_and_paged(self, store: Store):
+        rid = store.runs.create_run("f", "manual", "ann", {})
+        other = store.runs.create_run("f", "manual", "ann", {})
+        first = store.runs.start_task(rid, "plan", "a")
+        second = store.runs.start_task(rid, "apply", "b")
+        third = store.runs.start_task(rid, "apply", "c")
+        store.runs.start_task(other, "apply", "c")
+        store.runs.finish_task(first, "succeeded")
+        store.runs.finish_task(second, "failed", "bad")
+
+        def ids(**kw: Any) -> list[str]:
+            return [t.task_id for t in store.runs.list_tasks(rid, **kw)]
+
+        assert ids() == [first, second, third]
+        assert ids(status="running") == [third] and ids(status="failed") == [second]
+        assert ids(status="succeeded") == [first]
+        assert ids(kinds=("apply",)) == [second, third] and ids(kinds=("apply", "plan"), limit=1) == [first]
+        assert ids(newest_first=True) == [third, second, first]
+        assert ids(limit=2, newest_first=True) == [third, second]
+        assert ids(after_task=first) == [second, third]
+        assert ids(after_task=second, newest_first=True) == [first]
+
+    def test_finding_tasks_by_ref(self, store: Store):
+        rid = store.runs.create_run("f", "manual", "ann", {})
+        other = store.runs.create_run("f", "manual", "ann", {})
+        one = store.runs.start_task(rid, "apply", "apply:r:v:0:0")
+        two = store.runs.start_task(rid, "apply", "apply:r:v:0:0#1")
+        store.runs.start_task(rid, "apply", "apply:r:w:0:0")
+        store.runs.start_task(other, "apply", "apply:r:v:0:0")
+        row = store.runs.task_by_ref(rid, "apply:r:v:0:0")
+        assert row is not None and row.task_id == one
+        assert store.runs.task_by_ref(rid, "nothing") is None
+        assert [t.task_id for t in store.runs.tasks_by_ref(rid, "apply:r:v:")] == [one, two]
+        assert store.runs.tasks_by_ref(rid, "apply:%") == []
+
+    def test_counting_tasks(self, store: Store):
+        rid = store.runs.create_run("f", "manual", "ann", {})
+        store.runs.finish_task(store.runs.start_task(rid, "plan", "a"), "succeeded")
+        store.runs.finish_task(store.runs.start_task(rid, "plan", "b"), "succeeded")
+        store.runs.finish_task(store.runs.start_task(rid, "skip", "c"), "skipped", "paused")
+        assert dict(store.runs.count_tasks(rid)) == {("plan", "succeeded"): 2, ("skip", "skipped"): 1}
+
+    def test_one_stream_run_per_flow_and_day(self, store: Store):
+        first = store.runs.stream_run("f", "2026-10-18")
+        run = store.runs.get_run(first)
+        assert (run.trigger, run.status, run.params) == ("stream", "succeeded", {"day": "2026-10-18"})
+        assert store.runs.stream_run("f", "2026-10-18") == first
+        assert store.runs.stream_run("g", "2026-10-18") != first
+        assert store.runs.stream_run("f", "2026-10-19") != first
+
+    def test_a_version_keeps_its_tick_and_is_found_by_it(self, store: Store):
+        rid = store.runs.create_run("f", "stream", "system", {})
+        for vid, tick in (("v1", "t1"), ("v2", "t2")):
+            store.versions.stage(replace(draft(vid, run=rid), tick=tick))
+        assert [v.version_id for v in store.versions.staged_for_run(rid, "d", "t1")] == ["v1"]
+        assert len(store.versions.staged_for_run(rid, "d")) == 2
+        store.versions.seal(["v1", "v2"], [])
+        assert [v.version_id for v in store.versions.sealed_for_run(rid, "d", "t2")] == ["v2"]
+        assert store.versions.get("v2").tick == "t2"
+        assert [v.version_id for v in store.versions.newest_sealed_for_run(rid, "d", 1)] == ["v2"]
 
     def test_a_retry_is_noted_on_the_task_and_outlives_its_finish(self, store: Store):
         rid = store.runs.create_run("f", "manual", "ann", {})

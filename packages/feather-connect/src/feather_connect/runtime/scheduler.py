@@ -3,6 +3,9 @@
 `tick` is called often (once a second by the server's loop) and is cheap when nothing is due. It remembers the last tick
 of each trigger in the store (`ScheduleStore`), so a restart neither repeats a tick nor forgets one. Every tick that
 is due writes a run, a skipped one included, with the reason (I6).
+
+An interval under five minutes is a high-frequency poller. Each of its ticks is a task of the flow's daily stream run,
+a skipped one included, which keeps the runs list readable (design 6.3).
 """
 
 import logging
@@ -14,7 +17,7 @@ from zoneinfo import ZoneInfo
 from cronsim import CronSim
 
 from feather_connect.core.flow import Flow
-from feather_connect.core.triggers import Cron, Every, Trigger
+from feather_connect.core.triggers import Cron, Every, Trigger, is_stream
 from feather_connect.logs import redact
 from feather_connect.runtime.runtime import RunNotStarted, Runtime
 
@@ -29,7 +32,8 @@ _SCAN_LIMIT = 100_000
 
 @dataclass(frozen=True)
 class TickResult:
-    """What a due tick did: the run it wrote, with the status of that run and, if it was skipped or failed, why."""
+    """What a due tick did: the run it wrote, with the status of that run and, if it was skipped or failed, why. A
+    tick of a stream run has the stream run, and `status` and `reason` are of the tick when it is skipped or failed."""
 
     flow: str
     trigger_id: str
@@ -101,13 +105,21 @@ def _tick_trigger(
     if not due:
         return []
     schedules.set_last_tick(flow.name, tid, due[-1])
-    wanted = due[-1:] if flow.catch_up == "latest" else due[-MAX_CATCH_UP:]
+    stream = is_stream(trigger)
+    # All the missed ticks of a poller read from one watermark, and overlap would skip all but the first anyway.
+    wanted = due[-1:] if stream or flow.catch_up == "latest" else due[-MAX_CATCH_UP:]
     collapsed = left_out + len(due) - len(wanted)
     results: list[TickResult] = []
-    if collapsed:
+    if collapsed and stream:
+        note = f"catch_up_collapsed: {collapsed} ticks, from {due[0].isoformat()} to {wanted[0].isoformat()}"
+        runtime.skip_stream_tick(flow.name, trigger_id=tid, at=due[0], reason=note)
+        run_id = runtime.stream_run(flow.name, due[0])
+        results.append(TickResult(flow.name, tid, due[0], run_id, "skipped", "catch_up_collapsed"))
+    elif collapsed:
         params = {"collapsed": collapsed, "from": due[0].isoformat(), "to": wanted[0].isoformat()}
         results.append(_skip(runtime, flow, tid, due[0], "catch_up_collapsed", params))
-    results += [_fire(runtime, flow, tid, at) for at in wanted]
+    fire = _fire_stream if stream else _fire
+    results += [fire(runtime, flow, tid, at) for at in wanted]
     return results
 
 
@@ -128,6 +140,29 @@ def _skip(
         reason=reason,
     )
     return TickResult(flow.name, tid, due_at, run_id, "skipped", reason)
+
+
+def _fire_stream(runtime: Runtime, flow: Flow, tid: str, due_at: datetime) -> TickResult:
+    """Add one due tick to the flow's stream run, or record why it doesn't go ahead. Overlap is always `skip`, whatever
+    the flow asks, because the next tick reads from the same watermark anyway."""
+
+    def skip(reason: str) -> TickResult:
+        run_id = runtime.skip_stream_tick(flow.name, trigger_id=tid, at=due_at, reason=reason)
+        return TickResult(flow.name, tid, due_at, run_id, "skipped", reason)
+
+    if not flow.enabled:
+        return skip("disabled")
+    if runtime.is_flow_paused(flow.name):
+        return skip("paused")
+    if runtime.tick_in_flight(runtime.stream_run(flow.name, due_at)) or runtime.active_runs(flow.name):
+        return skip("overlap")
+    try:
+        run_id = runtime.start_stream_tick(flow.name, trigger_id=tid, at=due_at)
+    except RunNotStarted as error:
+        log.exception("could not start a tick of flow %s for %s", flow.name, tid)
+        return TickResult(flow.name, tid, due_at, error.run_id, "failed", error.reason)
+    run = runtime.store.runs.get_run(run_id)
+    return TickResult(flow.name, tid, due_at, run_id, run.status, None)
 
 
 def _fire(runtime: Runtime, flow: Flow, tid: str, due_at: datetime) -> TickResult:

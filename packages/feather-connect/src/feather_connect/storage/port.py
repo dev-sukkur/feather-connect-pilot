@@ -49,6 +49,9 @@ TRANSITIONS: Mapping[DeliveryStatus, frozenset[DeliveryStatus]] = {
 }
 
 # Statuses that no longer hold up the next version of a partition (I2).
+STREAM_TRIGGER = (
+    "stream"  # the trigger of a flow's daily run, which a poller's ticks and a push dataset's versions join
+)
 CLOSED: frozenset[DeliveryStatus] = frozenset({"applied", "skipped", "compensated"})
 
 
@@ -108,6 +111,9 @@ class VersionDraft:
     schema_hash: str | None
     watermark: Any
     code_sha: str
+    tick: str | None = (
+        None  # of a daily stream run: the tick that read it, as its run holds many ticks' versions
+    )
 
 
 @dataclass(frozen=True)
@@ -233,7 +239,37 @@ class RunJournal(Protocol):
         """End the task. Without an `error`, the one `record_attempt` left stays."""
         ...
 
-    def list_tasks(self, run_id: str) -> list[TaskRow]: ...
+    def stream_run(self, flow: str, day: str) -> str:
+        """Return the flow's daily stream run of `day`, an ISO date, making it if there is none. Racing callers get the
+        same run. A new one has trigger `stream` and status `succeeded`, having nothing to do yet."""
+        ...
+
+    def list_tasks(
+        self,
+        run_id: str,
+        *,
+        status: str | None = None,
+        kinds: Sequence[str] | None = None,
+        limit: int | None = None,
+        after_task: str | None = None,
+        newest_first: bool = False,
+    ) -> list[TaskRow]:
+        """The run's tasks in the order they were added, or the other way round with `newest_first`.
+
+        A run can hold thousands of tasks, so whatever runs per task or per tick asks for what it needs here: its cost
+        follows what it gets back. `after_task` is the id of the last task of the previous page.
+        """
+        ...
+
+    def task_by_ref(self, run_id: str, ref: str) -> TaskRow | None: ...
+    def tasks_by_ref(self, run_id: str, prefix: str) -> list[TaskRow]:
+        """The run's tasks whose `ref` starts with `prefix`, in the order they were added."""
+        ...
+
+    def count_tasks(self, run_id: str) -> Mapping[tuple[str, str], int]:
+        """How many tasks the run has of each (kind, status)."""
+        ...
+
     def log(self, task_id: str, level: str, message: str) -> None: ...
     def task_logs(self, task_id: str) -> list[str]:
         """The task's log lines in order, each as `level: message`."""
@@ -327,8 +363,15 @@ class VersionStore(Protocol):
         """The partitions given to `register_slices` for the run's dataset, finished or not, each once."""
         ...
 
-    def staged_for_run(self, run_id: str, dataset: str) -> list[Version]: ...
-    def sealed_for_run(self, run_id: str, dataset: str) -> list[Version]:
+    def staged_for_run(self, run_id: str, dataset: str, tick: str | None = None) -> list[Version]:
+        """The run's staged versions of `dataset`, or with `tick` only that tick's."""
+        ...
+
+    def newest_sealed_for_run(self, run_id: str, dataset: str, limit: int) -> list[Version]:
+        """The newest `limit` sealed versions of the run and dataset, newest first."""
+        ...
+
+    def sealed_for_run(self, run_id: str, dataset: str, tick: str | None = None) -> list[Version]:
         """All of the run's sealed versions of the dataset, in seal order."""
         ...
 
