@@ -35,6 +35,10 @@ VOLUME = "feather-dev-postgres-data"
 # These start a whole stack, some of them twice; the suite's default of 120 s would kill the session.
 pytestmark = pytest.mark.timeout(420)
 FIVE_MINUTES = 300
+# The demo runs on the minute and a stack's first tick only notes the time. So its first run comes within a minute of
+# the stack being ready, and its second a minute after that, with some room for a busy machine.
+FIRST_RUN_S = 120
+TWO_RUNS_S = 180
 
 
 def docker_works() -> bool:
@@ -206,7 +210,7 @@ def test_works_with_an_existing_database_url(dev, database):
 @needs_postgres
 def test_demo_runs_and_reaches_destinations(dev, database, pg_connect):
     client = dev.sign_in()
-    wait_until(lambda: len(dev.run_ids(client)) >= 2, 90, "two runs on the dashboard")
+    wait_until(lambda: len(dev.run_ids(client)) >= 2, TWO_RUNS_S, "two runs on the dashboard")
     store, _ = pg_connect(database)
 
     def applied(route: str) -> bool:
@@ -346,7 +350,7 @@ def test_ctrl_c_then_restart_keeps_data_and_leaves_no_processes(dev_clean, start
     first = start_dev()
     first.wait_ready(FIVE_MINUTES)
     client = first.sign_in()
-    wait_until(lambda: len(first.run_ids(client)) >= 2, 120, "two runs")
+    wait_until(lambda: len(first.run_ids(client)) >= 2, TWO_RUNS_S, "two runs")
     seen = set(first.run_ids(client))
     password = first.password()
     assert password and "the user dev already exists" not in first.output()
@@ -378,7 +382,7 @@ def test_reset_password_gives_a_new_password_and_keeps_the_data(start_dev, datab
     old = first.password()
     assert old
     client = first.sign_in()
-    wait_until(lambda: first.run_ids(client), 90, "a run")
+    wait_until(lambda: first.run_ids(client), FIRST_RUN_S, "a run")
     seen = set(first.run_ids(client))
     assert first.interrupt() == 0
 
