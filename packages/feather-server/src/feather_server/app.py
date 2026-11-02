@@ -140,9 +140,9 @@ def create_app(
         )
     app.state.reads = Reads(state)
     app.state.actions = Actions(state)
+    ingress.install(app, state)  # first, as routes are tried in order, and this one takes bursts
     auth.install(app, state)
     web.install(app, state)
-    ingress.install(app, state)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
