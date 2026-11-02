@@ -231,7 +231,7 @@ class Runtime:
 
         def run(ctx: TaskContext, args: Mapping[str, Any]) -> Mapping[str, Any] | None:
             run_id = args["run_id"]
-            row = next((r for r in self._deps.store.runs.list_tasks(run_id) if r.ref == ctx.task_ref), None)
+            row = self._deps.store.runs.task_by_ref(run_id, ctx.task_ref)
             with bind(
                 tenant=_TENANT,
                 flow=args.get("flow"),
@@ -581,7 +581,7 @@ class Runtime:
             return False
         why = f"its task {ref} ended without finishing it: retry or skip it"
         fail_open(delivery, why, deps)
-        row = next((r for r in deps.store.runs.list_tasks(run_id) if r.ref == ref), None)
+        row = deps.store.runs.task_by_ref(run_id, ref)
         if row is not None and row.status == "running":
             deps.store.runs.finish_task(row.task_id, "failed", why)
         self._settle_run(run_id)
@@ -621,8 +621,8 @@ class Runtime:
             route, version_id, to, actor=actor, reason=reason, code_sha=deps.code_sha
         )
         run_id = deps.store.versions.get(version_id).run_id
-        for row in deps.store.runs.list_tasks(run_id):
-            if row.status == "failed" and row.ref.startswith(f"apply:{route}:{version_id}:"):
+        for row in deps.store.runs.tasks_by_ref(run_id, f"apply:{route}:{version_id}:"):
+            if row.status == "failed":
                 deps.store.runs.finish_task(row.task_id, "cancelled", row.error)
         if to == "pending":
             deps.store.runs.set_run_status(run_id, "running")
@@ -897,7 +897,7 @@ class Runtime:
         """Return the key of the delivery's next apply task: `_apply_key`, and `#n` after it once `n` tasks of it ended
         because the route was paused, since an engine runs a key only once."""
         base = _apply_key(delivery)
-        rows = self._deps.store.runs.list_tasks(run_id)
+        rows = self._deps.store.runs.tasks_by_ref(run_id, base)
         held = sum(
             1
             for r in rows
@@ -955,7 +955,10 @@ class Runtime:
         self._deps.store.runs.record_attempt(self._task_id(run_id, ref), attempt, error)
 
     def _task_id(self, run_id: str, ref: str) -> str:
-        return next(row.task_id for row in self._deps.store.runs.list_tasks(run_id) if row.ref == ref)
+        row = self._deps.store.runs.task_by_ref(run_id, ref)
+        if row is None:
+            raise KeyError(f"run {run_id} has no task {ref}")
+        return row.task_id
 
     def _settle_run(self, run_id: str) -> None:
         """Finish the run if none of its tasks is still running. It failed for the first reason any of them did."""
