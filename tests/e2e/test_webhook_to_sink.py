@@ -16,7 +16,7 @@ from textwrap import dedent
 from typing import Any
 
 import pytest
-from real_stack import kill_abruptly, start_worker, wait_until
+from real_stack import kill_abruptly, scratch_database, server_url, start_worker, wait_until
 
 from feather_connect.connectors.simulation import SIGNATURE_HEADER, TIMESTAMP_HEADER
 from feather_connect.core.webhooks import sign
@@ -26,6 +26,13 @@ pytestmark = pytest.mark.postgres
 SECRET = "e2e-signature-secret"
 GENEROUS = 90  # a server and a worker to start: no statement about latency, which group L measures
 ENV = {"HOOK_SECRET": SECRET, "FEATHER_CODE_SHA": "testsha"}
+
+
+@pytest.fixture
+def pg_url() -> Iterator[str]:
+    """A database of its own, since a project's routes stay in the catalogue, where the other e2e tests would see them."""
+    with scratch_database(server_url()) as url:
+        yield url
 
 
 @pytest.fixture
