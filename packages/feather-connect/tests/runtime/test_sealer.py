@@ -666,3 +666,64 @@ def test_a_quarantined_event_keeps_its_inbox_day(any_world: World):
     assert world.store.inbox.drop_day(day) is False
     world.store.inbox.release("hooks", seq)
     assert world.store.inbox.drop_day(day) is True
+
+
+# Within a batch each key keeps its order across partitions, and its last write wins (S3).
+
+
+@pytest.fixture
+def moving_world(backend: tuple[Store, Spool], clock: FrozenClock) -> World:
+    world = World(*backend, clock, keep_state=True, partition=by_fields("p"))
+    world.post({"id": 1, "p": "a", "x": 0})
+    world.seal_due()
+    world.drain()
+    return world
+
+
+def ends_with(world: World, partition: str, payload: dict[str, Any]) -> None:
+    world.drain()
+    state = world.store.state.get_many("hooks", ["1"])["1"]
+    assert (state.partition, dict(state.payload)) == (f"p={partition}", payload)
+    assert [r for r in world.sink.rows if r["id"] == 1] == [payload]
+
+
+def test_a_key_that_moves_twice_in_a_batch_ends_where_it_went_last(moving_world: World):
+    world = moving_world
+    world.post({"id": 1, "p": "b", "x": 1}, {"id": 1, "p": "c", "x": 2}, {"id": 1, "p": "b", "x": 3})
+    world.seal_due()
+    ends_with(world, "b", {"id": 1, "p": "b", "x": 3})
+    assert [r["x"] for r in world.log.rows] == [0, 1, 2, 3]  # an append route still gets each, in order
+
+
+def test_a_key_that_moves_back_among_other_keys_ends_where_it_went_last(moving_world: World):
+    world = moving_world
+    world.post(
+        {"id": 2, "p": "b"},
+        {"id": 1, "p": "b", "x": 1},
+        {"id": 3, "p": "c"},
+        {"id": 1, "p": "c", "x": 2},
+        {"id": 4, "p": "b"},
+        {"id": 1, "p": "b", "x": 3},
+    )
+    world.seal_due()
+    ends_with(world, "b", {"id": 1, "p": "b", "x": 3})
+    world.drain()
+    assert sorted(r["id"] for r in world.sink.rows) == [1, 2, 3, 4]
+
+
+def test_a_key_that_moves_twice_in_one_event_ends_where_it_went_last(moving_world: World):
+    world = moving_world
+    world.post([{"id": 1, "p": "b", "x": 1}, {"id": 1, "p": "c", "x": 2}, {"id": 1, "p": "b", "x": 3}])
+    world.seal_due()
+    ends_with(world, "b", {"id": 1, "p": "b", "x": 3})
+
+
+@pytest.mark.parametrize("named", ["b", "a", "c"])
+def test_a_delete_after_a_move_in_a_batch_deletes(moving_world: World, named: str):
+    """The delete names the partition the key moved to, the one it left, or another the batch has seen."""
+    world = moving_world
+    world.post({"id": 3, "p": "c"}, {"id": 1, "p": "b", "x": 1}, {"_deleted": {"id": 1, "p": named}})
+    world.seal_due()
+    world.drain()
+    assert world.store.state.get_many("hooks", ["1"]) == {}
+    assert [r for r in world.sink.rows if r["id"] == 1] == []

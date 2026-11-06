@@ -21,6 +21,11 @@ behind it to keep their order, until a later tick after the retry policy's delay
 held. All the records of a batch stay in the version in order, including several of one key: a keyed route ends up with
 the last, and an append route is owed each of them.
 
+The versions of a batch seal in the order of their first events, so a key whose records go to several partitions keeps
+its order only while each record goes to a version no earlier than the last one's. An event that would break that, as a
+key moving back to a partition it left in the same batch does, starts the next batch, so the key's last write wins.
+Within one event, a key that goes to several partitions keeps only its last record.
+
 Nothing logged here carries a message of an error, which may quote a request. The quarantine keeps the message, capped
 and redacted, for someone who can see the data anyway.
 """
@@ -31,7 +36,7 @@ import traceback
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from feather_connect.core.connector import Deleted, PushSource
 from feather_connect.core.context import Context
@@ -66,6 +71,11 @@ _MAX_NAME = 200
 MAX_NESTING = 32
 MAX_PARTITION_BYTES = 1024
 MAX_KEY_BYTES = 1024
+
+
+_Read = Literal["added", "later", "next"]
+# What an item of an event comes to: its key, its partition, and its record or the error that turned it down.
+_Found = tuple[str, str | None, Record | None, Exception | None]
 
 
 @dataclass
@@ -121,6 +131,7 @@ class _Batch:
             set()
         )  # keys whose latest record is good, and whose earlier rejection is over
         self.held: list[int] = []  # events that are quarantined whole, to be held once the rest has sealed
+        self._last_part: dict[str, str] = {}  # where each key's latest record of the batch goes
 
     def reject(self, name: str, partition: str | None, error: Exception) -> None:
         message = redact(_printable(f"{name[:_MAX_NAME]}: {type(error).__name__}: {error}"))[:_MAX_ERROR]
@@ -132,16 +143,16 @@ class _Batch:
         self.reject(f"event:{event.event_seq}", None, error)
         self.held.append(event.event_seq)
 
-    def read(self, source: PushSource, ctx: Context, event: InboxEvent) -> bool:
-        """Add the records of the event, and return True, or return False if it is to be read again later. Whatever is
-        wrong with it costs that event, or that record, and no more."""
+    def read(self, source: PushSource, ctx: Context, event: InboxEvent) -> _Read:
+        """Add the records of the event, or say that it is to be read again later, or that it belongs in the next batch.
+        Whatever is wrong with it costs that event, or that record, and no more."""
         seq = event.event_seq
         try:
             found = list(source.receive(ctx, event.request))
         except PermanentError as error:
             log.warning("sealer: event %s of %s not read: %s", seq, self._dataset.name, type(error).__name__)
             self.hold(event, error)
-            return True
+            return "added"
         except Exception as error:  # noqa: BLE001 - a connector fails however it fails, and its tries decide
             tries = event.tries + 1
             log.warning(
@@ -152,24 +163,49 @@ class _Batch:
                 type(error).__name__,
             )
             if tries < self._deps.retry.max_attempts:
-                return False
+                return "later"
             self.hold(
                 event,
                 PermanentError(f"still failing after {tries} attempts: {type(error).__name__}: {error}"),
             )
-            return True
-        for item in found:
-            self._add(item, seq)
-        return True
+            return "added"
+        found_records = _last_of_each_moving_key([self._record_of(item, seq) for item in found])
+        if self._breaks_order(found_records):
+            return "next"
+        for name, partition, record, error in found_records:
+            if record is None:
+                self.reject(name, partition, cast(Exception, error))
+                self.settled.discard(name)
+            else:
+                self.parts.setdefault(cast(str, partition), _Part(seq)).records.append(record)
+                self._last_part[name] = cast(str, partition)
+                self.settled.add(name)
+        return "added"
 
-    def read_all(self, source: PushSource, ctx: Context, events: Sequence[InboxEvent]) -> int | None:
-        """Read the events in order, and stop at one to be read again later. Return where it stopped, or None."""
+    def read_all(
+        self, source: PushSource, ctx: Context, events: Sequence[InboxEvent]
+    ) -> tuple[int, _Read] | None:
+        """Read the events in order, and stop at one to be read again later or to start the next batch with. Return
+        where it stopped and why, or None."""
         for n, event in enumerate(events):
-            if not self.read(source, ctx, event):
-                return n
+            found = self.read(source, ctx, event)
+            if found != "added":
+                return n, found
         return None
 
-    def _add(self, item: Any, seq: int) -> None:
+    def _breaks_order(self, found: Sequence[_Found]) -> bool:
+        """Whether a record of a key would go to a version that seals before the one its latest record went to."""
+        order = {partition: n for n, partition in enumerate(self.parts)}
+        for name, partition, record, _ in found:
+            last = self._last_part.get(name)
+            if record is None or last is None or partition == last or partition not in order:
+                continue
+            if order[partition] < order[last]:
+                return True
+        return False
+
+    def _record_of(self, item: Any, seq: int) -> _Found:
+        """Return the record an item makes, or the error that turns it down, with its key and partition."""
         dataset = self._dataset
         name, partition = f"event:{seq}", None
         try:
@@ -195,11 +231,8 @@ class _Batch:
             log.warning(
                 "sealer: a record of event %s of %s rejected: %s", seq, dataset.name, type(error).__name__
             )
-            self.reject(name, partition, error)
-            self.settled.discard(name)
-            return
-        self.parts.setdefault(partition, _Part(seq)).records.append(record)
-        self.settled.add(name)
+            return name, partition, None, error
+        return name, partition, record, None
 
     def drop_what_arrow_refuses(self) -> None:
         """Arrow has limits of its own, such as the size of an integer. A table per record would be most of the cost of a
@@ -225,6 +258,21 @@ class _Batch:
         part.records = kept
         if not kept:
             del self.parts[partition]
+
+
+def _last_of_each_moving_key(found: Sequence[_Found]) -> list[_Found]:
+    """Leave out the records of a key that goes to several partitions in one event, but for its last."""
+    partitions: dict[str, set[str | None]] = {}
+    last: dict[str, int] = {}
+    for n, (name, partition, record, _) in enumerate(found):
+        if record is not None:
+            partitions.setdefault(name, set()).add(partition)
+            last[name] = n
+    return [
+        item
+        for n, item in enumerate(found)
+        if item[2] is None or len(partitions[item[0]]) == 1 or last[item[0]] == n
+    ]
 
 
 def _with_moves(dataset: Dataset, parts: Mapping[str, _Part], deps: Any) -> None:
@@ -374,8 +422,8 @@ def _seal_split(
     """
     deps = runtime.deps
     batch = _Batch(dataset, deps)
-    later = batch.read_all(cast(PushSource, dataset.source), ctx, events)
-    taken = events if later is None else events[:later]
+    stop = batch.read_all(cast(PushSource, dataset.source), ctx, events)
+    taken = events if stop is None else events[: stop[0]]
     try:
         sealed += _seal_batch(runtime, dataset, flows, batch, taken, now)
     except (StaleWriter, VersionSealed):
@@ -391,9 +439,12 @@ def _seal_split(
                 return True
             if _seal_split(runtime, dataset, flows, ctx, taken[half:], now, sealed):
                 return True
-    if later is None:
+    if stop is None:
         return False
-    event = events[later]
+    at, why = stop
+    if why == "next":
+        return _seal_split(runtime, dataset, flows, ctx, events[at:], now, sealed)
+    event = events[at]
     deps.store.inbox.defer(event.event_seq, now + deps.retry.delay(event.tries + 1, rand=lambda: 1.0))
     return True
 
