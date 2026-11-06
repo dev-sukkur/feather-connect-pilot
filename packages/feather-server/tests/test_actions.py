@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from feather_connect.core.connector import CheckResult, ConnectorSpec
+from feather_connect.core.connector import CheckResult, ConnectorSpec, InboundRequest
 from feather_connect.core.errors import PermanentError
 from feather_connect.engine.local import LocalEngine
 from feather_connect.runtime.runtime import FlowPaused
@@ -328,6 +328,29 @@ def test_dismiss_quarantine_closes_the_entry(world: World) -> None:
         world.actions.dismiss_quarantine(ANN, "warehouse", version.version_id, "k1")
     rows = [r for r in world.store.audit.list_audit() if r.action == "dismiss_quarantine"]
     assert [r.result.startswith("ok") for r in rows] == [False, True]  # the refusal is on record too
+
+
+def held_event(world: World) -> int:
+    world.store.inbox.put("hooks", InboundRequest("POST", "/", {}, b"{}", world.clock.now()))
+    [event] = world.store.inbox.take("hooks", 1)
+    world.store.inbox.hold(event.event_seq)
+    key = f"event:{event.event_seq}"
+    world.store.quarantine.add(None, None, key, f"{key}: PermanentError: unreadable", "hooks", None)
+    return event.event_seq
+
+
+@pytest.mark.parametrize("action", ["reprocess_event", "release_event"])
+def test_a_held_event_is_reprocessed_or_released_and_its_entry_closes(world: World, action: str) -> None:
+    seq = held_event(world)
+    getattr(world.actions, action)(ANN, "hooks", seq, reason="fixed in 1.4.2")
+    assert world.store.quarantine.list_open() == []
+    waiting = [e.event_seq for e in world.store.inbox.take("hooks", 10)]
+    assert waiting == ([seq] if action == "reprocess_event" else [])
+    with pytest.raises(LookupError):
+        getattr(world.actions, action)(ANN, "hooks", seq)
+    rows = [r for r in world.store.audit.list_audit() if r.action == action]
+    assert [r.result.startswith("ok") for r in rows] == [False, True]
+    assert rows[1].target == "dataset:hooks" and rows[1].request["event_seq"] == seq
 
 
 def test_pause_and_resume_go_through_the_runtime(world: World) -> None:

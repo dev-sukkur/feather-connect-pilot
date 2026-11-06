@@ -572,6 +572,42 @@ class Actions:
             dismiss,
         )
 
+    # Push events that the sealer held in the quarantine, whole.
+
+    def reprocess_event(
+        self, actor: Actor, dataset: str, event_seq: int, *, reason: str | None = None
+    ) -> None:
+        """Give a held event back to the sealer, which reads it again from the request it stored. It seals after what
+        has sealed since, so a keyed route ends up with its records unless a later event of the same key follows.
+
+        Closes its quarantine entry; reading it again opens a new one if it still fails. Raises `LookupError` when the
+        dataset holds no such event.
+        """
+        self._settle_event(actor, "reprocess_event", dataset, event_seq, reason, self._store.inbox.reprocess)
+
+    def release_event(self, actor: Actor, dataset: str, event_seq: int, *, reason: str | None = None) -> None:
+        """Let a held event go: it is sealed with no version, its quarantine entry closes and retention may drop its day.
+
+        Raises `LookupError` when the dataset holds no such event.
+        """
+        self._settle_event(actor, "release_event", dataset, event_seq, reason, self._store.inbox.release)
+
+    def _settle_event(
+        self,
+        actor: Actor,
+        action: str,
+        dataset: str,
+        event_seq: int,
+        reason: str | None,
+        settle: Callable[[str, int], bool],
+    ) -> None:
+        def do() -> None:
+            if not settle(dataset, event_seq):
+                raise LookupError(f"dataset {dataset!r} holds no event {event_seq} in the quarantine")
+            self._store.quarantine.close_extraction(dataset, [f"event:{event_seq}"])
+
+        self._do(actor, action, f"dataset:{dataset}", {"reason": reason, "event_seq": event_seq}, do)
+
     # Pausing.
 
     def pause_flow(self, actor: Actor, flow: str, *, reason: str | None = None) -> None:

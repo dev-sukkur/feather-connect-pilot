@@ -518,13 +518,18 @@ class QuarantineStore(Protocol):
 
 @dataclass(frozen=True)
 class InboxEvent:
-    """A push event in the inbox. `event_seq` says the order of arrival, and `event_id` is what the sender calls it."""
+    """A push event in the inbox. `event_seq` says the order of arrival, and `event_id` is what the sender calls it.
+
+    `tries` counts the reads of it that failed in a way that may pass, and `retry_at` is when to read it again.
+    """
 
     event_seq: int
     dataset: str
     event_id: str | None
     request: "InboundRequest"
     received_at: datetime
+    tries: int = 0
+    retry_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -548,11 +553,30 @@ class InboxStore(Protocol):
         ...
 
     def take(self, dataset: str, limit: int) -> list[InboxEvent]:
-        """The dataset's oldest events not yet sealed, in arrival order. They stay there until `seal_batch`."""
+        """The dataset's oldest events neither sealed nor held, in arrival order. They stay there until `seal_batch`."""
         ...
 
     def oldest_age(self, dataset: str, now: datetime) -> timedelta | None:
-        """How long the oldest event not yet sealed has waited, or None when none waits."""
+        """How long the oldest event neither sealed nor held has waited, or None when none waits."""
+        ...
+
+    def defer(self, event_seq: int, until: datetime) -> None:
+        """Count a failed try of the event, and set when to read it again. An event sealed or held meanwhile stays so."""
+        ...
+
+    def hold(self, event_seq: int) -> None:
+        """Set the event aside, unsealed, for someone to `reprocess` or `release`: `take` passes it by, and its day keeps.
+
+        Raises `StaleWriter` if the event is unknown, sealed or held, since another sealer has dealt with it.
+        """
+        ...
+
+    def reprocess(self, dataset: str, event_seq: int) -> bool:
+        """Give a held event back to the sealer, with its tries forgotten. Returns whether it was held."""
+        ...
+
+    def release(self, dataset: str, event_seq: int) -> bool:
+        """Seal a held event with no version, letting it go. Returns whether it was held."""
         ...
 
     def seal_batch(
@@ -578,7 +602,8 @@ class InboxStore(Protocol):
     def drop_day(self, day: date) -> bool:
         """Forget the day's events and event ids, unless one of its events is not sealed, and return whether it did.
 
-        This is the one check that counts: an unsealed event is never dropped, whatever was read before.
+        This is the one check that counts: an unsealed event, held or not, is never dropped, whatever was read
+        before.
         """
         ...
 

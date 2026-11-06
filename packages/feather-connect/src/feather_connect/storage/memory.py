@@ -1098,6 +1098,7 @@ class _InboxRow:
     event: InboxEvent
     day: date
     sealed_at: datetime | None = None
+    held: bool = False
 
 
 class _Inbox(InboxStore):
@@ -1127,8 +1128,47 @@ class _Inbox(InboxStore):
         return [self.put(dataset, request, event_id) for dataset, request, event_id in events]
 
     def _open(self, dataset: str) -> list[InboxEvent]:
-        rows = (r for r in self._rows.values() if r.sealed_at is None and r.event.dataset == dataset)
+        rows = (
+            r
+            for r in self._rows.values()
+            if r.sealed_at is None and not r.held and r.event.dataset == dataset
+        )
         return sorted((r.event for r in rows), key=lambda event: event.event_seq)
+
+    def defer(self, event_seq: int, until: datetime) -> None:
+        with self._d.lock:
+            row = self._rows.get(event_seq)
+            if row is not None and row.sealed_at is None and not row.held:
+                row.event = replace(row.event, tries=row.event.tries + 1, retry_at=until)
+
+    def hold(self, event_seq: int) -> None:
+        with self._d.lock:
+            row = self._rows.get(event_seq)
+            if row is None or row.sealed_at is not None or row.held:
+                raise StaleWriter("another sealer has dealt with this event")
+            row.held = True
+
+    def _held(self, dataset: str, event_seq: int) -> _InboxRow | None:
+        row = self._rows.get(event_seq)
+        return row if row is not None and row.held and row.event.dataset == dataset else None
+
+    def reprocess(self, dataset: str, event_seq: int) -> bool:
+        with self._d.lock:
+            row = self._held(dataset, event_seq)
+            if row is None:
+                return False
+            row.held = False
+            row.event = replace(row.event, tries=0, retry_at=None)
+            return True
+
+    def release(self, dataset: str, event_seq: int) -> bool:
+        with self._d.lock:
+            row = self._held(dataset, event_seq)
+            if row is None:
+                return False
+            row.held = False
+            row.sealed_at = self._d.clock.now()
+            return True
 
     def take(self, dataset: str, limit: int) -> list[InboxEvent]:
         with self._d.lock:
@@ -1151,7 +1191,7 @@ class _Inbox(InboxStore):
         ):  # every check comes before the first change, which is what one transaction amounts to here
             for seq in event_seqs:
                 row = self._rows.get(seq)
-                if row is None or row.sealed_at is not None:
+                if row is None or row.sealed_at is not None or row.held:
                     raise StaleWriter("another sealer has dealt with an event of this batch")
             for draft in drafts:
                 self._versions.check_writable(draft.version_id, writer)

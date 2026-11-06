@@ -1828,7 +1828,7 @@ class _Inbox(InboxStore):
         with self._db.tx() as conn:
             rows = conn.execute(
                 """select * from feather.inbox
-                   where tenant_id = %s and dataset = %s and sealed_at is null
+                   where tenant_id = %s and dataset = %s and sealed_at is null and held_at is null
                    order by event_seq limit %s""",
                 (self._db.tenant, dataset, limit),
             ).fetchall()
@@ -1839,6 +1839,8 @@ class _Inbox(InboxStore):
                 r["event_id"],
                 InboundRequest(r["method"], r["path"], r["headers"], bytes(r["body"]), r["received_at"]),
                 r["received_at"],
+                r["tries"],
+                r["retry_at"],
             )
             for r in rows
         ]
@@ -1847,11 +1849,50 @@ class _Inbox(InboxStore):
         with self._db.tx() as conn:
             row = conn.execute(
                 """select received_at from feather.inbox
-                   where tenant_id = %s and dataset = %s and sealed_at is null
+                   where tenant_id = %s and dataset = %s and sealed_at is null and held_at is null
                    order by event_seq limit 1""",
                 (self._db.tenant, dataset),
             ).fetchone()
         return None if row is None else now - row["received_at"]
+
+    def defer(self, event_seq: int, until: datetime) -> None:
+        with self._db.tx() as conn:
+            conn.execute(
+                """update feather.inbox set tries = tries + 1, retry_at = %s
+                   where tenant_id = %s and event_seq = %s and sealed_at is null and held_at is null""",
+                (until, self._db.tenant, event_seq),
+            )
+
+    def hold(self, event_seq: int) -> None:
+        with self._db.tx() as conn:
+            held = conn.execute(
+                """update feather.inbox set held_at = %s
+                   where tenant_id = %s and event_seq = %s and sealed_at is null and held_at is null
+                   returning event_seq""",
+                (self._db.clock.now(), self._db.tenant, event_seq),
+            ).fetchone()
+        if held is None:
+            raise StaleWriter("another sealer has dealt with this event")
+
+    def reprocess(self, dataset: str, event_seq: int) -> bool:
+        with self._db.tx() as conn:
+            found = conn.execute(
+                """update feather.inbox set held_at = null, tries = 0, retry_at = null
+                   where tenant_id = %s and dataset = %s and event_seq = %s and held_at is not null
+                   returning event_seq""",
+                (self._db.tenant, dataset, event_seq),
+            ).fetchone()
+        return found is not None
+
+    def release(self, dataset: str, event_seq: int) -> bool:
+        with self._db.tx() as conn:
+            found = conn.execute(
+                """update feather.inbox set held_at = null, sealed_at = %s
+                   where tenant_id = %s and dataset = %s and event_seq = %s and held_at is not null
+                   returning event_seq""",
+                (self._db.clock.now(), self._db.tenant, dataset, event_seq),
+            ).fetchone()
+        return found is not None
 
     def seal_batch(
         self,
@@ -1866,7 +1907,8 @@ class _Inbox(InboxStore):
             conn.execute(SEAL_LOCK)
             marked = conn.execute(
                 """update feather.inbox set sealed_at = %s
-                   where tenant_id = %s and event_seq = any(%s) and sealed_at is null returning event_seq""",
+                   where tenant_id = %s and event_seq = any(%s) and sealed_at is null and held_at is null
+                   returning event_seq""",
                 (self._db.clock.now(), self._db.tenant, list(event_seqs)),
             ).fetchall()
             if len(marked) != len(set(event_seqs)):

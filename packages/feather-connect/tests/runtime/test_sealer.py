@@ -17,9 +17,10 @@ from feather_connect.clock import FrozenClock
 from feather_connect.connectors import memory
 from feather_connect.core.connector import ConnectorSpec, Deleted, InboundRequest
 from feather_connect.core.context import Context
-from feather_connect.core.errors import PermanentError
+from feather_connect.core.errors import PermanentError, TransientError
 from feather_connect.core.partitions import by_bucket, by_fields
 from feather_connect.engine.local import LocalEngine
+from feather_connect.engine.port import RetryPolicy
 from feather_connect.ids import stable_id
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.runtime.sealer import seal_once
@@ -48,6 +49,7 @@ class Hooks:
 
     def __init__(self) -> None:
         self.during_receive: Any = None
+        self.failure: Exception | None = None  # what a body with `"fail": true` raises
 
     def verify(self, ctx: Context, request: InboundRequest) -> None:
         pass
@@ -58,9 +60,11 @@ class Hooks:
             during()
         body = json.loads(request.body)
         if body == "explode":
-            raise ValueError(f"can't read {request.body!r}")
+            raise PermanentError(f"can't read {request.body!r}")
+        if isinstance(body, dict) and body.get("fail") and self.failure is not None:
+            raise self.failure
         rows = body if isinstance(body, list) else [body]
-        return [Deleted(r["_deleted"]) if "_deleted" in r else r for r in rows]
+        return [Deleted(r["_deleted"]) if isinstance(r, dict) and "_deleted" in r else r for r in rows]
 
 
 class World:
@@ -173,7 +177,7 @@ def test_bad_event_is_quarantined_and_the_rest_seal(world: World):  # Review Foc
     [version] = world.seal_due()
     assert [r.key for r in world.records_of(version)] == ["1", "3"]
     [entry] = world.store.quarantine.list_open()
-    assert "event" in entry.error and entry.dataset == "hooks" and "ValueError" in entry.error
+    assert "event" in entry.error and entry.dataset == "hooks" and "PermanentError" in entry.error
     assert world.store.inbox.oldest_age("hooks", world.clock.now()) is None  # it isn't tried for ever
 
 
@@ -423,7 +427,7 @@ def test_a_rerun_after_a_crash_before_the_seal_gives_one_version(any_world: Worl
     with monkeypatch.context() as patch:
 
         def crash(*args: Any, **kwargs: Any) -> None:
-            raise OSError("power cut")
+            raise ConnectionError("power cut")  # as a crash does, it blames no event
 
         patch.setattr(world.store.inbox, "seal_batch", crash)
         assert world.seal_due() == []  # the chunks are written and nothing is sealed
@@ -580,3 +584,85 @@ def test_a_store_outage_mid_batch_quarantines_nothing(any_world: World, monkeypa
     monkeypatch.undo()
     [version] = world.seal_due()
     assert events_of(world, [version]) == ["1", "2"]
+
+
+# A failed `receive` that may pass when tried again leaves its event waiting, and a quarantined one can be had back (S2).
+
+RETRY = RetryPolicy()
+
+
+def test_a_transient_receive_error_leaves_the_event_for_later(any_world: World):
+    world = any_world
+    world.source.failure = TransientError("the connector's API answered 503")
+    world.post({"id": 1}, {"id": 2, "fail": True}, {"id": 3})
+    [before] = world.seal_due()
+    assert events_of(world, [before]) == ["1"]  # what came before it seals, and what came after it waits
+    assert world.store.quarantine.list_open() == []
+    world.clock.advance(RETRY.first_delay / 2)
+    assert world.seal() == []  # it waits its turn, and doesn't spin
+    world.source.failure = None
+    world.clock.advance(RETRY.first_delay)
+    [after] = world.seal()
+    assert [r.key for r in world.records_of(after)] == ["2", "3"]
+    assert world.store.inbox.oldest_age("hooks", world.clock.now()) is None
+
+
+def test_a_receive_error_that_doesnt_pass_is_quarantined_after_its_tries(any_world: World):
+    world = any_world
+    world.source.failure = RuntimeError("a bug in the connector")
+    world.post({"id": 2, "fail": True}, {"id": 3})
+    for _ in range(RETRY.max_attempts - 1):
+        assert world.seal_due() == []
+        assert world.store.quarantine.list_open() == []
+        world.clock.advance(RETRY.max_delay)
+    [version] = world.seal_due()
+    assert events_of(world, [version]) == ["3"]
+    [entry] = world.store.quarantine.list_open()
+    assert entry.key.startswith("event:") and f"{RETRY.max_attempts} attempts" in entry.error
+
+
+def test_a_permanent_receive_error_is_quarantined_at_once(any_world: World):
+    world = any_world
+    world.source.failure = PermanentError("the event is of a kind this connector doesn't know")
+    world.post({"id": 2, "fail": True}, {"id": 3})
+    [version] = world.seal_due()
+    assert events_of(world, [version]) == ["3"]
+    [entry] = world.store.quarantine.list_open()
+    assert "PermanentError" in entry.error
+
+
+def quarantined_event(world: World) -> int:
+    world.source.failure = PermanentError("a schema change the deploy got wrong")
+    world.post({"id": 2, "fail": True})
+    assert world.seal_due() == []
+    [entry] = world.store.quarantine.list_open()
+    return int(entry.key.removeprefix("event:"))
+
+
+def test_a_quarantined_event_can_be_processed_again(any_world: World):
+    world = any_world
+    seq = quarantined_event(world)
+    world.source.failure = None  # the fix is deployed
+    assert world.store.inbox.reprocess("hooks", seq) is True
+    [version] = world.seal_due()
+    assert events_of(world, [version]) == ["2"]
+    assert world.store.inbox.reprocess("hooks", seq) is False  # it is sealed now
+
+
+def test_a_quarantined_event_can_be_let_go(any_world: World):
+    world = any_world
+    seq = quarantined_event(world)
+    assert world.store.inbox.release("hooks", seq) is True
+    world.source.failure = None
+    assert world.seal_due() == []
+    assert world.store.inbox.oldest_age("hooks", world.clock.now()) is None
+    assert world.store.inbox.reprocess("hooks", seq) is False
+
+
+def test_a_quarantined_event_keeps_its_inbox_day(any_world: World):
+    world = any_world
+    seq = quarantined_event(world)
+    [day] = world.store.inbox.days()
+    assert world.store.inbox.drop_day(day) is False
+    world.store.inbox.release("hooks", seq)
+    assert world.store.inbox.drop_day(day) is True

@@ -1448,6 +1448,44 @@ def flow_spec(name: str, routes: list[str], owner: str | None = None) -> dict[st
         assert T0.date() not in store.inbox.days()
         assert store.inbox.put("d", inbound(), "e1") is True
 
+    def test_inbox_defer_counts_a_try_and_says_when(self, store: Store):
+        store.inbox.put("d", inbound())
+        [event] = store.inbox.take("d", 1)
+        store.inbox.defer(event.event_seq, T0 + timedelta(seconds=10))
+        store.inbox.defer(event.event_seq, T0 + timedelta(seconds=30))
+        [again] = store.inbox.take("d", 1)
+        assert (again.tries, again.retry_at) == (2, T0 + timedelta(seconds=30))
+
+    def test_a_held_inbox_event_waits_for_reprocess_or_release(self, store: Store):
+        for body in (b"1", b"2", b"3"):
+            store.inbox.put("d", inbound(body))
+        first, second, third = store.inbox.take("d", 3)
+        store.inbox.defer(first.event_seq, T0)
+        store.inbox.hold(first.event_seq)
+        store.inbox.hold(second.event_seq)
+        with pytest.raises(StaleWriter):
+            store.inbox.hold(second.event_seq)
+        with pytest.raises(StaleWriter):
+            store.inbox.seal_batch([second.event_seq], [], [])
+        assert store.inbox.take("d", 3) == [third]
+        assert store.inbox.day_status(T0.date()).unsealed == 3
+        assert store.inbox.reprocess("other", first.event_seq) is False
+        assert store.inbox.reprocess("d", first.event_seq) is True
+        [back, _] = store.inbox.take("d", 3)
+        assert (back.event_seq, back.tries, back.retry_at) == (first.event_seq, 0, None)
+        assert store.inbox.release("d", second.event_seq) is True
+        assert store.inbox.release("d", second.event_seq) is False
+        assert store.inbox.reprocess("d", second.event_seq) is False
+        assert store.inbox.day_status(T0.date()).unsealed == 2
+
+    def test_an_inbox_day_with_a_held_event_is_not_dropped(self, store: Store):
+        store.inbox.put("d", inbound())
+        [event] = store.inbox.take("d", 1)
+        store.inbox.hold(event.event_seq)
+        assert store.inbox.drop_day(T0.date()) is False
+        store.inbox.release("d", event.event_seq)
+        assert store.inbox.drop_day(T0.date()) is True
+
     def test_an_inbox_day_with_nothing_in_it_can_be_dropped(self, store: Store):
         store.inbox.ensure_partitions()
         assert store.inbox.drop_day(T0.date()) is True

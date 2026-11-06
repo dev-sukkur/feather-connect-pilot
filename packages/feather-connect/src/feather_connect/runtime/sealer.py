@@ -11,11 +11,15 @@ So two sealers, or a crash and a rerun, give one version per first event. Each l
 refused because the version is sealed, its write or its seal is refused because another claimed the version after it, or
 `seal_batch` is refused because an event is sealed already, whatever the name of the version.
 
-What comes in a webhook is untrusted, and one bad event must not hold up the rest for ever, so whatever can't be read or
-stored goes to the quarantine and its event is sealed with the others. What the store is known to refuse is checked for
-first, against the limits below, and a batch that fails all the same is split until the event that fails is alone. All the
-records of a batch stay in the version in order, including several of one key: a keyed route ends up with the last, and
-an append route is owed each of them.
+What comes in a webhook is untrusted, and one bad event must not hold up the rest for ever. A record that can't be
+stored goes to the quarantine and the rest of its event seals. An event that can't be read or stored goes to the
+quarantine and is held, unsealed, for someone to reprocess or release, and the events after it seal. What the store is
+known to refuse is checked for first, against the limits below, and a batch that fails all the same is split until the
+event that fails is alone. A read that fails in a way that may pass, as `TransientError` or anything not a
+`PermanentError` may, is tried again as the pull path tries a task: the event waits, and the events after it wait
+behind it to keep their order, until a later tick after the retry policy's delay. Only when its tries are used up is it
+held. All the records of a batch stay in the version in order, including several of one key: a keyed route ends up with
+the last, and an append route is owed each of them.
 
 Nothing logged here carries a message of an error, which may quote a request. The quarantine keeps the message, capped
 and redacted, for someone who can see the data anyway.
@@ -32,6 +36,7 @@ from typing import Any, cast
 from feather_connect.core.connector import Deleted, PushSource
 from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
+from feather_connect.core.errors import PermanentError
 from feather_connect.core.flow import Flow
 from feather_connect.core.records import Record, make_key, row_hash
 from feather_connect.ids import new_id, stable_id
@@ -115,6 +120,7 @@ class _Batch:
         self.settled: set[str] = (
             set()
         )  # keys whose latest record is good, and whose earlier rejection is over
+        self.held: list[int] = []  # events that are quarantined whole, to be held once the rest has sealed
 
     def reject(self, name: str, partition: str | None, error: Exception) -> None:
         message = redact(_printable(f"{name[:_MAX_NAME]}: {type(error).__name__}: {error}"))[:_MAX_ERROR]
@@ -122,17 +128,46 @@ class _Batch:
             None, None, _printable(name)[:_MAX_NAME], message, self._dataset.name, partition
         )
 
-    def read(self, source: PushSource, ctx: Context, event: InboxEvent) -> None:
-        """Add the records of the event. Whatever is wrong with it costs that event, or that record, and no more."""
+    def hold(self, event: InboxEvent, error: Exception) -> None:
+        self.reject(f"event:{event.event_seq}", None, error)
+        self.held.append(event.event_seq)
+
+    def read(self, source: PushSource, ctx: Context, event: InboxEvent) -> bool:
+        """Add the records of the event, and return True, or return False if it is to be read again later. Whatever is
+        wrong with it costs that event, or that record, and no more."""
         seq = event.event_seq
         try:
             found = list(source.receive(ctx, event.request))
-        except Exception as error:  # noqa: BLE001 - a connector fails on bad input however it fails
+        except PermanentError as error:
             log.warning("sealer: event %s of %s not read: %s", seq, self._dataset.name, type(error).__name__)
-            self.reject(f"event:{seq}", None, error)
-            return
+            self.hold(event, error)
+            return True
+        except Exception as error:  # noqa: BLE001 - a connector fails however it fails, and its tries decide
+            tries = event.tries + 1
+            log.warning(
+                "sealer: event %s of %s not read, try %s: %s",
+                seq,
+                self._dataset.name,
+                tries,
+                type(error).__name__,
+            )
+            if tries < self._deps.retry.max_attempts:
+                return False
+            self.hold(
+                event,
+                PermanentError(f"still failing after {tries} attempts: {type(error).__name__}: {error}"),
+            )
+            return True
         for item in found:
             self._add(item, seq)
+        return True
+
+    def read_all(self, source: PushSource, ctx: Context, events: Sequence[InboxEvent]) -> int | None:
+        """Read the events in order, and stop at one to be read again later. Return where it stopped, or None."""
+        for n, event in enumerate(events):
+            if not self.read(source, ctx, event):
+                return n
+        return None
 
     def _add(self, item: Any, seq: int) -> None:
         dataset = self._dataset
@@ -278,16 +313,17 @@ def _seal_batch(
     runtime: Runtime,
     dataset: Dataset,
     flows: Sequence[Flow],
-    ctx: Context,
+    batch: _Batch,
     events: Sequence[InboxEvent],
     now: datetime,
 ) -> list[Version]:
-    """Seal `events` as one batch, and return the versions."""
+    """Seal `events`, read into `batch`, as one batch, then hold those it quarantined whole. Return the versions."""
     deps = runtime.deps
-    source = cast(PushSource, dataset.source)
-    batch = _Batch(dataset, deps)
-    for event in events:
-        batch.read(source, ctx, event)
+    held = set(batch.held)
+    to_seal = [e.event_seq for e in events if e.event_seq not in held]
+    if not to_seal and not batch.parts:
+        _hold(batch, deps)
+        return []
     batch.drop_what_arrow_refuses()
     _with_moves(dataset, batch.parts, deps)
     routes = list(dict.fromkeys(route.name for flow in flows for route in flow.routes))
@@ -299,7 +335,7 @@ def _seal_batch(
         for partition, part in sorted(batch.parts.items(), key=lambda item: item[1].first_seq):
             written.append(stable_id(dataset.name, partition, str(part.first_seq)))
             drafts.append(_write(dataset, run_id, partition, part, writer, deps))
-        sealed = deps.store.inbox.seal_batch([e.event_seq for e in events], drafts, routes, writer)
+        sealed = deps.store.inbox.seal_batch(to_seal, drafts, routes, writer)
     except Exception:  # lost or failed, what this attempt wrote is no one's
         try:
             _drop_own_chunks(written, writer, deps)
@@ -307,7 +343,18 @@ def _seal_batch(
             _log_failure(dataset.name, error)
         raise
     _after_seal(runtime, dataset, sealed, routes, batch)
+    _hold(batch, deps)
     return sealed
+
+
+def _hold(batch: _Batch, deps: Any) -> None:
+    """Hold the events `batch` quarantined whole. One held or sealed since is another sealer's doing, and done already.
+    A crash before this leaves them to be read, and quarantined, again."""
+    for event_seq in batch.held:
+        try:
+            deps.store.inbox.hold(event_seq)
+        except StaleWriter:
+            continue
 
 
 def _seal_split(
@@ -318,32 +365,44 @@ def _seal_split(
     events: Sequence[InboxEvent],
     now: datetime,
     sealed: list[Version],
-) -> None:
+) -> bool:
     """Seal `events`, and add the versions to `sealed`. If they fail as a batch, seal each half in turn, down to the
-    event that fails alone: it goes to the quarantine with its reason, and is sealed with no records.
+    event that fails alone: it goes to the quarantine with its reason, and is held.
 
+    Return whether it stopped at an event to be read again later, which leaves that one and those after it waiting.
     Losing to another sealer, or the store being away, is no event's fault: that goes up as it is, and the events wait.
     """
+    deps = runtime.deps
+    batch = _Batch(dataset, deps)
+    later = batch.read_all(cast(PushSource, dataset.source), ctx, events)
+    taken = events if later is None else events[:later]
     try:
-        sealed += _seal_batch(runtime, dataset, flows, ctx, events, now)
-        return
+        sealed += _seal_batch(runtime, dataset, flows, batch, taken, now)
     except (StaleWriter, VersionSealed):
         raise
     except Exception as error:
-        if runtime.deps.store.is_unavailable(error):
+        if deps.store.is_unavailable(error):
             raise
-        if len(events) == 1:
-            _quarantine_event(runtime, dataset, events[0], error)
-            return
-    half = len(events) // 2
-    _seal_split(runtime, dataset, flows, ctx, events[:half], now, sealed)
-    _seal_split(runtime, dataset, flows, ctx, events[half:], now, sealed)
+        if len(taken) == 1:
+            _quarantine_event(runtime, dataset, taken[0], error)
+        else:
+            half = len(taken) // 2
+            if _seal_split(runtime, dataset, flows, ctx, taken[:half], now, sealed):
+                return True
+            if _seal_split(runtime, dataset, flows, ctx, taken[half:], now, sealed):
+                return True
+    if later is None:
+        return False
+    event = events[later]
+    deps.store.inbox.defer(event.event_seq, now + deps.retry.delay(event.tries + 1, rand=lambda: 1.0))
+    return True
 
 
 def _quarantine_event(runtime: Runtime, dataset: Dataset, event: InboxEvent, error: Exception) -> None:
     log.warning("sealer: event %s of %s not stored: %s", event.event_seq, dataset.name, type(error).__name__)
-    _Batch(dataset, runtime.deps).reject(f"event:{event.event_seq}", None, error)
-    runtime.deps.store.inbox.seal_batch([event.event_seq], [], [])
+    batch = _Batch(dataset, runtime.deps)
+    batch.hold(event, error)
+    _hold(batch, runtime.deps)
 
 
 def _is_due(age: timedelta, count: int, max_events: int, max_age: timedelta) -> bool:
@@ -372,9 +431,12 @@ def _seal_dataset(
         events = inbox.take(dataset.name, max_events)
         if not events or not _is_due(age, len(events), max_events, max_age):
             break
+        if events[0].retry_at is not None and events[0].retry_at > now:
+            break  # the first is to be read again later, and the others wait behind it
         if ctx is None:  # outside the events: a secret not set is not the events' fault
             ctx = runtime.make_context(cast(PushSource, dataset.source).connection)
-        _seal_split(runtime, dataset, flows, ctx, events, now, sealed)
+        if _seal_split(runtime, dataset, flows, ctx, events, now, sealed):
+            break
         if len(events) < max_events:
             break
 
