@@ -179,7 +179,8 @@ class PushSource(Protocol):
     connection: str
 
     def verify(self, ctx: Context, request: InboundRequest) -> None:
-        """Raise if the request is not genuine, for example because its signature is bad."""
+        """Raise if the request is not genuine, for example because its signature is bad. `ctx.now` is when the request
+        arrived, which is what a timestamp in it is to be checked against, however long it waited to be verified."""
         ...
 
     def receive(self, ctx: Context, request: InboundRequest) -> list[Mapping[str, Any] | Deleted]:

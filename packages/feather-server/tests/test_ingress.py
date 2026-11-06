@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+import threading
+import time
 from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
@@ -33,7 +35,9 @@ URL = "/ingress/default/events"
 
 
 class Harness:
-    def __init__(self, clock: FrozenClock, *, max_bytes: int = 1024, rate: float = 1000.0) -> None:
+    def __init__(
+        self, clock: FrozenClock, *, max_bytes: int = 1024, rate: float = 1000.0, **more: Any
+    ) -> None:
         self.clock = clock
         self.store = MemoryStore(clock)
         self.sink = memory.Sink("dst")
@@ -58,7 +62,7 @@ class Harness:
         )
         project = Project("demo", Path("."), "dev", (flow,), {}, {}, {"timezone": "UTC"}, "sha")
         settings = Settings(
-            secret_key="test-secret-key", ingress_max_bytes=max_bytes, ingress_rate_per_s=rate
+            secret_key="test-secret-key", ingress_max_bytes=max_bytes, ingress_rate_per_s=rate, **more
         )
         self.state = AppState(
             settings, project, self.store, MemorySpool(clock), self.runtime._engine, self.runtime, clock=clock
@@ -413,3 +417,97 @@ def test_a_dashboard_post_without_a_session_is_still_refused(h: Harness):
     assert fresh.post("/flows/f/run").status_code == 403
     assert fresh.get("/").status_code == 303
     assert fresh.get(URL).status_code == 405
+
+
+# Ingress under a database that is slow or away: a bound, a timeout, and 503 with Retry-After (S4).
+
+
+class Stalled:
+    """Makes `put_many` wait until let go, and says when one has started waiting."""
+
+    def __init__(self, h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.entered, self.released = threading.Event(), threading.Event()
+        real = h.store.inbox.put_many
+
+        def stalled(events: Any) -> list[bool]:
+            self.entered.set()
+            self.released.wait(10)
+            return real(events)
+
+        monkeypatch.setattr(h.store.inbox, "put_many", stalled)
+
+
+def handle_all(h: Harness, bodies: list[bytes], after_first: Any = None) -> list[Any]:
+    """Hand the requests to the worker as concurrent requests would, the first alone until it is being stored."""
+    worker = h.app.state.ingress_worker
+    dataset = h.runtime.dataset("events")
+
+    async def main() -> list[Any]:
+        requests = [_arrival(h, body).request for body in bodies]
+        tasks = [asyncio.create_task(worker.handle(dataset, requests[0]))]
+        if after_first is not None:
+            await asyncio.to_thread(after_first)
+        tasks += [asyncio.create_task(worker.handle(dataset, r)) for r in requests[1:]]
+        return list(await asyncio.gather(*tasks))
+
+    return asyncio.run(main())
+
+
+def test_a_full_ingress_queue_answers_503_at_once(clock: FrozenClock, monkeypatch: pytest.MonkeyPatch):
+    h = Harness(clock, ingress_queue_max=2)
+    stalled = Stalled(h, monkeypatch)
+
+    def then_let_go() -> None:
+        stalled.entered.wait(10)
+        threading.Timer(0.5, stalled.released.set).start()
+
+    answers = handle_all(h, [json.dumps({"id": n}).encode() for n in range(4)], then_let_go)
+    h.app.state.ingress_worker.close()
+    assert [a.status_code for a in answers] == [202, 202, 202, 503]
+    assert answers[3].headers["Retry-After"] == "1"
+    assert len(h.stored()) == 3
+
+
+def test_a_store_that_hangs_is_503_by_the_timeout_and_what_waited_is_not_stored(
+    clock: FrozenClock, monkeypatch: pytest.MonkeyPatch
+):
+    h = Harness(clock, ingress_wait_s=0.3)
+    stalled = Stalled(h, monkeypatch)
+    started = time.monotonic()
+    answers = handle_all(h, [b'{"id": 1}', b'{"id": 2}'], lambda: stalled.entered.wait(10))
+    assert time.monotonic() - started < 5
+    assert [a.status_code for a in answers] == [503, 503]
+    assert all(a.headers["Retry-After"] for a in answers)
+    stalled.released.set()
+    worker = h.app.state.ingress_worker
+    worker.close()
+    assert [r.body for r in h.stored()] == [b'{"id": 1}']  # it was being stored; the second had waited
+
+
+def test_a_store_that_is_away_answers_the_batch_503_without_trying_each(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+):
+    tried: list[Any] = []
+
+    def away(*args: Any) -> Any:
+        tried.append(args)
+        raise ConnectionError("the database went away")
+
+    monkeypatch.setattr(h.store.inbox, "put_many", away)
+    monkeypatch.setattr(h.store.inbox, "put", away)
+    answers = h.app.state.ingress_worker._answers([_arrival(h, b'{"id": 1}'), _arrival(h, b'{"id": 2}')])
+    assert [response.status_code for _, response in answers] == [503, 503]
+    assert all(response.headers["Retry-After"] for _, response in answers)
+    assert len(tried) == 1  # the batch, and not each event again
+
+
+def test_verify_checks_the_timestamp_against_when_the_request_arrived(h: Harness):
+    arrival = _arrival(h, b'{"id": 1}')  # signed and received now
+    h.clock.advance(timedelta(minutes=6))  # and verified after a wait longer than the tolerance
+    [(_, response)] = h.app.state.ingress_worker._answers([arrival])
+    assert response.status_code == 202
+
+
+def test_a_content_length_too_long_to_be_a_number_is_413(h: Harness):
+    status, _ = _drive(h.app, [(b"content-length", b"9" * 5000)], [b"{}"])
+    assert status == 413

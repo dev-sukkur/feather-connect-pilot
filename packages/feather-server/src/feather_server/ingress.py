@@ -58,6 +58,9 @@ _NOT_KEPT = frozenset({"authorization", "cookie", "proxy-authorization"})
 _MAX_EVENT_ID = 255
 _MAX_BATCH = 200
 _JOIN_S = 10.0
+_RETRY_AFTER = {
+    "Retry-After": "1"
+}  # the queue drains in seconds, and a database back from a blip is back at once
 
 router = APIRouter()
 
@@ -145,7 +148,8 @@ def _verified(
     if is_unsigned(source):
         return None
     try:
-        source.verify(state.runtime.make_context(source.connection), request)
+        ctx = replace(state.runtime.make_context(source.connection), now=request.received_at)
+        source.verify(ctx, request)
     except SignatureInvalid as error:
         log.warning("ingress %s: refused: %s", name, redact(str(error)))
         return _problem(401)
@@ -153,7 +157,7 @@ def _verified(
         PermanentError
     ) as error:  # the secret isn't there: the sender did nothing wrong, and should try again
         log.error("ingress %s: can't verify: %s", name, redact(str(error)))
-        return _problem(503)
+        return _problem(503, _RETRY_AFTER)
     except Exception as error:  # noqa: BLE001 - a verify that fails another way proves nothing: refuse
         log.warning("ingress %s: refused: verify raised %s", name, type(error).__name__)
         return _problem(401)
@@ -216,13 +220,18 @@ class IngressWorker:
 
     A transaction and two thread switches per event would leave a server at hundreds a second doing little else, so
     this takes what has come in while it was busy, stores that in one transaction and wakes the event loop once for all of
-    it. Nothing waits to fill a batch: a lone event goes straight away. If a batch can't be stored, its events are tried one
-    at a time, so that one bad event costs only its own sender an error.
+    it. Nothing waits to fill a batch: a lone event goes straight away. If a batch can't be stored because of what is in
+    it, its events are tried one at a time, so that one bad event costs only its own sender an error.
+
+    Nothing waits without a limit. A request that finds `ingress_queue_max` waiting, or isn't stored within
+    `ingress_wait_s`, is answered 503 with Retry-After, and one that is answered so before its turn comes is not stored.
+    One being stored as its time runs out may still be, which a 503 allows: a 202 still means stored, and only that.
+    When the database is away, a batch is answered 503 whole, without trying each event against it.
     """
 
     def __init__(self, state: "AppState") -> None:
         self._state = state
-        self._queue: queue.SimpleQueue[_Arrival | None] = queue.SimpleQueue()
+        self._queue: queue.Queue[_Arrival | None] = queue.Queue(state.settings.ingress_queue_max)
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
@@ -234,8 +243,16 @@ class IngressWorker:
                 self._thread.start()
         loop = asyncio.get_running_loop()
         arrival = _Arrival(dataset, request, loop, loop.create_future())
-        self._queue.put(arrival)
-        return await arrival.answer
+        try:
+            self._queue.put_nowait(arrival)
+        except queue.Full:
+            log.warning("ingress %s: refused: too many requests wait to be stored", dataset.name)
+            return _problem(503, _RETRY_AFTER)
+        try:
+            return await asyncio.wait_for(arrival.answer, self._state.settings.ingress_wait_s)
+        except TimeoutError:  # the answer is cancelled, which tells the worker to pass it by
+            log.warning("ingress %s: refused: not stored in time", dataset.name)
+            return _problem(503, _RETRY_AFTER)
 
     def close(self) -> None:
         with self._lock:
@@ -260,6 +277,9 @@ class IngressWorker:
                     closing = True
                     break
                 batch.append(more)
+            batch = [
+                arrival for arrival in batch if not arrival.answer.done()
+            ]  # what timed out goes unstored
             answers = self._answers(batch)
             for loop in {arrival.loop for arrival in batch}:
                 ours = [(arrival, response) for arrival, response in answers if arrival.loop is loop]
@@ -278,7 +298,7 @@ class IngressWorker:
                 log.error(
                     "ingress %s: could not check an event: %s", arrival.dataset.name, type(error).__name__
                 )
-                refused = _problem(503)
+                refused = _problem(503, _RETRY_AFTER)
             if refused is None:
                 to_store.append(arrival)
             else:
@@ -292,21 +312,32 @@ class IngressWorker:
         events = [_as_stored(arrival.dataset, arrival.request) for arrival in arrivals]
         try:
             inbox.put_many(events)
-        except Exception:  # noqa: BLE001 - whose fault it is shows below, one at a time
-            return [
-                self._stored_alone(arrival, event) for arrival, event in zip(arrivals, events, strict=True)
-            ]
+        except Exception as error:  # noqa: BLE001 - whose fault it is shows below, one at a time
+            log.error("ingress: could not store %s events: %s", len(events), type(error).__name__)
+            if self._state.store.is_unavailable(error):
+                return [(arrival, _problem(503, _RETRY_AFTER)) for arrival in arrivals]
+            return self._stored_alone(arrivals, events)
         return [(arrival, JSONResponse(_ACCEPTED, 202)) for arrival in arrivals]
 
     def _stored_alone(
-        self, arrival: _Arrival, event: tuple[str, InboundRequest, str | None]
-    ) -> tuple[_Arrival, Response]:
-        try:
-            self._state.store.inbox.put(*event)
-        except Exception as error:  # noqa: BLE001 - the message of a database's error may quote the row
-            log.error("ingress %s: could not store an event: %s", event[0], type(error).__name__)
-            return arrival, _problem(503)
-        return arrival, JSONResponse(_ACCEPTED, 202)
+        self, arrivals: Sequence[_Arrival], events: Sequence[tuple[str, InboundRequest, str | None]]
+    ) -> list[tuple[_Arrival, Response]]:
+        """Store each event in a transaction of its own, until the database is found to be away."""
+        answers: list[tuple[_Arrival, Response]] = []
+        away = False
+        for arrival, event in zip(arrivals, events, strict=True):
+            if away:
+                answers.append((arrival, _problem(503, _RETRY_AFTER)))
+                continue
+            try:
+                self._state.store.inbox.put(*event)
+            except Exception as error:  # noqa: BLE001 - the message of a database's error may quote the row
+                log.error("ingress %s: could not store an event: %s", event[0], type(error).__name__)
+                away = self._state.store.is_unavailable(error)
+                answers.append((arrival, _problem(503, _RETRY_AFTER)))
+            else:
+                answers.append((arrival, JSONResponse(_ACCEPTED, 202)))
+        return answers
 
 
 @router.post("/ingress/{tenant}/{source}")
@@ -324,7 +355,9 @@ async def ingress(request: Request, tenant: str, source: str) -> Response:
     if declared is not None:
         if not (declared.isascii() and declared.isdigit()):
             return _problem(400)
-        if int(declared) > limit:
+        if (
+            len(declared.lstrip("0")) > len(str(limit)) or int(declared) > limit
+        ):  # too long for `int` is too big
             log.warning("ingress %s: refused: %s bytes is over the limit", source, declared)
             return _problem(413)
     try:

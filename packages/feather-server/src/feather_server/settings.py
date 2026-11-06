@@ -17,7 +17,11 @@ class SettingsError(Exception):
 @dataclass
 class Settings:
     """What the server needs to start. `engine_poll_s` is how often workers poll their queues, `secret_key` signs
-    session cookies, and `ingress_max_bytes` and `ingress_rate_per_s` limit each webhook source."""
+    session cookies, and `ingress_max_bytes` and `ingress_rate_per_s` limit each webhook source.
+
+    `ingress_queue_max` is how many webhook requests may wait to be stored, past which one is answered 503 at once: a
+    few seconds at the rate limit. `ingress_wait_s` is how long a request waits for the database before it is answered
+    503, which is within what senders commonly wait for an answer."""
 
     env: str = "dev"
     database_url: str = ""
@@ -29,6 +33,8 @@ class Settings:
     project: Path = Path(".")
     ingress_max_bytes: int = 1024 * 1024
     ingress_rate_per_s: float = 1000.0
+    ingress_queue_max: int = 5000
+    ingress_wait_s: float = 5.0
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
@@ -58,12 +64,18 @@ class Settings:
         try:
             max_bytes = int(environ.get("FEATHER_INGRESS_MAX_BYTES", str(cls.ingress_max_bytes)))
             rate = float(environ.get("FEATHER_INGRESS_RATE_PER_S", str(cls.ingress_rate_per_s)))
+            queue_max = int(environ.get("FEATHER_INGRESS_QUEUE_MAX", str(cls.ingress_queue_max)))
+            wait = float(environ.get("FEATHER_INGRESS_WAIT_S", str(cls.ingress_wait_s)))
         except ValueError:
             raise SettingsError(
-                "FEATHER_INGRESS_MAX_BYTES or FEATHER_INGRESS_RATE_PER_S is not a number"
+                "FEATHER_INGRESS_MAX_BYTES, FEATHER_INGRESS_RATE_PER_S, FEATHER_INGRESS_QUEUE_MAX or "
+                "FEATHER_INGRESS_WAIT_S is not a number"
             ) from None
-        if max_bytes <= 0 or not 0 < rate < float("inf"):
-            raise SettingsError("FEATHER_INGRESS_MAX_BYTES and FEATHER_INGRESS_RATE_PER_S must be above zero")
+        if max_bytes <= 0 or queue_max <= 0 or not 0 < rate < float("inf") or not 0 < wait < float("inf"):
+            raise SettingsError(
+                "FEATHER_INGRESS_MAX_BYTES, FEATHER_INGRESS_RATE_PER_S, FEATHER_INGRESS_QUEUE_MAX and "
+                "FEATHER_INGRESS_WAIT_S must be above zero"
+            )
         return cls(
             env=environ.get("FEATHER_ENV", "dev"),
             database_url=need("FEATHER_DATABASE_URL"),
@@ -74,4 +86,6 @@ class Settings:
             project=Path(need("FEATHER_PROJECT")),
             ingress_max_bytes=max_bytes,
             ingress_rate_per_s=rate,
+            ingress_queue_max=queue_max,
+            ingress_wait_s=wait,
         )

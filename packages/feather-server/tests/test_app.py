@@ -123,6 +123,17 @@ def test_settings_have_defaults_and_say_what_is_missing_or_wrong() -> None:
         Settings.from_env({"FEATHER_DATABASE_URL": "x", "FEATHER_PROJECT": "p", "FEATHER_SPOOL": "objects"})
 
 
+def test_the_ingress_queue_and_wait_are_settings() -> None:
+    need = {"FEATHER_DATABASE_URL": "x", "FEATHER_PROJECT": "p"}
+    settings = Settings.from_env(need)
+    assert (settings.ingress_queue_max, settings.ingress_wait_s) == (5000, 5.0)
+    settings = Settings.from_env({**need, "FEATHER_INGRESS_QUEUE_MAX": "10", "FEATHER_INGRESS_WAIT_S": "1.5"})
+    assert (settings.ingress_queue_max, settings.ingress_wait_s) == (10, 1.5)
+    for name, value in [("FEATHER_INGRESS_QUEUE_MAX", "0"), ("FEATHER_INGRESS_WAIT_S", "soon")]:
+        with pytest.raises(SettingsError, match=name):
+            Settings.from_env({**need, name: value})
+
+
 @pytest.mark.postgres
 @pytest.mark.parametrize("engine", ["local", "dbos"])
 def test_create_app_builds_its_state_from_settings(
