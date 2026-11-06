@@ -13,7 +13,16 @@ from typing import Any
 
 import psycopg
 import pytest
-from real_stack import kill_abruptly, scratch_database, server_url, start_worker, wait_until
+from real_stack import (
+    free_port,
+    kill_abruptly,
+    scratch_database,
+    server_is_ready,
+    server_url,
+    start_server,
+    start_worker,
+    wait_until,
+)
 
 from feather_connect.project import load_project
 from feather_connect.runtime.runtime import Runtime
@@ -58,6 +67,7 @@ class World:
         self.runtime = Runtime(self.project.flows, self.store, self.spool, self.engine)
         self.procs: dict[str, subprocess.Popen[bytes]] = {}  # the current process of each worker id
         self.starts: dict[str, int] = {}
+        self.port = free_port()  # a server's, kept across its restarts
 
     def reconnect(self) -> None:
         """Open the test's own session again, after the server has been away."""
@@ -80,6 +90,27 @@ class World:
             self.procs[worker_id] = start_worker(PROJECT, self.url, worker_id, env=env, log=log)
         wait_until(lambda: worker_id in [w.worker_id for w in self.store.workers.list_workers()], 60)
         return worker_id
+
+    def start_server(self, server_id: str = "server") -> str:
+        """Start a server, which runs the sealer and the sweeper, and return its id once it answers. An id given again
+        is a restart, on the same port."""
+        self.starts[server_id] = self.starts.get(server_id, 0) + 1
+        env = {"FEATHER_CHAOS_URL": self.url, "FEATHER_CHAOS_WHO": self.who(server_id)}
+        log_file = self.logs / f"{server_id}.log"
+        with log_file.open("ab") as log:
+            proc = start_server(PROJECT, self.url, self.port, env=env, log=log)
+        self.procs[server_id] = proc
+        try:
+            wait_until(lambda: server_is_ready(proc, self.server_address, log_file), 90)
+        except AssertionError:
+            raise AssertionError(
+                f"{server_id} didn't answer: {log_file.read_text(errors='replace')[-3000:]}"
+            ) from None
+        return server_id
+
+    @property
+    def server_address(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
 
     def who(self, worker_id: str) -> str:
         """Name the current process of a worker, as the connectors report it. A process id wouldn't do, since on

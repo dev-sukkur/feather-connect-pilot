@@ -15,13 +15,15 @@ import feather_connect as fc
 from feather_connect.connectors import simulation
 from feather_connect.core.connector import ApplyBatch, ApplyResult, CheckResult, ConnectorSpec, ReadRequest
 from feather_connect.core.context import Context
+from feather_connect.runtime import sealer
 from feather_connect.storage import spool
 
 ROWS = 100
 CHUNK_ROWS = 20  # so that ROWS make 5 chunks
 SLOW_S = 0.1  # what a chunk takes to apply, so that routes overlap and a kill finds others under way too
 
-# Only in a worker: the test process loads this module too, and shares the setting with whatever it runs next.
+# Only in a worker or a server: the test process loads this module too, and shares the setting with whatever it runs
+# next.
 if "FEATHER_CHAOS_URL" in os.environ:
     spool.CHUNK_ROWS = CHUNK_ROWS
 
@@ -59,6 +61,40 @@ def pass_point(conn: psycopg.Connection[Any], point: str) -> None:
         if released[0]:
             return
         time.sleep(0.05)
+
+
+def _hold_the_sealer() -> None:
+    """Give the sealer two hold points: `seal:written`, once a version's chunks are written and before `seal_batch`, and
+    `seal:sealed`, after `seal_batch` and before the applies are submitted. The sealer has no hooks, so they wrap two of
+    its steps, in this process only."""
+    write, after_seal = sealer._write, sealer._after_seal  # pyright: ignore[reportPrivateUsage]
+
+    def written(*args: Any, **kwargs: Any) -> Any:
+        draft = write(*args, **kwargs)
+        with _connect() as conn:
+            pass_point(conn, "seal:written")
+        return draft
+
+    def sealed(*args: Any, **kwargs: Any) -> None:
+        with _connect() as conn:
+            pass_point(conn, "seal:sealed")
+        after_seal(*args, **kwargs)
+
+    sealer._write = written  # pyright: ignore[reportPrivateUsage]
+    sealer._after_seal = sealed  # pyright: ignore[reportPrivateUsage]
+
+
+if "FEATHER_CHAOS_URL" in os.environ:
+    _hold_the_sealer()
+
+
+class PushSource(simulation.Source):
+    """Takes unsigned webhooks, each a record or a list of them."""
+
+    spec = ConnectorSpec(name="chaos.push_source", strategies=frozenset({"push"}))
+
+    def __init__(self, connection: str) -> None:
+        super().__init__(connection, generator={"id": simulation.seq()}, rows_per_partition=0, unsigned=True)
 
 
 class ChaosSource(simulation.Source):
@@ -148,3 +184,5 @@ def _flow(name: str, connection: str, sinks: list[str], rows: int = ROWS) -> fc.
 main = _flow("main", "source", ["slow_a", "slow_b", "slow_c"])
 fits = _flow("fits", "fits_source", ["fits_sink"], rows=2)  # two calls, and its budget holds two
 too_big = _flow("too_big", "big_source", ["big_sink"], rows=5)  # five calls, and its budget holds three
+hooks = fc.Dataset("hooks", source=PushSource("hooks"), key="id", strategy=fc.strategy.push())
+push = fc.Flow("push", reads=hooks, deliver=[fc.to(SlowSink("push_sink"))], triggers=[fc.on_event(hooks)])

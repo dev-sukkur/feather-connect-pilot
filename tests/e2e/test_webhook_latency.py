@@ -138,7 +138,14 @@ def rows_of(stack: Any, since: float = 0.0) -> list[tuple[str, float, float, flo
 
 
 def writes_of(stack: Any) -> int:
+    """Every write the sink took, a repeat of a key included."""
     found = stack.conn.execute("select count(*) from perf.sink_rows").fetchone()
+    return found[0]
+
+
+def duplicates_of(stack: Any) -> int:
+    """The writes of a key past its first."""
+    found = stack.conn.execute("select count(*) - count(distinct key) from perf.sink_rows").fetchone()
     return found[0]
 
 
@@ -217,6 +224,7 @@ def test_webhook_to_sink_p95_within_5s(push_stack: Any, tmp_path: Path, record_p
         "accepted": len(report["accepted"]),
         "lost": lost,
         "writes": writes_of(push_stack),
+        "duplicates": duplicates_of(push_stack),
         "statuses": report["statuses"],
         "p50": round(sorted(latencies)[len(latencies) // 2], 3),
         "p95": round(p95(latencies), 3),
@@ -233,6 +241,7 @@ def test_webhook_to_sink_p95_within_5s(push_stack: Any, tmp_path: Path, record_p
     assert set(report["statuses"]) == {"202"}, report["refused"]
     check_rates(report)
     assert lost == 0, numbers
+    assert numbers["writes"] == numbers["accepted"] and numbers["duplicates"] == 0, numbers
     assert p95(latencies) <= P95_TARGET_S, numbers
 
 
@@ -272,6 +281,7 @@ def test_burst_at_10x_loses_nothing_and_recovers(
         "accepted": len(report["accepted"]),
         "lost": lost,
         "writes": writes_of(push_stack),
+        "duplicates": duplicates_of(push_stack),
         "statuses": report["statuses"],
         "refused": report["refused"][:5],
         "seconds_until_p95_recovers": recovered,
@@ -286,6 +296,7 @@ def test_burst_at_10x_loses_nothing_and_recovers(
     assert set(report["statuses"]) == {"202"}, numbers
     check_rates(report)
     assert lost == 0, numbers
+    assert numbers["writes"] == numbers["accepted"] and numbers["duplicates"] == 0, numbers
     assert recovered is not None and recovered <= RECOVERY_TARGET_S, numbers
 
 
