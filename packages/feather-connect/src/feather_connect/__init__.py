@@ -12,6 +12,7 @@ from feather_connect.core.connector import (
     Deleted,
     InboundRequest,
     PushSource,
+    Secret,
     Sink,
     Source,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "PushSource",
     "Record",
     "RecordRejected",
+    "Secret",
     "Sink",
     "Source",
     "TransientError",

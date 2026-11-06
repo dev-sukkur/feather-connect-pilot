@@ -9,6 +9,9 @@ dependencies = [
     "httpx",
 ]
 
+[project.entry-points."feather_connect.connectors"]
+"http.rest" = "feather_connect.connectors.http:Rest"
+
 [tool.uv.sources]
 feather-connect = { workspace = true }
 

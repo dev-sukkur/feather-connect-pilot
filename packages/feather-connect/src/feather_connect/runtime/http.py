@@ -344,7 +344,7 @@ class FeatherHttp:
     def request(
         self,
         method: str,
-        url: str,
+        url: str | httpx.URL,
         *,
         cost_key: str = "default",
         budget: BudgetHandle | None = None,
@@ -401,7 +401,7 @@ class FeatherHttp:
             self._sleep(wait)
 
     def _send(
-        self, method: str, url: str, kwargs: Mapping[str, Any]
+        self, method: str, url: str | httpx.URL, kwargs: Mapping[str, Any]
     ) -> tuple[httpx.Response | None, str | None]:
         """Send once. Returns the response, or None and what went wrong when none came back."""
         call: dict[str, Any] = dict(kwargs)
@@ -416,11 +416,11 @@ class FeatherHttp:
         except httpx.TransportError as error:
             return None, f"the connection failed ({type(error).__name__})"
 
-    def _where(self, url: str) -> str:
-        return self.redact(url)
+    def _where(self, url: str | httpx.URL) -> str:
+        return self.redact(str(url))
 
     def _status_error(
-        self, method: str, url: str, response: httpx.Response, note: str = ""
+        self, method: str, url: str | httpx.URL, response: httpx.Response, note: str = ""
     ) -> HttpStatusError:
         excerpt = self.redact(response.text[:_EXCERPT])
         suffix = f" {note}" if note else ""

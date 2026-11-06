@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, ClassVar, Literal, Protocol
 
 import pyarrow as pa
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 from feather_connect.core.context import Context
 from feather_connect.core.errors import PermanentError
@@ -19,6 +19,8 @@ RouteMode = Literal["upsert", "append", "replace_partition", "side_effect"]
 Key = str | tuple[Any, ...]
 # What a source yields: an Arrow record batch, or rows as dicts.
 Batch = pa.RecordBatch | list[dict[str, Any]]
+# The type of a secret field in a connector's config model: its value stays out of `repr`, logs and errors.
+Secret = SecretStr
 
 
 @dataclass(frozen=True)
