@@ -1,5 +1,9 @@
 """Feather Connect: flows written as code. Flow authors import it as `import feather_connect as fc`."""
 
+# Connector distributions add modules to the namespace `feather_connect.connectors` from their own `src` folders. An
+# editable install puts each of those folders on the path, and this lets the namespace look in every one of them.
+__path__ = __import__("pkgutil").extend_path(__path__, __name__)
+
 from feather_connect.core import partitions as partition
 from feather_connect.core import strategies as strategy
 from feather_connect.core.connector import (

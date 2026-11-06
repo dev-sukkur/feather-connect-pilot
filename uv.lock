@@ -11,6 +11,7 @@ members = [
     "feather-cli",
     "feather-connect",
     "feather-engine-dbos",
+    "feather-http",
     "feather-server",
 ]
 
@@ -470,6 +471,21 @@ dependencies = [
 requires-dist = [
     { name = "dbos", specifier = "==3.4.0" },
     { name = "feather-connect", extras = ["postgres"], editable = "packages/feather-connect" },
+]
+
+[[package]]
+name = "feather-http"
+version = "0.1.0"
+source = { editable = "packages/connectors/feather-http" }
+dependencies = [
+    { name = "feather-connect" },
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "feather-connect", editable = "packages/feather-connect" },
+    { name = "httpx" },
 ]
 
 [[package]]
