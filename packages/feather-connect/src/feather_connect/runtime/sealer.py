@@ -12,8 +12,10 @@ refused because the version is sealed, its write or its seal is refused because 
 `seal_batch` is refused because an event is sealed already, whatever the name of the version.
 
 What comes in a webhook is untrusted, and one bad event must not hold up the rest for ever, so whatever can't be read or
-stored goes to the quarantine and its event is sealed with the others. All the records of a batch stay in the version in
-order, including several of one key: a keyed route ends up with the last, and an append route is owed each of them.
+stored goes to the quarantine and its event is sealed with the others. What the store is known to refuse is checked for
+first, against the limits below, and a batch that fails all the same is split until the event that fails is alone. All the
+records of a batch stay in the version in order, including several of one key: a keyed route ends up with the last, and
+an append route is owed each of them.
 
 Nothing logged here carries a message of an error, which may quote a request. The quarantine keeps the message, capped
 and redacted, for someone who can see the data anyway.
@@ -53,6 +55,13 @@ _MAX_BATCHES = 20  # a tick that a backlog can't keep for long, so that the othe
 _MAX_ERROR = 500
 _MAX_NAME = 200
 
+# What one record of a push event may be. Past these the store can't take it, and its batch would fail at every tick.
+# Nesting counts objects and lists inside each other: Parquet reads back no more than 49 lists deep, or 98 objects. A
+# partition key is in btree indexes, whose rows Postgres caps at about 2.7 KB, and so is a key, in the record state.
+MAX_NESTING = 32
+MAX_PARTITION_BYTES = 1024
+MAX_KEY_BYTES = 1024
+
 
 @dataclass
 class _Part:
@@ -67,8 +76,11 @@ def _printable(text: str) -> str:
     return text.encode("utf-8", "replace").decode("utf-8").replace("\x00", "")
 
 
-def _check_storable(value: Any) -> None:
-    """Raise unless each part of a payload can be stored: as JSON in the state, and as text in the quarantine."""
+def _check_storable(value: Any, depth: int = 0) -> None:
+    """Raise unless each part of a payload can be stored: as JSON in the state, as text in the quarantine, and as Parquet
+    in the spool."""
+    if depth > MAX_NESTING:
+        raise ValueError(f"the payload is nested more than {MAX_NESTING} deep")
     if isinstance(value, str):
         if "\x00" in value:
             raise ValueError("a text holds a NUL character")
@@ -79,10 +91,10 @@ def _check_storable(value: Any) -> None:
     elif isinstance(value, Mapping):
         for name, item in cast(Mapping[Any, Any], value).items():
             _check_storable(name)
-            _check_storable(item)
+            _check_storable(item, depth + 1)
     elif isinstance(value, list | tuple):
         for item in cast(Iterable[Any], value):
-            _check_storable(item)
+            _check_storable(item, depth + 1)
 
 
 def _log_failure(dataset: str, error: Exception) -> None:
@@ -104,8 +116,8 @@ class _Batch:
             set()
         )  # keys whose latest record is good, and whose earlier rejection is over
 
-    def _reject(self, name: str, partition: str | None, error: Exception) -> None:
-        message = redact(_printable(f"{name}: {type(error).__name__}: {error}"))[:_MAX_ERROR]
+    def reject(self, name: str, partition: str | None, error: Exception) -> None:
+        message = redact(_printable(f"{name[:_MAX_NAME]}: {type(error).__name__}: {error}"))[:_MAX_ERROR]
         self._deps.store.quarantine.add(
             None, None, _printable(name)[:_MAX_NAME], message, self._dataset.name, partition
         )
@@ -117,7 +129,7 @@ class _Batch:
             found = list(source.receive(ctx, event.request))
         except Exception as error:  # noqa: BLE001 - a connector fails on bad input however it fails
             log.warning("sealer: event %s of %s not read: %s", seq, self._dataset.name, type(error).__name__)
-            self._reject(f"event:{seq}", None, error)
+            self.reject(f"event:{seq}", None, error)
             return
         for item in found:
             self._add(item, seq)
@@ -133,6 +145,11 @@ class _Batch:
             payload = cast(Mapping[str, Any], row)
             name = make_key(payload, dataset.key)
             partition = dataset.partition.key_of(payload)
+            if len(partition.encode("utf-8", "replace")) > MAX_PARTITION_BYTES:
+                partition = None
+                raise ValueError(f"the partition key is longer than {MAX_PARTITION_BYTES} bytes")
+            if len(name.encode("utf-8", "replace")) > MAX_KEY_BYTES:
+                raise ValueError(f"the key is longer than {MAX_KEY_BYTES} bytes")
             _check_storable(name)
             _check_storable(payload)
             if not deleted:  # a delete has only to name its record
@@ -143,7 +160,7 @@ class _Batch:
             log.warning(
                 "sealer: a record of event %s of %s rejected: %s", seq, dataset.name, type(error).__name__
             )
-            self._reject(name, partition, error)
+            self.reject(name, partition, error)
             self.settled.discard(name)
             return
         self.parts.setdefault(partition, _Part(seq)).records.append(record)
@@ -165,7 +182,7 @@ class _Batch:
                 records_to_table([record])
             except Exception as error:  # noqa: BLE001 - a bad record of a push source can fail in any way at all
                 log.warning("sealer: a record of %s rejected: %s", self._dataset.name, type(error).__name__)
-                self._reject(record.key, partition, error)
+                self.reject(record.key, partition, error)
                 self.settled.discard(record.key)
             else:
                 kept.append(record)
@@ -220,7 +237,8 @@ def _write(
 
 
 def _drop_own_chunks(version_ids: Iterable[str], writer: str, deps: Any) -> None:
-    """Remove what this attempt wrote, having lost. A version another sealer has claimed since is that sealer's."""
+    """Remove what this attempt wrote, having lost or failed. A version another sealer has claimed since is that
+    sealer's."""
     for version_id in version_ids:
         try:
             deps.spool.delete_version(version_id, writer)
@@ -257,14 +275,16 @@ def _flows_of(runtime: Runtime, dataset: Dataset) -> list[Flow]:
 
 
 def _seal_batch(
-    runtime: Runtime, dataset: Dataset, flows: Sequence[Flow], events: Sequence[InboxEvent], now: datetime
+    runtime: Runtime,
+    dataset: Dataset,
+    flows: Sequence[Flow],
+    ctx: Context,
+    events: Sequence[InboxEvent],
+    now: datetime,
 ) -> list[Version]:
     """Seal `events` as one batch, and return the versions."""
     deps = runtime.deps
     source = cast(PushSource, dataset.source)
-    ctx = runtime.make_context(
-        source.connection
-    )  # outside the events: a secret not set is not the events' fault
     batch = _Batch(dataset, deps)
     for event in events:
         batch.read(source, ctx, event)
@@ -280,11 +300,50 @@ def _seal_batch(
             written.append(stable_id(dataset.name, partition, str(part.first_seq)))
             drafts.append(_write(dataset, run_id, partition, part, writer, deps))
         sealed = deps.store.inbox.seal_batch([e.event_seq for e in events], drafts, routes, writer)
-    except (StaleWriter, VersionSealed):
-        _drop_own_chunks(written, writer, deps)
+    except Exception:  # lost or failed, what this attempt wrote is no one's
+        try:
+            _drop_own_chunks(written, writer, deps)
+        except Exception as error:  # noqa: BLE001 - what failed first is what counts
+            _log_failure(dataset.name, error)
         raise
     _after_seal(runtime, dataset, sealed, routes, batch)
     return sealed
+
+
+def _seal_split(
+    runtime: Runtime,
+    dataset: Dataset,
+    flows: Sequence[Flow],
+    ctx: Context,
+    events: Sequence[InboxEvent],
+    now: datetime,
+    sealed: list[Version],
+) -> None:
+    """Seal `events`, and add the versions to `sealed`. If they fail as a batch, seal each half in turn, down to the
+    event that fails alone: it goes to the quarantine with its reason, and is sealed with no records.
+
+    Losing to another sealer, or the store being away, is no event's fault: that goes up as it is, and the events wait.
+    """
+    try:
+        sealed += _seal_batch(runtime, dataset, flows, ctx, events, now)
+        return
+    except (StaleWriter, VersionSealed):
+        raise
+    except Exception as error:
+        if runtime.deps.store.is_unavailable(error):
+            raise
+        if len(events) == 1:
+            _quarantine_event(runtime, dataset, events[0], error)
+            return
+    half = len(events) // 2
+    _seal_split(runtime, dataset, flows, ctx, events[:half], now, sealed)
+    _seal_split(runtime, dataset, flows, ctx, events[half:], now, sealed)
+
+
+def _quarantine_event(runtime: Runtime, dataset: Dataset, event: InboxEvent, error: Exception) -> None:
+    log.warning("sealer: event %s of %s not stored: %s", event.event_seq, dataset.name, type(error).__name__)
+    _Batch(dataset, runtime.deps).reject(f"event:{event.event_seq}", None, error)
+    runtime.deps.store.inbox.seal_batch([event.event_seq], [], [])
 
 
 def _is_due(age: timedelta, count: int, max_events: int, max_age: timedelta) -> bool:
@@ -305,6 +364,7 @@ def _seal_dataset(
     if not flows or any(runtime.is_flow_paused(flow.name) for flow in flows):
         return  # the events keep, and retention keeps their days
     inbox = runtime.deps.store.inbox
+    ctx: Context | None = None
     for _ in range(_MAX_BATCHES):
         age = inbox.oldest_age(dataset.name, now)
         if age is None:
@@ -312,7 +372,9 @@ def _seal_dataset(
         events = inbox.take(dataset.name, max_events)
         if not events or not _is_due(age, len(events), max_events, max_age):
             break
-        sealed += _seal_batch(runtime, dataset, flows, events, now)
+        if ctx is None:  # outside the events: a secret not set is not the events' fault
+            ctx = runtime.make_context(cast(PushSource, dataset.source).connection)
+        _seal_split(runtime, dataset, flows, ctx, events, now, sealed)
         if len(events) < max_events:
             break
 

@@ -1942,6 +1942,14 @@ class PostgresStore(Store):
         )
         object.__setattr__(self, "_pool", pool)  # `Store` is frozen
 
+    def is_unavailable(self, error: BaseException) -> bool:
+        """A lost or refused connection, a pool timeout, a cancelled statement or a deadlock, and not a value too big
+        for an index, which Postgres counts among them but which the same row will meet again."""
+        if isinstance(error, psycopg.errors.ProgramLimitExceeded):
+            return False
+        lost = isinstance(error, psycopg.OperationalError | psycopg.InterfaceError)
+        return lost or super().is_unavailable(error)
+
     def close(self) -> None:
         """Close the pool, which the spool of the same `connect` shares. Closing it again changes nothing."""
         atexit.unregister(self._pool.close)

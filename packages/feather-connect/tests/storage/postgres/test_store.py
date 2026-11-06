@@ -1,3 +1,4 @@
+import secrets
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -6,12 +7,12 @@ from typing import Any
 import psycopg
 import pytest
 from psycopg.rows import DictRow
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout
 
 from feather_connect.clock import FrozenClock
 from feather_connect.core.connector import InboundRequest
 from feather_connect.core.records import Record
-from feather_connect.storage.port import InvalidTransition, StaleWriter, Store
+from feather_connect.storage.port import InvalidTransition, StaleWriter, StateRow, Store
 from feather_connect.storage.postgres import support
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.leader import PostgresLeaderLock
@@ -291,3 +292,12 @@ def test_inbox_event_ids_hold_across_threads(store: Store):
         8, lambda n: store.inbox.put("d", InboundRequest("POST", "/", {}, b"{}", T0), "same")
     )
     assert sorted(results) == [False] * 7 + [True] and len(store.inbox.take("d", 10)) == 1
+
+
+def test_a_row_too_big_for_an_index_is_not_an_outage(store: Store):
+    with pytest.raises(psycopg.errors.ProgramLimitExceeded) as found:
+        store.state.put_many("d", [StateRow(secrets.token_urlsafe(2400), "_", 1, {}, "v")])
+    assert not store.is_unavailable(found.value)
+    assert store.is_unavailable(psycopg.OperationalError("connection lost"))
+    assert store.is_unavailable(PoolTimeout("no connection in 30 s"))
+    assert not store.is_unavailable(psycopg.errors.UniqueViolation("duplicate key"))

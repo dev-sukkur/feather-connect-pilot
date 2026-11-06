@@ -1,5 +1,6 @@
 import json
 import logging
+import secrets
 import threading
 from collections.abc import Iterator, Sequence
 from datetime import timedelta
@@ -493,3 +494,89 @@ def test_two_sealers_in_threads_give_each_event_one_version(
     else:
         assert len(keys) == len(set(keys))
     assert sorted(v.version_id for v in sealed) == sorted(v.version_id for v in versions)
+
+
+# What the store can't take must cost only its own event (S1).
+
+
+def nested(depth: int, kind: str) -> Any:
+    value: Any = 1
+    for _ in range(depth):
+        value = [value] if kind == "list" else {"a": value}
+    return value
+
+
+@pytest.mark.parametrize("kind", ["list", "dict"])
+def test_a_too_deeply_nested_event_costs_only_itself(any_world: World, kind: str):
+    world = any_world
+    world.post({"id": 1}, {"id": 2, "a": nested(200, kind)}, {"id": 3})
+    [version] = world.seal_due()
+    assert events_of(world, [version]) == ["1", "3"]
+    [entry] = world.store.quarantine.list_open()
+    assert entry.key == "2" and "nested" in entry.error
+    assert world.store.inbox.oldest_age("hooks", world.clock.now()) is None
+
+
+def test_nesting_up_to_the_limit_seals(any_world: World):
+    world = any_world
+    world.post({"id": 1, "a": nested(31, "list")}, {"id": 2, "a": nested(31, "dict")})
+    [version] = world.seal_due()
+    assert events_of(world, [version]) == ["1", "2"]
+    assert world.store.quarantine.list_open() == []
+
+
+def test_a_too_long_partition_key_costs_only_its_event(backend: tuple[Store, Spool], clock: FrozenClock):
+    world = World(*backend, clock, partition=by_fields("p"))
+    world.post({"id": 1, "p": "a"}, {"id": 2, "p": secrets.token_urlsafe(2400)}, {"id": 3, "p": "a"})
+    [version] = world.seal_due()
+    assert events_of(world, [version]) == ["1", "3"]
+    [entry] = world.store.quarantine.list_open()
+    assert entry.key == "2" and "partition" in entry.error
+    assert world.store.inbox.oldest_age("hooks", world.clock.now()) is None
+
+
+def test_a_too_long_key_costs_only_its_event(backend: tuple[Store, Spool], clock: FrozenClock):
+    world = World(*backend, clock, keep_state=True)
+    world.post({"id": 1}, {"id": secrets.token_urlsafe(2400)}, {"id": 3})
+    [version] = world.seal_due()
+    assert events_of(world, [version]) == ["1", "3"]
+    [entry] = world.store.quarantine.list_open()
+    assert "key" in entry.error
+    assert set(world.store.state.get_many("hooks", ["1", "3"])) == {"1", "3"}
+
+
+def test_a_batch_that_fails_for_one_event_seals_the_rest(any_world: World, monkeypatch):
+    """Whatever no check foresaw: the batch is split until the one event that fails is alone, with its reason."""
+    world = any_world
+    real = world.spool.put_chunk
+
+    def refuses_2(version_id: str, chunk_no: int, kind: Any, table: Any, writer: Any = None) -> None:
+        if "2" in table.column("_fc_key").to_pylist():
+            raise ValueError("the spool can't take record 2")
+        real(version_id, chunk_no, kind, table, writer)
+
+    monkeypatch.setattr(world.spool, "put_chunk", refuses_2)
+    world.post(*({"id": n} for n in range(1, 6)))
+    sealed = world.seal_due()
+    assert events_of(world, sealed) == ["1", "3", "4", "5"]
+    [entry] = world.store.quarantine.list_open()
+    assert entry.key.startswith("event:") and "ValueError" in entry.error and "record 2" in entry.error
+    assert world.store.inbox.oldest_age("hooks", world.clock.now()) is None
+    world.drain()
+    assert sorted(r["id"] for r in world.sink.rows) == [1, 3, 4, 5]
+
+
+def test_a_store_outage_mid_batch_quarantines_nothing(any_world: World, monkeypatch):
+    world = any_world
+
+    def away(*args: Any, **kwargs: Any) -> None:
+        raise ConnectionError("the database went away")
+
+    monkeypatch.setattr(world.spool, "put_chunk", away)
+    world.post({"id": 1}, {"id": 2})
+    assert world.seal_due() == []
+    assert world.store.quarantine.list_open() == []
+    assert world.store.inbox.oldest_age("hooks", world.clock.now()) is not None
+    monkeypatch.undo()
+    [version] = world.seal_due()
+    assert events_of(world, [version]) == ["1", "2"]

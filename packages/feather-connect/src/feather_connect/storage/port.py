@@ -979,3 +979,8 @@ class Store:
     audit: AuditStore
     reads: ReadStore
     inbox: InboxStore
+
+    def is_unavailable(self, error: BaseException) -> bool:
+        """Whether `error` says that the store can't be reached, or can't keep up, just now, so that the same call may
+        work later. Otherwise it refused what it was given, and will again."""
+        return isinstance(error, ConnectionError | TimeoutError)
