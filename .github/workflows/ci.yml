@@ -87,12 +87,13 @@ jobs:
       - if: steps.engine.outputs.run == 'true'
         run: uv run pytest tests/engine_conformance
 
-  # The chaos and performance checks kill real workers and restart a database (a container of their own, on 25434), and
-  # take minutes. They run every night, and on a pull request only when the change touches the engine or the checks.
+  # The chaos and performance checks kill real workers and servers and restart a database (a container of their own, on
+  # 25434, with the Docker the runner has), and take minutes. They run every night, and on a pull request whenever the
+  # change touches a package or a test, since crash safety and latency can break anywhere in the product's code.
   # The webhook latency, burst and schedule checks are named by file here: `tests/e2e` as a folder leaves them out.
   chaos:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     services:
       postgres:
         image: postgres:17
@@ -111,11 +112,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Decide whether the engine or the checks changed
+      - name: Decide whether the product or the checks changed
         id: changes
         run: |
           if [ "$GITHUB_EVENT_NAME" != "pull_request" ] \
-            || ! git diff --quiet "${{ github.event.pull_request.base.sha }}" HEAD -- packages/feather-engine-dbos packages/feather-server/src/feather_server/ingress.py tests/chaos tests/perf tests/e2e/test_webhook_latency.py tests/e2e/perf_project tests/e2e/conftest.py tests/support/webhook_load.py; then
+            || ! git diff --quiet "${{ github.event.pull_request.base.sha }}" HEAD -- packages tests conftest.py pyproject.toml uv.lock .github/workflows/ci.yml; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
       - if: steps.changes.outputs.run == 'true'
