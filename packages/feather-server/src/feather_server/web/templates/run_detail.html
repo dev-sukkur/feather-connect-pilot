@@ -12,7 +12,8 @@
     <dt>Id</dt><dd><code>{{ run.run_id }}</code></dd>
     <dt>Started by</dt><dd>{{ run.trigger }} · {{ run.actor }}</dd>
     <dt>Started</dt><dd>{{ m.time_ago(run.created_at) }}</dd>
-    <dt>Partitions</dt><dd>{% if run.params.get("partitions") %}{% for key in run.params["partitions"] %}{% if first_dataset %}{{ m.partition_label(first_dataset, key) }}{% else %}<code>{{ key }}</code>{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}<span class="muted">as planned when it started</span>{% endif %}</dd>
+    {% if detail.ticks %}<dt>Day</dt><dd>{{ detail.ticks.day }}{% if detail.ticks.day_open %} <span class="muted">(open: it takes ticks and versions until the day ends)</span>{% else %} <span class="muted">(closed: its status stands once what it holds has ended)</span>{% endif %}</dd>{% else %}
+    <dt>Partitions</dt><dd>{% if run.params.get("partitions") %}{% for key in run.params["partitions"] %}{% if first_dataset %}{{ m.partition_label(first_dataset, key) }}{% else %}<code>{{ key }}</code>{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}<span class="muted">as planned when it started</span>{% endif %}</dd>{% endif %}
     {% if run.params.get("max_concurrent") %}<dt>Slices at a time</dt><dd>{{ run.params["max_concurrent"] }}</dd>{% endif %}
     <dt>Reason</dt><dd>{% if run.reason %}{{ run.reason }}{% else %}<span class="muted">none</span>{% endif %}</dd>
   </dl>
@@ -33,6 +34,9 @@
 
 <section aria-labelledby="h-actions">
   <h2 id="h-actions">Actions</h2>
+  {% if detail.ticks %}
+  <p>This is the flow's daily stream run. It can't be cancelled or run again: <a href="/flows/{{ run.flow | urlencode }}">pause the flow</a> to stop its ticks, and retry, skip or replay its deliveries on the <a href="/failures">failures page</a>.</p>
+  {% else %}
   <div class="actions">
     {% if active and not confirm_cancel %}
     <form method="post" action="/runs/{{ run.run_id | urlencode }}/cancel">
@@ -50,6 +54,7 @@
     </form>
     {% endif %}
   </div>
+  {% endif %}
 </section>
 
 {% include "_run_live.html" %}

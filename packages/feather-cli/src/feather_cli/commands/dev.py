@@ -38,6 +38,7 @@ from feather_connect.project import ProjectError, load_project
 from feather_connect.storage.port import Store
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import migrate
+from feather_connect.storage.postgres.store import PostgresStore
 from feather_connect.worker import run_worker
 from feather_server.app import create_app
 from feather_server.auth import hash_password
@@ -188,7 +189,7 @@ class Stack:
         self._worker_stop = threading.Event()
         self._worker: threading.Thread | None = None
         self._worker_error: BaseException | None = None
-        self._store: Store | None = None  # one pool for the life of the command, not one per reload
+        self._store: PostgresStore | None = None  # one pool for the life of the command, not one per reload
         self._server: uvicorn.Server | None = None
         self._server_thread: threading.Thread | None = None
 
@@ -257,6 +258,13 @@ class Stack:
         root = logging.getLogger()
         for handler in [h for h in root.handlers if isinstance(h, TaskLogHandler)]:
             root.removeHandler(handler)  # each start adds its own
+
+    def close(self) -> None:
+        """Stop for good: unlike a reload, this lets go of the store as well."""
+        self.stop()
+        if self._store is not None:
+            self._store.close()
+            self._store = None
 
 
 def _ensure_dev_user(store: Store, reset: bool = False) -> str | None:
@@ -363,7 +371,10 @@ def _run(
     database_url = own_database or _start_postgres_container(json_mode)
     migrate(database_url)
     store, _ = connect(database_url)
-    password = _ensure_dev_user(store, reset_password)
+    try:
+        password = _ensure_dev_user(store, reset_password)
+    finally:
+        store.close()
     settings = Settings(
         env=env,
         database_url=database_url,
@@ -393,7 +404,7 @@ def _run(
         _watch(root, env, port, stack, stop, announce)
     finally:
         typer.echo("stopping...", err=True)
-        stack.stop()
+        stack.close()
 
 
 def _announce(document: dict[str, Any], own_database: bool) -> None:

@@ -2,7 +2,7 @@
 
 import logging
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,7 +20,8 @@ from feather_connect.storage.port import Store
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import at_head, migrate
 from feather_connect.storage.spool import Spool
-from feather_server import auth, web
+from feather_connect.worker import config_of
+from feather_server import auth, ingress, web
 from feather_server.loops import LoopRunner, default_loops
 from feather_server.services.actions import Actions
 from feather_server.services.reads import Reads
@@ -76,6 +77,10 @@ def build_state(settings: Settings) -> AppState:
         engine: Engine = dbos_engine
     else:
         engine = local
+
+    def config(connection: str) -> Mapping[str, Any]:  # webhook sources verify and parse here, in the server
+        return config_of(project, connection) if connection in project.connections else {}
+
     runtime = Runtime(
         project.flows,
         store,
@@ -83,6 +88,7 @@ def build_state(settings: Settings) -> AppState:
         engine,
         code_sha=project.code_sha,
         clock=clock,
+        config_of=config,
         timezone=str(project.settings["timezone"]),
     )
     if local is not None:
@@ -134,6 +140,7 @@ def create_app(
         )
     app.state.reads = Reads(state)
     app.state.actions = Actions(state)
+    ingress.install(app, state)  # first, as routes are tried in order, and this one takes bursts
     auth.install(app, state)
     web.install(app, state)
 

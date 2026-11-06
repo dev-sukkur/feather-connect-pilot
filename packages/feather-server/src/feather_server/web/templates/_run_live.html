@@ -1,18 +1,22 @@
 {% import "_macros.html" as m with context %}
 {% set run = detail.run %}
-<div id="live"{% if active %} hx-get="{{ path }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+<div id="live"{% if live %} hx-get="{{ path }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
   <p>Status: {{ m.status_badge(run.status) }}{% if run.reason and run.status in ("skipped", "cancelled", "failed") %} <span class="muted">{{ run.reason }}</span>{% endif %}</p>
+
+  {% if detail.ticks %}
+  <p class="ticks">Ticks: {{ detail.ticks.total }} &middot; {{ detail.ticks.skipped }} skipped &middot; {{ detail.ticks.failed }} failed to plan. Tasks: {{ detail.task_total }} &middot; {{ detail.tasks_failed }} failed.</p>
+  {% endif %}
 
   <section aria-labelledby="h-timeline">
     <h2 id="h-timeline">Timeline</h2>
     {% if detail.tasks %}
     <div class="table-wrap"><table>
-      <caption class="sr-only">The tasks of the run, in the order they started</caption>
+      <caption class="sr-only">The tasks of the run, {{ "newest first" if detail.ticks else "in the order they started" }}</caption>
       <thead><tr><th scope="col">Task</th><th scope="col">For</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Started</th><th scope="col">Took</th><th scope="col">Worker</th><th scope="col">Code</th><th scope="col">Log</th></tr></thead>
       <tbody>
       {% for task in detail.tasks %}
         <tr>
-          <th scope="row">{{ task.kind }}</th>
+          <th scope="row">{% if detail.ticks and task.kind in ("plan", "skip") %}tick{% else %}{{ task.kind }}{% endif %}</th>
           <td>{% if task.dataset and task.partition %}{{ m.partition_label(task.dataset, task.partition) }}{% elif task.dataset %}{{ task.dataset }}{% endif %}{% if task.route %} &rarr; {{ task.route }}{% endif %}</td>
           <td>{{ m.status_badge(task.status) }}</td>
           <td>{% if task.attempt > 1 %}{% if task.status == "running" %}attempt {{ task.attempt }}{% else %}{{ task.status }} after {{ task.attempt }} attempts{% endif %}{% else %}1{% endif %}</td>
@@ -22,10 +26,12 @@
           <td>{% if task.code_sha %}<code>{{ task.code_sha[:8] }}</code>{% endif %}</td>
           <td><a href="/tasks/{{ task.task_id | urlencode }}/logs?run={{ run.run_id | urlencode }}">Log</a></td>
         </tr>
-        {% if task.error %}<tr><td colspan="9"><span class="error-text">{% if task.attempt > 1 and task.status != "failed" %}Last error: {% endif %}{{ task.error }}</span></td></tr>{% endif %}
+        {% if task.status == "skipped" %}<tr><td colspan="9"><span class="muted">Skipped: {{ task.error }}</span></td></tr>
+        {% elif task.error %}<tr><td colspan="9"><span class="error-text">{% if task.attempt > 1 and task.status != "failed" %}Last error: {% endif %}{{ task.error }}</span></td></tr>{% endif %}
       {% endfor %}
       </tbody>
     </table></div>
+    {{ m.pagination(detail.next_task) }}
     {% elif run.status == "skipped" %}
     <p class="empty">This run was skipped, so no task ran.</p>
     {% else %}
@@ -36,6 +42,7 @@
   {% if detail.deliveries %}
   <section aria-labelledby="h-attempts">
     <h2 id="h-attempts">Deliveries and attempts</h2>
+    {% if detail.ticks %}<p class="muted">Of its newest versions.</p>{% endif %}
     <div class="table-wrap"><table>
       <thead><tr><th scope="col">Partition</th><th scope="col">Route</th><th scope="col">Status</th><th scope="col" class="num">Attempts</th><th scope="col">Last error</th></tr></thead>
       <tbody>

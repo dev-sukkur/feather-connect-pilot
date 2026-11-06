@@ -27,13 +27,15 @@ class PermanentError(Exception):
 
 
 class BudgetDeferred(Exception):
-    """A call has to wait for budget: try again after `wait`. `budget` names the budget that ran out."""
+    """A call has to wait for budget: try again after `wait`. `budget` names the budget that ran out, and `taken` is
+    how many units the work had already taken from it through this handle, which is lost if the work starts again."""
 
-    def __init__(self, wait: timedelta, budget: str) -> None:
+    def __init__(self, wait: timedelta, budget: str, taken: int = 0) -> None:
         # `args` stays the constructor arguments, so that pickle and copy can rebuild the error.
-        super().__init__(wait, budget)
+        super().__init__(wait, budget, taken)
         self.wait = wait
         self.budget = budget
+        self.taken = taken
 
     def __str__(self) -> str:
         return f"budget {self.budget!r} is used up; try again in {self.wait}"

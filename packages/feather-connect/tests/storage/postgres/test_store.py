@@ -1,3 +1,4 @@
+import secrets
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -6,11 +7,12 @@ from typing import Any
 import psycopg
 import pytest
 from psycopg.rows import DictRow
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout
 
 from feather_connect.clock import FrozenClock
+from feather_connect.core.connector import InboundRequest
 from feather_connect.core.records import Record
-from feather_connect.storage.port import InvalidTransition, Store
+from feather_connect.storage.port import InvalidTransition, StaleWriter, StateRow, Store
 from feather_connect.storage.postgres import support
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.leader import PostgresLeaderLock
@@ -169,8 +171,10 @@ def test_datetime_watermarks_compare_as_datetimes(store: Store):
     assert [v.version_id for v in store.versions.since_watermark("d", "p", late)] == ["v2"]
 
 
-def test_connect_opens_a_store_and_a_spool_on_one_pool(pg: Pg, pg_url: str, clock: FrozenClock):
-    store, spool = connect(pg_url, clock=clock, tenant="t1", max_size=2)
+def test_connect_opens_a_store_and_a_spool_on_one_pool(
+    pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any
+):
+    store, spool = pg_connect(pg_url, clock=clock, tenant="t1", max_size=2)
     run_id = store.runs.create_run("f", "manual", "ann", {"x": 1})
     spool.put_chunk("v1", 0, "data", records_to_table([Record("a", "upsert", {"x": 1}, 1)]))
     assert store.runs.get_run(run_id).params == {"x": 1} and len(spool.list_chunks("v1")) == 1
@@ -180,8 +184,10 @@ def pool_of(store: Store) -> Any:
     return store.runs._db.pool  # type: ignore[attr-defined]
 
 
-def test_pool_sessions_have_timeouts_and_keepalives(pg: Pg, pg_url: str, clock: FrozenClock):  # F9
-    store, _ = connect(pg_url, clock=clock, max_size=1)
+def test_pool_sessions_have_timeouts_and_keepalives(
+    pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any
+):  # F9
+    store, _ = pg_connect(pg_url, clock=clock, max_size=1)
     with pool_of(store).connection() as conn:
         given = conn.info.get_parameters()
         assert given["connect_timeout"] == str(support.CONNECT_TIMEOUT_S)
@@ -193,10 +199,10 @@ def test_pool_sessions_have_timeouts_and_keepalives(pg: Pg, pg_url: str, clock: 
 
 
 def test_the_statement_timeout_limits_a_statement_and_not_a_transaction(
-    pg: Pg, pg_url: str, clock: FrozenClock, monkeypatch: pytest.MonkeyPatch
+    pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any, monkeypatch: pytest.MonkeyPatch
 ):  # F9
     monkeypatch.setattr(support, "STATEMENT_TIMEOUT_MS", 400)
-    store, _ = connect(pg_url, clock=clock, max_size=1)
+    store, _ = pg_connect(pg_url, clock=clock, max_size=1)
     pool = pool_of(store)
     with pool.connection() as conn:  # longer than the limit in all, in short statements
         for _ in range(3):
@@ -205,9 +211,9 @@ def test_the_statement_timeout_limits_a_statement_and_not_a_transaction(
         conn.execute("select pg_sleep(2)")
 
 
-def test_options_in_the_url_are_kept(pg: Pg, pg_url: str, clock: FrozenClock):  # F9
+def test_options_in_the_url_are_kept(pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any):  # F9
     url = f"{pg_url}?options=-c%20search_path%3Dfeather"
-    store, _ = connect(url, clock=clock, max_size=1)
+    store, _ = pg_connect(url, clock=clock, max_size=1)
     with pool_of(store).connection() as conn:
         assert conn.execute("show search_path").fetchone() == {"search_path": "feather"}
         assert conn.execute("show statement_timeout").fetchone() == {"statement_timeout": "2min"}
@@ -231,3 +237,67 @@ def test_closing_a_store_closes_its_pool(pg: Pg, pg_url: str, clock: FrozenClock
     store.close()
     assert pool.closed
     store.close()  # closing again is harmless
+
+
+def test_seal_batch_undoes_all_of_it_when_the_last_write_fails(store: Store, pg: Pg):
+    """The events, the version and the deliveries are one transaction, whichever write it is that fails."""
+    store.inbox.put("d", InboundRequest("POST", "/", {}, b"{}", T0))
+    [event] = store.inbox.take("d", 1)
+    pg.execute(
+        """create function feather.refuse() returns trigger language plpgsql as
+           $$ begin if new.route = 'second' then raise exception 'refused'; end if; return new; end $$"""
+    )
+    pg.execute(
+        "create trigger refuse before insert on feather.delivery for each row execute function feather.refuse()"
+    )
+    try:
+        with pytest.raises(psycopg.errors.RaiseException):
+            store.inbox.seal_batch([event.event_seq], [draft("v1", complete=False)], ["first", "second"])
+    finally:
+        pg.execute("drop trigger refuse on feather.delivery")
+        pg.execute("drop function feather.refuse()")
+    assert store.inbox.take("d", 1) == [event]
+    with pytest.raises(KeyError):
+        store.versions.get("v1")
+    assert store.ledger.list_deliveries() == []
+
+
+def test_inbox_is_partitioned_by_day_a_week_ahead(store: Store, pg: Pg, clock: FrozenClock):
+    store.inbox.ensure_partitions()
+    days = store.inbox.days()
+    assert all(T0.date() + timedelta(days=n) in days for n in range(8))
+    clock.advance(timedelta(days=30))  # a day nobody made room for
+    store.inbox.put("d", InboundRequest("POST", "/", {}, b"{}", clock.now()))
+    assert clock.now().date() in store.inbox.days()
+    plan = pg.execute(
+        "explain select * from feather.inbox where tenant_id = 'default' and day = %s", (T0.date(),)
+    ).fetchall()
+    assert "inbox_20261018" in str(plan) and "inbox_20261117" not in str(plan)
+
+
+def test_inbox_keeps_tenants_apart(pool: ConnectionPool[Pg], pg: Pg, clock: FrozenClock):
+    mine, other = PostgresStore(pool, clock, "mine"), PostgresStore(pool, clock, "other")
+    request = InboundRequest("POST", "/", {}, b"{}", T0)
+    assert mine.inbox.put("d", request, "e1") and other.inbox.put("d", request, "e1")
+    [event] = mine.inbox.take("d", 10)
+    with pytest.raises(StaleWriter):
+        other.inbox.seal_batch([event.event_seq], [], [])
+    other.inbox.seal_batch([other.inbox.take("d", 1)[0].event_seq], [], [])
+    assert mine.inbox.take("d", 10) == [event]
+    assert other.inbox.drop_day(T0.date()) is False  # the partition holds the other tenant's event too
+
+
+def test_inbox_event_ids_hold_across_threads(store: Store):
+    results = in_threads(
+        8, lambda n: store.inbox.put("d", InboundRequest("POST", "/", {}, b"{}", T0), "same")
+    )
+    assert sorted(results) == [False] * 7 + [True] and len(store.inbox.take("d", 10)) == 1
+
+
+def test_a_row_too_big_for_an_index_is_not_an_outage(store: Store):
+    with pytest.raises(psycopg.errors.ProgramLimitExceeded) as found:
+        store.state.put_many("d", [StateRow(secrets.token_urlsafe(2400), "_", 1, {}, "v")])
+    assert not store.is_unavailable(found.value)
+    assert store.is_unavailable(psycopg.OperationalError("connection lost"))
+    assert store.is_unavailable(PoolTimeout("no connection in 30 s"))
+    assert not store.is_unavailable(psycopg.errors.UniqueViolation("duplicate key"))

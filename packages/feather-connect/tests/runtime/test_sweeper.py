@@ -6,6 +6,7 @@ from feather_connect.clock import FrozenClock
 from feather_connect.connectors.memory import Sink, Source
 from feather_connect.core.errors import PermanentError
 from feather_connect.engine.local import LocalEngine
+from feather_connect.runtime.retention import retention_once
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.runtime.sweeper import sweep_once
 from feather_connect.storage.memory import MemoryStore
@@ -322,3 +323,103 @@ def stranded_for_sweeper(h: Harness, status: str) -> tuple[str, str]:
 
 class _Vanished(PermanentError):
     """A task that ended without a word to the journal, as when the database is away for its last attempt."""
+
+
+def test_a_sweep_does_nothing_for_deliveries_waiting_behind_a_failure() -> None:
+    """F11: only the head of a stream can be helped, so what waits behind one costs no work and isn't reported."""
+    h = Harness({"strategy": fc.strategy.snapshot_diff()})
+    h.a.fail_next(PermanentError("destination gone"))
+    h.rt.start_run("f")
+    h.engine.run_until_idle()
+    for n in range(5):
+        h.clock.advance(timedelta(minutes=1))
+        h.rt.flow("f").datasets[0].source.load([{"id": 1, "v": f"changed {n}"}])  # type: ignore[union-attr]
+        h.rt.start_run("f")
+        h.engine.run_until_idle()
+    waiting = h.store.ledger.list_deliveries(route=h.rt.flow("f").routes[0].name, status="pending")
+    assert len(waiting) == 5
+    h.clock.advance(timedelta(minutes=2))
+
+    looked_up: list[str] = []
+    real = h.store.versions.get
+    h.store.versions.get = lambda v: (looked_up.append(v), real(v))[1]  # type: ignore[method-assign]
+    report = h.sweep()
+
+    assert report.resubmitted_deliveries == []
+    assert not {d.version_id for d in waiting} & set(looked_up)
+
+
+def sliced_run(h: Harness, *, fail_slice: bool) -> str:
+    """Run the two days in slices. One slice is staged and, if `fail_slice`, the other's read fails for good."""
+    source: Any = h.rt.flow("f").datasets[0].source
+    real = source.read
+
+    def read(ctx: Any, req: Any) -> Any:
+        if fail_slice and req.partition == DAY_18:
+            raise PermanentError("the source refuses")
+        return real(ctx, req)
+
+    source.read = read
+    run = h.rt.start_run("f", partitions=[DAY_17, DAY_18])
+    h.engine.run_until_idle()
+    source.read = real
+    return run
+
+
+def test_a_failed_runs_staged_versions_are_discarded_and_free_their_day() -> None:  # F13
+    h = Harness(**two_days())
+    run = sliced_run(h, fail_slice=True)
+    assert h.store.runs.get_run(run).status == "failed"
+    [staged] = h.store.versions.staged_for_run(run, "d")
+    assert h.store.versions.runs_ready_to_seal() == []  # one slice never finished
+    spool = h.rt._deps.spool  # pyright: ignore[reportPrivateUsage]
+    assert retention_once(h.store, spool, now=h.clock.now() + timedelta(days=15)).kept_days
+
+    report = h.sweep()
+
+    assert report.discarded_versions == [staged.version_id]
+    assert h.store.versions.staged_for_run(run, "d") == []
+    assert spool.list_chunks(staged.version_id, "full") == []
+    assert h.sweep().discarded_versions == []
+    assert not retention_once(h.store, spool, now=h.clock.now() + timedelta(days=15)).kept_days
+
+
+def test_a_cancelled_runs_staged_versions_are_discarded() -> None:  # F13
+    h = Harness(**two_days())
+    h.engine.crash_before("seal")
+    run = h.rt.start_run("f", partitions=[DAY_17, DAY_18])
+    h.engine.run_until_idle()
+    assert len(h.store.versions.staged_for_run(run, "d")) == 2
+    h.rt.cancel_run(run, actor="ann")
+
+    report = h.sweep()
+
+    assert len(report.discarded_versions) == 2 and report.resubmitted_seals == []
+    assert h.store.versions.staged_for_run(run, "d") == []
+
+
+def test_a_seal_that_failed_for_good_is_not_submitted_again() -> None:  # F13
+    h = Harness({**two_days()["reads_kw"]}, rows=two_days()["rows"])
+    run = h.rt.start_run("f", partitions=[DAY_17, DAY_18])
+    h.engine.run_until_idle()
+    source: Any = h.rt.flow("f").datasets[0].source
+    source.load([])  # an empty read of both days, which the guard refuses at the seal
+    empty = h.rt.start_run("f", partitions=[DAY_17, DAY_18])
+    h.engine.run_until_idle()
+    assert h.store.runs.get_run(run).status == "succeeded"
+    assert h.store.runs.get_run(empty).status == "failed"
+
+    assert h.store.versions.runs_ready_to_seal() == []
+    report = h.sweep()
+    assert report.resubmitted_seals == []
+    assert len(report.discarded_versions) == 2
+
+
+def test_a_running_runs_staged_versions_stay() -> None:  # F13
+    h = Harness(**two_days())
+    h.engine.crash_before("seal")
+    run = h.rt.start_run("f", partitions=[DAY_17, DAY_18])
+    h.engine.run_until_idle()
+    assert h.store.runs.get_run(run).status == "running"
+    assert h.sweep().discarded_versions == []
+    assert len(h.store.versions.staged_for_run(run, "d")) == 2

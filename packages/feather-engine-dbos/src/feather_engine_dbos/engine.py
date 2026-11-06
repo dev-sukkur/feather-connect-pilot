@@ -14,10 +14,12 @@ mapping follows design §6.8:
 import json
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from dbos import DBOS, DBOSClient, EnqueueOptions
 
 from feather_connect.engine.port import Engine, RetryPolicy, TaskCall
+from feather_connect.storage.postgres.support import connection_timeouts
 
 KEYED = "feather-keyed"
 FREE = "feather-free"
@@ -42,6 +44,17 @@ def retry_input(policy: RetryPolicy) -> dict[str, Any]:
     }
 
 
+def system_database_url(database_url: str) -> str:
+    """Return the URL to give DBOS, which sets the timeouts of our own sessions on every connection it opens.
+
+    The URL is the one setting the client, `DBOS.migrate` and the worker all take. A statement timeout is not among
+    these: DBOS decides how long its own statements may take.
+    """
+    parts = urlsplit(database_url)
+    query = {**dict(parse_qsl(parts.query)), **connection_timeouts()}
+    return parts._replace(query=urlencode(query)).geturl()
+
+
 class DbosEngine(Engine):
     """Submits and manages tasks through the DBOS system database. It never runs a task itself.
 
@@ -50,9 +63,10 @@ class DbosEngine(Engine):
     """
 
     def __init__(self, database_url: str, *, schema: str = "dbos") -> None:
-        DBOS.migrate(database_url, schema=schema)
+        url = system_database_url(database_url)
+        DBOS.migrate(url, schema=schema)
         self._client = DBOSClient(
-            system_database_url=database_url,
+            system_database_url=url,
             dbos_system_schema=schema,
             system_database_pool_size=_CLIENT_POOL,
         )

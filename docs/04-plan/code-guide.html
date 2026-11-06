@@ -47,8 +47,8 @@ th { font-size: .78rem; font-weight: 700; color: var(--ink-2); }
 <div class="wrap">
 <header style="display:grid;gap:.8rem">
   <h1>Feather Connect Code Guide</h1>
-  <p class="sub">What each folder and file does, what to read first, and what is left to build. It describes the <code>stage-2-dashboard</code> branch, <a href="https://github.com/dev-sukkur/feather-connect/pull/3">PR 3</a>. The sections on the core loop keep their line counts from Stage 1, so those counts are approximate now.</p>
-  <p>The project now has four packages: <code>feather-connect</code> (the SDK and runtime), <code>feather-engine-dbos</code>, <code>feather-server</code> and <code>feather-cli</code>. There are 1,068 tests. Stage 2 added about 17,700 lines, and a flow now runs on Postgres and DBOS and shows in a dashboard. Paths in the sections below are under <code>packages/feather-connect/</code>.</p>
+  <p class="sub">What each folder and file does, what to read first, and what is left to build. It describes the <code>stage-3-reliability</code> branch. Stage 2 merged as <a href="https://github.com/dev-sukkur/feather-connect/pull/3">PR 3</a>. The sections on the core loop keep their line counts from Stage 1, so those counts are approximate now.</p>
+  <p>The project now has four packages: <code>feather-connect</code> (the SDK and runtime), <code>feather-engine-dbos</code>, <code>feather-server</code> and <code>feather-cli</code>. There are about 1,370 tests, plus crash, latency and engine conformance suites. A flow runs on Postgres and DBOS and shows in a dashboard. Stage 3 proved crash safety and added webhooks, the sealer and pollers. Paths in the sections below are under <code>packages/feather-connect/</code>.</p>
   <nav>
     <a href="#order">Reading order</a><a href="#stage2">New in Stage 2</a><a href="#flow">How a run works</a><a href="#core">core</a><a href="#runtime">runtime</a><a href="#engine">engine</a><a href="#storage">storage</a><a href="#connectors">connectors</a><a href="#testing">testing</a><a href="#top">top-level files</a><a href="#tests">tests</a><a href="#open">Known gaps</a><a href="#remaining">Remaining work</a>
   </nav>
@@ -238,11 +238,12 @@ th { font-size: .78rem; font-weight: 700; color: var(--ink-2); }
 
 <section id="open">
   <h2>Known gaps</h2>
+  <p>Stage 3 added these files: <code>runtime/sealer.py</code> (groups webhook events into versions), <code>core/webhooks.py</code> (signatures), <code>feather_server/ingress.py</code> (the webhook endpoint and its queue), migrations 0005 to 0009 (writer claims, the inbox and its holds, stream runs), and the test suites <code>tests/chaos</code>, <code>tests/perf</code>, <code>tests/engine_conformance</code> and <code>tests/e2e/test_webhook_latency.py</code>, with shared helpers in <code>tests/support/real_stack.py</code>.</p>
   <ul>
-    <li><b>Crash safety isn't proved yet.</b> Stage 3 proves it. Review finding F4, where a task running twice could overwrite sealed chunks, must close first.</li>
-    <li><b>Other open review findings:</b> F11 to F14, and 13 minor items, are listed under &ldquo;Open after the Stage 2 review&rdquo; in <code>docs/04-plan/README.md</code>.</li>
-    <li><b>One long test run on Windows:</b> a single pytest process running every package can hang at a random test. Each package passes on its own, and the same run passed on Linux in CI.</li>
-    <li><b>Slow database when the machine is busy:</b> other busy Docker containers slow it down. DBOS's own connections don't have the new timeouts yet.</li>
+    <li><b>Open review findings:</b> S5, S6 and 14 minor items from the Stage 3 review, and 13 from Stage 2, are listed in <code>docs/04-plan/README.md</code>.</li>
+    <li><b>Exactly once needs the sink's help:</b> a delivery can repeat after a crash, with the same idempotency key. The test sinks honour it in memory only; the Stage 4 connectors must honour it durably.</li>
+    <li><b>Webhook events:</b> reprocessing or releasing a quarantined event is a service call, with no dashboard button yet. A failing event holds its dataset for up to about 5 minutes of retries.</li>
+    <li><b>The long test run:</b> never hung again in ten runs after leaked pools were fixed, but the cause is unproved.</li>
     <li><b>Moves without <code>keep_state</code>:</b> a record moving between slices read in separate runs can be deleted at the destination. <code>Flow.validate</code> warns about this.</li>
     <li><b>Multi-chunk replace:</b> a sink rejection partway through can leave the destination partial. The delivery fails and says so.</li>
     <li><b>Source with a key in two slices:</b> with <code>keep_state</code>, it re-sends every run. M2 must guard this before side-effect routes.</li>
@@ -251,12 +252,12 @@ th { font-size: .78rem; font-weight: 700; color: var(--ink-2); }
 
 <section id="remaining">
   <h2>Remaining work</h2>
-  <p>The remaining work runs in stages. Stages 1 and 2 are built, with Stage 2 in review as <a href="https://github.com/dev-sukkur/feather-connect/pull/3">PR 3</a>. Each remaining stage gets one review, at its end.</p>
+  <p>The remaining work runs in stages. Stages 1 and 2 are merged, and Stage 3 is built and in review. Each remaining stage gets one review, at its end.</p>
   <div class="scroll"><table>
     <tr><th>Stage</th><th class="n">Tasks</th><th>What gets built</th><th>What you can do afterwards</th></tr>
     <tr><td><b>1. Core loop</b> <span class="done">Done</span></td><td class="n">14</td><td>SDK, data model, runtime and test harness, in memory</td><td>Write a flow and test it with no database</td></tr>
-    <tr><td><b>2. Runnable dashboard</b> <span class="done">Built, in review</span></td><td class="n">24</td><td>Postgres schema, store, spool and budgets; project and secrets loader; DBOS engine; worker and sweeper; server, scheduler, pause and resume; logs, sign-in and service layer; HTML dashboard (overview, flows, partition grid, runs, failures, connections); CLI basics, <code>feather dev</code> and a simulated demo. Also makes extraction wait when a budget runs out.<span class="names">2.1–2.6, 2.8, 2.9, 3.1, 3.2, 3.6, 5.1–5.3, 5.5–5.10, 6.1, 6.5, 6.7, demo task</span></td><td>Start everything with one command, watch runs live, and retry, replay, pause and re-run from the browser. Simulated data only, and crash safety isn't proven yet</td></tr>
-    <tr><td><b>3. Reliability and live events</b> (next)</td><td class="n">6</td><td>Engine conformance suite, crash and speed tests, webhook endpoint and inbox, sealer, pollers, latency tests<span class="names">2.7, 2.10, 3.3, 3.4, 3.5, 3.7</span></td><td>Kill -9 a worker with nothing lost or duplicated, and get webhooks to destinations in seconds</td></tr>
+    <tr><td><b>2. Runnable dashboard</b> <span class="done">Done</span></td><td class="n">24</td><td>Postgres schema, store, spool and budgets; project and secrets loader; DBOS engine; worker and sweeper; server, scheduler, pause and resume; logs, sign-in and service layer; HTML dashboard (overview, flows, partition grid, runs, failures, connections); CLI basics, <code>feather dev</code> and a simulated demo. Also makes extraction wait when a budget runs out.<span class="names">2.1–2.6, 2.8, 2.9, 3.1, 3.2, 3.6, 5.1–5.3, 5.5–5.10, 6.1, 6.5, 6.7, demo task</span></td><td>Start everything with one command, watch runs live, and retry, replay, pause and re-run from the browser. Simulated data only, and crash safety isn't proven yet</td></tr>
+    <tr><td><b>3. Reliability and live events</b> <span class="done">Built, in review</span></td><td class="n">6</td><td>Engine conformance suite, crash and speed tests, webhook endpoint and inbox, sealer, pollers, latency tests<span class="names">2.7, 2.10, 3.3, 3.4, 3.5, 3.7</span></td><td>Kill -9 a worker with nothing lost or duplicated, and get webhooks to destinations in seconds</td></tr>
     <tr><td><b>4. Connectors</b></td><td class="n">9</td><td>Conformance kit, shared HTTP client, Postgres, S3, REST, GraphQL, webhook and HTTP, DuckDB and MotherDuck, five templates<span class="names">4.1–4.9</span></td><td>Run real integrations from templates</td></tr>
     <tr><td><b>5. API, packaging and M1 exit</b></td><td class="n">9</td><td>JSON API, browser and accessibility tests, the rest of the CLI and scaffolding, images and Compose, full demo, hard-case tests, exit report<span class="names">5.4, 5.11, 6.1 (describe), 6.2–6.4, 6.6, 6.8, 6.9</span></td><td>Run the full demo in under 5 minutes, and prove the M1 exit criteria</td></tr>
   </table></div>

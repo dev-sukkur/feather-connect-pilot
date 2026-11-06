@@ -4,16 +4,19 @@ import copy
 import json
 import math
 import threading
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from fractions import Fraction
 from typing import Any
 
 from feather_connect.clock import Clock, SystemClock
-from feather_connect.ids import new_id
+from feather_connect.core.connector import InboundRequest
+from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
+    STREAM_TRIGGER,
     Attempt,
     AuditRow,
     AuditStore,
@@ -26,6 +29,9 @@ from feather_connect.storage.port import (
     FailureGroup,
     FlowRow,
     Grant,
+    InboxDay,
+    InboxEvent,
+    InboxStore,
     Ledger,
     Override,
     OverrideStore,
@@ -39,6 +45,8 @@ from feather_connect.storage.port import (
     Run,
     RunJournal,
     ScheduleStore,
+    SliceFinished,
+    StaleWriter,
     StateRow,
     Store,
     TaskRow,
@@ -66,9 +74,11 @@ class _Data:
     lock: threading.RLock = field(default_factory=threading.RLock)
     runs: dict[str, Run] = field(default_factory=dict[str, Run])
     tasks: dict[str, TaskRow] = field(default_factory=dict[str, TaskRow])
+    stream_runs: dict[tuple[str, str], str] = field(default_factory=dict[tuple[str, str], str])
     logs: dict[str, list[tuple[datetime, str]]] = field(default_factory=dict[str, list[tuple[datetime, str]]])
     versions: dict[str, Version] = field(default_factory=dict[str, Version])
     seal_seq: int = 0
+    writers: dict[str, str] = field(default_factory=dict[str, str])  # who holds the claim of a version
     slices: dict[tuple[str, str], dict[str, bool]] = field(
         default_factory=dict[tuple[str, str], dict[str, bool]]
     )
@@ -188,9 +198,44 @@ class _Runs(RunJournal):
                 finished_at=self._d.clock.now(),
             )
 
-    def list_tasks(self, run_id: str) -> list[TaskRow]:
+    def stream_run(self, flow: str, day: str) -> str:
         with self._d.lock:
-            return [t for t in self._d.tasks.values() if t.run_id == run_id]
+            found = self._d.stream_runs.get((flow, day))
+            if found is None:
+                found = self.create_run(flow, STREAM_TRIGGER, "system", {"day": day}, status="succeeded")
+                self._d.stream_runs[(flow, day)] = found
+            return found
+
+    def list_tasks(
+        self,
+        run_id: str,
+        *,
+        status: str | None = None,
+        kinds: Sequence[str] | None = None,
+        limit: int | None = None,
+        after_task: str | None = None,
+        newest_first: bool = False,
+    ) -> list[TaskRow]:
+        with self._d.lock:
+            rows = [t for t in self._d.tasks.values() if t.run_id == run_id]
+        if newest_first:
+            rows.reverse()
+        if after_task is not None:
+            at = next((i for i, row in enumerate(rows) if row.task_id == after_task), None)
+            rows = [] if at is None else rows[at + 1 :]
+        rows = [
+            t for t in rows if (status is None or t.status == status) and (kinds is None or t.kind in kinds)
+        ]
+        return rows if limit is None else rows[:limit]
+
+    def task_by_ref(self, run_id: str, ref: str) -> TaskRow | None:
+        return next((t for t in self.list_tasks(run_id) if t.ref == ref), None)
+
+    def tasks_by_ref(self, run_id: str, prefix: str) -> list[TaskRow]:
+        return [t for t in self.list_tasks(run_id) if t.ref.startswith(prefix)]
+
+    def count_tasks(self, run_id: str) -> Mapping[tuple[str, str], int]:
+        return Counter((t.kind, t.status) for t in self.list_tasks(run_id))
 
     def log(self, task_id: str, level: str, message: str) -> None:
         with self._d.lock:
@@ -237,17 +282,50 @@ class _Versions(VersionStore):
     def __init__(self, data: _Data) -> None:
         self._d = data
 
-    def stage(self, draft: VersionDraft) -> Version:
+    @property
+    def lock(self) -> threading.RLock:
+        return self._d.lock
+
+    def check_writable(self, version_id: str, writer: str | None) -> None:
         with self._d.lock:
-            existing = self._d.versions.get(draft.version_id)
+            existing = self._d.versions.get(version_id)
             if existing is not None and existing.status == "sealed":
-                raise VersionSealed(f"version {draft.version_id} is sealed")
+                raise VersionSealed(f"version {version_id} is sealed")
+            if writer is not None and self._d.writers.get(version_id) != writer:
+                raise StaleWriter(f"version {version_id} was claimed by a later execution")
+
+    def claim(self, version_id: str, writer: str, run_id: str, dataset: str, partition: str) -> None:
+        with self._d.lock:
+            if self._d.slices.get((run_id, dataset), {}).get(partition):
+                raise SliceFinished(f"slice {partition} of run {run_id} is done")
+            self.check_writable(version_id, None)
+            self._d.writers[version_id] = writer
+            self._d.versions.pop(version_id, None)
+
+    def take_over(self, version_ids: Sequence[str], writer: str) -> None:
+        with self._d.lock:
+            for version_id in version_ids:
+                self.check_writable(version_id, None)
+            self._d.writers.update(dict.fromkeys(version_ids, writer))
+
+    def stage(self, draft: VersionDraft, writer: str | None = None) -> Version:
+        with self._d.lock:
+            self.check_writable(draft.version_id, writer)
             version = Version(**vars(draft))
             self._d.versions[draft.version_id] = version
             return version
 
-    def seal(self, version_ids: Sequence[str], routes: Sequence[str]) -> list[Version]:
+    def seal(
+        self, version_ids: Sequence[str], routes: Sequence[str], writer: str | None = None
+    ) -> list[Version]:
         with self._d.lock:
+            if writer is not None:  # before the rest: a version that a later claim took away is not "missing"
+                for version_id in version_ids:
+                    found = self._d.versions.get(version_id)
+                    if (found is None or found.status != "sealed") and self._d.writers.get(
+                        version_id
+                    ) != writer:
+                        raise StaleWriter(f"version {version_id} was claimed by a later execution")
             missing = [v for v in version_ids if v not in self._d.versions]
             if missing:
                 raise KeyError(
@@ -271,11 +349,9 @@ class _Versions(VersionStore):
                 sealed.append(version)
             return sealed
 
-    def discard_staged(self, version_id: str) -> None:
+    def discard_staged(self, version_id: str, writer: str | None = None) -> None:
         with self._d.lock:
-            existing = self._d.versions.get(version_id)
-            if existing is not None and existing.status == "sealed":
-                raise VersionSealed(f"version {version_id} is sealed")
+            self.check_writable(version_id, writer)
             self._d.versions.pop(version_id, None)
 
     def get(self, version_id: str) -> Version:
@@ -321,11 +397,14 @@ class _Versions(VersionStore):
             for partition in partitions:
                 slices.setdefault(partition, False)  # a replay must not undo finished slices
 
-    def finish_slice(self, run_id: str, dataset: str, partition: str) -> bool:
+    def finish_slice(self, run_id: str, dataset: str, partition: str, writer: str | None = None) -> bool:
         with self._d.lock:
             slices = self._d.slices[(run_id, dataset)]
             if partition not in slices:
                 raise KeyError(f"slice {partition} is not registered for run {run_id}, dataset {dataset}")
+            version_id = stable_id(run_id, dataset, partition)
+            if writer is not None and not slices[partition] and self._d.writers.get(version_id) != writer:
+                raise StaleWriter(f"slice {partition} of run {run_id} was claimed by a later execution")
             slices[partition] = True
             return all(slices.values())
 
@@ -333,17 +412,28 @@ class _Versions(VersionStore):
         with self._d.lock:
             return list(self._d.slices.get((run_id, dataset), {}))
 
-    def staged_for_run(self, run_id: str, dataset: str) -> list[Version]:
+    def staged_for_run(self, run_id: str, dataset: str, tick: str | None = None) -> list[Version]:
         with self._d.lock:
             return [
                 v
                 for v in self._d.versions.values()
-                if v.status == "staged" and v.run_id == run_id and v.dataset == dataset
+                if v.status == "staged"
+                and v.run_id == run_id
+                and v.dataset == dataset
+                and (tick is None or v.tick == tick)
             ]
 
-    def sealed_for_run(self, run_id: str, dataset: str) -> list[Version]:
+    def newest_sealed_for_run(self, run_id: str, dataset: str, limit: int) -> list[Version]:
         with self._d.lock:
-            found = [v for v in self._sealed(dataset, None) if v.run_id == run_id]
+            return [v for v in self._sealed(dataset, None) if v.run_id == run_id][:limit]
+
+    def sealed_for_run(self, run_id: str, dataset: str, tick: str | None = None) -> list[Version]:
+        with self._d.lock:
+            found = [
+                v
+                for v in self._sealed(dataset, None)
+                if v.run_id == run_id and (tick is None or v.tick == tick)
+            ]
         return found[::-1]  # `_sealed` is newest first
 
     def list_versions(self, dataset: str, partition: str | None = None, limit: int = 100) -> list[Version]:
@@ -361,10 +451,28 @@ class _Versions(VersionStore):
 
     def runs_ready_to_seal(self) -> list[tuple[str, str]]:
         with self._d.lock:
-            staged = {(v.run_id, v.dataset) for v in self._d.versions.values() if v.status == "staged"}
+            staged = {
+                (v.run_id, v.dataset)
+                for v in self._d.versions.values()
+                if v.status == "staged" and not self._ended_badly(v.run_id)
+            }
             return sorted(
                 key for key, slices in self._d.slices.items() if key in staged and all(slices.values())
             )
+
+    def _ended_badly(self, run_id: str) -> bool:
+        run = self._d.runs.get(run_id)
+        return run is not None and run.status in ("failed", "cancelled")
+
+    def abandoned(self, limit: int = 1000) -> list[Version]:
+        with self._d.lock:
+            return [
+                v
+                for v in self._d.versions.values()
+                if v.status == "staged"
+                and self._ended_badly(v.run_id)
+                and self._d.runs[v.run_id].trigger != STREAM_TRIGGER
+            ][:limit]
 
     def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:
         with self._d.lock:
@@ -385,6 +493,7 @@ class _Versions(VersionStore):
             found = [v for v in dict.fromkeys(version_ids) if v in self._d.versions]
             for version_id in found:
                 del self._d.versions[version_id]
+                self._d.writers.pop(version_id, None)
             return len(found)
 
     def _sealed_all(self) -> list[Version]:
@@ -489,15 +598,22 @@ class _Ledger(Ledger):
         with self._d.lock:
             return all(d.status == "applied" for d in self._d.deliveries.values())
 
-    def pending_older_than(self, age: timedelta, *, now: datetime | None = None) -> list[Delivery]:
+    def pending_older_than(
+        self, age: timedelta, *, now: datetime | None = None, limit: int = 1000
+    ) -> list[Delivery]:
         cutoff = (self._d.clock.now() if now is None else now) - age
         with self._d.lock:
+            next_up: dict[tuple[str, str, str], Delivery] = {}
+            for delivery in sorted(self._d.deliveries.values(), key=lambda d: d.seal_seq):
+                if delivery.status not in CLOSED:
+                    stream = (delivery.route, delivery.dataset, delivery.partition)
+                    next_up.setdefault(stream, delivery)
             found = [
                 d
-                for key, d in self._d.deliveries.items()
-                if d.status == "pending" and self._d.changed[key] < cutoff
+                for d in next_up.values()
+                if d.status == "pending" and self._d.changed[(d.route, d.version_id)] < cutoff
             ]
-        return sorted(found, key=lambda d: (d.seal_seq, d.route))
+        return sorted(found, key=lambda d: (d.seal_seq, d.route))[:limit]
 
     def open_versions(self, version_ids: Iterable[str]) -> set[str]:
         wanted = set(version_ids)
@@ -977,14 +1093,145 @@ class _Reads(ReadStore):
             return found
 
 
+@dataclass
+class _InboxRow:
+    event: InboxEvent
+    day: date
+    sealed_at: datetime | None = None
+    held: bool = False
+
+
+class _Inbox(InboxStore):
+    def __init__(self, data: _Data, versions: _Versions) -> None:
+        self._d = data
+        self._versions = versions
+        self._rows: dict[int, _InboxRow] = {}
+        self._seen: dict[tuple[str, str], date] = {}
+        self._seq = 0
+
+    def ensure_partitions(self, days_ahead: int = 7) -> None:
+        """Memory needs no partitions."""
+
+    def put(self, dataset: str, request: InboundRequest, event_id: str | None = None) -> bool:
+        with self._d.lock:
+            day = self._d.clock.now().date()
+            if event_id is not None:
+                if (dataset, event_id) in self._seen:
+                    return False
+                self._seen[(dataset, event_id)] = day
+            self._seq += 1
+            event = InboxEvent(self._seq, dataset, event_id, request, request.received_at)
+            self._rows[self._seq] = _InboxRow(event, day)
+            return True
+
+    def put_many(self, events: Sequence[tuple[str, InboundRequest, str | None]]) -> list[bool]:
+        return [self.put(dataset, request, event_id) for dataset, request, event_id in events]
+
+    def _open(self, dataset: str) -> list[InboxEvent]:
+        rows = (
+            r
+            for r in self._rows.values()
+            if r.sealed_at is None and not r.held and r.event.dataset == dataset
+        )
+        return sorted((r.event for r in rows), key=lambda event: event.event_seq)
+
+    def defer(self, event_seq: int, until: datetime) -> None:
+        with self._d.lock:
+            row = self._rows.get(event_seq)
+            if row is not None and row.sealed_at is None and not row.held:
+                row.event = replace(row.event, tries=row.event.tries + 1, retry_at=until)
+
+    def hold(self, event_seq: int) -> None:
+        with self._d.lock:
+            row = self._rows.get(event_seq)
+            if row is None or row.sealed_at is not None or row.held:
+                raise StaleWriter("another sealer has dealt with this event")
+            row.held = True
+
+    def _held(self, dataset: str, event_seq: int) -> _InboxRow | None:
+        row = self._rows.get(event_seq)
+        return row if row is not None and row.held and row.event.dataset == dataset else None
+
+    def reprocess(self, dataset: str, event_seq: int) -> bool:
+        with self._d.lock:
+            row = self._held(dataset, event_seq)
+            if row is None:
+                return False
+            row.held = False
+            row.event = replace(row.event, tries=0, retry_at=None)
+            return True
+
+    def release(self, dataset: str, event_seq: int) -> bool:
+        with self._d.lock:
+            row = self._held(dataset, event_seq)
+            if row is None:
+                return False
+            row.held = False
+            row.sealed_at = self._d.clock.now()
+            return True
+
+    def take(self, dataset: str, limit: int) -> list[InboxEvent]:
+        with self._d.lock:
+            return self._open(dataset)[:limit]
+
+    def oldest_age(self, dataset: str, now: datetime) -> timedelta | None:
+        with self._d.lock:
+            found = self._open(dataset)
+        return now - found[0].received_at if found else None
+
+    def seal_batch(
+        self,
+        event_seqs: Sequence[int],
+        drafts: Sequence[VersionDraft],
+        routes: Sequence[str],
+        writer: str | None = None,
+    ) -> list[Version]:
+        with (
+            self._d.lock
+        ):  # every check comes before the first change, which is what one transaction amounts to here
+            for seq in event_seqs:
+                row = self._rows.get(seq)
+                if row is None or row.sealed_at is not None or row.held:
+                    raise StaleWriter("another sealer has dealt with an event of this batch")
+            for draft in drafts:
+                self._versions.check_writable(draft.version_id, writer)
+            for seq in event_seqs:
+                self._rows[seq].sealed_at = self._d.clock.now()
+            for draft in drafts:
+                self._versions.stage(draft, writer)
+            return self._versions.seal([draft.version_id for draft in drafts], routes, writer)
+
+    def days(self) -> list[date]:
+        with self._d.lock:
+            return sorted({row.day for row in self._rows.values()})
+
+    def day_status(self, day: date) -> InboxDay:
+        with self._d.lock:
+            rows = [row for row in self._rows.values() if row.day == day]
+        waiting = [row.event.event_seq for row in rows if row.sealed_at is None]
+        sealed = [row.sealed_at for row in rows if row.sealed_at is not None]
+        return InboxDay(len(waiting), min(waiting, default=None), max(sealed, default=None))
+
+    def drop_day(self, day: date) -> bool:
+        with self._d.lock:
+            rows = {seq: row for seq, row in self._rows.items() if row.day == day}
+            if any(row.sealed_at is None for row in rows.values()):
+                return False
+            for seq in rows:
+                del self._rows[seq]
+            self._seen = {key: seen for key, seen in self._seen.items() if seen != day}
+            return True
+
+
 class MemoryStore(Store):
     """A `Store` that keeps everything in memory. `clock` defaults to the system clock."""
 
     def __init__(self, clock: Clock | None = None) -> None:
         data = _Data(clock or SystemClock())
+        versions = _Versions(data)
         super().__init__(
             runs=_Runs(data),
-            versions=_Versions(data),
+            versions=versions,
             ledger=_Ledger(data),
             state=_State(data),
             quarantine=_Quarantine(data),
@@ -996,4 +1243,5 @@ class MemoryStore(Store):
             users=_Users(data),
             audit=_Audit(data),
             reads=_Reads(data),
+            inbox=_Inbox(data, versions),
         )

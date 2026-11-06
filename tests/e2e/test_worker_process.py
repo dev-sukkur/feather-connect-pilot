@@ -1,25 +1,17 @@
 """The worker as a real process, against the test Postgres. `demo_project` is a small project made for these tests."""
 
 import json
-import os
-import signal
-import subprocess
-import sys
 import time
 import uuid
-from collections.abc import Callable, Iterator
 from pathlib import Path
 from textwrap import dedent
 from typing import Any
 
 import pytest
+from real_stack import start_worker, stop_gracefully, wait_until
 
 from feather_connect.project import load_project
 from feather_connect.runtime.runtime import Runtime
-from feather_connect.storage.port import Store
-from feather_connect.storage.postgres.connect import connect
-from feather_connect.storage.spool import Spool
-from feather_engine_dbos import DbosEngine
 
 pytestmark = pytest.mark.postgres
 
@@ -76,65 +68,6 @@ def sim_sink_rows(project: Path) -> list[dict[str, Any]]:
     return [json.loads(line)["payload"] for line in out.read_text().splitlines()] if out.exists() else []
 
 
-def wait_until(check: Callable[[], Any], timeout: float = 30) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            if check():
-                return
-        except KeyError:
-            pass
-        time.sleep(0.2)
-    raise AssertionError("timed out waiting")
-
-
-@pytest.fixture
-def db(pg_url: str) -> Iterator[tuple[Store, Spool]]:
-    from feather_connect.storage.postgres.migrate import migrate
-
-    migrate(pg_url)
-    yield connect(pg_url)
-
-
-def start_worker(project: Path, pg_url: str, worker_id: str, sha: str = SHA) -> subprocess.Popen[bytes]:
-    env = {**os.environ, "FEATHER_CODE_SHA": sha}
-    flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0  # type: ignore[attr-defined]
-    return subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "feather_connect.worker",
-            str(project),
-            "dev",
-            "--database-url",
-            pg_url,
-            "--worker-id",
-            worker_id,
-            "--poll-s",
-            "0.1",
-        ],
-        env=env,
-        creationflags=flags,
-    )
-
-
-@pytest.fixture
-def workers() -> Iterator[list[subprocess.Popen[bytes]]]:
-    procs: list[subprocess.Popen[bytes]] = []
-    yield procs
-    for proc in procs:
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait()
-
-
-def stop_gracefully(proc: subprocess.Popen[bytes]) -> None:
-    if sys.platform == "win32":
-        proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
-    else:
-        proc.terminate()
-
-
 def test_worker_registers_catalogue_and_heartbeats(demo_project, pg_url, db, workers):
     store, _ = db
     wid = "w-" + uuid.uuid4().hex[:6]
@@ -152,17 +85,19 @@ def test_worker_registers_catalogue_and_heartbeats(demo_project, pg_url, db, wor
     )
 
 
-def test_a_run_completes_through_a_real_worker(demo_project, pg_url, db, workers):
+def test_a_run_completes_through_a_real_worker(demo_project, pg_url, db, workers, client_engine):
     store, spool = db
     workers.append(start_worker(demo_project, pg_url, "w-run-" + uuid.uuid4().hex[:6]))
-    client = Runtime(load_project(demo_project, "dev").flows, store, spool, DbosEngine(pg_url))
+    client = Runtime(load_project(demo_project, "dev").flows, store, spool, client_engine)
     wait_until(lambda: store.workers.list_workers())
     run = client.start_run("demo")
     wait_until(lambda: store.runs.get_run(run).status == "succeeded", timeout=60)
     assert sim_sink_rows(demo_project) == ROWS
 
 
-def test_a_retry_is_noted_in_the_journal_through_a_real_worker(demo_project, pg_url, db, workers):
+def test_a_retry_is_noted_in_the_journal_through_a_real_worker(
+    demo_project, pg_url, db, workers, client_engine
+):
     """Seed 5 makes the first two reads of the source time out and the third one work."""
     store, spool = db
     flow = demo_project / "flows" / "demo.py"
@@ -173,7 +108,7 @@ def test_a_retry_is_noted_in_the_journal_through_a_real_worker(demo_project, pg_
         )
     )
     workers.append(start_worker(demo_project, pg_url, "w-retry-" + uuid.uuid4().hex[:6]))
-    client = Runtime(load_project(demo_project, "dev").flows, store, spool, DbosEngine(pg_url))
+    client = Runtime(load_project(demo_project, "dev").flows, store, spool, client_engine)
     wait_until(lambda: store.workers.list_workers())
     run = client.start_run("demo")
     wait_until(lambda: store.runs.get_run(run).status == "succeeded", timeout=90)

@@ -1,6 +1,7 @@
+import itertools
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -10,10 +11,11 @@ import feather_connect as fc
 from feather_connect.clock import FrozenClock
 from feather_connect.connectors import memory
 from feather_connect.connectors import simulation as sim
-from feather_connect.core.connector import ApplyBatch, ApplyRecord, ReadRequest
+from feather_connect.core.connector import ApplyBatch, ApplyRecord, Deleted, InboundRequest, ReadRequest
 from feather_connect.core.context import Context
 from feather_connect.core.errors import PermanentError, TransientError
 from feather_connect.core.partitions import by_day, none
+from feather_connect.core.webhooks import SignatureInvalid
 from feather_connect.engine.local import LocalEngine
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.memory import MemoryStore
@@ -261,3 +263,69 @@ def test_the_failures_of_a_sink_repeat_with_the_seed() -> None:
 def test_a_fail_rate_outside_zero_to_one_is_refused() -> None:
     with pytest.raises(ValueError, match="fail_rate"):
         sim.Sink(fail_rate=1.5)
+
+
+# As a push source.
+
+
+def _push_source(**kwargs: Any) -> sim.Source:
+    return sim.Source("hooks", generator={"id": sim.seq()}, rows_per_partition=3, **kwargs)
+
+
+def _context(now: datetime, **config: Any) -> Context:
+    return Context(config, logging.getLogger("hooks"), now, "UTC")
+
+
+PUSH_T0 = datetime(2026, 10, 18, 9, 0, tzinfo=UTC)
+
+
+def _inbound(body: bytes, **headers: str) -> InboundRequest:
+    return InboundRequest("POST", "/", headers, body, PUSH_T0)
+
+
+def test_push_events_are_signed_so_that_verify_takes_them():
+    source = _push_source()
+    events = source.events(10, secret="k", start=PUSH_T0)
+    first, second = next(events), next(events)
+    ctx = _context(PUSH_T0, signature_secret="k")
+    source.verify(ctx, first)
+    assert second.received_at - first.received_at == timedelta(seconds=0.1)
+    assert source.event_id(first) != source.event_id(second)
+    with pytest.raises(SignatureInvalid):
+        source.verify(_context(PUSH_T0, signature_secret="other"), first)
+
+
+def test_push_events_go_on_past_the_end_of_the_rows():
+    events = _push_source().events(1000, secret="k", start=PUSH_T0)
+    ids = [json.loads(next(events).body)["event_id"] for _ in range(7)]
+    assert len(set(ids)) == 7
+
+
+def test_bursty_push_events_come_together_at_the_same_average_rate():
+    events = list(itertools.islice(_push_source().events(10, secret="k", bursty=True, start=PUSH_T0), 40))
+    assert len({e.received_at for e in events}) == 2
+    assert events[20].received_at - events[0].received_at == timedelta(seconds=2)
+
+
+def test_push_verify_needs_its_secret():
+    with pytest.raises(PermanentError, match="signature_secret"):
+        _push_source().verify(_context(PUSH_T0), _inbound(b"{}"))
+
+
+def test_push_receive_reads_objects_lists_and_deletes():
+    source = _push_source()
+    ctx = _context(PUSH_T0)
+    assert source.receive(ctx, _inbound(b'{"id": 1}')) == [{"id": 1}]
+    assert source.receive(ctx, _inbound(b'[{"id": 1}, {"id": 2, "_deleted": true}]')) == [
+        {"id": 1},
+        Deleted({"id": 2}),
+    ]
+    with pytest.raises(TypeError):
+        source.receive(ctx, _inbound(b"[1]"))
+
+
+def test_push_event_id_comes_from_the_body():
+    source = _push_source()
+    assert source.event_id(_inbound(b'{"event_id": "e1"}')) == "e1"
+    assert source.event_id(_inbound(b'{"event_id": 7}')) is None
+    assert source.event_id(_inbound(b"[]")) is None

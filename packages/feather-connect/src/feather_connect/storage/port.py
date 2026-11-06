@@ -8,8 +8,11 @@ import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import Any, Literal, Protocol
+from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+if TYPE_CHECKING:  # only as a type: the connector module reaches this one through the context's budget handle
+    from feather_connect.core.connector import InboundRequest
 
 Priority = Literal["low", "normal", "high"]
 VersionStatus = Literal["staged", "sealed"]
@@ -20,6 +23,14 @@ WorkerState = Literal["alive", "draining", "dead"]
 
 class VersionSealed(Exception):
     """A sealed version was staged again. Sealed versions never change (I1)."""
+
+
+class StaleWriter(Exception):
+    """An execution wrote to a version that a later execution has claimed. Only the last claim may write (I1)."""
+
+
+class SliceFinished(Exception):
+    """An execution claimed a slice whose run has marked it done: the read that finished it stands, for the seal task."""
 
 
 class InvalidTransition(Exception):
@@ -38,6 +49,9 @@ TRANSITIONS: Mapping[DeliveryStatus, frozenset[DeliveryStatus]] = {
 }
 
 # Statuses that no longer hold up the next version of a partition (I2).
+STREAM_TRIGGER = (
+    "stream"  # the trigger of a flow's daily run, which a poller's ticks and a push dataset's versions join
+)
 CLOSED: frozenset[DeliveryStatus] = frozenset({"applied", "skipped", "compensated"})
 
 
@@ -97,6 +111,9 @@ class VersionDraft:
     schema_hash: str | None
     watermark: Any
     code_sha: str
+    tick: str | None = (
+        None  # of a daily stream run: the tick that read it, as its run holds many ticks' versions
+    )
 
 
 @dataclass(frozen=True)
@@ -222,7 +239,37 @@ class RunJournal(Protocol):
         """End the task. Without an `error`, the one `record_attempt` left stays."""
         ...
 
-    def list_tasks(self, run_id: str) -> list[TaskRow]: ...
+    def stream_run(self, flow: str, day: str) -> str:
+        """Return the flow's daily stream run of `day`, an ISO date, making it if there is none. Racing callers get the
+        same run. A new one has trigger `stream` and status `succeeded`, having nothing to do yet."""
+        ...
+
+    def list_tasks(
+        self,
+        run_id: str,
+        *,
+        status: str | None = None,
+        kinds: Sequence[str] | None = None,
+        limit: int | None = None,
+        after_task: str | None = None,
+        newest_first: bool = False,
+    ) -> list[TaskRow]:
+        """The run's tasks in the order they were added, or the other way round with `newest_first`.
+
+        A run can hold thousands of tasks, so whatever runs per task or per tick asks for what it needs here: its cost
+        follows what it gets back. `after_task` is the id of the last task of the previous page.
+        """
+        ...
+
+    def task_by_ref(self, run_id: str, ref: str) -> TaskRow | None: ...
+    def tasks_by_ref(self, run_id: str, prefix: str) -> list[TaskRow]:
+        """The run's tasks whose `ref` starts with `prefix`, in the order they were added."""
+        ...
+
+    def count_tasks(self, run_id: str) -> Mapping[tuple[str, str], int]:
+        """How many tasks the run has of each (kind, status)."""
+        ...
+
     def log(self, task_id: str, level: str, message: str) -> None: ...
     def task_logs(self, task_id: str) -> list[str]:
         """The task's log lines in order, each as `level: message`."""
@@ -243,21 +290,46 @@ class RunJournal(Protocol):
 class VersionStore(Protocol):
     """Versions, from staging to sealing, and the slices of a run."""
 
-    def stage(self, draft: VersionDraft) -> Version:
-        """Store a draft. Staging a version again replaces it, until it is sealed; then `VersionSealed`."""
-        ...
+    def claim(self, version_id: str, writer: str, run_id: str, dataset: str, partition: str) -> None:
+        """Make `writer` the only execution that may write this version, and forget the version staged before it.
 
-    def seal(self, version_ids: Sequence[str], routes: Sequence[str]) -> list[Version]:
-        """Seal each version, give it the next `seal_seq` and a pending delivery per route.
+        A task can run twice at once, and both copies use the same version id. The last claim wins: from here on the
+        spool, `stage`, `seal`, `discard_staged` and `finish_slice` refuse any other writer with `StaleWriter`, so that a
+        version is only ever sealed with the chunks of one execution.
 
-        Sealing a version that is already sealed changes nothing.
+        Raises `VersionSealed` for a sealed version, and `SliceFinished` when (`run_id`, `dataset`, `partition`) is a slice
+        marked done, whose seal task may be working from it. Neither changes anything.
         """
         ...
 
-    def discard_staged(self, version_id: str) -> None:
+    def take_over(self, version_ids: Sequence[str], writer: str) -> None:
+        """Make `writer` the writer of staged versions, as they are, for a seal task to decide and seal them.
+
+        Raises `VersionSealed`, changing nothing, if any of them is sealed.
+        """
+        ...
+
+    def stage(self, draft: VersionDraft, writer: str | None = None) -> Version:
+        """Store a draft. Staging a version again replaces it, until it is sealed; then `VersionSealed`.
+
+        With a `writer`, raises `StaleWriter` unless it holds the claim.
+        """
+        ...
+
+    def seal(
+        self, version_ids: Sequence[str], routes: Sequence[str], writer: str | None = None
+    ) -> list[Version]:
+        """Seal each version, give it the next `seal_seq` and a pending delivery per route.
+
+        Sealing a version that is already sealed changes nothing. With a `writer`, raises `StaleWriter`, sealing none,
+        unless it holds the claim of each version that isn't sealed yet.
+        """
+        ...
+
+    def discard_staged(self, version_id: str, writer: str | None = None) -> None:
         """Remove a staged version, which an extract found it had no need of. An unknown id changes nothing.
 
-        Raises `VersionSealed` for a sealed version.
+        Raises `VersionSealed` for a sealed version. With a `writer`, raises `StaleWriter` unless it holds the claim.
         """
         ...
 
@@ -280,16 +352,26 @@ class VersionStore(Protocol):
         ...
 
     def register_slices(self, run_id: str, dataset: str, partitions: Iterable[str]) -> None: ...
-    def finish_slice(self, run_id: str, dataset: str, partition: str) -> bool:
-        """Mark a slice done. True when every registered slice of the run's dataset is done. Safe to repeat."""
+    def finish_slice(self, run_id: str, dataset: str, partition: str, writer: str | None = None) -> bool:
+        """Mark a slice done. True when every registered slice of the run's dataset is done. Safe to repeat.
+
+        With a `writer`, raises `StaleWriter` unless the slice is done already or it holds the claim of the slice's version.
+        """
         ...
 
     def slices_for_run(self, run_id: str, dataset: str) -> list[str]:
         """The partitions given to `register_slices` for the run's dataset, finished or not, each once."""
         ...
 
-    def staged_for_run(self, run_id: str, dataset: str) -> list[Version]: ...
-    def sealed_for_run(self, run_id: str, dataset: str) -> list[Version]:
+    def staged_for_run(self, run_id: str, dataset: str, tick: str | None = None) -> list[Version]:
+        """The run's staged versions of `dataset`, or with `tick` only that tick's."""
+        ...
+
+    def newest_sealed_for_run(self, run_id: str, dataset: str, limit: int) -> list[Version]:
+        """The newest `limit` sealed versions of the run and dataset, newest first."""
+        ...
+
+    def sealed_for_run(self, run_id: str, dataset: str, tick: str | None = None) -> list[Version]:
         """All of the run's sealed versions of the dataset, in seal order."""
         ...
 
@@ -304,8 +386,13 @@ class VersionStore(Protocol):
     def runs_ready_to_seal(self) -> list[tuple[str, str]]:
         """The `(run_id, dataset)` pairs whose slices are all finished and that still have a staged version.
 
-        Their seal task has not run to the end: it was never submitted, or it was lost.
+        Their seal task has not run to the end: it was never submitted, or it was lost. A run that failed or was
+        cancelled is not one: nothing will seal it (see `abandoned`).
         """
+        ...
+
+    def abandoned(self, limit: int = 1000) -> list[Version]:
+        """Staged versions of runs that failed or were cancelled, which nothing will seal, oldest staged first."""
         ...
 
     def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:
@@ -364,7 +451,9 @@ class Ledger(Protocol):
         """True when every delivery is applied, which includes there being none."""
         ...
 
-    def pending_older_than(self, age: timedelta, *, now: datetime | None = None) -> list[Delivery]:
+    def pending_older_than(
+        self, age: timedelta, *, now: datetime | None = None, limit: int = 1000
+    ) -> list[Delivery]:
         """The pending deliveries that last changed more than `age` before `now` (the store's clock by default).
 
         In seal order. A delivery that is pending has nothing running it, or a task waiting out a retry delay.
@@ -425,6 +514,102 @@ class QuarantineStore(Protocol):
         ...
 
     def list_open(self, route: str | None = None) -> list[QuarantineRow]: ...
+
+
+@dataclass(frozen=True)
+class InboxEvent:
+    """A push event in the inbox. `event_seq` says the order of arrival, and `event_id` is what the sender calls it.
+
+    `tries` counts the reads of it that failed in a way that may pass, and `retry_at` is when to read it again.
+    """
+
+    event_seq: int
+    dataset: str
+    event_id: str | None
+    request: "InboundRequest"
+    received_at: datetime
+    tries: int = 0
+    retry_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class InboxDay:
+    """How a day of the inbox stands: how many events wait to be sealed, the first of them, and when the last sealed."""
+
+    unsealed: int
+    first_unsealed: int | None
+    last_sealed: datetime | None
+
+
+class InboxStore(Protocol):
+    """Push events between arriving and being sealed, kept by the day of their arrival (design 6.3 and 7.4)."""
+
+    def put(self, dataset: str, request: "InboundRequest", event_id: str | None = None) -> bool:
+        """Store an event. False, storing nothing, when the dataset has had this `event_id` on a day it still holds."""
+        ...
+
+    def put_many(self, events: "Sequence[tuple[str, InboundRequest, str | None]]") -> list[bool]:
+        """Store (dataset, request, event id) in that order, all or none, and say of each what `put` would have."""
+        ...
+
+    def take(self, dataset: str, limit: int) -> list[InboxEvent]:
+        """The dataset's oldest events neither sealed nor held, in arrival order. They stay there until `seal_batch`."""
+        ...
+
+    def oldest_age(self, dataset: str, now: datetime) -> timedelta | None:
+        """How long the oldest event neither sealed nor held has waited, or None when none waits."""
+        ...
+
+    def defer(self, event_seq: int, until: datetime) -> None:
+        """Count a failed try of the event, and set when to read it again. An event sealed or held meanwhile stays so."""
+        ...
+
+    def hold(self, event_seq: int) -> None:
+        """Set the event aside, unsealed, for someone to `reprocess` or `release`: `take` passes it by, and its day keeps.
+
+        Raises `StaleWriter` if the event is unknown, sealed or held, since another sealer has dealt with it.
+        """
+        ...
+
+    def reprocess(self, dataset: str, event_seq: int) -> bool:
+        """Give a held event back to the sealer, with its tries forgotten. Returns whether it was held."""
+        ...
+
+    def release(self, dataset: str, event_seq: int) -> bool:
+        """Seal a held event with no version, letting it go. Returns whether it was held."""
+        ...
+
+    def seal_batch(
+        self,
+        event_seqs: Sequence[int],
+        drafts: Sequence[VersionDraft],
+        routes: Sequence[str],
+        writer: str | None = None,
+    ) -> list["Version"]:
+        """Mark the events sealed, then stage and seal the versions with a pending delivery per route, in one transaction.
+
+        Either all of it happens or none. Raises `StaleWriter` if any event is unknown or already sealed, since another
+        sealer has dealt with it, or if a `writer` doesn't hold the claim of a draft, and `VersionSealed` if a draft is
+        sealed already. `drafts` can be empty, for events that gave no records.
+        """
+        ...
+
+    def days(self) -> list[date]:
+        """The days the inbox holds a place for, oldest first, with or without events."""
+        ...
+
+    def day_status(self, day: date) -> InboxDay: ...
+    def drop_day(self, day: date) -> bool:
+        """Forget the day's events and event ids, unless one of its events is not sealed, and return whether it did.
+
+        This is the one check that counts: an unsealed event, held or not, is never dropped, whatever was read
+        before.
+        """
+        ...
+
+    def ensure_partitions(self, days_ahead: int = 7) -> None:
+        """Make room for writes from today to `days_ahead` days on, for a backend that needs it."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -818,3 +1003,9 @@ class Store:
     users: UserStore
     audit: AuditStore
     reads: ReadStore
+    inbox: InboxStore
+
+    def is_unavailable(self, error: BaseException) -> bool:
+        """Whether `error` says that the store can't be reached, or can't keep up, just now, so that the same call may
+        work later. Otherwise it refused what it was given, and will again."""
+        return isinstance(error, ConnectionError | TimeoutError)

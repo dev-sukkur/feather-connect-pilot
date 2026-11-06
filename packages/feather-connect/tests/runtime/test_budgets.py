@@ -153,6 +153,7 @@ class World:
             users=base.users,
             audit=base.audit,
             reads=base.reads,
+            inbox=base.inbox,
         )
         self.store.budgets.define(spec)
         self.engine = LocalEngine(self.clock)
@@ -288,3 +289,76 @@ def test_a_deferred_extract_does_not_use_up_an_attempt():
     assert dry.reads == 8 and clock.now() - T0 >= timedelta(hours=56)
     [extract] = [t for t in store.runs.list_tasks(run) if t.kind == "extract"]
     assert extract.status == "succeeded"
+
+
+class PagedSource(Source):
+    """Makes one metered call per row, as a source that reads many pages does."""
+
+    def read(self, ctx: Context, req: ReadRequest) -> Iterator[list[dict[str, Any]]]:
+        assert ctx.budget is not None
+        for batch in super().read(ctx, req):
+            for row in batch:
+                ctx.budget.acquire()
+                yield [row]
+
+
+def paged_world(calls: int, limit: str, **kw: Any) -> World:
+    reserve = kw.pop("reserve", {})
+    dataset = fc.Dataset(
+        "d", source=PagedSource("src", rows_of(calls)), key="id", strategy=fc.strategy.replace(), **kw
+    )
+    return World(
+        BudgetSpec("z", parse_limits([limit]), reserve=reserve),
+        [fc.Flow("f", reads=dataset, deliver=[fc.to(Sink("dst"), name="r")])],
+        {"src": "z"},
+    )
+
+
+def rows_of(calls: int) -> list[dict[str, Any]]:
+    return [{"id": n} for n in range(calls)]
+
+
+def test_a_read_that_needs_more_than_the_budget_holds_fails_with_the_reason():  # F12
+    world = paged_world(60, "50/hour")
+    run = world.runtime.start_run("f")
+    world.engine.run_until_idle()
+
+    found = world.store.runs.get_run(run)
+    assert found.status == "failed"
+    assert found.reason is not None and "budget 'z'" in found.reason and "holds 50" in found.reason
+    assert sum(g[2] for g in world.spy.grants) == 50  # it stops, instead of spending the budget for good
+    [extract] = [t for t in world.store.runs.list_tasks(run) if t.kind == "extract"]
+    assert extract.status == "failed" and extract.error == found.reason
+
+
+def test_a_read_that_fits_finishes_as_the_tokens_build_up():  # F12
+    world = paged_world(40, "50/hour")
+    assert world.store.budgets.acquire("z", 30).granted  # other work has used most of the window
+    run = world.runtime.start_run("f")
+    world.engine.run_until_idle()
+
+    assert world.store.runs.get_run(run).status == "succeeded"
+    assert world.clock.now() - T0 >= timedelta(minutes=20)  # what forty calls need to build up
+
+
+def test_a_read_that_never_fits_the_share_left_to_it_still_ends():  # F12
+    world = paged_world(30, "50/hour", priority="low", reserve={"high": 0.6})
+    run = world.runtime.start_run("f")
+    world.engine.run_until_idle()
+
+    found = world.store.runs.get_run(run)
+    assert found.status == "failed" and found.reason is not None and "budget 'z'" in found.reason
+    assert world.clock.now() - T0 < timedelta(days=1)
+
+
+def test_reads_competing_for_a_budget_only_wait():  # F12: being told to wait is not being too big
+    both = days(1, 6)
+    dataset = by_day_dataset("d", MeteredSource("src", rows_on(both, 1)))
+    world = World(
+        BudgetSpec("z", parse_limits(["1/hour"])),
+        [fc.Flow("f", reads=dataset, deliver=[fc.to(Sink("dst"), name="r")])],
+        {"src": "z"},
+    )
+    run = world.runtime.start_run("f", partitions=both)
+    world.engine.run_until_idle()
+    assert world.store.runs.get_run(run).status == "succeeded"

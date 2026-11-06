@@ -51,12 +51,12 @@ nav { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 15px; }
   <h1>Feather Connect Operating Guide</h1>
   <p class="lead prose">How to run Feather Connect on your machine, then how a customer creates a new flow, runs it, watches it and fixes it when something goes wrong.</p>
   <nav>
-    <a href="#run">Run it</a><a href="#create">Create a flow</a><a href="#start">Start the flow</a><a href="#monitor">Monitor</a><a href="#operate">Operate</a><a href="#limits">Not ready yet</a>
+    <a href="#run">Run it</a><a href="#create">Create a flow</a><a href="#start">Start the flow</a><a href="#monitor">Monitor</a><a href="#operate">Operate</a><a href="#webhooks">Webhooks</a><a href="#limits">Not ready yet</a>
   </nav>
 </header>
 
 <div class="status prose">
-  <p><b>This describes Stage 2 of milestone 1, a development setup.</b> Every screenshot and command comes from a real run on 1 Nov 2026. Today a flow can only read and write simulated data, because real connectors arrive in Stage 4. Until <a href="https://github.com/dev-sukkur/feather-connect/pull/3">PR 3</a> merges, the code is on the <code>stage-2-dashboard</code> branch.</p>
+  <p><b>This describes Stage 3 of milestone 1, a development setup.</b> The screenshots come from a real run of Stage 2 on 1 Nov 2026. Stage 3 changed what a fast schedule looks like (see <a href="#create">Create a flow</a>) and added webhooks (see <a href="#webhooks">Receive webhooks</a>). Today a flow can only read and write simulated data, because real connectors arrive in Stage 4. Until the Stage 3 pull request merges, the code is on the <code>stage-3-reliability</code> branch.</p>
 </div>
 
 <section id="run">
@@ -64,7 +64,7 @@ nav { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 15px; }
   <p class="prose">You need <a href="https://docs.astral.sh/uv/">uv</a> and a running Docker. Docker hosts the Postgres database. If you already have a database, set <code>FEATHER_DATABASE_URL</code> and Docker isn't needed.</p>
   <pre><code>git clone https://github.com/dev-sukkur/feather-connect.git
 cd feather-connect
-git switch stage-2-dashboard
+git switch stage-3-reliability
 uv sync --all-extras
 uv run feather dev</code></pre>
   <p class="prose">That one command starts Postgres, runs the database migrations, starts the server and a worker, and loads a demo shop. The first start also downloads the Postgres image. It prints the address and a password:</p>
@@ -133,7 +133,7 @@ sync_customers = fc.Flow(
     <tr><td><code>Dataset</code></td><td>What to read. <code>key</code> names the field that identifies a record.</td></tr>
     <tr><td><code>strategy</code></td><td>How changes are found. <code>replace()</code> takes the whole set each time. <code>snapshot_diff()</code> compares with the last read. <code>by_stamp("updated_at")</code> reads what changed since a timestamp.</td></tr>
     <tr><td><code>deliver</code></td><td>The destinations. Each <code>fc.to(...)</code> is a route, and a failure on one doesn't stop the others.</td></tr>
-    <tr><td><code>triggers</code></td><td>When it runs: <code>fc.every("30s")</code>, or <code>fc.cron("0 6 * * *", tz="Asia/Kolkata")</code>.</td></tr>
+    <tr><td><code>triggers</code></td><td>When it runs: <code>fc.every("30s")</code>, or <code>fc.cron("0 6 * * *", tz="Asia/Kolkata")</code>. An interval under 5 minutes is a <b>poller</b>: each tick is a task inside one run per day, called a stream run, rather than a run of its own. So <code>every("30s")</code> shows as one run that gathers about 2,880 ticks a day, and its page counts them. Longer intervals and every cron make a run per firing, as in the screenshots below.</td></tr>
   </table></div>
   <h3>Check it before you run it</h3>
   <pre><code>uv run feather validate --project my-shop</code></pre>
@@ -190,6 +190,9 @@ sync_customers = fc.Flow(
     <tr><td>Failed delivery</td><td>Retries ran out, or the destination refused</td><td>Fix the cause, then Retry from Failures.</td></tr>
     <tr><td>Skipped run, reason <code>paused</code></td><td>The flow is paused</td><td>Resume it when ready.</td></tr>
     <tr><td>Skipped run, reason <code>overlap</code></td><td>The last run was still going</td><td>Check whether the schedule is too tight.</td></tr>
+    <tr><td>Skipped tick on a stream run</td><td>A poller tick found the last one still going, or several missed ticks were collapsed into one (<code>catch_up_collapsed</code>)</td><td>Nothing: the next tick reads from where the last one stopped.</td></tr>
+    <tr><td>“Days kept past retention” on the Overview</td><td>Stored data is kept because a delivery or a webhook event is still open</td><td>Fix the delivery it names. The day goes once nothing needs it.</td></tr>
+    <tr><td>Webhook answered 503</td><td>The server couldn't store it in time: the database is down or the queue is full</td><td>Nothing. Senders retry. Rarely, a slow store can still finish after the 503, so send an <code>event_id</code> to make the retry a repeat.</td></tr>
     <tr><td>Records in Quarantine</td><td>A destination refused those records</td><td>Read the reason, fix the data, and dismiss them.</td></tr>
     <tr><td>Code shown as two versions</td><td>Workers run different code. Normal during a rollout</td><td>Check again once the rollout ends.</td></tr>
     <tr><td><code>port 8080 is already in use</code></td><td>Something else holds the port</td><td>Add <code>--port 8081</code>.</td></tr>
@@ -197,12 +200,26 @@ sync_customers = fc.Flow(
   </table></div>
 </section>
 
+<section id="webhooks">
+  <h2><span class="n">6</span>Receive webhooks</h2>
+  <p class="prose">A dataset with a <code>push</code> strategy receives webhooks at <code>POST /ingress/default/&lt;dataset&gt;</code>. The server checks the signature, stores the event, and answers <code>202</code> only once it is stored. Within about a second the sealer groups new events into a version, and delivery starts as for any other version. In the latency tests, a webhook reached its destination in about 2 seconds at p95, against a target of 5.</p>
+  <p class="prose">Webhooks are signed with HMAC-SHA256. The sender puts the time in seconds in <code>X-Timestamp</code>, and <code>sha256=</code> followed by the hex HMAC of <code>&lt;timestamp&gt;.&lt;body&gt;</code> in <code>X-Signature</code>. The secret is the <code>signature_secret</code> entry under the connection's <code>auth</code>, as a secret reference. A source that can't sign must say <code>unsigned=True</code>, or the project is refused at load. An <code>event_id</code> in the body stops a resent event from being stored twice.</p>
+  <div class="scroll"><table>
+    <tr><th>Answer</th><th>Why</th></tr>
+    <tr><td><code>202</code></td><td>Stored. A repeat of an event id also gets 202, and is stored once</td></tr>
+    <tr><td><code>401</code></td><td>The signature or timestamp is wrong, or the timestamp is over 5 minutes old. The answer is the same whatever the reason, and the server logs which</td></tr>
+    <tr><td><code>404</code></td><td>No such dataset, or it isn't a push dataset</td></tr>
+    <tr><td><code>413</code></td><td>The body is over <code>FEATHER_INGRESS_MAX_BYTES</code> (1 MiB by default)</td></tr>
+    <tr><td><code>429</code></td><td>Over <code>FEATHER_INGRESS_RATE_PER_S</code> for that source (1,000 by default), with <code>Retry-After</code></td></tr>
+    <tr><td><code>503</code></td><td>The queue is over <code>FEATHER_INGRESS_QUEUE_MAX</code> (5,000), or the database didn't answer within <code>FEATHER_INGRESS_WAIT_S</code> (5 s), with <code>Retry-After</code></td></tr>
+  </table></div>
+  <p class="prose">An event the source can't read goes to quarantine and the rest of its batch carries on. A temporary failure is retried for a few minutes first. Reprocessing or releasing a quarantined event is a service call today; dashboard buttons come later. This section is covered by automated tests; it wasn't run by hand for this guide.</p>
+</section>
+
 <section id="limits">
-  <h2><span class="n">6</span>Not ready yet</h2>
+  <h2><span class="n">7</span>Not ready yet</h2>
   <div class="scroll"><table>
     <tr><th>Missing</th><th>Arrives in</th></tr>
-    <tr><td>Proof that a crash loses and duplicates nothing. Don't rely on this stage for that, and one known risk (F4) must close first</td><td>Stage 3</td></tr>
-    <tr><td>Webhooks and near-real-time events</td><td>Stage 3</td></tr>
     <tr><td>Real connectors: Postgres, S3, REST, GraphQL, HTTP, DuckDB. Flows use simulated data until then</td><td>Stage 4</td></tr>
     <tr><td><code>feather new</code> to create a project for you, <code>feather run</code>, <code>feather test</code> and the remote commands</td><td>Stage 5</td></tr>
     <tr><td>JSON API, container images and Compose, so a real deployment. <code>feather dev</code> is for development only</td><td>Stage 5</td></tr>

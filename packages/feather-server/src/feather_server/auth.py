@@ -13,7 +13,6 @@ import hashlib
 import hmac
 import logging
 import secrets
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import cache
@@ -27,6 +26,8 @@ from fastapi import APIRouter, Depends, FastAPI, Form, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from feather_connect.clock import Clock, SystemClock
 from feather_connect.storage.port import Store
@@ -283,6 +284,59 @@ def _refuse(request: Request, error: AuthError) -> Response:
     return PlainTextResponse(f"{error.title}: {error.detail}", status_code=error.status)
 
 
+class _SessionCookie:
+    """Reads the session cookie, writes it back if it changed, and adds the security headers.
+
+    Plain ASGI, as `BaseHTTPMiddleware` starts a task and streams per request, which ingress can't afford at a burst.
+    """
+
+    def __init__(self, app: ASGIApp, state: "AppState", secure: bool) -> None:
+        self._app = app
+        self._state = state
+        self._secure = secure
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        request = Request(scope)
+        request.state.session = None
+        request.state.session_dirty = False
+        raw = request.cookies.get(SESSION_COOKIE)
+        if raw:
+            try:
+                data = _serializer(self._state).loads(raw, max_age=int(SESSION_TTL.total_seconds()))
+                request.state.session = _Session(str(data["sid"]), data.get("user"))
+            except (BadSignature, KeyError, TypeError):
+                pass  # a cookie that can't be trusted is as good as none
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                self._add_headers(request, MutableHeaders(scope=message))
+            await send(message)
+
+        await self._app(scope, receive, send_with_headers)
+
+    def _add_headers(self, request: Request, headers: MutableHeaders) -> None:
+        session: _Session | None = request.state.session
+        if request.state.session_dirty and session is not None:
+            cookie = Response()
+            cookie.set_cookie(
+                SESSION_COOKIE,
+                _serializer(self._state).dumps({"sid": session.sid, "user": session.user}),
+                max_age=int(SESSION_TTL.total_seconds()),
+                httponly=True,
+                secure=self._secure,
+                samesite="lax",
+                path="/",
+            )
+            headers.append("set-cookie", cookie.headers["set-cookie"])
+        headers.setdefault("Content-Security-Policy", CSP)
+        headers.setdefault("X-Content-Type-Options", "nosniff")
+        headers.setdefault("X-Frame-Options", "DENY")
+        headers.setdefault("Referrer-Policy", "same-origin")
+
+
 def install(app: FastAPI, state: "AppState") -> None:
     """Add the login routes, the session cookie and the security headers to `app`."""
     secure = (urlparse(state.settings.base_url).hostname or "") not in _LOCAL_HOSTS
@@ -290,33 +344,4 @@ def install(app: FastAPI, state: "AppState") -> None:
     app.include_router(router)
     app.add_exception_handler(AuthError, lambda request, error: _refuse(request, error))  # type: ignore[arg-type]
 
-    @app.middleware("http")
-    async def session_cookie(
-        request: Request, call_next: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
-        request.state.session = None
-        request.state.session_dirty = False
-        raw = request.cookies.get(SESSION_COOKIE)
-        if raw:
-            try:
-                data = _serializer(state).loads(raw, max_age=int(SESSION_TTL.total_seconds()))
-                request.state.session = _Session(str(data["sid"]), data.get("user"))
-            except (BadSignature, KeyError, TypeError):
-                pass  # a cookie that can't be trusted is as good as none
-        response = await call_next(request)
-        session: _Session | None = request.state.session
-        if request.state.session_dirty and session is not None:
-            response.set_cookie(
-                SESSION_COOKIE,
-                _serializer(state).dumps({"sid": session.sid, "user": session.user}),
-                max_age=int(SESSION_TTL.total_seconds()),
-                httponly=True,
-                secure=secure,
-                samesite="lax",
-                path="/",
-            )
-        response.headers.setdefault("Content-Security-Policy", CSP)
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Referrer-Policy", "same-origin")
-        return response
+    app.add_middleware(_SessionCookie, state=state, secure=secure)

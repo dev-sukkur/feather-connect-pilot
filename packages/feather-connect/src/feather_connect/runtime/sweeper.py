@@ -4,7 +4,8 @@ A worker that stops sending heartbeats has its tasks re-queued and is then marke
 tried again. A pending delivery that has sat for a while may have lost the submit that follows sealing, a run still
 queued may have lost the submit of its plan, and a run whose slices are all read may have lost its seal task. These are
 submitted again under the same idempotency key, so one that exists is not run twice. A delivery still open when its task
-has ended can't be helped by that, so it is failed, which lets an operator retry or skip it.
+has ended can't be helped by that, so it is failed, which lets an operator retry or skip it. A staged version of a run
+that failed or was cancelled will never be sealed, so it goes, or it would keep its day's chunks for good.
 """
 
 import logging
@@ -30,6 +31,7 @@ class SweepReport:
     resubmitted_seals: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     resubmitted_runs: list[str] = field(default_factory=list[str])
     stranded_deliveries: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    discarded_versions: list[str] = field(default_factory=list[str])
 
 
 def sweep_once(
@@ -44,7 +46,8 @@ def sweep_once(
     """Do one sweep as of `now`.
 
     A worker is dead when it hasn't sent a heartbeat for `dead_after`, and a delivery is lost when it has been pending for
-    `pending_after`. What can't be put right, such as one delivery the engine refuses, is logged and left for the next
+    `pending_after` and is the next of its stream: one behind it waits its turn and has no task to lose, so its cost is
+    nothing however long the queue behind a failure grows. What can't be put right, such as one delivery the engine refuses, is logged and left for the next
     sweep, so it doesn't hold up the rest.
     """
     dead: list[str] = []
@@ -61,21 +64,17 @@ def sweep_once(
             dead.append(worker.worker_id)
     deliveries: list[tuple[str, str]] = []
     stranded: list[tuple[str, str]] = []
-    streams: set[tuple[str, str, str]] = set()
     for delivery in store.ledger.pending_older_than(pending_after, now=now):
         if runtime.is_route_paused(delivery.route):  # held on purpose, and picked up when the pause ends
             continue
         name = (delivery.route, delivery.version_id)
-        stream = (delivery.route, delivery.dataset, delivery.partition)
         try:
             runtime.submit_apply(*name)
-            # These come in seal order, and only the first of a stream can have had a task.
-            ended = stream not in streams and runtime.fail_stranded(*name)
+            ended = runtime.fail_stranded(*name)
         except Exception:
             log.exception("could not submit delivery %s of version %s", *name)
         else:
             (stranded if ended else deliveries).append(name)
-        streams.add(stream)
     for delivery in store.ledger.list_deliveries(status="running", limit=_RUNNING):
         name = (delivery.route, delivery.version_id)
         try:
@@ -96,12 +95,17 @@ def sweep_once(
     seals: list[tuple[str, str]] = []
     for run_id, dataset in store.versions.runs_ready_to_seal():
         try:
-            run = store.runs.get_run(run_id)
-            if run.status == "cancelled":  # somebody stopped the run on purpose
-                continue
-            runtime.submit_seal(run.flow, dataset, run_id)
+            runtime.submit_seal(store.runs.get_run(run_id).flow, dataset, run_id)
         except Exception:
             log.exception("could not submit the seal of dataset %s for run %s", dataset, run_id)
         else:
             seals.append((run_id, dataset))
-    return SweepReport(dead, recovered, deliveries, seals, runs, stranded)
+    discarded: list[str] = []
+    for version in store.versions.abandoned():
+        try:
+            runtime.discard_abandoned(version.version_id)
+        except Exception:
+            log.exception("could not discard version %s of run %s", version.version_id, version.run_id)
+        else:
+            discarded.append(version.version_id)
+    return SweepReport(dead, recovered, deliveries, seals, runs, stranded, discarded)

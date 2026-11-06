@@ -31,13 +31,17 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
+# One encoder for every row: `json.dumps` builds a new one per call for settings like these, and this runs per row.
+_CANONICAL = json.JSONEncoder(sort_keys=True, separators=(",", ":"), default=_json_default)
+
+
 def canonical_json(value: Any) -> bytes:
     """Return `value` as JSON bytes that are the same for the same data: sorted keys, no spaces.
 
     Beyond the JSON types it accepts `Decimal` (as text), `date` and `datetime` (as ISO-8601, with an
     aware datetime converted to UTC first) and `bytes` (as base64).
     """
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=_json_default).encode("utf-8")
+    return _CANONICAL.encode(value).encode("utf-8")
 
 
 def row_hash(payload: Mapping[str, Any]) -> int:

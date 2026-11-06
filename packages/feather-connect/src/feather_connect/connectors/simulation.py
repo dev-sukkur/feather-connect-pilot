@@ -1,17 +1,17 @@
 """The JSON simulation connector: repeatable source data and injected faults, so dev and qa need no real system.
 
 A source serves rows from a JSON or JSONL fixture or from a generator spec. A fixed seed makes its rows, and
-the faults it injects, the same on every run. The sink is the in-memory one and can also write what it gets to
-a JSONL file.
+the faults it injects, the same on every run. It can also be a push source: `verify` and `receive` take signed
+JSON requests, and `events` makes them. The sink is the in-memory one and can also write what it gets to a JSONL file.
 """
 
 import json
 import random
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from feather_connect.connectors import memory
 from feather_connect.core import connector
@@ -20,11 +20,14 @@ from feather_connect.core.connector import (
     ApplyResult,
     CheckResult,
     ConnectorSpec,
+    Deleted,
+    InboundRequest,
     ReadRequest,
     StreamSchema,
 )
 from feather_connect.core.context import Context
 from feather_connect.core.errors import PermanentError, TransientError
+from feather_connect.core.webhooks import sign, verify_hmac
 
 # How a generated field makes its value: from the source's random generator and the row's number, from 0.
 FieldSpec = Callable[[random.Random, int], Any]
@@ -34,6 +37,10 @@ _LAST_NAMES = ("Abbott", "Banerjee", "Costa", "Diaz", "Evans", "Fischer", "Gupta
 # What `schema_change` adds to the rows. It also drops their last original field.
 ADDED_FIELD = "sim_extra"
 _RETRY_AFTER_429 = 1.0
+# How a push request of this source looks. A record marked `DELETED_FIELD` says that it was deleted.
+SIGNATURE_HEADER, TIMESTAMP_HEADER = "x-signature", "x-timestamp"
+EVENT_ID_FIELD, DELETED_FIELD = "event_id", "_deleted"
+_BURST = 20  # how many events a bursty stream sends in one go
 
 
 @dataclass(frozen=True)
@@ -105,6 +112,9 @@ class Source(connector.Source):
     such as `seq()`), `rows_per_partition` of them, whatever the partition a read asks for. A read draws its
     faults from a generator seeded with `seed` and the number of the read, so the same source gives the same
     reads every time. The first field of a row is its key, for `key_rewrite`.
+
+    As a push source it verifies an HMAC signature against the `signature_secret` entry of its connection's `auth`, or
+    takes anything when built with `unsigned=True`.
     """
 
     spec = ConnectorSpec(
@@ -120,12 +130,17 @@ class Source(connector.Source):
         rows_per_partition: int = 100,
         seed: int = 42,
         faults: Faults = Faults(),  # noqa: B008  (frozen, so it is safe to share)
+        *,
+        signature_secret: str = "signature_secret",
+        unsigned: bool = False,
     ) -> None:
         if (fixture is None) == (generator is None):
             raise ValueError("give a simulation source either a fixture or a generator")
         self.connection = connection
         self.seed = seed
         self.faults = faults
+        self.signature_secret = signature_secret
+        self.unsigned = unsigned
         self.reads = 0
         self._rows = self._make_rows(fixture, generator, rows_per_partition)
         self._late: list[dict[str, Any]] = []  # held back by `late`, served by the next read
@@ -177,6 +192,57 @@ class Source(connector.Source):
                 rows.append(dict(row))
         if rows:
             yield rows
+
+    def verify(self, ctx: Context, request: InboundRequest) -> None:
+        """Raise `SignatureInvalid` unless the request is signed with the connection's secret."""
+        verify_hmac(
+            ctx.secret(self.signature_secret),
+            request.body,
+            request.headers.get(SIGNATURE_HEADER, ""),
+            request.headers.get(TIMESTAMP_HEADER),
+            now=ctx.now,
+        )
+
+    def event_id(self, request: InboundRequest) -> str | None:
+        """Return the body's `event_id`, if it has one as text."""
+        body: Any = json.loads(request.body)
+        found = cast(dict[str, Any], body).get(EVENT_ID_FIELD) if isinstance(body, dict) else None
+        return found if isinstance(found, str) else None
+
+    def receive(self, ctx: Context, request: InboundRequest) -> list[Mapping[str, Any] | Deleted]:
+        """Return the record in the body, or the records of a list. `_deleted: true` marks an explicit delete, and
+        the rest of that record has at least its key. Raises `TypeError` for anything but JSON objects."""
+        body: Any = json.loads(request.body)
+        items = cast(list[Any], body) if isinstance(body, list) else [body]
+        records: list[Mapping[str, Any] | Deleted] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise TypeError("a simulated event must be a JSON object, or a list of them")
+            row = {k: v for k, v in cast(dict[str, Any], item).items() if k != DELETED_FIELD}
+            records.append(Deleted(row) if cast(dict[str, Any], item).get(DELETED_FIELD) else row)
+        return records
+
+    def events(
+        self, rate_per_s: float, *, secret: str, bursty: bool = False, start: datetime | None = None
+    ) -> Iterator[InboundRequest]:
+        """Yield signed requests with the source's rows, over and over, each with an event id of its own.
+
+        Nothing waits: `received_at` says when each is due at `rate_per_s`, for the caller to pace itself by. `bursty`
+        sends them in bursts of 20, at the same average rate. Signatures are timestamped when due, so a caller that
+        sends them much later than that sends them stale.
+        """
+        at = datetime.now(UTC) if start is None else start
+        step = timedelta(seconds=1 / rate_per_s)
+        number = 0
+        while self._rows:
+            for row in self._rows:
+                body = json.dumps({**row, EVENT_ID_FIELD: f"{self.seed}-{number}"}, default=str).encode()
+                stamp = str(int(at.timestamp()))
+                headers = {SIGNATURE_HEADER: sign(secret, body, stamp), TIMESTAMP_HEADER: stamp}
+                yield InboundRequest("POST", f"/ingress/default/{self.connection}", headers, body, at)
+                number += 1
+                if not bursty or number % _BURST == 0:
+                    at += step * (_BURST if bursty else 1)
 
     def _raise_transient(self, rng: random.Random) -> None:
         if rng.random() < self.faults.http_429:

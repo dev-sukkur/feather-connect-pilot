@@ -9,6 +9,7 @@ from feather_connect.core.strategies import ByStamp
 from feather_connect.runtime.deps import RuntimeDeps
 
 _ALL_PARTITIONS = "*"
+_PUSH = "push"
 
 
 def _partitions_of(dataset: Dataset, explicit: Sequence[str] | None, deps: RuntimeDeps) -> list[str]:
@@ -30,16 +31,27 @@ def _partitions_of(dataset: Dataset, explicit: Sequence[str] | None, deps: Runti
     return list(dict.fromkeys(chosen))
 
 
-def run_plan(flow: Flow, run_id: str, deps: RuntimeDeps) -> dict[str, list[str]]:
+def run_plan(flow: Flow, run_id: str, deps: RuntimeDeps, tick: str | None = None) -> dict[str, list[str]]:
     """Return the partitions the run reads of each dataset of `flow`, and register the slices of a multi-slice read.
 
     A complete dataset read in more than one slice is registered, and that is what later makes its extracts stage
     their versions for `run_seal`. Calling this again registers nothing new.
+
+    A `tick` of a stream run can't do that: slices are registered per run, and a stream run holds a day of ticks.
     """
     explicit = deps.store.runs.get_run(run_id).params.get("partitions")
     planned: dict[str, list[str]] = {}
     for dataset in flow.datasets:
+        if (
+            dataset.strategy.name == _PUSH
+        ):  # nothing to read: its events come in, and the sealer makes its versions
+            continue
         partitions = _partitions_of(dataset, explicit, deps)
+        if tick is not None and dataset.strategy.complete and len(partitions) > 1:
+            raise PermanentError(
+                f"dataset {dataset.name!r} reads {len(partitions)} slices as a whole, which a high-frequency poller "
+                "can't do: use the by_stamp strategy, one partition, or an interval of 5 minutes or more"
+            )
         if dataset.strategy.complete and len(partitions) > 1:
             deps.store.versions.register_slices(run_id, dataset.name, partitions)
         planned[dataset.name] = partitions

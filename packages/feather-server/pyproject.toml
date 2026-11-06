@@ -13,6 +13,7 @@ dependencies = [
     "itsdangerous",
     "python-multipart",
     "jinja2",
+    "httptools>=0.9.0",
 ]
 
 [tool.uv.sources]

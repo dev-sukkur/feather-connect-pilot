@@ -12,8 +12,10 @@ then a waiting delivery has a row but no task, which keeps its run going while a
 import logging
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from feather_connect.clock import Clock, SystemClock
 from feather_connect.core.context import Context
@@ -21,15 +23,17 @@ from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import BudgetDeferred, PermanentError
 from feather_connect.core.flow import Flow, RouteSpec
 from feather_connect.engine.port import Engine, RetryPolicy, TaskCall, TaskContext, TaskFn
+from feather_connect.ids import new_id
 from feather_connect.logs import bind, redact
 from feather_connect.runtime.apply import fail_open, oldest_open, replay_gap, run_apply
 from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.deps import RuntimeDeps
-from feather_connect.runtime.extract import ExtractFailed, VerifyResult, run_extract
+from feather_connect.runtime.extract import ExtractFailed, VerifyResult, discard_abandoned, run_extract
 from feather_connect.runtime.plan import run_plan
 from feather_connect.runtime.seal import run_seal
 from feather_connect.storage.port import (
     CLOSED,
+    STREAM_TRIGGER,
     Delivery,
     DeliveryStatus,
     InvalidTransition,
@@ -37,6 +41,7 @@ from feather_connect.storage.port import (
     Run,
     Store,
     TaskRow,
+    Window,
     delivery_cursor,
     is_paused,
 )
@@ -48,10 +53,28 @@ _UTC = "UTC"
 _ACTIVE = ("queued", "running")
 _PAUSED = "route paused"  # why a task ended without delivering: the key of its successor ends in `#n`
 _MANY = 10_000
+_READING = (
+    "plan",
+    "extract",
+    "seal_run",
+)  # the tasks that read: what a tick can overlap, and what a cancel stops
+_SKIP = "skip"  # the kind of the row of a tick that didn't go ahead
+_RUNS_LOOKED_AT = (
+    20  # rows of tasks still reading that one tick looks at: there are few, as ticks don't overlap
+)
+_LOST_AFTER = timedelta(minutes=1)  # how long a tick's plan may stay unstarted before it is submitted again
+_READS_IN_VAIN = (
+    5  # reads that spend budget and still come up short, each after the longest wait, before giving up
+)
 
 
 def _no_config(connection: str) -> Mapping[str, Any]:
     return {}
+
+
+def _tick_ref(run_id: str, tick: str, what: str) -> str:
+    """Return the key of a task of a tick. They share a prefix, so a tick's tasks can be found among the day's."""
+    return f"tick:{run_id}:{tick}:{what}"
 
 
 def _apply_key(delivery: Delivery) -> str:
@@ -72,17 +95,12 @@ class RunNotStarted(Exception):
         self.reason = reason
 
 
-def _step_through_deferrals[T](ctx: TaskContext, name: str, fn: Callable[[], T]) -> T:
-    """Run a step, and sleep off a budget deferral before running it again, as delivery does.
+@dataclass(frozen=True)
+class _Extracted:
+    """What an extract step hands to the steps after it: what it sealed, and the claim it read its slice under."""
 
-    A deferral is a wait for budget, not a failure: the sleep is durable, and no attempt is used up however many
-    deferrals there are. A source that is read again after one starts its read afresh (`run_extract`).
-    """
-    while True:
-        try:
-            return ctx.step(name, fn)
-        except BudgetDeferred as deferred:
-            ctx.sleep(deferred.wait)
+    version_ids: list[str]
+    writer: str
 
 
 class Runtime:
@@ -131,6 +149,7 @@ class Runtime:
         self._config_of = config_of or _no_config
         self._timezone = timezone
         self._priorities = self._connection_priorities()
+        self._stream_runs: dict[str, tuple[str, str]] = {}  # by flow: the day, and the stream run of that day
 
     @staticmethod
     def _add[T](found: dict[str, T], kind: str, name: str, value: T) -> None:
@@ -165,6 +184,20 @@ class Runtime:
     def store(self) -> Store:
         return self._deps.store
 
+    @property
+    def deps(self) -> RuntimeDeps:
+        return self._deps
+
+    def make_context(self, connection: str) -> Context:
+        """Return the context to call the connection's connector with. It holds the secrets of the connection, and
+        raises `PermanentError` if one can't be resolved."""
+        return self._deps.make_context(connection)
+
+    @property
+    def timezone(self) -> str:
+        """The IANA name of the time zone that contexts carry and that a stream run's day is told in."""
+        return self._timezone
+
     def flows(self) -> list[Flow]:
         """Return the flows, in the order they were given."""
         return list(self._flows.values())
@@ -198,7 +231,7 @@ class Runtime:
 
         def run(ctx: TaskContext, args: Mapping[str, Any]) -> Mapping[str, Any] | None:
             run_id = args["run_id"]
-            row = next((r for r in self._deps.store.runs.list_tasks(run_id) if r.ref == ctx.task_ref), None)
+            row = self._deps.store.runs.task_by_ref(run_id, ctx.task_ref)
             with bind(
                 tenant=_TENANT,
                 flow=args.get("flow"),
@@ -329,9 +362,8 @@ class Runtime:
         """End a run whose plan never went out. If the database is what is away, the sweeper submits it later."""
         runs = self._deps.store.runs
         try:
-            for row in runs.list_tasks(run_id):
-                if row.status == "running":
-                    runs.finish_task(row.task_id, "failed", reason)
+            for row in runs.list_tasks(run_id, status="running"):
+                runs.finish_task(row.task_id, "failed", reason)
             runs.set_run_status(run_id, "failed", reason)
         except Exception:
             log.exception("could not mark run %s failed", run_id)
@@ -342,6 +374,10 @@ class Runtime:
         Raises `KeyError` for an unknown dataset and `PermanentError` when the source can't be read as a run would.
         """
         found = self.dataset(dataset)
+        if found.strategy.name == "push":
+            raise PermanentError(
+                f"dataset {dataset!r} is a push dataset: nothing can read it back to compare"
+            )
         try:
             return run_extract(
                 found, "verify", partition, routes=(), stage_only=False, deps=self._deps, dry_run=True
@@ -350,27 +386,113 @@ class Runtime:
             raise PermanentError(str(error)) from error
 
     def active_runs(self, flow: str) -> list[Run]:
-        """Return the flow's runs that are queued or running, oldest first."""
+        """Return the flow's runs that are queued or running, oldest first. A stream run is not one that a tick can
+        overlap, since it only holds the deliveries of versions that are already sealed."""
         runs = self._deps.store.runs
         found = [r for status in _ACTIVE for r in runs.list_runs(flow=flow, status=status, limit=_MANY)]
-        return sorted(found, key=lambda r: r.run_id)
+        return sorted((r for r in found if r.trigger != STREAM_TRIGGER), key=lambda r: r.run_id)
+
+    def stream_run(self, flow: str, now: datetime) -> str:
+        """Return the id of the flow's stream run of today, making it if need be. A poller's ticks and an event-driven
+        flow's versions attach to it, so that a flow taking an event a second doesn't write a run a second.
+
+        Its status is how it stands now. It is running while any of its tasks is, and between ticks it has settled:
+        failed if a delivery is failed, or if the newest tick failed, and succeeded otherwise. It has no moment of
+        ending. The day's turn is what closes it, as ticks and versions then go to the next day's run, and it keeps the
+        status it last settled on once what it still holds has ended. "Today" is in the project's time zone.
+        """
+        day = now.astimezone(ZoneInfo(self._timezone)).date().isoformat()
+        cached = self._stream_runs.get(flow)
+        if cached is not None and cached[0] == day:
+            return cached[1]
+        run_id = self._deps.store.runs.stream_run(flow, day)
+        self._stream_runs[flow] = (day, run_id)
+        return run_id
+
+    def start_stream_tick(self, flow: str, *, trigger_id: str, at: datetime) -> str:
+        """Add a tick to the flow's stream run of the day of `at`, submit its plan, and return the run.
+
+        The tick answers for itself: its failure to start, like its failure later on, ends this tick and not the run,
+        and the next tick reads from the same watermark. Raises `FlowPaused` if the flow is paused, and `RunNotStarted`
+        if the plan can't be submitted, having recorded that on the tick's row.
+        """
+        self.flow(flow)
+        if self.is_flow_paused(flow):
+            raise FlowPaused(f"flow {flow!r} is paused{self._pause_note(f'flow:{flow}')}")
+        runs = self._deps.store.runs
+        run_id = self.stream_run(flow, at)
+        tick = f"{trigger_id}@{at.astimezone(UTC).isoformat()}"
+        self._open_row(run_id, "plan", _tick_ref(run_id, tick, "plan"), None, None)
+        runs.set_run_status(run_id, "running")
+        try:
+            self._engine.submit(self._tick_plan_call(flow, run_id, tick))
+        except Exception as error:
+            reason = redact(f"could not start: {error}")
+            self._finish_task(_tick_ref(run_id, tick, "plan"), run_id, "failed", reason)
+            raise RunNotStarted(run_id, reason) from error
+        return run_id
+
+    def skip_stream_tick(self, flow: str, *, trigger_id: str, at: datetime, reason: str) -> str:
+        """Record a tick that doesn't go ahead as a skipped task of the day's stream run, and return the run (I6)."""
+        self.flow(flow)
+        runs = self._deps.store.runs
+        run_id = self.stream_run(flow, at)
+        tick = f"{trigger_id}@{at.astimezone(UTC).isoformat()}"
+        task_id = runs.start_task(run_id, _SKIP, _tick_ref(run_id, tick, _SKIP), code_sha=self._deps.code_sha)
+        runs.finish_task(task_id, "skipped", reason)
+        return run_id
+
+    def tick_in_flight(self, run_id: str) -> bool:
+        """Say whether a tick of the stream run is still reading, which makes the next one overlap.
+
+        Deliveries don't count: they wait in order, whatever the next tick reads. Since a tick that never ends would
+        make every later one skip, this also looks after what it finds. A row whose task has ended fails, and the plan
+        of a tick that may have been lost before its submit, as a crash could do, is submitted again under its key.
+        """
+        runs = self._deps.store.runs
+        going = False
+        for row in runs.list_tasks(run_id, status="running", kinds=_READING, limit=_RUNS_LOOKED_AT):
+            if self._engine.has_ended(row.ref):
+                self._finish_task(row.ref, run_id, "failed", f"its task {row.ref} ended without finishing it")
+                continue
+            going = True
+            if row.kind == "plan" and self._clock.now() - row.started_at >= _LOST_AFTER:
+                tick = row.ref.removeprefix(f"tick:{run_id}:").removesuffix(":plan")
+                self._engine.submit(self._tick_plan_call(runs.get_run(run_id).flow, run_id, tick))
+        return going
+
+    def _tick_plan_call(self, flow: str, run_id: str, tick: str) -> TaskCall:
+        return TaskCall(
+            "feather.plan",
+            {"run_id": run_id, "flow": flow, "tick": tick},
+            _tick_ref(run_id, tick, "plan"),
+            f"plan:{_TENANT}:{flow}",
+            retry=self._deps.retry,
+        )
 
     def cancel_run(self, run_id: str, *, actor: str, reason: str | None = None) -> None:
         """Cancel the run: its plan, extract and seal tasks stop, and the run ends `cancelled`, whatever follows.
 
         The deliveries of versions that were already sealed carry on, because sealed versions are the ledger's and must
         still reach their routes in order (I2). Cancelling a run that is over changes nothing.
+
+        Raises `InvalidTransition` for a stream run, which holds a day of ticks and has no end to bring forward.
         """
         runs = self._deps.store.runs
-        if runs.get_run(run_id).status not in _ACTIVE:
+        run = runs.get_run(run_id)
+        if run.trigger == STREAM_TRIGGER:
+            raise InvalidTransition(
+                f"run {run_id} is the daily stream run of flow {run.flow!r} and can't be cancelled: pause the flow to "
+                "stop its ticks. Its deliveries can each be retried or skipped"
+            )
+        if run.status not in _ACTIVE:
             return
-        for row in runs.list_tasks(run_id):
-            if row.status == "running" and row.kind != "apply":
-                try:
-                    self._engine.cancel(row.ref)
-                except KeyError:  # the row was opened and its task never submitted
-                    pass
-                runs.finish_task(row.task_id, "cancelled", reason)
+        for row in runs.list_tasks(run_id, status="running", kinds=_READING):
+            try:
+                self._engine.cancel(row.ref)
+            except KeyError:  # the row was opened and its task never submitted
+                pass
+            runs.finish_task(row.task_id, "cancelled", reason)
         runs.set_run_status(run_id, "cancelled", f"{actor}: {reason}" if reason else f"cancelled by {actor}")
 
     def retry(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
@@ -459,11 +581,15 @@ class Runtime:
             return False
         why = f"its task {ref} ended without finishing it: retry or skip it"
         fail_open(delivery, why, deps)
-        row = next((r for r in deps.store.runs.list_tasks(run_id) if r.ref == ref), None)
+        row = deps.store.runs.task_by_ref(run_id, ref)
         if row is not None and row.status == "running":
             deps.store.runs.finish_task(row.task_id, "failed", why)
         self._settle_run(run_id)
         return True
+
+    def discard_abandoned(self, version_id: str) -> None:
+        """Remove a staged version of a run that failed or was cancelled, with its chunks, which frees its day."""
+        discard_abandoned(version_id, self._deps)
 
     def submit_seal(self, flow: str, dataset: str, run_id: str) -> None:
         """Submit the task that seals the run's slices of `dataset`."""
@@ -495,8 +621,8 @@ class Runtime:
             route, version_id, to, actor=actor, reason=reason, code_sha=deps.code_sha
         )
         run_id = deps.store.versions.get(version_id).run_id
-        for row in deps.store.runs.list_tasks(run_id):
-            if row.status == "failed" and row.ref.startswith(f"apply:{route}:{version_id}:"):
+        for row in deps.store.runs.tasks_by_ref(run_id, f"apply:{route}:{version_id}:"):
+            if row.status == "failed":
                 deps.store.runs.finish_task(row.task_id, "cancelled", row.error)
         if to == "pending":
             deps.store.runs.set_run_status(run_id, "running")
@@ -509,18 +635,20 @@ class Runtime:
 
     def _plan_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
         run_id = args["run_id"]
+        tick = args.get("tick")
 
         def body() -> None:
             flow = self.flow(args["flow"])
             ctx.step("begin", lambda: self._deps.store.runs.set_run_status(run_id, "running"))
-            planned = ctx.step("plan", lambda: run_plan(flow, run_id, self._deps))
-            ctx.step("submit_extracts", lambda: self._submit_extracts(flow.name, run_id, planned))
+            planned = ctx.step("plan", lambda: run_plan(flow, run_id, self._deps, tick))
+            ctx.step("submit_extracts", lambda: self._submit_extracts(flow.name, run_id, planned, tick))
             self._finish_step(ctx, run_id)
 
         self._tracked(ctx, run_id, body)
 
     def _extract_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
         run_id, partition = args["run_id"], args["partition"]
+        tick = args.get("tick")
         versions = self._deps.store.versions
 
         def hand_on() -> None:
@@ -529,16 +657,24 @@ class Runtime:
         def body() -> None:
             flow, dataset = self.flow(args["flow"]), self.dataset(args["dataset"])
             sliced = ctx.step("sliced", lambda: bool(versions.slices_for_run(run_id, dataset.name)))
-            extract = lambda: self._extract(flow, dataset, run_id, partition, sliced)
-            ids = _step_through_deferrals(ctx, "extract", extract)
+            extract = lambda: self._extract(flow, dataset, run_id, partition, sliced, tick)
+            found = self._read_through_deferrals(ctx, dataset, extract)
             if not sliced:
-                ctx.step("submit_applies", lambda: self._submit_applies(flow, run_id, ids))
-            elif ctx.step("finish_slice", lambda: versions.finish_slice(run_id, dataset.name, partition)):
+                ctx.step("submit_applies", lambda: self._submit_applies(flow, run_id, found.version_ids))
+            elif ctx.step(
+                "finish_slice",
+                lambda: versions.finish_slice(run_id, dataset.name, partition, found.writer),
+            ):
                 ctx.step("submit_seal", lambda: self.submit_seal(flow.name, dataset.name, run_id))
             hand_on()
             self._finish_step(ctx, run_id)
 
-        self._tracked(ctx, run_id, body, on_failure=lambda _: hand_on())
+        def give_up(_: Exception) -> None:
+            hand_on()
+            if tick is not None:  # a stream run's status doesn't tell the sweeper that this tick is over
+                ctx.step("discard", lambda: self._discard_tick(run_id, args["dataset"], args["tick"]))
+
+        self._tracked(ctx, run_id, body, on_failure=give_up)
 
     def _seal_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
         run_id = args["run_id"]
@@ -611,16 +747,82 @@ class Runtime:
         message = redact(str(error))
         ctx.step("failed", lambda: self._finish_task(ctx.task_ref, run_id, "failed", message))
 
+    def _read_through_deferrals[T](self, ctx: TaskContext, dataset: Dataset, read: Callable[[], T]) -> T:
+        """Run a read as a step, sleeping off each budget deferral, or end it when waiting can't help (design 6.6).
+
+        A deferral is a wait, not a failure: the sleep is durable, and uses up no attempt. But a read has no checkpoint,
+        so it starts afresh after one and has to get every call it needs in one go. So each wait is twice the last, up
+        to the budget's longest window, for the tokens to build up. A read that took all a window holds and wanted more
+        can never finish, and neither can one that keeps failing after waiting that long (a read of low priority sees
+        less than the window holds). Those end as a permanent failure that says why, instead of spending the budget for
+        good. A read that was deferred having taken nothing has spent nothing: it just keeps waiting its turn.
+        """
+        last = timedelta(0)
+        deferrals = in_vain = 0
+        while True:
+            try:
+                return ctx.step("extract", read)
+            except BudgetDeferred as deferred:
+                deferrals += 1
+                windows = self._windows_step(ctx, deferrals, deferred.budget)
+                holds = min((w.units for w in windows if w.seconds / w.units >= 60), default=None)
+                longest = timedelta(seconds=max((w.seconds for w in windows), default=0))
+                too_big = holds is not None and deferred.taken >= holds
+                in_vain += deferred.taken > 0 and bool(windows) and last >= longest
+                if too_big or in_vain >= _READS_IN_VAIN:
+                    size = (
+                        f"holds {holds}" if too_big else f"gave too little after waiting {longest} each time"
+                    )
+                    raise PermanentError(
+                        f"dataset {dataset.name!r}: the read took {deferred.taken} calls and needs more, but budget "
+                        f"{deferred.budget!r} {size}. A read starts again after a deferral, so it needs all its calls "
+                        "in one go: raise the budget's limit, or read less at a time"
+                    ) from deferred
+                wait = max(deferred.wait, min(last * 2, longest))
+                log.warning(
+                    "dataset %s: budget %s is used up after %d calls, and the read starts again in %s",
+                    dataset.name,
+                    deferred.budget,
+                    deferred.taken,
+                    wait,
+                )
+                ctx.sleep(wait)
+                last = wait
+
+    def _windows_step(self, ctx: TaskContext, deferral: int, budget: str) -> list[Window]:
+        return ctx.step(f"budget_windows:{deferral}", lambda: self._windows_of(budget))
+
+    def _windows_of(self, budget: str) -> list[Window]:
+        """The windows of the budget. One the store doesn't know has none, and its wait is taken as it comes."""
+        try:
+            return [usage.window for usage in self._deps.store.budgets.usage(budget)]
+        except KeyError:
+            return []
+
     # What the steps do.
 
-    def _extract(self, flow: Flow, dataset: Dataset, run_id: str, partition: str, sliced: bool) -> list[str]:
+    def _discard_tick(self, run_id: str, dataset: str, tick: str) -> None:
+        for version in self._deps.store.versions.staged_for_run(run_id, dataset, tick):
+            discard_abandoned(version.version_id, self._deps)
+
+    def _extract(
+        self, flow: Flow, dataset: Dataset, run_id: str, partition: str, sliced: bool, tick: str | None
+    ) -> _Extracted:
+        writer = new_id()
         try:
             versions = run_extract(
-                dataset, run_id, partition, routes=flow.routes, stage_only=sliced, deps=self._deps
+                dataset,
+                run_id,
+                partition,
+                routes=flow.routes,
+                stage_only=sliced,
+                deps=self._deps,
+                writer=writer,
+                tick=tick,
             )
         except ExtractFailed as error:  # the source would say the same again, so a retry can't help
             raise PermanentError(str(error)) from error
-        return [] if sliced else [version.version_id for version in versions]
+        return _Extracted([] if sliced else [version.version_id for version in versions], writer)
 
     def _seal(self, flow: Flow, dataset: Dataset, run_id: str) -> list[str]:
         try:
@@ -630,16 +832,25 @@ class Runtime:
         return [version.version_id for version in versions]
 
     @staticmethod
-    def _extract_call(flow: str, run_id: str, dataset: str, partition: str, retry: RetryPolicy) -> TaskCall:
+    def _extract_call(
+        flow: str, run_id: str, dataset: str, partition: str, retry: RetryPolicy, tick: str | None = None
+    ) -> TaskCall:
+        args = {"run_id": run_id, "flow": flow, "dataset": dataset, "partition": partition}
+        key = f"extract:{run_id}:{dataset}:{partition}"
+        if tick is not None:
+            args["tick"] = tick
+            key = _tick_ref(run_id, tick, f"extract:{dataset}:{partition}")
         return TaskCall(
             "feather.extract",
-            {"run_id": run_id, "flow": flow, "dataset": dataset, "partition": partition},
-            f"extract:{run_id}:{dataset}:{partition}",
+            args,
+            key,
             f"extract:{_TENANT}:{dataset}:{partition}",
             retry=retry,
         )
 
-    def _submit_extracts(self, flow: str, run_id: str, planned: Mapping[str, Sequence[str]]) -> None:
+    def _submit_extracts(
+        self, flow: str, run_id: str, planned: Mapping[str, Sequence[str]], tick: str | None = None
+    ) -> None:
         """Open a row for every extract and submit them, or only the first `max_concurrent` of them.
 
         The rows of the rest are open without a task, as those of waiting deliveries are, which keeps the run going.
@@ -649,7 +860,7 @@ class Runtime:
         limit = self._deps.store.runs.get_run(run_id).params.get("max_concurrent")
         every = [(dataset, partition) for dataset, partitions in planned.items() for partition in partitions]
         for place, (dataset, partition) in enumerate(every):
-            call = self._extract_call(flow, run_id, dataset, partition, self._deps.retry)
+            call = self._extract_call(flow, run_id, dataset, partition, self._deps.retry, tick)
             if limit is None or place < limit:
                 self._submit(call, run_id, "extract", dataset, partition)
             else:
@@ -686,7 +897,7 @@ class Runtime:
         """Return the key of the delivery's next apply task: `_apply_key`, and `#n` after it once `n` tasks of it ended
         because the route was paused, since an engine runs a key only once."""
         base = _apply_key(delivery)
-        rows = self._deps.store.runs.list_tasks(run_id)
+        rows = self._deps.store.runs.tasks_by_ref(run_id, base)
         held = sum(
             1
             for r in rows
@@ -733,36 +944,55 @@ class Runtime:
 
     def _hold(self, ref: str, run_id: str, delivery: Delivery) -> None:
         """End a task that found its route paused, and give its delivery a row to wait under, so that the run stays going."""
-        runs = self._deps.store.runs
-        task_id = next(row.task_id for row in runs.list_tasks(run_id) if row.ref == ref)
-        runs.finish_task(task_id, "cancelled", _PAUSED)
+        self._deps.store.runs.finish_task(self._task_id(run_id, ref), "cancelled", _PAUSED)
         self._open_apply_row(delivery, run_id)
 
     def _finish_task(self, ref: str, run_id: str, status: str, error: str | None = None) -> None:
-        runs = self._deps.store.runs
-        task_id = next(row.task_id for row in runs.list_tasks(run_id) if row.ref == ref)
-        runs.finish_task(task_id, status, error)
+        self._deps.store.runs.finish_task(self._task_id(run_id, ref), status, error)
         self._settle_run(run_id)
 
     def _record_attempt(self, ref: str, run_id: str, attempt: int, error: str) -> None:
-        runs = self._deps.store.runs
-        runs.record_attempt(
-            next(row.task_id for row in runs.list_tasks(run_id) if row.ref == ref), attempt, error
-        )
+        self._deps.store.runs.record_attempt(self._task_id(run_id, ref), attempt, error)
+
+    def _task_id(self, run_id: str, ref: str) -> str:
+        row = self._deps.store.runs.task_by_ref(run_id, ref)
+        if row is None:
+            raise KeyError(f"run {run_id} has no task {ref}")
+        return row.task_id
 
     def _settle_run(self, run_id: str) -> None:
         """Finish the run if none of its tasks is still running. It failed for the first reason any of them did."""
         runs = self._deps.store.runs
-        if runs.get_run(run_id).status == "cancelled":
+        run = runs.get_run(run_id)
+        if run.status == "cancelled":
             return  # what the sealed versions still do is the ledger's business now
-        rows = runs.list_tasks(run_id)
-        if any(row.status == "running" for row in rows):
+        if runs.list_tasks(run_id, status="running", limit=1):
             return
-        failed = next((row for row in rows if row.status == "failed"), None)
-        if failed is None:
-            runs.set_run_status(run_id, "succeeded")
+        if run.trigger == STREAM_TRIGGER:
+            failed = self._stream_failure(run_id)
+            if failed is None:  # a stream run gets over a failure, so what it said then must not stay
+                runs.set_run_status(run_id, "succeeded", "")
+            else:
+                runs.set_run_status(run_id, "failed", failed.error)
+            return
+        found = runs.list_tasks(run_id, status="failed", limit=1)
+        if found:
+            runs.set_run_status(run_id, "failed", found[0].error)
         else:
-            runs.set_run_status(run_id, "failed", failed.error)
+            runs.set_run_status(run_id, "succeeded")
+
+    def _stream_failure(self, run_id: str) -> TaskRow | None:
+        """Return what makes a settled stream run failed: a failed delivery, which stays until someone acts, or else a
+        failure of its newest tick. An older tick's failure is over, since the newer one read from the same watermark."""
+        runs = self._deps.store.runs
+        failed = runs.list_tasks(run_id, status="failed", kinds=("apply",), limit=1)
+        if failed:
+            return failed[0]
+        newest = runs.list_tasks(run_id, kinds=("plan",), limit=1, newest_first=True)
+        if not newest:
+            return None
+        tick = newest[0].ref.removesuffix("plan")
+        return next((row for row in runs.tasks_by_ref(run_id, tick) if row.status == "failed"), None)
 
     def _submit(
         self,

@@ -37,6 +37,14 @@ class OnEvent:
 
 Trigger = Cron | Every | Manual | OnEvent
 
+# An interval under this is a high-frequency poller: its ticks are tasks of one daily run, not a run each (design 6.3).
+STREAM_BELOW = timedelta(minutes=5)
+
+
+def is_stream(trigger: Trigger) -> bool:
+    """Return whether the trigger's ticks go into the flow's daily stream run. Longer intervals behave like cron."""
+    return isinstance(trigger, Every) and trigger.interval < STREAM_BELOW
+
 
 def cron(expr: str, *, tz: str) -> Cron:
     """Return a trigger that runs on the cron schedule `expr`, such as `*/15 * * * *`, read in time zone `tz`.

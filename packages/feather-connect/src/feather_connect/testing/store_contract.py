@@ -6,6 +6,7 @@ record. A backend with only a spool subclasses `SpoolContract`, which needs `spo
 """
 
 import pickle
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -14,14 +15,19 @@ import pyarrow as pa
 import pytest
 
 from feather_connect.clock import FrozenClock
+from feather_connect.core.connector import InboundRequest
 from feather_connect.core.records import Record, row_hash
+from feather_connect.ids import stable_id
 from feather_connect.storage.port import (
     CLOSED,
     TRANSITIONS,
     BudgetSpec,
     DeliveryStatus,
     DuplicateUser,
+    InboxDay,
     InvalidTransition,
+    SliceFinished,
+    StaleWriter,
     StateRow,
     Store,
     TokenRow,
@@ -50,6 +56,10 @@ def draft(
 def seal(store: Store, vid: str, routes: list[str], **kw: Any) -> None:
     store.versions.stage(draft(vid, **kw))
     store.versions.seal([vid], routes)
+
+
+def inbound(body: bytes = b"{}", at: datetime = T0, **headers: str) -> InboundRequest:
+    return InboundRequest("POST", "/ingress/default/d", headers, body, at)
 
 
 def upserts(*pairs: tuple[str, dict[str, Any]]) -> list[Record]:
@@ -227,6 +237,105 @@ class SpoolContract:
 
 
 class StoreContract(SpoolContract):
+    def _table(self) -> pa.Table:
+        return records_to_table(upserts(("k", {"x": 1})))
+
+    def test_a_sealed_version_refuses_every_write_and_delete(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        spool.put_chunk("v1", 0, "data", self._table())
+        spool.put_chunk("v1", 0, "snapshot", snapshot_table([("k", 1)]))
+        seal(store, "v1", ["a"])
+        for kind in ("data", "snapshot", "full", "moves", "settled"):
+            with pytest.raises(VersionSealed):
+                spool.put_chunk("v1", 0, kind, self._table())
+        for kind in ("data", "snapshot", "full", "moves"):
+            with pytest.raises(VersionSealed):
+                spool.delete_chunks("v1", kind)
+        with pytest.raises(VersionSealed):
+            spool.delete_version("v1")
+        assert [c.chunk_no for c in spool.list_chunks("v1")] == [0]
+        assert [c.chunk_no for c in spool.list_chunks("v1", "snapshot")] == [0]
+
+    def test_what_follows_sealing_may_still_clear_the_working_chunks(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        spool.put_chunk("v1", 0, "candidates", snapshot_table([("k", 1)]))
+        seal(store, "v1", ["a"])
+        spool.delete_chunks("v1", "candidates")
+        assert spool.list_chunks("v1", "candidates") == []
+
+    def test_retention_can_still_take_a_sealed_versions_chunks(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        spool.put_chunk("v1", 0, "data", self._table())
+        spool.put_chunk("v1", 0, "snapshot", snapshot_table([("k", 1)]))
+        seal(store, "v1", ["a"])
+        spool.expire_chunks("v1", "snapshot")
+        assert spool.list_chunks("v1", "snapshot") == []
+        spool.expire_version("v1")
+        assert spool.list_chunks("v1") == []
+
+    def test_a_later_claim_shuts_out_the_earlier_writer(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        store.versions.claim("v1", "first", "r1", "d", "p")
+        spool.put_chunk("v1", 0, "data", self._table(), "first")
+        store.versions.stage(draft("v1"), "first")
+        store.versions.claim("v1", "second", "r1", "d", "p")
+
+        with pytest.raises(KeyError):  # the claim took the staged version with it
+            store.versions.get("v1")
+        with pytest.raises(StaleWriter):
+            spool.put_chunk("v1", 1, "data", self._table(), "first")
+        with pytest.raises(StaleWriter):
+            spool.delete_chunks("v1", "data", writer="first")
+        with pytest.raises(StaleWriter):
+            spool.delete_version("v1", "first")
+        with pytest.raises(StaleWriter):
+            store.versions.stage(draft("v1"), "first")
+        with pytest.raises(StaleWriter):
+            store.versions.discard_staged("v1", "first")
+        store.versions.stage(draft("v1"), "second")
+        with pytest.raises(StaleWriter):  # not the later writer's version to seal, though it is staged
+            store.versions.seal(["v1"], ["a"], "first")
+        assert store.versions.get("v1").status == "staged"
+        assert store.versions.seal(["v1"], ["a"], "second")[0].status == "sealed"
+        assert store.versions.seal(["v1"], ["a"], "first")[0].status == "sealed"  # a repeat changes nothing
+
+    def test_a_writer_that_clears_its_version_keeps_its_claim(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        store.versions.claim("v1", "w", "r1", "d", "p")
+        spool.put_chunk("v1", 0, "data", self._table(), "w")
+        spool.delete_version("v1", "w")
+        assert spool.list_chunks("v1") == []
+        spool.put_chunk("v1", 0, "settled", self._table(), "w")
+
+    def test_a_sealed_version_cannot_be_claimed_or_taken_over(self, store: Store, spool: Spool):
+        seal(store, "v1", ["a"])
+        with pytest.raises(VersionSealed):
+            store.versions.claim("v1", "w", "r1", "d", "p")
+        with pytest.raises(VersionSealed):
+            store.versions.take_over(["v1"], "w")
+
+    def test_taking_over_shuts_out_the_earlier_writer_and_keeps_the_version(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        store.versions.claim("v1", "first", "r1", "d", "p")
+        store.versions.stage(draft("v1"), "first")
+        store.versions.take_over(["v1"], "seal")
+        assert store.versions.get("v1").status == "staged"
+        with pytest.raises(StaleWriter):
+            spool.put_chunk("v1", 0, "data", self._table(), "first")
+        assert store.versions.seal(["v1"], ["a"], "seal")[0].status == "sealed"
+
+    def test_a_finished_slice_cannot_be_claimed_and_a_stale_writer_cannot_finish_one(self, store: Store):
+        store.versions.register_slices("r1", "d", ["p", "q"])
+        vid = stable_id("r1", "d", "p")
+        store.versions.claim(vid, "first", "r1", "d", "p")
+        store.versions.claim(vid, "second", "r1", "d", "p")
+        with pytest.raises(StaleWriter):
+            store.versions.finish_slice("r1", "d", "p", "first")
+        assert store.versions.finish_slice("r1", "d", "p", "second") is False
+        assert store.versions.finish_slice("r1", "d", "p", "first") is False  # done already: it's a repeat
+        with pytest.raises(SliceFinished):
+            store.versions.claim(vid, "third", "r1", "d", "p")
+
     # budgets
 
     def test_budget_never_exceeds_any_window(self, store: Store, clock: FrozenClock):
@@ -609,6 +718,67 @@ class StoreContract(SpoolContract):
         assert (tasks[1].status, tasks[1].route, tasks[1].dataset) == ("running", "a", None)
         assert store.runs.task_logs(t1) == ["info: started", "error: bad row"]
         assert store.runs.task_logs(t2) == []
+
+    def test_listing_tasks_narrowed_and_paged(self, store: Store):
+        rid = store.runs.create_run("f", "manual", "ann", {})
+        other = store.runs.create_run("f", "manual", "ann", {})
+        first = store.runs.start_task(rid, "plan", "a")
+        second = store.runs.start_task(rid, "apply", "b")
+        third = store.runs.start_task(rid, "apply", "c")
+        store.runs.start_task(other, "apply", "c")
+        store.runs.finish_task(first, "succeeded")
+        store.runs.finish_task(second, "failed", "bad")
+
+        def ids(**kw: Any) -> list[str]:
+            return [t.task_id for t in store.runs.list_tasks(rid, **kw)]
+
+        assert ids() == [first, second, third]
+        assert ids(status="running") == [third] and ids(status="failed") == [second]
+        assert ids(status="succeeded") == [first]
+        assert ids(kinds=("apply",)) == [second, third] and ids(kinds=("apply", "plan"), limit=1) == [first]
+        assert ids(newest_first=True) == [third, second, first]
+        assert ids(limit=2, newest_first=True) == [third, second]
+        assert ids(after_task=first) == [second, third]
+        assert ids(after_task=second, newest_first=True) == [first]
+
+    def test_finding_tasks_by_ref(self, store: Store):
+        rid = store.runs.create_run("f", "manual", "ann", {})
+        other = store.runs.create_run("f", "manual", "ann", {})
+        one = store.runs.start_task(rid, "apply", "apply:r:v:0:0")
+        two = store.runs.start_task(rid, "apply", "apply:r:v:0:0#1")
+        store.runs.start_task(rid, "apply", "apply:r:w:0:0")
+        store.runs.start_task(other, "apply", "apply:r:v:0:0")
+        row = store.runs.task_by_ref(rid, "apply:r:v:0:0")
+        assert row is not None and row.task_id == one
+        assert store.runs.task_by_ref(rid, "nothing") is None
+        assert [t.task_id for t in store.runs.tasks_by_ref(rid, "apply:r:v:")] == [one, two]
+        assert store.runs.tasks_by_ref(rid, "apply:%") == []
+
+    def test_counting_tasks(self, store: Store):
+        rid = store.runs.create_run("f", "manual", "ann", {})
+        store.runs.finish_task(store.runs.start_task(rid, "plan", "a"), "succeeded")
+        store.runs.finish_task(store.runs.start_task(rid, "plan", "b"), "succeeded")
+        store.runs.finish_task(store.runs.start_task(rid, "skip", "c"), "skipped", "paused")
+        assert dict(store.runs.count_tasks(rid)) == {("plan", "succeeded"): 2, ("skip", "skipped"): 1}
+
+    def test_one_stream_run_per_flow_and_day(self, store: Store):
+        first = store.runs.stream_run("f", "2026-10-18")
+        run = store.runs.get_run(first)
+        assert (run.trigger, run.status, run.params) == ("stream", "succeeded", {"day": "2026-10-18"})
+        assert store.runs.stream_run("f", "2026-10-18") == first
+        assert store.runs.stream_run("g", "2026-10-18") != first
+        assert store.runs.stream_run("f", "2026-10-19") != first
+
+    def test_a_version_keeps_its_tick_and_is_found_by_it(self, store: Store):
+        rid = store.runs.create_run("f", "stream", "system", {})
+        for vid, tick in (("v1", "t1"), ("v2", "t2")):
+            store.versions.stage(replace(draft(vid, run=rid), tick=tick))
+        assert [v.version_id for v in store.versions.staged_for_run(rid, "d", "t1")] == ["v1"]
+        assert len(store.versions.staged_for_run(rid, "d")) == 2
+        store.versions.seal(["v1", "v2"], [])
+        assert [v.version_id for v in store.versions.sealed_for_run(rid, "d", "t2")] == ["v2"]
+        assert store.versions.get("v2").tick == "t2"
+        assert [v.version_id for v in store.versions.newest_sealed_for_run(rid, "d", 1)] == ["v2"]
 
     def test_a_retry_is_noted_on_the_task_and_outlives_its_finish(self, store: Store):
         rid = store.runs.create_run("f", "manual", "ann", {})
@@ -1003,6 +1173,47 @@ class StoreContract(SpoolContract):
         later = clock.now() + timedelta(minutes=5)
         assert len(store.ledger.pending_older_than(timedelta(minutes=1), now=later)) == 2
 
+    def test_pending_older_than_lists_only_the_next_delivery_of_each_stream(
+        self, store: Store, clock: FrozenClock
+    ):
+        for version_id in ("v1", "v2", "v3"):  # in one stream, on route a
+            seal(store, version_id, ["a"])
+        seal(store, "other", ["a"], ds="e")  # another dataset, so another stream
+        seal(store, "blocked", ["b"], part="q")
+        seal(store, "behind", ["b"], part="q")  # waits behind a failure, so nothing can be done for it
+        store.ledger.transition("b", "blocked", "running", actor="t")
+        store.ledger.transition("b", "blocked", "failed", actor="t")
+        clock.advance(timedelta(minutes=2))
+        found = store.ledger.pending_older_than(timedelta(minutes=1))
+        assert [(d.route, d.version_id) for d in found] == [("a", "v1"), ("a", "other")]
+
+        store.ledger.transition("a", "v1", "running", actor="t")  # a running one is next, and isn't pending
+        assert [d.version_id for d in store.ledger.pending_older_than(timedelta(minutes=1))] == ["other"]
+        assert store.ledger.pending_older_than(timedelta(minutes=1), limit=0) == []
+
+    def test_pending_older_than_stops_at_its_limit(self, store: Store, clock: FrozenClock):
+        for n in range(3):
+            seal(store, f"v{n}", ["a"], part=f"p{n}")
+        clock.advance(timedelta(minutes=2))
+        found = store.ledger.pending_older_than(timedelta(minutes=1), limit=2)
+        assert [d.version_id for d in found] == ["v0", "v1"]
+
+    def test_a_run_that_ended_badly_has_no_seal_to_wait_for_and_its_staged_versions_are_abandoned(
+        self, store: Store
+    ):
+        run = store.runs.create_run("f", "manual", "ann", {})
+        store.versions.stage(draft("v1", run=run))
+        store.versions.register_slices(run, "d", ["p"])
+        store.versions.finish_slice(run, "d", "p")
+        assert store.versions.runs_ready_to_seal() == [(run, "d")]
+        assert store.versions.abandoned() == []
+        for status in ("failed", "cancelled"):
+            store.runs.set_run_status(run, status)
+            assert store.versions.runs_ready_to_seal() == []
+            assert [v.version_id for v in store.versions.abandoned()] == ["v1"]
+        store.versions.seal(["v1"], ["a"])
+        assert store.versions.abandoned() == []
+
     def test_open_versions_are_those_with_a_delivery_that_is_not_closed(self, store: Store):
         for vid, part in (("v1", "p"), ("v2", "q"), ("v3", "r")):
             seal(store, vid, ["a", "b"], part=part)
@@ -1102,3 +1313,180 @@ def flow_spec(name: str, routes: list[str], owner: str | None = None) -> dict[st
         "routes": [{"name": route, "connection": route} for route in routes],
         "triggers": [],
     }
+
+    # The inbox.
+
+    def test_inbox_take_is_in_arrival_order(self, store: Store):
+        for n in range(3):
+            assert store.inbox.put("d", inbound(str(n).encode())) is True
+        store.inbox.put("other", inbound(b"x"))
+        events = store.inbox.take("d", 10)
+        assert [e.request.body for e in events] == [b"0", b"1", b"2"]
+        assert events[0].event_seq < events[1].event_seq < events[2].event_seq
+        assert [e.request.body for e in store.inbox.take("d", 2)] == [b"0", b"1"]
+
+    def test_inbox_keeps_a_request_exactly(self, store: Store):
+        body = b'\x00\xff{"not": "text"}'
+        store.inbox.put("d", inbound(body, **{"x-signature": "abc"}), "e1")
+        [event] = store.inbox.take("d", 1)
+        assert (event.dataset, event.event_id, event.received_at) == ("d", "e1", T0)
+        assert event.request == inbound(body, **{"x-signature": "abc"})
+
+    def test_inbox_put_many_stores_in_order_and_says_what_put_would(self, store: Store):
+        store.inbox.put("d", inbound(b"old"), "seen")
+        request = inbound(b"\x00raw", **{"x-signature": "abc"})
+        stored = store.inbox.put_many(
+            [
+                ("d", request, "e1"),
+                ("d", inbound(b"seen again"), "seen"),
+                ("d", inbound(b"no id"), None),
+                ("d", inbound(b"repeat within"), "e1"),
+                ("other", inbound(b"other dataset"), "e1"),
+                ("d", inbound(b"last"), "e2"),
+            ]
+        )
+        assert stored == [True, False, True, False, True, True]
+        events = store.inbox.take("d", 10)
+        assert [e.request.body for e in events] == [b"old", b"\x00raw", b"no id", b"last"]
+        assert events[1].event_id == "e1" and events[1].request.headers == request.headers
+        assert [e.request.body for e in store.inbox.take("other", 10)] == [b"other dataset"]
+
+    def test_inbox_put_many_of_nothing_stores_nothing(self, store: Store):
+        assert store.inbox.put_many([]) == []
+        assert store.inbox.take("d", 10) == []
+
+    def test_inbox_stores_an_event_id_once_per_dataset(self, store: Store):
+        assert store.inbox.put("d", inbound(b"1"), "e1") is True
+        assert store.inbox.put("d", inbound(b"2"), "e1") is False
+        assert store.inbox.put("other", inbound(b"3"), "e1") is True
+        assert store.inbox.put("d", inbound(b"4")) is True  # no id: nothing to compare
+        assert store.inbox.put("d", inbound(b"5")) is True
+        assert [e.request.body for e in store.inbox.take("d", 10)] == [b"1", b"4", b"5"]
+
+    def test_an_event_id_stays_used_once_sealed(self, store: Store):
+        store.inbox.put("d", inbound(), "e1")
+        store.inbox.seal_batch([e.event_seq for e in store.inbox.take("d", 1)], [], [])
+        assert store.inbox.put("d", inbound(), "e1") is False
+
+    def test_inbox_oldest_age(self, store: Store, clock: FrozenClock):
+        assert store.inbox.oldest_age("d", clock.now()) is None
+        store.inbox.put("d", inbound())
+        store.inbox.put("d", inbound(at=T0 + timedelta(seconds=5)))
+        assert store.inbox.oldest_age("d", T0 + timedelta(seconds=7)) == timedelta(seconds=7)
+        store.inbox.seal_batch([e.event_seq for e in store.inbox.take("d", 1)], [], [])
+        assert store.inbox.oldest_age("d", T0 + timedelta(seconds=7)) == timedelta(seconds=2)
+
+    def test_seal_batch_seals_events_and_versions_together(self, store: Store):
+        store.inbox.put("d", inbound())
+        seqs = [e.event_seq for e in store.inbox.take("d", 1)]
+        [version] = store.inbox.seal_batch(seqs, [draft("v1", complete=False)], ["a"])
+        assert version.status == "sealed" and version.seal_seq is not None
+        assert store.ledger.get("a", "v1").status == "pending"
+        assert store.inbox.take("d", 1) == []
+
+    def test_seal_batch_is_one_transaction(self, store: Store):
+        """Any refusal leaves the events open, the versions unknown and the ledger empty."""
+        store.inbox.put("d", inbound(b"1"))
+        store.inbox.put("d", inbound(b"2"))
+        first, second = (e.event_seq for e in store.inbox.take("d", 2))
+        store.inbox.seal_batch([first], [], [])
+        with pytest.raises(StaleWriter):  # an event already sealed: another sealer got there
+            store.inbox.seal_batch([first, second], [draft("v1", complete=False)], ["a"])
+        with pytest.raises(StaleWriter):  # no such event
+            store.inbox.seal_batch([second, second + 1000], [draft("v1", complete=False)], ["a"])
+        store.versions.claim("v2", "w1", "r1", "d", "p")
+        store.versions.claim("v3", "w1", "r1", "d", "p")
+        store.versions.claim("v3", "later", "r1", "d", "p")
+        drafts = [draft("v2", complete=False), draft("v3", complete=False)]
+        with pytest.raises(StaleWriter):  # the first draft holds its claim, and the second has lost its own
+            store.inbox.seal_batch([second], drafts, ["a"], writer="w1")
+        assert [e.event_seq for e in store.inbox.take("d", 10)] == [second]
+        for version_id in ("v1", "v2", "v3"):
+            with pytest.raises(KeyError):
+                store.versions.get(version_id)
+        assert store.ledger.list_deliveries() == []
+
+    def test_seal_batch_refuses_a_version_already_sealed(self, store: Store):
+        seal(store, "v1", ["a"], complete=False)
+        store.inbox.put("d", inbound())
+        [event] = store.inbox.take("d", 1)
+        with pytest.raises(VersionSealed):
+            store.inbox.seal_batch([event.event_seq], [draft("v1", complete=False)], ["a"])
+        assert store.inbox.take("d", 1) == [event]
+
+    def test_a_sealed_event_cannot_seal_again_with_a_later_first_event(self, store: Store):
+        """Two sealers can see different first events when a commit comes late: an event still seals only once."""
+        store.inbox.put("d", inbound(b"1"))
+        store.inbox.put("d", inbound(b"2"))
+        first, second = (e.event_seq for e in store.inbox.take("d", 2))
+        store.inbox.seal_batch([first, second], [draft("from-first", complete=False)], ["a"])
+        with pytest.raises(StaleWriter):
+            store.inbox.seal_batch([second], [draft("from-second", complete=False)], ["a"])
+        with pytest.raises(KeyError):
+            store.versions.get("from-second")
+
+    def test_inbox_days_say_what_is_on_them(self, store: Store):
+        store.inbox.put("d", inbound())
+        store.inbox.put("d", inbound())
+        [first, _] = store.inbox.take("d", 2)
+        day = T0.date()
+        assert day in store.inbox.days()
+        assert store.inbox.day_status(day) == InboxDay(2, first.event_seq, None)
+        store.inbox.seal_batch([first.event_seq], [], [])
+        status = store.inbox.day_status(day)
+        assert (status.unsealed, status.last_sealed) == (1, T0)
+
+    def test_an_inbox_day_with_an_unsealed_event_is_not_dropped(self, store: Store):
+        store.inbox.put("d", inbound())
+        assert store.inbox.drop_day(T0.date()) is False
+        assert len(store.inbox.take("d", 1)) == 1
+
+    def test_dropping_an_inbox_day_frees_its_event_ids(self, store: Store):
+        store.inbox.put("d", inbound(), "e1")
+        store.inbox.seal_batch([e.event_seq for e in store.inbox.take("d", 1)], [], [])
+        assert store.inbox.drop_day(T0.date()) is True
+        assert T0.date() not in store.inbox.days()
+        assert store.inbox.put("d", inbound(), "e1") is True
+
+    def test_inbox_defer_counts_a_try_and_says_when(self, store: Store):
+        store.inbox.put("d", inbound())
+        [event] = store.inbox.take("d", 1)
+        store.inbox.defer(event.event_seq, T0 + timedelta(seconds=10))
+        store.inbox.defer(event.event_seq, T0 + timedelta(seconds=30))
+        [again] = store.inbox.take("d", 1)
+        assert (again.tries, again.retry_at) == (2, T0 + timedelta(seconds=30))
+
+    def test_a_held_inbox_event_waits_for_reprocess_or_release(self, store: Store):
+        for body in (b"1", b"2", b"3"):
+            store.inbox.put("d", inbound(body))
+        first, second, third = store.inbox.take("d", 3)
+        store.inbox.defer(first.event_seq, T0)
+        store.inbox.hold(first.event_seq)
+        store.inbox.hold(second.event_seq)
+        with pytest.raises(StaleWriter):
+            store.inbox.hold(second.event_seq)
+        with pytest.raises(StaleWriter):
+            store.inbox.seal_batch([second.event_seq], [], [])
+        assert store.inbox.take("d", 3) == [third]
+        assert store.inbox.day_status(T0.date()).unsealed == 3
+        assert store.inbox.reprocess("other", first.event_seq) is False
+        assert store.inbox.reprocess("d", first.event_seq) is True
+        [back, _] = store.inbox.take("d", 3)
+        assert (back.event_seq, back.tries, back.retry_at) == (first.event_seq, 0, None)
+        assert store.inbox.release("d", second.event_seq) is True
+        assert store.inbox.release("d", second.event_seq) is False
+        assert store.inbox.reprocess("d", second.event_seq) is False
+        assert store.inbox.day_status(T0.date()).unsealed == 2
+
+    def test_an_inbox_day_with_a_held_event_is_not_dropped(self, store: Store):
+        store.inbox.put("d", inbound())
+        [event] = store.inbox.take("d", 1)
+        store.inbox.hold(event.event_seq)
+        assert store.inbox.drop_day(T0.date()) is False
+        store.inbox.release("d", event.event_seq)
+        assert store.inbox.drop_day(T0.date()) is True
+
+    def test_an_inbox_day_with_nothing_in_it_can_be_dropped(self, store: Store):
+        store.inbox.ensure_partitions()
+        assert store.inbox.drop_day(T0.date()) is True
+        assert store.inbox.drop_day(T0.date()) is True

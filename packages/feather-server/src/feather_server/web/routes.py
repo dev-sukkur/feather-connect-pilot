@@ -16,7 +16,13 @@ from fastapi.templating import Jinja2Templates
 
 from feather_connect.core.errors import PermanentError
 from feather_connect.runtime.runtime import FlowPaused
-from feather_connect.storage.port import DeliveryStatus, Run, delivery_cursor, failure_cursor
+from feather_connect.storage.port import (
+    STREAM_TRIGGER,
+    DeliveryStatus,
+    Run,
+    delivery_cursor,
+    failure_cursor,
+)
 from feather_server.auth import Actor, CurrentActor, csrf_token, require_csrf
 from feather_server.services import actions as action_limits
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
@@ -154,7 +160,12 @@ def overview(request: Request, actor: CurrentActor) -> HTMLResponse:
         if failed_routes.get(flow.name) or (flow.last_run and flow.last_run.status == "failed")
     ]
     runs = read.runs(limit=_RECENT_RUNS)
-    finished = [_seconds(r) for r in reversed(runs) if r.status in ("succeeded", "failed")]
+    # A stream run lasts a day whatever it does, so its span says nothing about how long runs take.
+    finished = [
+        _seconds(r)
+        for r in reversed(runs)
+        if r.status in ("succeeded", "failed") and r.trigger != STREAM_TRIGGER
+    ]
     alive = [w for w in summary.workers if w.state == "alive"]
     return render(
         request,
@@ -530,6 +541,14 @@ _RUNS_PAGE = 50
 _LOG_PAGE = 200
 _ACTIVE = ("queued", "running")
 _RUN_NOTICES = {"cancelled": "The run is cancelled."}
+_NO_CANCEL = (
+    "This is a daily stream run, which can't be cancelled: pause the flow to stop its ticks. "
+    "Its deliveries can each be retried or skipped on the failures page."
+)
+_NO_RERUN = (
+    "This is a daily stream run, which has no inputs to run again: its next tick reads from the watermark. "
+    "To read something again, re-run its partitions from the partition grid, or run the flow from its page."
+)
 
 
 @router.get("/runs", response_class=HTMLResponse)
@@ -569,7 +588,7 @@ def _run_page(
     form: dict[str, str] | None = None,
 ) -> HTMLResponse:
     try:
-        detail = reads(request).run_detail(run_id)
+        detail = reads(request).run_detail(run_id, request.query_params.get("cursor") or None)
     except KeyError:
         return _not_found(request, f"No run with the id {run_id!r}.")
     done = _RUN_NOTICES.get(request.query_params.get("done", ""))
@@ -585,6 +604,8 @@ def _run_page(
         actor=actor,
         detail=detail,
         active=detail.run.status in _ACTIVE,
+        live=(detail.run.status in _ACTIVE or (detail.ticks is not None and detail.ticks.day_open))
+        and "cursor" not in request.query_params,
         notice=notice,
         confirm_cancel=confirm_cancel,
         form=form or {},
@@ -634,6 +655,8 @@ def cancel_run(
         run = reads(request).run_detail(run_id).run
     except KeyError:
         return _not_found(request, f"No run with the id {run_id!r}.")
+    if run.trigger == STREAM_TRIGGER:
+        return _run_page(request, actor, run_id, status=409, notice=("bad", _NO_CANCEL))
     if run.status not in _ACTIVE:
         return _run_page(request, actor, run_id, status=409, notice=("bad", "The run is already over."))
     if confirm != "yes":  # the first step only asks
@@ -654,6 +677,8 @@ def rerun_run(
         run = reads(request).run_detail(run_id).run
     except KeyError:
         return _not_found(request, f"No run with the id {run_id!r}.")
+    if run.trigger == STREAM_TRIGGER:
+        return _run_page(request, actor, run_id, status=409, notice=("bad", _NO_RERUN))
     given = [p for p in re.split(r"[,\s]+", partitions) if p]
     chosen = given or run.params.get("partitions")  # no new inputs: the run's own
     slices = run.params.get("max_concurrent")

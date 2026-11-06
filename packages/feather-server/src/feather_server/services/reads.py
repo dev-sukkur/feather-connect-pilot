@@ -5,7 +5,7 @@ appears as `***` or not at all.
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -14,7 +14,9 @@ from cronsim import CronSim
 from feather_connect.core.flow import Flow
 from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Trigger
 from feather_connect.project import ConfigValue, effective_config
+from feather_connect.runtime.retention import kept_days, kept_inbox_days
 from feather_connect.storage.port import (
+    STREAM_TRIGGER,
     Delivery,
     DeliveryStatus,
     FailureGroup,
@@ -35,9 +37,14 @@ STALE_AFTER_RUNS = (
     2  # a dataset is stale when its newest version is older than this many intervals of its flow
 )
 _RECENT_RUNS = 10
+_TASKS_A_PAGE = 100
+_VERSIONS_SHOWN = 50  # of each dataset, on a run's page: a stream run holds a day of them
 _RECENT_VERSIONS = 15
 _FAILED_RUNS_SHOWN = 100
 _BLOCKED_SHOWN = 2
+_KEPT_DAYS_FOR = timedelta(
+    seconds=60
+)  # the page refreshes every 10 s, and working this out reads every old day
 
 
 @dataclass(frozen=True)
@@ -104,6 +111,12 @@ class BudgetUse:
 
 
 @dataclass(frozen=True)
+class KeptDay:
+    day: date
+    why: str
+
+
+@dataclass(frozen=True)
 class Overview:
     deliveries: Mapping[str, int]
     failed_deliveries: int
@@ -114,6 +127,7 @@ class Overview:
     stale_datasets: tuple[StaleDataset, ...]
     budgets: tuple[BudgetUse, ...]
     workers: tuple[WorkerRow, ...]
+    kept_days: tuple[KeptDay, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -141,13 +155,31 @@ class Grid:
 
 
 @dataclass(frozen=True)
+class TickCounts:
+    """How the ticks of a daily stream run went. A tick's own reading and delivering are tasks of their own."""
+
+    total: int
+    skipped: int
+    failed: int
+    day: str
+    day_open: bool  # it is still that day, so more ticks will come
+
+
+@dataclass(frozen=True)
 class RunDetail:
+    """A run and one page of what it holds. A stream run can gather thousands of tasks a day, so `tasks` is a page,
+    newest first on a stream run and oldest first otherwise, and `versions` are only its newest."""
+
     run: Run
     tasks: tuple[TaskRow, ...]
     versions: tuple[Version, ...]
     deliveries: tuple[
         Delivery, ...
     ] = ()  # of the run's versions on each route of its flow, with their attempts
+    next_task: str | None = None  # the cursor of the next page of tasks
+    task_total: int = 0
+    tasks_failed: int = 0
+    ticks: TickCounts | None = None  # of a stream run
 
 
 @dataclass(frozen=True)
@@ -227,6 +259,7 @@ class Reads:
         self._state = state
         self._rt = state.runtime
         self._store = state.store
+        self._kept_days: tuple[datetime, tuple[KeptDay, ...]] | None = None
 
     # Flows.
 
@@ -315,6 +348,17 @@ class Reads:
             )
         return found
 
+    def _kept(self) -> tuple[KeptDay, ...]:
+        """Why old days are being kept, worked out here because retention's own report is only on the replica that
+        leads it. Two requests at once may both work it out, which does no harm."""
+        now = self._state.clock.now()
+        if self._kept_days is None or now - self._kept_days[0] >= _KEPT_DAYS_FOR:
+            days = kept_days(self._store, self._state.spool, now=now)
+            inbox = kept_inbox_days(self._store, now=now)
+            found = [*days.items(), *((day, f"inbox: {why}") for day, why in inbox.items())]
+            self._kept_days = (now, tuple(KeptDay(day, why) for day, why in sorted(found)))
+        return self._kept_days[1]
+
     def overview(self) -> Overview:
         counts = self._store.reads.delivery_counts()
         runs = self._store.runs
@@ -328,6 +372,7 @@ class Reads:
             tuple(self._stale()),
             tuple(self._budgets()),
             tuple(self._store.workers.list_workers()),
+            self._kept(),
         )
 
     # The partition grid, runs, failures.
@@ -365,23 +410,47 @@ class Reads:
         """For each run, how many of its tasks took more than one attempt. Runs with none are left out."""
         return self._store.reads.retried_tasks(run_ids)
 
-    def run_detail(self, run_id: str) -> RunDetail:
-        """Raises `KeyError` for an unknown run."""
+    def _ticks(self, run: Run, counts: Mapping[tuple[str, str], int]) -> TickCounts | None:
+        if run.trigger != STREAM_TRIGGER:
+            return None
+        day = str(run.params.get("day", ""))
+        today = self._state.clock.now().astimezone(ZoneInfo(self._rt.timezone)).date().isoformat()
+        total = sum(n for (kind, _), n in counts.items() if kind in ("plan", "skip"))
+        return TickCounts(
+            total, counts.get(("skip", "skipped"), 0), counts.get(("plan", "failed"), 0), day, day == today
+        )
+
+    def run_detail(self, run_id: str, cursor: str | None = None, limit: int = _TASKS_A_PAGE) -> RunDetail:
+        """Return the run with a page of its tasks, `cursor` being the last task of the page before. Raises `KeyError`
+        for an unknown run."""
         run = self._store.runs.get_run(run_id)
         versions: list[Version] = []
         deliveries: list[Delivery] = []
         if run.flow in {f.name for f in self._rt.flows()}:
             flow = self._rt.flow(run.flow)
             for dataset in flow.datasets:
-                versions.extend(self._store.versions.sealed_for_run(run_id, dataset.name))
+                newest = self._store.versions.newest_sealed_for_run(run_id, dataset.name, _VERSIONS_SHOWN)
+                versions.extend(reversed(newest))
             for version in versions:
                 for route in flow.routes:
                     try:
                         deliveries.append(self._store.ledger.get(route.name, version.version_id))
                     except KeyError:  # not delivered to this route (yet)
                         pass
-        tasks = sorted(self._store.runs.list_tasks(run_id), key=lambda t: (t.started_at, t.task_id))
-        return RunDetail(run, tuple(tasks), tuple(versions), tuple(deliveries))
+        tasks = self._store.runs.list_tasks(
+            run_id, limit=limit, after_task=cursor, newest_first=run.trigger == STREAM_TRIGGER
+        )
+        counts = self._store.runs.count_tasks(run_id)
+        return RunDetail(
+            run,
+            tuple(tasks),
+            tuple(versions),
+            tuple(deliveries),
+            tasks[-1].task_id if len(tasks) == limit else None,
+            sum(counts.values()),
+            sum(n for (_, status), n in counts.items() if status == "failed"),
+            self._ticks(run, counts),
+        )
 
     def task_logs(self, task_id: str) -> list[str]:
         return self._store.runs.task_logs(task_id)

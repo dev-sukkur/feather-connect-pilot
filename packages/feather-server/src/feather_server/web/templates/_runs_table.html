@@ -9,10 +9,10 @@
       <tr>
         <th scope="row"><a href="/runs/{{ run.run_id | urlencode }}"><code>{{ run.run_id[:8] }}</code></a></th>
         <td><a href="/flows/{{ run.flow | urlencode }}">{{ run.flow }}</a></td>
-        <td>{{ run.trigger }} · {{ run.actor }}</td>
+        <td>{{ run.trigger }} · {{ run.actor }}{% if run.trigger == "stream" %} · {{ run.params.get("day", "") }}{% endif %}</td>
         <td>{{ m.status_badge(run.status) }}</td>
         <td>{{ m.time_ago(run.created_at) }}</td>
-        <td>{% if run.status in ("succeeded", "failed", "cancelled") %}{{ (run.updated_at - run.created_at) | span }}{% else %}<span class="muted">&ndash;</span>{% endif %}</td>
+        <td>{% if run.status in ("succeeded", "failed", "cancelled") and run.trigger != "stream" %}{{ (run.updated_at - run.created_at) | span }}{% else %}<span class="muted">&ndash;</span>{% endif %}</td>
         <td>{% if retries.get(run.run_id) %}{{ retries[run.run_id] }} task{{ "s" if retries[run.run_id] != 1 }} retried{% endif %}</td>
         <td>{% if run.reason %}{{ run.reason }}{% endif %}</td>
       </tr>

@@ -90,7 +90,8 @@ def _dataset_problems(dataset: Dataset, path: str) -> list[Problem]:
                 f"use one of: {offered}" if offered else f"{source.name} declares no strategies",
             )
         )
-    if dataset.planner is None and dataset.partition.recent(_ANY_TIME) is None:
+    is_read = strategy.name != "push"  # a push dataset's partitions come from its events
+    if is_read and dataset.planner is None and dataset.partition.recent(_ANY_TIME) is None:
         problems.append(
             Problem(
                 "error",

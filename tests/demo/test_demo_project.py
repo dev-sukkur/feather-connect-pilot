@@ -5,7 +5,7 @@ from pathlib import Path
 
 from feather_connect.clock import FrozenClock
 from feather_connect.connectors import memory, simulation
-from feather_connect.core.triggers import every
+from feather_connect.core.triggers import cron
 from feather_connect.engine.local import LocalEngine
 from feather_connect.project import load_project, validate_project
 from feather_connect.runtime.runtime import Runtime
@@ -18,7 +18,7 @@ DEMO = Path(__file__).resolve().parents[2] / "examples" / "demo"
 def test_the_demo_project_is_sound():
     project = load_project(DEMO, "dev")
     assert [f.name for f in project.flows] == ["orders"]
-    assert project.flows[0].triggers == (every("10s"),)
+    assert project.flows[0].triggers == (cron("* * * * *", tz="UTC"),)
     assert [r.name for r in project.flows[0].routes] == ["warehouse", "archive"]
     assert validate_project(project) == []
 

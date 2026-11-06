@@ -1,13 +1,18 @@
 import hashlib
 import re
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from feather_connect.clock import FrozenClock
+from feather_connect.core.connector import InboundRequest
 from feather_connect.core.errors import PermanentError
+from feather_connect.core.records import Record
+from feather_connect.storage.port import VersionDraft
+from feather_connect.storage.spool import records_to_table
 from feather_server import web
 from feather_server.app import AppState, create_app
 from feather_server.settings import Settings
@@ -152,3 +157,54 @@ def test_meter_shows_use_against_the_limit_and_clamps() -> None:
     assert 'class="meter"' in meter(45, 90) and "45 of 90" in meter(45, 90)
     assert meter(100, 90).count("meter-over") == 1  # past the limit, drawn full and marked
     assert "0 of 0" in meter(0, 0)  # no limit does not divide by zero
+
+
+def stage_version(world: World, version_id: str) -> None:
+    world.store.versions.stage(VersionDraft(version_id, "d", "p", "r1", True, 1, 0, "h", None, None, "sha"))
+    table = records_to_table([Record("a", "upsert", {"x": 1}, 1)])
+    world.state.spool.put_chunk(version_id, 0, "data", table)
+
+
+def keep_an_old_day(world: World) -> date:
+    """Stage a version that is never sealed, then move past the days retention keeps. Returns the day it is on."""
+    old = world.clock.now().date()
+    stage_version(world, "v-old")
+    world.clock.advance(timedelta(days=15))
+    return old
+
+
+def test_overview_says_why_old_days_were_kept(client: TestClient, world: World) -> None:  # F14
+    assert "Days kept past retention" not in client.get("/").text
+    old = keep_an_old_day(world)
+    html = client.get("/").text
+    assert "Days kept past retention" in html
+    assert old.isoformat() in html and "not sealed" in html and "v-old" in html
+
+
+def test_overview_works_the_reasons_out_without_changing_anything(world: World) -> None:  # F14
+    old = keep_an_old_day(world)
+    assert [(k.day, "not sealed" in k.why) for k in world.reads.overview().kept_days] == [(old, True)]
+    assert world.state.spool.days() == [old]
+    assert world.store.versions.get("v-old").status == "staged"
+
+
+def test_overview_keeps_the_reasons_for_a_short_while(world: World) -> None:  # F14
+    assert world.reads.overview().kept_days == ()
+    keep_an_old_day(world)  # 15 days have gone by, so the empty answer has expired
+    found = world.reads.overview().kept_days
+    assert len(found) == 1
+    world.state.spool.drop_day(found[0].day)
+    world.clock.advance(timedelta(seconds=59))
+    assert world.reads.overview().kept_days == found
+    world.clock.advance(timedelta(seconds=1))
+    assert world.reads.overview().kept_days == ()
+
+
+def test_an_inbox_day_kept_for_an_unsealed_event_shows_on_the_overview(
+    world: World, clock: FrozenClock
+) -> None:
+    world.store.inbox.put("d", InboundRequest("POST", "/", {}, b"{}", clock.now()))
+    old = clock.now().date()
+    clock.advance(timedelta(days=30))
+    [kept] = world.reads.overview().kept_days
+    assert kept.day == old and kept.why.startswith("inbox: 1 events not sealed")

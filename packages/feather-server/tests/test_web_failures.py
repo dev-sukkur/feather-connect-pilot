@@ -2,6 +2,7 @@ import html as htmllib
 import re
 import time
 from collections.abc import Callable
+from typing import Any
 
 import psycopg
 import pytest
@@ -12,7 +13,6 @@ from feather_connect.core.errors import PermanentError, TransientError
 from feather_connect.engine.local import LocalEngine
 from feather_connect.logs import register_secrets
 from feather_connect.runtime.runtime import Runtime
-from feather_connect.storage.postgres.connect import connect
 from feather_server.app import AppState, create_app
 from feather_server.settings import Settings
 from feather_server.testing import World, day, sign_in
@@ -284,9 +284,9 @@ KINDS = 500
 
 
 @pytest.fixture
-def seed_failures(world: World, pg_url: str, pg: psycopg.Connection[DictRow]) -> TestClient:
+def seed_failures(world: World, pg_url: str, pg: psycopg.Connection[DictRow], pg_connect: Any) -> TestClient:
     """A signed-in browser on a Postgres store with `BIG` failed deliveries on `warehouse`, of `KINDS` different errors."""
-    store, spool = connect(pg_url, clock=world.clock)
+    store, spool = pg_connect(pg_url, clock=world.clock)
     engine = LocalEngine(world.clock)
     project = world.state.project
     runtime = Runtime(project.flows, store, spool, engine, code_sha="sha", clock=world.clock)

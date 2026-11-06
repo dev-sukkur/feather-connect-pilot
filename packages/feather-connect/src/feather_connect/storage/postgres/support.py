@@ -8,6 +8,8 @@ from psycopg import conninfo, sql
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
+from feather_connect.storage.port import StaleWriter, VersionSealed
+
 Pool = ConnectionPool[psycopg.Connection[DictRow]]
 
 # How a session of ours deals with a database or a network that has gone quiet. Without these a connect waits up to
@@ -25,6 +27,18 @@ TCP_USER_TIMEOUT_MS = (
 STATEMENT_TIMEOUT_MS = 120_000
 
 
+def connection_timeouts() -> dict[str, int]:
+    """Return how a connection deals with a network that has gone quiet, as libpq parameters."""
+    return {
+        "connect_timeout": CONNECT_TIMEOUT_S,
+        "keepalives": 1,
+        "keepalives_idle": KEEPALIVES_IDLE_S,
+        "keepalives_interval": KEEPALIVES_INTERVAL_S,
+        "keepalives_count": KEEPALIVES_COUNT,
+        "tcp_user_timeout": TCP_USER_TIMEOUT_MS,
+    }
+
+
 def session_options(database_url: str) -> dict[str, Any]:
     """Return the connection settings of every session we open, on a pool or alone, as keywords for psycopg.
 
@@ -33,14 +47,33 @@ def session_options(database_url: str) -> dict[str, Any]:
     options = conninfo.conninfo_to_dict(database_url).get("options")
     return {
         "application_name": "feather",
-        "connect_timeout": CONNECT_TIMEOUT_S,
-        "keepalives": 1,
-        "keepalives_idle": KEEPALIVES_IDLE_S,
-        "keepalives_interval": KEEPALIVES_INTERVAL_S,
-        "keepalives_count": KEEPALIVES_COUNT,
-        "tcp_user_timeout": TCP_USER_TIMEOUT_MS,
+        **connection_timeouts(),
         "options": f"{options or ''} -c statement_timeout={STATEMENT_TIMEOUT_MS}".strip(),
     }
+
+
+def guard_version(
+    conn: psycopg.Connection[DictRow], tenant: str, version_id: str, writer: str | None
+) -> None:
+    """Refuse the transaction's change to a version that is sealed, or that `writer` doesn't hold the claim of.
+
+    It locks both rows until the transaction ends, so a seal or a later claim waits for this change or comes before it.
+    Every transaction takes `spool_version` first, then `version`, so that they can't deadlock.
+    """
+    owner = None
+    if writer is not None:
+        owner = conn.execute(
+            "select writer from feather.spool_version where tenant_id = %s and version_id = %s for share",
+            (tenant, version_id),
+        ).fetchone()
+    version = conn.execute(
+        "select status from feather.version where tenant_id = %s and version_id = %s for share",
+        (tenant, version_id),
+    ).fetchone()
+    if version is not None and version["status"] == "sealed":
+        raise VersionSealed(f"version {version_id} is sealed")
+    if writer is not None and (owner is None or owner["writer"] != writer):
+        raise StaleWriter(f"version {version_id} was claimed by a later execution")
 
 
 # Serialises partition creation, which would otherwise fail when two writers need the same new partition.

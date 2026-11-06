@@ -3,6 +3,7 @@
 from collections.abc import Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, ClassVar, Literal, Protocol
 
 import pyarrow as pa
@@ -151,20 +152,57 @@ class Source(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class InboundRequest:
+    """A webhook as it arrived. `body` is the raw bytes, which is what a signature covers, and it is untrusted until
+    `verify` has passed. The names in `headers` are in lower case."""
+
+    method: str
+    path: str
+    headers: Mapping[str, str]
+    body: bytes
+    received_at: datetime
+
+
 class PushSource(Protocol):
-    """A source that receives webhooks or change events instead of being read."""
+    """A source that receives webhooks or change events instead of being read.
+
+    Three members are optional, and `is_unsigned`, `signature_secret_of` and `event_id_of` read them:
+
+    - `signature_secret: str`, the name under the connection's `auth` of the secret that `verify` checks against.
+    - `unsigned: bool`, true to say that this source takes requests with no check at all. Loading a project refuses a
+      push source that has neither of these (design 13.5).
+    - `event_id(request) -> str | None`, the id the sender gives the event, by which a repeat is stored only once.
+    """
 
     spec: ClassVar[ConnectorSpec]
     connection: str
 
-    # `request` will be an `InboundRequest` once the ingress task adds that type.
-    def verify(self, ctx: Context, request: Any) -> None:
-        """Raise if the request is not genuine, for example because its signature is bad."""
+    def verify(self, ctx: Context, request: InboundRequest) -> None:
+        """Raise if the request is not genuine, for example because its signature is bad. `ctx.now` is when the request
+        arrived, which is what a timestamp in it is to be checked against, however long it waited to be verified."""
         ...
 
-    def receive(self, ctx: Context, request: Any) -> list[Mapping[str, Any] | Deleted]:
+    def receive(self, ctx: Context, request: InboundRequest) -> list[Mapping[str, Any] | Deleted]:
         """Return the records in the request. The runtime derives their keys and hashes."""
         ...
+
+
+def is_unsigned(source: object) -> bool:
+    """Whether a push source has said that it takes requests with no check."""
+    return getattr(source, "unsigned", False) is True
+
+
+def signature_secret_of(source: object) -> str | None:
+    """The name of the `auth` entry that a push source verifies against, or None if it names none."""
+    name = getattr(source, "signature_secret", None)
+    return name if isinstance(name, str) and name else None
+
+
+def event_id_of(source: object, request: InboundRequest) -> str | None:
+    """The id of the event in `request`, if the source can tell one."""
+    find = getattr(source, "event_id", None)
+    return None if find is None else find(request)
 
 
 class Sink(Protocol):

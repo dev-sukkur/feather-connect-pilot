@@ -26,7 +26,6 @@ from psycopg import sql
 from typer.testing import CliRunner
 
 from feather_cli.main import app
-from feather_connect.storage.postgres.connect import connect
 
 ROOT = Path(__file__).resolve().parents[2]
 DEMO = ROOT / "examples" / "demo"
@@ -36,6 +35,10 @@ VOLUME = "feather-dev-postgres-data"
 # These start a whole stack, some of them twice; the suite's default of 120 s would kill the session.
 pytestmark = pytest.mark.timeout(420)
 FIVE_MINUTES = 300
+# The demo runs on the minute and a stack's first tick only notes the time. So its first run comes within a minute of
+# the stack being ready, and its second a minute after that, with some room for a busy machine.
+FIRST_RUN_S = 120
+TWO_RUNS_S = 180
 
 
 def docker_works() -> bool:
@@ -205,10 +208,10 @@ def test_works_with_an_existing_database_url(dev, database):
 
 
 @needs_postgres
-def test_demo_runs_and_reaches_destinations(dev, database):
+def test_demo_runs_and_reaches_destinations(dev, database, pg_connect):
     client = dev.sign_in()
-    wait_until(lambda: len(dev.run_ids(client)) >= 2, 90, "two runs on the dashboard")
-    store, _ = connect(database)
+    wait_until(lambda: len(dev.run_ids(client)) >= 2, TWO_RUNS_S, "two runs on the dashboard")
+    store, _ = pg_connect(database)
 
     def applied(route: str) -> bool:
         done = store.ledger.list_deliveries(route=route, status="applied")
@@ -229,12 +232,12 @@ def test_demo_runs_and_reaches_destinations(dev, database):
 
 
 @needs_postgres
-def test_editing_a_flow_reloads_it(start_dev, database, tmp_path):
+def test_editing_a_flow_reloads_it(start_dev, database, tmp_path, pg_connect):
     project = tmp_path / "demo"
     shutil.copytree(DEMO, project, ignore=shutil.ignore_patterns("__pycache__"))
     running = start_dev("--project", str(project), env={"FEATHER_DATABASE_URL": database})
     running.wait_ready()
-    store, _ = connect(database)
+    store, _ = pg_connect(database)
     flow_file = project / "flows" / "orders.py"
     assert store.catalog.flow("orders").spec["owner"] == "demo"
 
@@ -347,7 +350,7 @@ def test_ctrl_c_then_restart_keeps_data_and_leaves_no_processes(dev_clean, start
     first = start_dev()
     first.wait_ready(FIVE_MINUTES)
     client = first.sign_in()
-    wait_until(lambda: len(first.run_ids(client)) >= 2, 120, "two runs")
+    wait_until(lambda: len(first.run_ids(client)) >= 2, TWO_RUNS_S, "two runs")
     seen = set(first.run_ids(client))
     password = first.password()
     assert password and "the user dev already exists" not in first.output()
@@ -379,7 +382,7 @@ def test_reset_password_gives_a_new_password_and_keeps_the_data(start_dev, datab
     old = first.password()
     assert old
     client = first.sign_in()
-    wait_until(lambda: first.run_ids(client), 90, "a run")
+    wait_until(lambda: first.run_ids(client), FIRST_RUN_S, "a run")
     seen = set(first.run_ids(client))
     assert first.interrupt() == 0
 
@@ -420,10 +423,10 @@ faulthandler.dump_traceback_later(100, exit=True, file=sys.stdout)  # within the
 
 def backends():
     with psycopg.connect(url, autocommit=True) as conn:
-        row = conn.execute(
-            "select count(*) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()"
-        ).fetchone()
-    return row[0]
+        return conn.execute(
+            "select application_name, state, left(query, 80) from pg_stat_activity"
+            " where datname = current_database() and pid <> pg_backend_pid()"
+        ).fetchall()
 
 
 migrate(url)
@@ -433,7 +436,9 @@ for _ in range(3):
     stack.start(port)
     stack.stop()
     time.sleep(1)
-    counts.append(backends())
+    found = backends()
+    counts.append(len(found))
+    print("BACKENDS", found, flush=True)
 print("COUNTS " + json.dumps(counts), flush=True)
 """
 
@@ -459,7 +464,7 @@ def test_a_reload_leaves_no_connections_behind(tmp_path: Path, pg_url: str) -> N
         found = re.search(r"COUNTS (\[.*\])", done.stdout)
         assert found, f"{done.stdout[-2000:]}\n{done.stderr[-2000:]}"
         first, _, last = json.loads(found.group(1))
-        assert last <= first, f"backends after each stop: {found.group(1)}"
+        assert last <= first, f"backends after each stop: {found.group(1)}\n{done.stdout[-2000:]}"
     finally:
         with psycopg.connect(pg_url, autocommit=True) as admin:
             admin.execute(sql.SQL("drop database if exists {} with (force)").format(sql.Identifier(name)))

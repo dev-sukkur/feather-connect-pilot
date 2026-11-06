@@ -12,7 +12,6 @@ from psycopg.rows import DictRow
 from feather_connect.core.errors import PermanentError
 from feather_connect.engine.local import LocalEngine
 from feather_connect.runtime.runtime import Runtime
-from feather_connect.storage.postgres.connect import connect
 from feather_server.app import AppState, create_app
 from feather_server.settings import Settings
 from feather_server.testing import World, day, sign_in
@@ -235,7 +234,7 @@ def test_grid_replay_of_an_aged_out_version_is_refused_at_the_preview(
     world.run()
     latest = world.store.versions.latest_sealed("orders", day(17))
     assert latest is not None
-    world.state.spool.delete_chunks(latest.version_id, "data")
+    world.state.spool.expire_chunks(latest.version_id, "data")
     response = client.post(
         f"/routes/warehouse/partitions/{quote(day(17), safe='')}/replay/preview",
         data={"csrf_token": csrf(), "dataset": "orders"},
@@ -266,10 +265,10 @@ BIG = 50_000
 
 
 @pytest.fixture
-def seed_grid(world: World, pg_url: str, pg: psycopg.Connection[DictRow]) -> TestClient:
+def seed_grid(world: World, pg_url: str, pg: psycopg.Connection[DictRow], pg_connect: Any) -> TestClient:
     """A signed-in browser on a Postgres store that holds `BIG` sealed partitions of `orders`, each delivered to both
     routes."""
-    store, spool = connect(pg_url, clock=world.clock)
+    store, spool = pg_connect(pg_url, clock=world.clock)
     engine = LocalEngine(world.clock)
     project = world.state.project
     runtime = Runtime(project.flows, store, spool, engine, code_sha="sha", clock=world.clock)

@@ -9,18 +9,21 @@ import json
 import math
 from collections.abc import Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from fractions import Fraction
 from typing import Any, Literal, LiteralString
 
 import psycopg
+from psycopg import sql
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
 from feather_connect.clock import Clock, SystemClock
-from feather_connect.ids import new_id
+from feather_connect.core.connector import InboundRequest
+from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
+    STREAM_TRIGGER,
     Attempt,
     AuditRow,
     AuditStore,
@@ -33,6 +36,9 @@ from feather_connect.storage.port import (
     FailureGroup,
     FlowRow,
     Grant,
+    InboxDay,
+    InboxEvent,
+    InboxStore,
     Ledger,
     Override,
     OverrideStore,
@@ -46,6 +52,8 @@ from feather_connect.storage.port import (
     Run,
     RunJournal,
     ScheduleStore,
+    SliceFinished,
+    StaleWriter,
     StateRow,
     Store,
     TaskRow,
@@ -64,7 +72,7 @@ from feather_connect.storage.port import (
     check_transition,
     split_error,
 )
-from feather_connect.storage.postgres.support import Pool, ensure_partition
+from feather_connect.storage.postgres.support import Pool, ensure_partition, guard_version
 from feather_connect.storage.spool import decode_json_value, encode_json_value
 
 # The oldest delivery of a partition that is still open (I2). `status <> 'applied'` is repeated outside the
@@ -74,6 +82,10 @@ OLDEST_OPEN_SQL: LiteralString = """
     where tenant_id = %(tenant)s and route = %(route)s and partition = %(partition)s
       and status <> 'applied' and status <> all(%(closed)s)
     order by seal_seq limit 1"""
+
+# One sealer at a time, so that seal_seq follows commit order and a reader never sees a lower number appear after a
+# higher one.
+SEAL_LOCK: LiteralString = "select pg_advisory_xact_lock(hashtext('feather.seal'))"
 
 Row = DictRow
 
@@ -86,6 +98,9 @@ def _json(value: Any) -> Jsonb:
 def _unjson(value: Any) -> Any:
     """Undo `_json` for a value read back from a `jsonb` column."""
     return json.loads(json.dumps(value), object_hook=decode_json_value)
+
+
+_HIGHEST_CHARACTER = "\U0010ffff"  # sorts after any text that starts with a prefix, in the C collation
 
 
 class _Db:
@@ -157,6 +172,7 @@ def _version(r: Row) -> Version:
         r["schema_hash"],
         None if r["watermark"] is None else _unjson(r["watermark"]),
         r["code_sha"],
+        r["tick"],
         r["status"],
         r["seal_seq"],
         r["sealed_at"],
@@ -308,13 +324,92 @@ class _Runs(RunJournal):
         if changed.rowcount == 0:
             raise KeyError(task_id)
 
-    def list_tasks(self, run_id: str) -> list[TaskRow]:
+    def stream_run(self, flow: str, day: str) -> str:
+        now = self._db.clock.now()
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """insert into feather.run (tenant_id, run_id, flow, trigger, actor, params, status, created_at,
+                                            updated_at, stream_day)
+                   values (%s, %s, %s, %s, 'system', %s, 'succeeded', %s, %s, %s)
+                   on conflict (tenant_id, flow, stream_day) where stream_day is not null do nothing
+                   returning run_id""",
+                (self._db.tenant, new_id(), flow, STREAM_TRIGGER, _json({"day": day}), now, now, day),
+            ).fetchone()
+            if row is None:  # it was made earlier, or by a replica that won the race
+                row = conn.execute(
+                    "select run_id from feather.run where tenant_id = %s and flow = %s and stream_day = %s",
+                    (self._db.tenant, flow, day),
+                ).fetchone()
+        assert row is not None
+        return row["run_id"]
+
+    def list_tasks(
+        self,
+        run_id: str,
+        *,
+        status: str | None = None,
+        kinds: Sequence[str] | None = None,
+        limit: int | None = None,
+        after_task: str | None = None,
+        newest_first: bool = False,
+    ) -> list[TaskRow]:
+        # Each condition is there only when asked for, and the two statuses with a partial index are spelled out, so
+        # that the plan can use the indexes of 0007 whatever psycopg prepares.
+        query = "select * from feather.task where tenant_id = %(tenant)s and run_id = %(run)s"
+        if status == "running":
+            query += " and status = 'running'"
+        elif status == "failed":
+            query += " and status = 'failed'"
+        elif status is not None:
+            query += " and status = %(status)s"
+        if kinds is not None:
+            query += " and kind = any(%(kinds)s)"
+        if after_task is not None:
+            query += " and seq < " if newest_first else " and seq > "
+            query += "(select seq from feather.task where tenant_id = %(tenant)s and task_id = %(after)s)"
+        query += " order by seq desc" if newest_first else " order by seq"
+        if limit is not None:
+            query += " limit %(limit)s"
         with self._db.tx() as conn:
             rows = conn.execute(
-                "select * from feather.task where tenant_id = %s and run_id = %s order by seq",
-                (self._db.tenant, run_id),
+                query,
+                {
+                    "tenant": self._db.tenant,
+                    "run": run_id,
+                    "status": status,
+                    "kinds": None if kinds is None else list(kinds),
+                    "after": after_task,
+                    "limit": limit,
+                },
             ).fetchall()
         return [_task(r) for r in rows]
+
+    def task_by_ref(self, run_id: str, ref: str) -> TaskRow | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                "select * from feather.task where tenant_id = %s and run_id = %s and ref = %s",
+                (self._db.tenant, run_id, ref),
+            ).fetchone()
+        return None if row is None else _task(row)
+
+    def tasks_by_ref(self, run_id: str, prefix: str) -> list[TaskRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.task
+                   where tenant_id = %s and run_id = %s and ref collate "C" >= %s and ref collate "C" < %s
+                   order by seq""",
+                (self._db.tenant, run_id, prefix, prefix + _HIGHEST_CHARACTER),
+            ).fetchall()
+        return [_task(r) for r in rows]
+
+    def count_tasks(self, run_id: str) -> Mapping[tuple[str, str], int]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select kind, status, count(*) as n from feather.task
+                   where tenant_id = %s and run_id = %s group by kind, status""",
+                (self._db.tenant, run_id),
+            ).fetchall()
+        return {(r["kind"], r["status"]): r["n"] for r in rows}
 
     def log(self, task_id: str, level: str, message: str) -> None:
         now = self._db.clock.now()
@@ -375,85 +470,148 @@ class _Versions(VersionStore):
     def __init__(self, db: _Db) -> None:
         self._db = db
 
-    def stage(self, draft: VersionDraft) -> Version:
+    def _hold_claim(self, conn: psycopg.Connection[DictRow], version_id: str, writer: str) -> None:
+        """Make `writer` the writer of the version. The row stays locked until the transaction ends."""
+        conn.execute(
+            """insert into feather.spool_version (tenant_id, version_id, day, writer) values (%s, %s, %s, %s)
+               on conflict (tenant_id, version_id) do update set writer = excluded.writer""",
+            (self._db.tenant, version_id, self._db.clock.now().date(), writer),
+        )
+
+    def claim(self, version_id: str, writer: str, run_id: str, dataset: str, partition: str) -> None:
         with self._db.tx() as conn:
-            row = conn.execute(
-                """insert into feather.version as v (tenant_id, version_id, dataset, partition, run_id, complete,
-                                                upserts, deletes, content_hash, schema_hash, watermark, code_sha)
-                   values (%(tenant)s, %(id)s, %(dataset)s, %(partition)s, %(run)s, %(complete)s, %(upserts)s,
-                           %(deletes)s, %(content)s, %(schema)s, %(watermark)s, %(sha)s)
-                   on conflict (tenant_id, version_id) do update set
-                       dataset = excluded.dataset, partition = excluded.partition, run_id = excluded.run_id,
-                       complete = excluded.complete, upserts = excluded.upserts, deletes = excluded.deletes,
-                       content_hash = excluded.content_hash, schema_hash = excluded.schema_hash,
-                       watermark = excluded.watermark, code_sha = excluded.code_sha
-                   where v.status = 'staged'
-                   returning *""",
-                {
-                    "tenant": self._db.tenant,
-                    "id": draft.version_id,
-                    "dataset": draft.dataset,
-                    "partition": draft.partition,
-                    "run": draft.run_id,
-                    "complete": draft.complete,
-                    "upserts": draft.upserts,
-                    "deletes": draft.deletes,
-                    "content": draft.content_hash,
-                    "schema": draft.schema_hash,
-                    "watermark": None if draft.watermark is None else _json(draft.watermark),
-                    "sha": draft.code_sha,
-                },
+            done = conn.execute(
+                """select done from feather.run_slice
+                   where tenant_id = %s and run_id = %s and dataset = %s and partition = %s for share""",
+                (self._db.tenant, run_id, dataset, partition),
             ).fetchone()
+            if done is not None and done["done"]:
+                raise SliceFinished(f"slice {partition} of run {run_id} is done")
+            self._hold_claim(conn, version_id, writer)
+            guard_version(conn, self._db.tenant, version_id, None)
+            conn.execute(
+                "delete from feather.version where tenant_id = %s and version_id = %s",
+                (self._db.tenant, version_id),
+            )
+
+    def take_over(self, version_ids: Sequence[str], writer: str) -> None:
+        with self._db.tx() as conn:
+            for version_id in sorted(version_ids):
+                self._hold_claim(conn, version_id, writer)
+                guard_version(conn, self._db.tenant, version_id, None)
+
+    def stage(self, draft: VersionDraft, writer: str | None = None) -> Version:
+        with self._db.tx() as conn:
+            return self.stage_in(conn, draft, writer)
+
+    def stage_in(self, conn: psycopg.Connection[DictRow], draft: VersionDraft, writer: str | None) -> Version:
+        """`stage`, in the caller's transaction."""
+        if writer is not None:
+            guard_version(conn, self._db.tenant, draft.version_id, writer)
+        row = conn.execute(
+            """insert into feather.version as v (tenant_id, version_id, dataset, partition, run_id, complete,
+                                            upserts, deletes, content_hash, schema_hash, watermark, code_sha, tick)
+               values (%(tenant)s, %(id)s, %(dataset)s, %(partition)s, %(run)s, %(complete)s, %(upserts)s,
+                       %(deletes)s, %(content)s, %(schema)s, %(watermark)s, %(sha)s, %(tick)s)
+               on conflict (tenant_id, version_id) do update set
+                   dataset = excluded.dataset, partition = excluded.partition, run_id = excluded.run_id,
+                   complete = excluded.complete, upserts = excluded.upserts, deletes = excluded.deletes,
+                   content_hash = excluded.content_hash, schema_hash = excluded.schema_hash,
+                   watermark = excluded.watermark, code_sha = excluded.code_sha, tick = excluded.tick
+               where v.status = 'staged'
+               returning *""",
+            {
+                "tenant": self._db.tenant,
+                "id": draft.version_id,
+                "dataset": draft.dataset,
+                "partition": draft.partition,
+                "run": draft.run_id,
+                "complete": draft.complete,
+                "upserts": draft.upserts,
+                "deletes": draft.deletes,
+                "content": draft.content_hash,
+                "schema": draft.schema_hash,
+                "watermark": None if draft.watermark is None else _json(draft.watermark),
+                "sha": draft.code_sha,
+                "tick": draft.tick,
+            },
+        ).fetchone()
         if row is None:  # the conflicting row is sealed, so the update did not apply
             raise VersionSealed(f"version {draft.version_id} is sealed")
         return _version(row)
 
-    def seal(self, version_ids: Sequence[str], routes: Sequence[str]) -> list[Version]:
+    def seal(
+        self, version_ids: Sequence[str], routes: Sequence[str], writer: str | None = None
+    ) -> list[Version]:
         with self._db.tx() as conn:
-            # One sealer at a time, so that seal_seq follows commit order and a reader never sees a lower
-            # number appear after a higher one.
-            conn.execute("select pg_advisory_xact_lock(hashtext('feather.seal'))")
-            found = {
-                r["version_id"]: r
-                for r in conn.execute(
-                    """select * from feather.version where tenant_id = %s and version_id = any(%s)
-                       order by version_id for update""",
-                    (self._db.tenant, list(version_ids)),
-                ).fetchall()
-            }
-            if missing := next((v for v in version_ids if v not in found), None):
-                raise KeyError(f"no such version: {missing}")  # before sealing any, so it is all or nothing
-            now = self._db.clock.now()
+            return self.seal_in(conn, version_ids, routes, writer)
+
+    def seal_in(
+        self,
+        conn: psycopg.Connection[DictRow],
+        version_ids: Sequence[str],
+        routes: Sequence[str],
+        writer: str | None,
+    ) -> list[Version]:
+        """`seal`, in the caller's transaction."""
+        conn.execute(SEAL_LOCK)
+        owners = {
+            r["version_id"]: r["writer"]
+            for r in conn.execute(
+                """select version_id, writer from feather.spool_version
+                   where tenant_id = %s and version_id = any(%s) order by version_id for share""",
+                (self._db.tenant, list(version_ids) if writer is not None else []),
+            ).fetchall()
+        }
+        found = {
+            r["version_id"]: r
+            for r in conn.execute(
+                """select * from feather.version where tenant_id = %s and version_id = any(%s)
+                   order by version_id for update""",
+                (self._db.tenant, list(version_ids)),
+            ).fetchall()
+        }
+        if writer is not None:  # before the rest: a version that a later claim took away is not "missing"
             for version_id in version_ids:
-                if found[version_id]["status"] == "sealed":
+                if version_id in found and found[version_id]["status"] == "sealed":
                     continue
-                sealed = conn.execute(
-                    """update feather.version
-                       set status = 'sealed', seal_seq = nextval('feather.seal_seq'), sealed_at = %s
-                       where tenant_id = %s and version_id = %s returning *""",
-                    (now, self._db.tenant, version_id),
-                ).fetchone()
-                assert sealed is not None
-                found[version_id] = sealed
-                for route in routes:
-                    conn.execute(
-                        """insert into feather.delivery (tenant_id, route, version_id, dataset, partition,
-                                                         seal_seq, status, updated_at)
-                           values (%s, %s, %s, %s, %s, %s, 'pending', %s)""",
-                        (
-                            self._db.tenant,
-                            route,
-                            version_id,
-                            sealed["dataset"],
-                            sealed["partition"],
-                            sealed["seal_seq"],
-                            now,
-                        ),
-                    )
+                if owners.get(version_id) != writer:
+                    raise StaleWriter(f"version {version_id} was claimed by a later execution")
+        if missing := next((v for v in version_ids if v not in found), None):
+            raise KeyError(f"no such version: {missing}")  # before sealing any, so it is all or nothing
+        now = self._db.clock.now()
+        for version_id in version_ids:
+            if found[version_id]["status"] == "sealed":
+                continue
+            sealed = conn.execute(
+                """update feather.version
+                   set status = 'sealed', seal_seq = nextval('feather.seal_seq'), sealed_at = %s
+                   where tenant_id = %s and version_id = %s returning *""",
+                (now, self._db.tenant, version_id),
+            ).fetchone()
+            assert sealed is not None
+            found[version_id] = sealed
+            for route in routes:
+                conn.execute(
+                    """insert into feather.delivery (tenant_id, route, version_id, dataset, partition,
+                                                     seal_seq, status, updated_at)
+                       values (%s, %s, %s, %s, %s, %s, 'pending', %s)""",
+                    (
+                        self._db.tenant,
+                        route,
+                        version_id,
+                        sealed["dataset"],
+                        sealed["partition"],
+                        sealed["seal_seq"],
+                        now,
+                    ),
+                )
         return [_version(found[v]) for v in version_ids]
 
-    def discard_staged(self, version_id: str) -> None:
+    def discard_staged(self, version_id: str, writer: str | None = None) -> None:
         with self._db.tx() as conn:
+            if writer is not None:
+                guard_version(conn, self._db.tenant, version_id, writer)
             conn.execute(
                 "delete from feather.version where tenant_id = %s and version_id = %s and status = 'staged'",
                 (self._db.tenant, version_id),
@@ -523,7 +681,7 @@ class _Versions(VersionStore):
                 (self._db.tenant, run_id, dataset, list(partitions)),
             )
 
-    def finish_slice(self, run_id: str, dataset: str, partition: str) -> bool:
+    def finish_slice(self, run_id: str, dataset: str, partition: str, writer: str | None = None) -> bool:
         with self._db.tx() as conn:
             # Lock the run's slices first: two slices finishing together must not each miss the other's.
             slices = conn.execute(
@@ -533,6 +691,14 @@ class _Versions(VersionStore):
             ).fetchall()
             if partition not in {s["partition"] for s in slices}:
                 raise KeyError(f"slice {partition} is not registered for run {run_id}, dataset {dataset}")
+            this_one = next(s for s in slices if s["partition"] == partition)
+            if writer is not None and not this_one["done"]:
+                owner = conn.execute(
+                    "select writer from feather.spool_version where tenant_id = %s and version_id = %s for share",
+                    (self._db.tenant, stable_id(run_id, dataset, partition)),
+                ).fetchone()
+                if owner is None or owner["writer"] != writer:
+                    raise StaleWriter(f"slice {partition} of run {run_id} was claimed by a later execution")
             conn.execute(
                 """update feather.run_slice set done = true
                    where tenant_id = %s and run_id = %s and dataset = %s and partition = %s""",
@@ -548,24 +714,37 @@ class _Versions(VersionStore):
             ).fetchall()
         return [r["partition"] for r in rows]
 
-    def staged_for_run(self, run_id: str, dataset: str) -> list[Version]:
-        with self._db.tx() as conn:
-            rows = conn.execute(
-                """select * from feather.version
-                   where tenant_id = %s and run_id = %s and dataset = %s and status = 'staged'
-                   order by stage_seq""",
-                (self._db.tenant, run_id, dataset),
-            ).fetchall()
-        return [_version(r) for r in rows]
+    def staged_for_run(self, run_id: str, dataset: str, tick: str | None = None) -> list[Version]:
+        return self._of_run("staged", "stage_seq", run_id, dataset, tick)
 
-    def sealed_for_run(self, run_id: str, dataset: str) -> list[Version]:
+    def newest_sealed_for_run(self, run_id: str, dataset: str, limit: int) -> list[Version]:
         with self._db.tx() as conn:
             rows = conn.execute(
                 """select * from feather.version
                    where tenant_id = %s and run_id = %s and dataset = %s and status = 'sealed'
-                   order by seal_seq""",
-                (self._db.tenant, run_id, dataset),
+                   order by seal_seq desc limit %s""",
+                (self._db.tenant, run_id, dataset, limit),
             ).fetchall()
+        return [_version(r) for r in rows]
+
+    def sealed_for_run(self, run_id: str, dataset: str, tick: str | None = None) -> list[Version]:
+        return self._of_run("sealed", "seal_seq", run_id, dataset, tick)
+
+    def _of_run(
+        self,
+        status: Literal["staged", "sealed"],
+        order: Literal["stage_seq", "seal_seq"],
+        run_id: str,
+        dataset: str,
+        tick: str | None,
+    ) -> list[Version]:
+        query = "select * from feather.version where tenant_id = %s and run_id = %s and dataset = %s"
+        query += " and status = 'staged'" if status == "staged" else " and status = 'sealed'"
+        query += "" if tick is None else " and tick is not null and tick = %s"
+        query += " order by stage_seq" if order == "stage_seq" else " order by seal_seq"
+        params = (self._db.tenant, run_id, dataset, *(() if tick is None else (tick,)))
+        with self._db.tx() as conn:
+            rows = conn.execute(query, params).fetchall()
         return [_version(r) for r in rows]
 
     def list_versions(self, dataset: str, partition: str | None = None, limit: int = 100) -> list[Version]:
@@ -597,10 +776,25 @@ class _Versions(VersionStore):
                      and not exists (select 1 from feather.run_slice s
                                      where s.tenant_id = v.tenant_id and s.run_id = v.run_id
                                        and s.dataset = v.dataset and not s.done)
+                     and not exists (select 1 from feather.run r
+                                     where r.tenant_id = v.tenant_id and r.run_id = v.run_id
+                                       and r.status in ('failed', 'cancelled'))
                    order by v.run_id, v.dataset""",
                 {"tenant": self._db.tenant},
             ).fetchall()
         return [(r["run_id"], r["dataset"]) for r in rows]
+
+    def abandoned(self, limit: int = 1000) -> list[Version]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select v.* from feather.version v join feather.run r
+                     on r.tenant_id = v.tenant_id and r.run_id = v.run_id
+                   where v.tenant_id = %s and v.status = 'staged' and r.status in ('failed', 'cancelled')
+                     and r.trigger <> %s
+                   order by v.stage_seq limit %s""",
+                (self._db.tenant, STREAM_TRIGGER, limit),
+            ).fetchall()
+        return [_version(r) for r in rows]
 
     def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:
         with self._db.tx() as conn:
@@ -794,13 +988,17 @@ class _Ledger(Ledger):
         assert row is not None
         return row["ok"]
 
-    def pending_older_than(self, age: timedelta, *, now: datetime | None = None) -> list[Delivery]:
+    def pending_older_than(
+        self, age: timedelta, *, now: datetime | None = None, limit: int = 1000
+    ) -> list[Delivery]:
         cutoff = (self._db.clock.now() if now is None else now) - age
         with self._db.tx() as conn:
             rows = conn.execute(
-                """select * from feather.delivery
-                   where tenant_id = %s and status = 'pending' and updated_at < %s order by seal_seq, route""",
-                (self._db.tenant, cutoff),
+                """select * from (select distinct on (route, dataset, partition) * from feather.delivery
+                                  where tenant_id = %s and status <> 'applied' and status <> all(%s)
+                                  order by route, dataset, partition, seal_seq) next_up
+                   where status = 'pending' and updated_at < %s order by seal_seq, route limit %s""",
+                (self._db.tenant, sorted(CLOSED), cutoff, limit),
             ).fetchall()
         return [_delivery(r) for r in rows]
 
@@ -901,15 +1099,15 @@ class _Quarantine(QuarantineStore):
             )
 
     def open_extraction_keys(self, dataset: str, keys: Iterable[str], outside: str | None = None) -> set[str]:
+        # `keys` can be every row of a read and the open entries are few, so the keys don't go to the server.
         with self._db.tx() as conn:
             rows = conn.execute(
                 """select distinct key from feather.quarantine
                    where tenant_id = %(tenant)s and status = 'open' and route is null and dataset = %(dataset)s
-                     and key = any(%(keys)s)
                      and (%(outside)s::text is null or partition is distinct from %(outside)s)""",
-                {"tenant": self._db.tenant, "dataset": dataset, "keys": list(keys), "outside": outside},
+                {"tenant": self._db.tenant, "dataset": dataset, "outside": outside},
             ).fetchall()
-        return {r["key"] for r in rows}
+        return {r["key"] for r in rows}.intersection(keys)
 
     def close_extraction(self, dataset: str, keys: Iterable[str]) -> int:
         with self._db.tx() as conn:
@@ -1531,6 +1729,235 @@ class _Reads(ReadStore):
         return {(r["dataset"], r["partition"]): r["n"] for r in rows}
 
 
+class _Inbox(InboxStore):
+    def __init__(self, db: _Db, versions: _Versions) -> None:
+        self._db = db
+        self._versions = versions
+        self._known: set[str] = set()
+
+    @staticmethod
+    def _partition(day: date) -> str:
+        return f"inbox_{day:%Y%m%d}"
+
+    def _ensure_day(self, day: date) -> None:
+        ensure_partition(
+            self._db.pool, "inbox", self._partition(day), day, day + timedelta(days=1), self._known
+        )
+
+    def ensure_partitions(self, days_ahead: int = 7) -> None:
+        today = self._db.clock.now().date()
+        for offset in range(days_ahead + 1):
+            self._ensure_day(today + timedelta(days=offset))
+
+    def put(self, dataset: str, request: InboundRequest, event_id: str | None = None) -> bool:
+        day = self._db.clock.now().date()
+        self._ensure_day(day)
+        with self._db.tx() as conn:
+            if event_id is not None:
+                new = conn.execute(
+                    """insert into feather.inbox_event_id (tenant_id, dataset, event_id, day)
+                       values (%s, %s, %s, %s) on conflict do nothing returning day""",
+                    (self._db.tenant, dataset, event_id, day),
+                ).fetchone()
+                if new is None:
+                    return False
+            conn.execute(
+                """insert into feather.inbox (tenant_id, day, dataset, event_id, method, path, headers, body, received_at)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    self._db.tenant,
+                    day,
+                    dataset,
+                    event_id,
+                    request.method,
+                    request.path,
+                    Jsonb(dict(request.headers)),
+                    request.body,
+                    request.received_at,
+                ),
+            )
+        return True
+
+    def put_many(self, events: Sequence[tuple[str, InboundRequest, str | None]]) -> list[bool]:
+        """One transaction and few round trips however many events, which is what lets ingress keep up with a burst."""
+        day = self._db.clock.now().date()
+        self._ensure_day(day)
+        named = [(dataset, event_id) for dataset, _, event_id in events if event_id is not None]
+        with self._db.tx() as conn:
+            new: set[tuple[str, str]] = set()
+            if named:
+                rows = conn.execute(
+                    """insert into feather.inbox_event_id (tenant_id, dataset, event_id, day)
+                       select %s, n.dataset, n.event_id, %s from unnest(%s::text[], %s::text[]) n(dataset, event_id)
+                       on conflict do nothing returning dataset, event_id""",
+                    (self._db.tenant, day, [n[0] for n in named], [n[1] for n in named]),
+                ).fetchall()
+                new = {(row["dataset"], row["event_id"]) for row in rows}
+            stored: list[bool] = []
+            kept: list[tuple[str, InboundRequest, str | None]] = []
+            for dataset, request, event_id in events:
+                is_new = event_id is None or (dataset, event_id) in new
+                if event_id is not None:
+                    new.discard((dataset, event_id))  # a repeat within these events is a repeat too
+                stored.append(is_new)
+                if is_new:
+                    kept.append((dataset, request, event_id))
+            if kept:
+                conn.execute(
+                    """insert into feather.inbox (tenant_id, day, dataset, event_id, method, path, headers, body, received_at)
+                       select %s, %s, t.dataset, t.event_id, t.method, t.path, t.headers, t.body, t.received_at
+                       from unnest(
+                         %s::text[], %s::text[], %s::text[], %s::text[], %s::jsonb[], %s::bytea[], %s::timestamptz[])
+                       with ordinality as t(dataset, event_id, method, path, headers, body, received_at, n)
+                       order by t.n""",
+                    (
+                        self._db.tenant,
+                        day,
+                        [k[0] for k in kept],
+                        [k[2] for k in kept],
+                        [k[1].method for k in kept],
+                        [k[1].path for k in kept],
+                        [Jsonb(dict(k[1].headers)) for k in kept],
+                        [k[1].body for k in kept],
+                        [k[1].received_at for k in kept],
+                    ),
+                )
+        return stored
+
+    def take(self, dataset: str, limit: int) -> list[InboxEvent]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.inbox
+                   where tenant_id = %s and dataset = %s and sealed_at is null and held_at is null
+                   order by event_seq limit %s""",
+                (self._db.tenant, dataset, limit),
+            ).fetchall()
+        return [
+            InboxEvent(
+                r["event_seq"],
+                r["dataset"],
+                r["event_id"],
+                InboundRequest(r["method"], r["path"], r["headers"], bytes(r["body"]), r["received_at"]),
+                r["received_at"],
+                r["tries"],
+                r["retry_at"],
+            )
+            for r in rows
+        ]
+
+    def oldest_age(self, dataset: str, now: datetime) -> timedelta | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select received_at from feather.inbox
+                   where tenant_id = %s and dataset = %s and sealed_at is null and held_at is null
+                   order by event_seq limit 1""",
+                (self._db.tenant, dataset),
+            ).fetchone()
+        return None if row is None else now - row["received_at"]
+
+    def defer(self, event_seq: int, until: datetime) -> None:
+        with self._db.tx() as conn:
+            conn.execute(
+                """update feather.inbox set tries = tries + 1, retry_at = %s
+                   where tenant_id = %s and event_seq = %s and sealed_at is null and held_at is null""",
+                (until, self._db.tenant, event_seq),
+            )
+
+    def hold(self, event_seq: int) -> None:
+        with self._db.tx() as conn:
+            held = conn.execute(
+                """update feather.inbox set held_at = %s
+                   where tenant_id = %s and event_seq = %s and sealed_at is null and held_at is null
+                   returning event_seq""",
+                (self._db.clock.now(), self._db.tenant, event_seq),
+            ).fetchone()
+        if held is None:
+            raise StaleWriter("another sealer has dealt with this event")
+
+    def reprocess(self, dataset: str, event_seq: int) -> bool:
+        with self._db.tx() as conn:
+            found = conn.execute(
+                """update feather.inbox set held_at = null, tries = 0, retry_at = null
+                   where tenant_id = %s and dataset = %s and event_seq = %s and held_at is not null
+                   returning event_seq""",
+                (self._db.tenant, dataset, event_seq),
+            ).fetchone()
+        return found is not None
+
+    def release(self, dataset: str, event_seq: int) -> bool:
+        with self._db.tx() as conn:
+            found = conn.execute(
+                """update feather.inbox set held_at = null, sealed_at = %s
+                   where tenant_id = %s and dataset = %s and event_seq = %s and held_at is not null
+                   returning event_seq""",
+                (self._db.clock.now(), self._db.tenant, dataset, event_seq),
+            ).fetchone()
+        return found is not None
+
+    def seal_batch(
+        self,
+        event_seqs: Sequence[int],
+        drafts: Sequence[VersionDraft],
+        routes: Sequence[str],
+        writer: str | None = None,
+    ) -> list[Version]:
+        with self._db.tx() as conn:
+            # Before any row, as `seal_in` wants it first: a sealer that held a version's row and waited for this
+            # would deadlock with one that held this and wanted the row.
+            conn.execute(SEAL_LOCK)
+            marked = conn.execute(
+                """update feather.inbox set sealed_at = %s
+                   where tenant_id = %s and event_seq = any(%s) and sealed_at is null and held_at is null
+                   returning event_seq""",
+                (self._db.clock.now(), self._db.tenant, list(event_seqs)),
+            ).fetchall()
+            if len(marked) != len(set(event_seqs)):
+                raise StaleWriter("another sealer has dealt with an event of this batch")
+            for draft in drafts:
+                self._versions.stage_in(conn, draft, writer)
+            return self._versions.seal_in(conn, [draft.version_id for draft in drafts], routes, writer)
+
+    def days(self) -> list[date]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select c.relname from pg_inherits i join pg_class c on c.oid = i.inhrelid
+                   where i.inhparent = 'feather.inbox'::regclass"""
+            ).fetchall()
+        return sorted(datetime.strptime(r["relname"], "inbox_%Y%m%d").date() for r in rows)
+
+    def day_status(self, day: date) -> InboxDay:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select count(*) filter (where sealed_at is null) as unsealed,
+                          min(event_seq) filter (where sealed_at is null) as first_unsealed,
+                          max(sealed_at) as last_sealed
+                   from feather.inbox where tenant_id = %s and day = %s""",
+                (self._db.tenant, day),
+            ).fetchone()
+        assert row is not None
+        return InboxDay(row["unsealed"], row["first_unsealed"], row["last_sealed"])
+
+    def drop_day(self, day: date) -> bool:
+        """Drop the day's partition, for every tenant, as the spool does: so any tenant's unsealed event keeps it."""
+        partition = sql.Identifier("feather", self._partition(day))
+        with self._db.tx() as conn:
+            found = conn.execute(
+                "select to_regclass(%s) as found", (f"feather.{self._partition(day)}",)
+            ).fetchone()
+            if found is not None and found["found"] is not None:
+                # Nothing can write to the day between this look and the drop.
+                conn.execute(sql.SQL("lock table {} in access exclusive mode").format(partition))
+                waiting = conn.execute(
+                    sql.SQL("select 1 from {} where sealed_at is null limit 1").format(partition)
+                ).fetchone()
+                if waiting is not None:
+                    return False
+                conn.execute(sql.SQL("drop table {}").format(partition))
+            conn.execute("delete from feather.inbox_event_id where day = %s", (day,))
+        self._known.discard(self._partition(day))
+        return True
+
+
 class PostgresStore(Store):
     """A `Store` that keeps everything in Postgres, for one tenant. `clock` defaults to the system clock."""
 
@@ -1538,9 +1965,10 @@ class PostgresStore(Store):
 
     def __init__(self, pool: Pool, clock: Clock | None = None, tenant: str = "default") -> None:
         db = _Db(pool, clock or SystemClock(), tenant)
+        versions = _Versions(db)
         super().__init__(
             runs=_Runs(db),
-            versions=_Versions(db),
+            versions=versions,
             ledger=_Ledger(db),
             state=_State(db),
             quarantine=_Quarantine(db),
@@ -1552,8 +1980,17 @@ class PostgresStore(Store):
             users=_Users(db),
             audit=_Audit(db),
             reads=_Reads(db),
+            inbox=_Inbox(db, versions),
         )
         object.__setattr__(self, "_pool", pool)  # `Store` is frozen
+
+    def is_unavailable(self, error: BaseException) -> bool:
+        """A lost or refused connection, a pool timeout, a cancelled statement or a deadlock, and not a value too big
+        for an index, which Postgres counts among them but which the same row will meet again."""
+        if isinstance(error, psycopg.errors.ProgramLimitExceeded):
+            return False
+        lost = isinstance(error, psycopg.OperationalError | psycopg.InterfaceError)
+        return lost or super().is_unavailable(error)
 
     def close(self) -> None:
         """Close the pool, which the spool of the same `connect` shares. Closing it again changes nothing."""

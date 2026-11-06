@@ -8,17 +8,22 @@ import base64
 import json
 import threading
 from collections.abc import Iterable, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 
 import pyarrow as pa
 
 from feather_connect.clock import Clock, SystemClock
 from feather_connect.core.records import Op, Record
+from feather_connect.storage.port import VersionStore
 
 ChunkKind = Literal["data", "snapshot", "full", "candidates", "moves", "rejected", "settled"]
+
+# What only helps build a version and isn't part of what it says, so its clean-up may run after sealing.
+_WORKING_KINDS: frozenset[ChunkKind] = frozenset({"candidates", "rejected", "settled"})
 
 # How many records go into one chunk.
 CHUNK_ROWS = 50_000
@@ -42,10 +47,28 @@ class ChunkRef:
     nbytes: int
 
 
-class Spool(Protocol):
-    """Chunks by (version, kind, chunk number). Putting a chunk that exists replaces it."""
+def is_working_kind(kind: ChunkKind) -> bool:
+    return kind in _WORKING_KINDS
 
-    def put_chunk(self, version_id: str, chunk_no: int, kind: ChunkKind, table: pa.Table) -> ChunkRef: ...
+
+class Spool(Protocol):
+    """Chunks by (version, kind, chunk number). Putting a chunk that exists replaces it, until the version is sealed.
+
+    A sealed version never changes (I1). Writing to one, or deleting what it says, raises `VersionSealed`, in the same
+    transaction as the write, so that it can't slip in beside a seal. Only retention takes chunks from it, by
+    `expire_chunks`, `expire_version` and `drop_day`.
+
+    An execution that passes its `writer` is also refused with `StaleWriter` unless it holds the version's claim
+    (`VersionStore.claim`).
+    """
+
+    def bind(self, versions: VersionStore) -> None:
+        """Be told the store whose versions this spool holds, for a backend that can't see them by itself."""
+        ...
+
+    def put_chunk(
+        self, version_id: str, chunk_no: int, kind: ChunkKind, table: pa.Table, writer: str | None = None
+    ) -> ChunkRef: ...
     def get_chunk(self, version_id: str, chunk_no: int, kind: ChunkKind = "data") -> pa.Table:
         """Raises `KeyError` when there is no such chunk."""
         ...
@@ -54,12 +77,26 @@ class Spool(Protocol):
         """In chunk order."""
         ...
 
-    def delete_chunks(self, version_id: str, kind: ChunkKind, from_chunk: int = 0) -> None:
-        """Drop the chunks of `kind` numbered `from_chunk` and up."""
+    def delete_chunks(
+        self, version_id: str, kind: ChunkKind, from_chunk: int = 0, writer: str | None = None
+    ) -> None:
+        """Drop the chunks of `kind` numbered `from_chunk` and up.
+
+        The working kinds (`candidates`, `rejected`, `settled`) may be cleared from a sealed version when no `writer` is
+        given, which is the clean-up that follows sealing. They are no part of what the version says.
+        """
         ...
 
-    def delete_version(self, version_id: str) -> None:
-        """Drop every chunk of the version, of every kind."""
+    def delete_version(self, version_id: str, writer: str | None = None) -> None:
+        """Drop every chunk of the version, of every kind. A `writer` keeps its claim."""
+        ...
+
+    def expire_chunks(self, version_id: str, kind: ChunkKind) -> None:
+        """Retention only: drop the version's chunks of `kind`, sealed or not."""
+        ...
+
+    def expire_version(self, version_id: str) -> None:
+        """Retention only: drop every chunk of the version, sealed or not."""
         ...
 
     # Retention (design 7.3). The chunks of a version live on the day of its first write, whatever kind they are
@@ -86,19 +123,44 @@ class Spool(Protocol):
         ...
 
 
+@runtime_checkable
+class WriteGuard(Protocol):
+    """What the memory store offers a spool that holds its versions: its lock, so that a write and a seal can't
+    interleave, and the check."""
+
+    @property
+    def lock(self) -> AbstractContextManager[Any]: ...
+    def check_writable(self, version_id: str, writer: str | None) -> None:
+        """Raise `VersionSealed` for a sealed version, and `StaleWriter` if a given `writer` doesn't hold the claim."""
+        ...
+
+
 class MemorySpool:
-    """A spool in memory, for tests and the in-process engine."""
+    """A spool in memory, for tests and the in-process engine. It can refuse writes once `bind` names its store."""
 
     def __init__(self, clock: Clock | None = None) -> None:
-        self._lock = threading.Lock()
+        self._lock: AbstractContextManager[Any] = threading.RLock()
+        self._guard: WriteGuard | None = None
         self._clock = clock or SystemClock()
         self._chunks: dict[tuple[str, ChunkKind, int], pa.Table] = {}
         self._day_of: dict[
             str, date
         ] = {}  # the day of a version's first write of a chunk that is not a snapshot
 
-    def put_chunk(self, version_id: str, chunk_no: int, kind: ChunkKind, table: pa.Table) -> ChunkRef:
+    def bind(self, versions: VersionStore) -> None:
+        if isinstance(versions, WriteGuard):
+            self._guard = versions
+            self._lock = versions.lock
+
+    def _check(self, version_id: str, writer: str | None) -> None:
+        if self._guard is not None:
+            self._guard.check_writable(version_id, writer)
+
+    def put_chunk(
+        self, version_id: str, chunk_no: int, kind: ChunkKind, table: pa.Table, writer: str | None = None
+    ) -> ChunkRef:
         with self._lock:
+            self._check(version_id, writer)
             self._chunks[(version_id, kind, chunk_no)] = table
             if kind != "snapshot":
                 self._day_of.setdefault(version_id, self._clock.now().date())
@@ -116,14 +178,28 @@ class MemorySpool:
             found = sorted((n, t) for (v, k, n), t in self._chunks.items() if v == version_id and k == kind)
         return [ChunkRef(version_id, n, kind, t.num_rows, t.nbytes) for n, t in found]
 
-    def delete_chunks(self, version_id: str, kind: ChunkKind, from_chunk: int = 0) -> None:
+    def delete_chunks(
+        self, version_id: str, kind: ChunkKind, from_chunk: int = 0, writer: str | None = None
+    ) -> None:
         with self._lock:
+            if writer is not None or not is_working_kind(kind):
+                self._check(version_id, writer)
             for key in [
                 k for k in self._chunks if k[0] == version_id and k[1] == kind and k[2] >= from_chunk
             ]:
                 del self._chunks[key]
 
-    def delete_version(self, version_id: str) -> None:
+    def delete_version(self, version_id: str, writer: str | None = None) -> None:
+        with self._lock:
+            self._check(version_id, writer)
+            self.expire_version(version_id)
+
+    def expire_chunks(self, version_id: str, kind: ChunkKind) -> None:
+        with self._lock:
+            for key in [k for k in self._chunks if k[0] == version_id and k[1] == kind]:
+                del self._chunks[key]
+
+    def expire_version(self, version_id: str) -> None:
         with self._lock:
             for key in [k for k in self._chunks if k[0] == version_id]:
                 del self._chunks[key]

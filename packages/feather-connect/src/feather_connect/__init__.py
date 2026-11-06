@@ -2,7 +2,15 @@
 
 from feather_connect.core import partitions as partition
 from feather_connect.core import strategies as strategy
-from feather_connect.core.connector import CheckResult, ConnectorSpec, PushSource, Sink, Source
+from feather_connect.core.connector import (
+    CheckResult,
+    ConnectorSpec,
+    Deleted,
+    InboundRequest,
+    PushSource,
+    Sink,
+    Source,
+)
 from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import PermanentError, RecordRejected, TransientError
@@ -18,7 +26,9 @@ __all__ = [
     "ConnectorSpec",
     "Context",
     "Dataset",
+    "Deleted",
     "Flow",
+    "InboundRequest",
     "PermanentError",
     "PushSource",
     "Record",

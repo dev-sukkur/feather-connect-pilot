@@ -6,13 +6,17 @@ from collections.abc import Callable, Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from dbos import DBOSClient
 
 import feather_engine_dbos
 from feather_connect.engine.port import RetryPolicy, TaskCall
-from feather_engine_dbos import DbosEngine
+from feather_connect.storage.postgres import support
+from feather_engine_dbos import DbosEngine, DbosWorkerRuntime, runtime
+from feather_engine_dbos.engine import system_database_url
 
 pytestmark = pytest.mark.postgres
 
@@ -189,3 +193,35 @@ def test_a_killed_workers_task_is_recovered_by_another(engine, sys_db, pg_url):
     finally:
         second.kill()
         second.wait()
+
+
+def test_the_client_sessions_have_the_timeouts_of_our_own(engine: DbosEngine) -> None:
+    connection = engine._client._sys_db.engine.raw_connection()  # type: ignore[attr-defined]
+    try:
+        given = connection.driver_connection.info.get_parameters()  # type: ignore[union-attr]
+    finally:
+        connection.close()
+    assert given["connect_timeout"] == str(support.CONNECT_TIMEOUT_S)
+    assert given["keepalives"] == "1"
+    assert given["keepalives_idle"] == str(support.KEEPALIVES_IDLE_S)
+    assert given["keepalives_interval"] == str(support.KEEPALIVES_INTERVAL_S)
+    assert given["keepalives_count"] == str(support.KEEPALIVES_COUNT)
+    assert given["tcp_user_timeout"] == str(support.TCP_USER_TIMEOUT_MS)
+
+
+def test_the_worker_gives_dbos_the_same_timeouts(pg_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = MagicMock()
+    monkeypatch.setattr(runtime, "DBOS", fake)
+    DbosWorkerRuntime(pg_url).run({}, "w1", {}, 1)
+    url = fake.call_args.kwargs["config"]["system_database_url"]
+    assert url.startswith(pg_url)
+    query = parse_qs(urlsplit(url).query)
+    assert query["connect_timeout"] == [str(support.CONNECT_TIMEOUT_S)]
+    assert query["keepalives_idle"] == [str(support.KEEPALIVES_IDLE_S)]
+
+
+def test_timeouts_replace_those_in_the_url_and_keep_the_rest() -> None:
+    url = system_database_url("postgresql://u:p%40ss@h:1/d?connect_timeout=99&sslmode=require")
+    assert url.startswith("postgresql://u:p%40ss@h:1/d?")
+    query = parse_qs(urlsplit(url).query)
+    assert query["connect_timeout"] == [str(support.CONNECT_TIMEOUT_S)] and query["sslmode"] == ["require"]

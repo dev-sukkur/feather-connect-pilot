@@ -63,13 +63,14 @@ def _heartbeats(
     return stop
 
 
-def _config_of(project: Project, connection: str) -> Mapping[str, Any]:
+def config_of(project: Project, connection: str) -> Mapping[str, Any]:
+    """Return the connection's settings, secrets resolved and registered, so that no log line can show one."""
     config = project.connections[connection]
     try:
         resolved = config.resolve()
     except ProjectError as error:  # no retry brings back a secret that isn't set
         raise PermanentError(f"connection {connection!r}: {error}") from None
-    register_secrets(*(resolved[key] for key in config.secret_refs))  # so that no log line can show one
+    register_secrets(*(resolved[key] for key in config.secret_refs))
     return resolved
 
 
@@ -114,7 +115,7 @@ def run_worker(
             engine,
             code_sha=project.code_sha,
             budgets={c.name: c.budget for c in project.connections.values() if c.budget is not None},
-            config_of=lambda connection: _config_of(project, connection),
+            config_of=lambda connection: config_of(project, connection),
             timezone=str(project.settings["timezone"]),
         )
         return _work(runtime, store, database_url, worker_id, labels, slots, poll_s, stop, project.code_sha)
