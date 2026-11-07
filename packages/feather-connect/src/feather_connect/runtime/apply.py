@@ -24,9 +24,18 @@ from feather_connect.core.records import Op, Record, canonical_json, decode_key
 from feather_connect.core.transforms import apply_map, is_batch_map
 from feather_connect.engine.port import RetryPolicy, TaskContext
 from feather_connect.logs import redact
+from feather_connect.runtime import http
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import NOT_DELIVERED
-from feather_connect.storage.port import CLOSED, Delivery, DeliveryStatus, Version, delivery_cursor, is_paused
+from feather_connect.storage.port import (
+    CLOSED,
+    Delivery,
+    DeliveryStatus,
+    ResponseRow,
+    Version,
+    delivery_cursor,
+    is_paused,
+)
 from feather_connect.storage.spool import ChunkKind, table_to_records
 
 log = logging.getLogger(__name__)
@@ -188,6 +197,21 @@ def _start(route: RouteSpec, delivery: Delivery, deps: RuntimeDeps) -> _Plan:
     return _counting_a_try(delivery, deps, lambda: _plan_of(route, deps.store.versions.get(version_id), deps))
 
 
+def _redacted(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy with every known secret and token pattern masked in the text it holds, at any depth."""
+
+    def mask(item: Any) -> Any:
+        if isinstance(item, str):
+            return http.redact(item)
+        if isinstance(item, Mapping):
+            return {str(k): mask(v) for k, v in cast(Mapping[Any, Any], item).items()}
+        if isinstance(item, list | tuple):
+            return [mask(v) for v in cast(Sequence[Any], item)]
+        return item
+
+    return cast(dict[str, Any], mask(value))
+
+
 def _key_text(key: Key) -> str:
     """Undo `decode_key`, to name a record the way the store does."""
     return key if isinstance(key, str) else canonical_json(list(key)).decode("utf-8")
@@ -262,9 +286,35 @@ class _ChunkSender:
                 f"{route.sink.spec.name} asked to confirm later, and confirm-later sinks arrive in M2, "
                 "so this delivery can't be marked applied"
             )
+        self._keep_responses(chunk_no, result)
         for rejection in result.rejected:
             self._reject(_key_text(rejection.key), rejection.message)
         return _Counts(result.applied, rejected + len(result.rejected))
+
+    def _keep_responses(self, chunk_no: int, result: ApplyResult) -> None:
+        """Keep what the destination answered for each record, redacted, in the store and in the task's log (ruling 5).
+
+        Before the rejections are quarantined, so that an entry can show the body its record was sent with.
+        """
+        if not result.responses:
+            return
+        name, version_id = self._route.name, self._delivery.version_id
+        rows = [
+            ResponseRow(
+                name,
+                version_id,
+                chunk_no,
+                _key_text(response.key),
+                response.status,
+                _redacted(response.fields),
+                None if response.sent is None else _redacted(response.sent),
+            )
+            for response in result.responses
+        ]
+        self._deps.store.responses.record(rows)
+        for row in rows:
+            fields = canonical_json(dict(row.fields)).decode("utf-8")
+            log.info("route %s, record %s: HTTP %d, %s", name, row.key, row.status, fields)
 
     def _records(self, version: Version, chunk_no: int, context: Context) -> tuple[list[ApplyRecord], int]:
         """Return what the sink gets of a chunk, and how many records were turned down on the way."""

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% set d = detail.delivery %}
+{% block content %}
+<h1>Delivery of {{ m.partition_label(d.dataset, d.partition) }} to {{ d.route }}</h1>
+<p>{% if run %}<a href="/runs/{{ run | urlencode }}">&larr; The run</a> &middot; {% endif %}<a href="/routes/{{ d.route | urlencode }}/deliveries?partition={{ d.partition | urlencode }}">All deliveries of the partition</a></p>
+
+<section aria-labelledby="h-facts">
+  <h2 id="h-facts">Delivery</h2>
+  <dl class="facts">
+    <dt>Version</dt><dd><code>{{ d.version_id }}</code></dd>
+    <dt>Status</dt><dd>{{ m.status_badge(d.status) }}</dd>
+    <dt>Records</dt><dd>{{ d.rows_applied }} applied &middot; {{ d.rows_rejected }} rejected</dd>
+    <dt>Attempts</dt><dd>{{ d.attempts }}</dd>
+    {% if d.last_error %}<dt>Last error</dt><dd><span class="error-text">{{ d.last_error }}</span></dd>{% endif %}
+  </dl>
+</section>
+
+<section aria-labelledby="h-responses">
+  <h2 id="h-responses">What the destination answered</h2>
+  {% if detail.responses %}
+  <p class="muted">Per record: the HTTP status and the fields the sink's response map kept, never the raw answer. A rejected record shows the body it was sent with.</p>
+  <div class="table-wrap"><table>
+    <caption class="sr-only">The destination's answer per record, by chunk and then key</caption>
+    <thead><tr><th scope="col">Record</th><th scope="col" class="num">Chunk</th><th scope="col" class="num">Status</th><th scope="col">Fields</th><th scope="col">Sent</th><th scope="col">At</th></tr></thead>
+    <tbody>
+    {% for r in detail.responses %}
+      <tr>
+        <th scope="row"><code>{{ r.key }}</code></th>
+        <td class="num">{{ r.chunk_no }}</td>
+        <td class="num">{% if r.status >= 400 %}<span class="error-text">{{ r.status }}</span>{% else %}{{ r.status }}{% endif %}</td>
+        <td>{% for name, value in r.fields | dictsort %}<code>{{ name }}</code>: {{ value }}{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">&ndash;</span>{% endfor %}</td>
+        <td>{% if r.sent is not none %}{% for name, value in r.sent | dictsort %}<code>{{ name }}</code>: {{ value }}{% if not loop.last %}<br>{% endif %}{% endfor %}{% endif %}</td>
+        <td>{{ m.time_ago(r.at) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}
+  <p class="empty">The sink of this route reported no answers per record.</p>
+  {% endif %}
+</section>
+
+<section aria-labelledby="h-attempts">
+  <h2 id="h-attempts">Attempts</h2>
+  {% if detail.attempts %}
+  <div class="table-wrap"><table>
+    <thead><tr><th scope="col">From</th><th scope="col">To</th><th scope="col">By</th><th scope="col" class="num">Applied</th><th scope="col" class="num">Rejected</th><th scope="col">Error</th><th scope="col">At</th></tr></thead>
+    <tbody>
+    {% for a in detail.attempts %}
+      <tr>
+        <td>{{ a.from_status }}</td>
+        <td>{{ m.status_badge(a.to_status) }}</td>
+        <td>{{ a.actor }}{% if a.reason %} <span class="muted">{{ a.reason }}</span>{% endif %}</td>
+        <td class="num">{{ a.rows_applied }}</td>
+        <td class="num">{{ a.rows_rejected }}</td>
+        <td>{% if a.error %}<span class="error-text">{{ a.error }}</span>{% endif %}</td>
+        <td>{{ m.time_ago(a.at) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}
+  <p class="empty">No attempt yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

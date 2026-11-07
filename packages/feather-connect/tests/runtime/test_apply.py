@@ -11,7 +11,7 @@ from pydantic import BaseModel
 import feather_connect as fc
 from feather_connect.clock import FrozenClock
 from feather_connect.connectors.memory import Sink, Source
-from feather_connect.core.connector import ApplyResult
+from feather_connect.core.connector import ApplyResult, RecordResponse
 from feather_connect.core.context import Context
 from feather_connect.core.errors import BudgetDeferred, PermanentError, RecordRejected, TransientError
 from feather_connect.core.records import Record, row_hash
@@ -301,6 +301,33 @@ def test_sink_rejection_quarantines_and_continues():
     assert delivery.status == "applied" and (delivery.rows_applied, delivery.rows_rejected) == (2, 1)
     row = QUARANTINE.list_open()[0]
     assert (row.key, row.error, row.route, row.version_id) == ("2", "bad sku", "r", v1)
+
+
+class AnsweringSink(Sink):
+    """A sink that reports what a destination answered, as an HTTP call sink does."""
+
+    def apply(self, ctx: Context, batch: Any) -> ApplyResult:
+        responses = [
+            RecordResponse(r.key, 201, {"erp_id": f"e-{r.key}", "token": "Bearer leaked-123"})
+            for r in batch.records
+        ]
+        return ApplyResult(len(batch.records), responses=responses)
+
+
+def test_what_the_destination_answered_is_kept_redacted_and_logged(caplog):  # ruling 5
+    caplog.set_level(logging.INFO)
+    ds = dataset()
+    route = fc.to(AnsweringSink("r"), name="r")
+    [v1] = seal_versions(ds, [ROWS], route)
+    apply(ds, route, v1)
+    rows = DEPS.store.responses.of_delivery("r", v1)
+    assert [(r.key, r.status, r.fields["erp_id"]) for r in rows] == [
+        ("1", 201, "e-1"),
+        ("2", 201, "e-2"),
+        ("3", 201, "e-3"),
+    ]
+    assert all(r.fields["token"] == "Bearer ***" for r in rows) and "leaked-123" not in caplog.text
+    assert "record 2: HTTP 201" in caplog.text and '"erp_id":"e-2"' in caplog.text
 
 
 def test_sink_rejection_with_on_record_error_fail_fails_the_version():

@@ -17,11 +17,13 @@ from feather_connect.project import ConfigValue, effective_config
 from feather_connect.runtime.retention import kept_days, kept_inbox_days
 from feather_connect.storage.port import (
     STREAM_TRIGGER,
+    Attempt,
     Delivery,
     DeliveryStatus,
     FailureGroup,
     PartitionRow,
     QuarantineRow,
+    ResponseRow,
     Run,
     TaskRow,
     Version,
@@ -38,6 +40,7 @@ STALE_AFTER_RUNS = (
 )
 _RECENT_RUNS = 10
 _TASKS_A_PAGE = 100
+_RESPONSES_SHOWN = 500
 _VERSIONS_SHOWN = 50  # of each dataset, on a run's page: a stream run holds a day of them
 _RECENT_VERSIONS = 15
 _FAILED_RUNS_SHOWN = 100
@@ -180,6 +183,16 @@ class RunDetail:
     task_total: int = 0
     tasks_failed: int = 0
     ticks: TickCounts | None = None  # of a stream run
+
+
+@dataclass(frozen=True)
+class DeliveryDetail:
+    """One delivery with its attempts and what the destination answered for each record (ruling 5), at most
+    `_RESPONSES_SHOWN` of them."""
+
+    delivery: Delivery
+    attempts: tuple[Attempt, ...]
+    responses: tuple[ResponseRow, ...]
 
 
 @dataclass(frozen=True)
@@ -498,6 +511,15 @@ class Reads:
     ) -> list[Delivery]:
         return self._store.ledger.list_deliveries(
             route=route, status=status, partition=partition, limit=limit, cursor=cursor
+        )
+
+    def delivery_detail(self, route: str, version_id: str) -> DeliveryDetail:
+        """Return a delivery with its attempts and the destination's answers. Raises `KeyError` for an unknown one."""
+        delivery = self._store.ledger.get(route, version_id)
+        return DeliveryDetail(
+            delivery,
+            tuple(self._store.ledger.attempts(route, version_id)),
+            tuple(self._store.responses.of_delivery(route, version_id, _RESPONSES_SHOWN)),
         )
 
     def quarantine(self, route: str | None = None) -> list[QuarantineRow]:

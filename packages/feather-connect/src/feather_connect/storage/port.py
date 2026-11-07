@@ -517,6 +517,42 @@ class QuarantineStore(Protocol):
 
 
 @dataclass(frozen=True)
+class ResponseRow:
+    """What a destination answered for one record of a delivered chunk (ruling 5).
+
+    `status` is the HTTP status, and `fields` the fields that the sink's `response_map` took from the answer, never
+    the raw body or headers. `sent` is the body that a rejected record went with, so that it can be looked at and
+    retried; it is None for a record the destination took. `at` is when the store recorded it.
+    """
+
+    route: str
+    version_id: str
+    chunk_no: int
+    key: str
+    status: int
+    fields: Mapping[str, Any]
+    sent: Mapping[str, Any] | None = None
+    at: datetime | None = None
+
+
+class ResponseStore(Protocol):
+    """The answers of destinations, per record of a delivery. They go when their delivery goes (`delete_closed_before`)."""
+
+    def record(self, rows: Sequence[ResponseRow]) -> None:
+        """Keep the rows, stamped with the store's time. A row for the same route, version, chunk and key replaces the
+        one before, so a chunk sent again keeps its latest answers."""
+        ...
+
+    def of_delivery(self, route: str, version_id: str, limit: int = 1000) -> list[ResponseRow]:
+        """The rows of one delivery, by chunk and then key, at most `limit` of them."""
+        ...
+
+    def find(self, route: str, version_id: str, key: str) -> ResponseRow | None:
+        """The latest row of a record in a delivery: of its highest chunk, if the record was in several."""
+        ...
+
+
+@dataclass(frozen=True)
 class InboxEvent:
     """A push event in the inbox. `event_seq` says the order of arrival, and `event_id` is what the sender calls it.
 
@@ -1004,6 +1040,7 @@ class Store:
     audit: AuditStore
     reads: ReadStore
     inbox: InboxStore
+    responses: ResponseStore
 
     def is_unavailable(self, error: BaseException) -> bool:
         """Whether `error` says that the store can't be reached, or can't keep up, just now, so that the same call may

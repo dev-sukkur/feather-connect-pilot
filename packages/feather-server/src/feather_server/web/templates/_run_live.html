@@ -50,7 +50,7 @@
         <tr>
           <th scope="row">{{ m.partition_label(d.dataset, d.partition) }}</th>
           <td><a href="/routes/{{ d.route | urlencode }}/deliveries?partition={{ d.partition | urlencode }}">{{ d.route }}</a></td>
-          <td>{{ m.status_badge(d.status) }}</td>
+          <td><a href="/routes/{{ d.route | urlencode }}/deliveries/{{ d.version_id | urlencode }}?run={{ run.run_id | urlencode }}" aria-label="Details of the delivery to {{ d.route }}">{{ m.status_badge(d.status) }}</a></td>
           <td class="num">{{ d.attempts }}</td>
           <td>{% if d.last_error %}<span class="error-text">{{ d.last_error }}</span>{% endif %}</td>
         </tr>

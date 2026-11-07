@@ -48,6 +48,8 @@ from feather_connect.storage.port import (
     QuarantineStore,
     ReadStore,
     RecordStateStore,
+    ResponseRow,
+    ResponseStore,
     RouteRow,
     Run,
     RunJournal,
@@ -1023,6 +1025,11 @@ class _Ledger(Ledger):
                    where a.tenant_id = %s and a.route = g.route and a.version_id = g.version_id""",
                 ([r["route"] for r in gone], [r["version_id"] for r in gone], self._db.tenant),
             )
+            conn.execute(
+                """delete from feather.delivery_response a using unnest(%s::text[], %s::text[]) as g(route, version_id)
+                   where a.tenant_id = %s and a.route = g.route and a.version_id = g.version_id""",
+                ([r["route"] for r in gone], [r["version_id"] for r in gone], self._db.tenant),
+            )
         return len(gone)
 
 
@@ -1144,6 +1151,71 @@ class _Quarantine(QuarantineStore):
             )
             for r in rows
         ]
+
+
+def _response(r: Row) -> ResponseRow:
+    return ResponseRow(
+        r["route"],
+        r["version_id"],
+        r["chunk_no"],
+        r["key"],
+        r["status"],
+        _unjson(r["fields"]),
+        None if r["sent"] is None else _unjson(r["sent"]),
+        r["at"],
+    )
+
+
+class _Responses(ResponseStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def record(self, rows: Sequence[ResponseRow]) -> None:
+        if not rows:
+            return
+        now = self._db.clock.now()
+        with self._db.tx() as conn, conn.cursor() as cursor:
+            cursor.executemany(
+                """insert into feather.delivery_response
+                       (tenant_id, route, version_id, chunk_no, key, status, fields, sent, at)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   on conflict (tenant_id, route, version_id, chunk_no, key) do update set
+                       status = excluded.status, fields = excluded.fields, sent = excluded.sent, at = excluded.at""",
+                [
+                    (
+                        self._db.tenant,
+                        row.route,
+                        row.version_id,
+                        row.chunk_no,
+                        row.key,
+                        row.status,
+                        _json(dict(row.fields)),
+                        None if row.sent is None else _json(dict(row.sent)),
+                        now,
+                    )
+                    for row in rows
+                ],
+            )
+
+    def of_delivery(self, route: str, version_id: str, limit: int = 1000) -> list[ResponseRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.delivery_response
+                   where tenant_id = %s and route = %s and version_id = %s
+                   order by chunk_no, key collate "C" limit %s""",
+                (self._db.tenant, route, version_id, limit),
+            ).fetchall()
+        return [_response(r) for r in rows]
+
+    def find(self, route: str, version_id: str, key: str) -> ResponseRow | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select * from feather.delivery_response
+                   where tenant_id = %s and route = %s and version_id = %s and key = %s
+                   order by chunk_no desc limit 1""",
+                (self._db.tenant, route, version_id, key),
+            ).fetchone()
+        return None if row is None else _response(row)
 
 
 # A window's tokens now: the stored ones plus what has refilled since `refilled_at`, up to the window's size.
@@ -1981,6 +2053,7 @@ class PostgresStore(Store):
             audit=_Audit(db),
             reads=_Reads(db),
             inbox=_Inbox(db, versions),
+            responses=_Responses(db),
         )
         object.__setattr__(self, "_pool", pool)  # `Store` is frozen
 

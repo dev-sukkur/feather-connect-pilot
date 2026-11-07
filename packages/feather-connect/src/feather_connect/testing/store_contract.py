@@ -26,6 +26,7 @@ from feather_connect.storage.port import (
     DuplicateUser,
     InboxDay,
     InvalidTransition,
+    ResponseRow,
     SliceFinished,
     StaleWriter,
     StateRow,
@@ -236,7 +237,56 @@ class SpoolContract:
         assert len(spool.list_chunks("v3")) == 1
 
 
-class StoreContract(SpoolContract):
+class ResponseStoreContract:
+    """The answers of destinations per record (ruling 5). A part of `StoreContract`, which needs only `store`."""
+
+    def test_responses_are_kept_per_record_and_listed_by_chunk_then_key(self, store: Store):
+        store.responses.record(
+            [
+                ResponseRow("a", "v1", 1, "k2", 201, {"erp_id": "e-3"}),
+                ResponseRow("a", "v1", 0, "k9", 201, {"erp_id": "e-1", "at": T0, "n": Decimal("1.5")}),
+                ResponseRow("a", "v1", 0, "k10", 422, {}, sent={"customer": None, "lines": [1, 2]}),
+                ResponseRow("b", "v1", 0, "k1", 201, {"erp_id": "other route"}),
+            ]
+        )
+        rows = store.responses.of_delivery("a", "v1")
+        assert [(r.chunk_no, r.key) for r in rows] == [(0, "k10"), (0, "k9"), (1, "k2")]
+        assert rows[1].fields == {"erp_id": "e-1", "at": T0, "n": Decimal("1.5")}  # values keep their types
+        assert rows[0].sent == {"customer": None, "lines": [1, 2]} and rows[1].sent is None
+        assert rows[0].status == 422 and rows[0].at == T0
+        assert store.responses.of_delivery("a", "v1", limit=1) == rows[:1]
+        assert store.responses.of_delivery("a", "nope") == []
+
+    def test_a_chunk_sent_again_replaces_its_answers(self, store: Store, clock: FrozenClock):
+        store.responses.record([ResponseRow("a", "v1", 0, "k", 500, {"try": 1})])
+        clock.advance(timedelta(minutes=1))
+        store.responses.record([ResponseRow("a", "v1", 0, "k", 201, {"try": 2})])
+        (row,) = store.responses.of_delivery("a", "v1")
+        assert (row.status, row.fields, row.at) == (201, {"try": 2}, T0 + timedelta(minutes=1))
+
+    def test_find_gives_the_latest_answer_for_a_record(self, store: Store):
+        store.responses.record(
+            [ResponseRow("a", "v1", 0, "k", 422, {}, sent={"x": 1}), ResponseRow("a", "v1", 3, "k", 201, {})]
+        )
+        found = store.responses.find("a", "v1", "k")
+        assert found is not None and found.chunk_no == 3
+        assert store.responses.find("a", "v1", "other") is None
+        store.responses.record([])  # nothing to keep is fine
+
+    def test_answers_go_when_their_delivery_goes(self, store: Store, clock: FrozenClock):
+        seal(store, "v1", ["a"])
+        store.ledger.transition("a", "v1", "running", actor="t")
+        store.ledger.transition("a", "v1", "applied", actor="t")
+        seal(store, "v2", ["a"], part="q")
+        store.responses.record(
+            [ResponseRow("a", "v1", 0, "k", 201, {}), ResponseRow("a", "v2", 0, "k", 201, {})]
+        )
+        assert store.ledger.delete_closed_before(clock.now() + timedelta(days=1)) == 1
+        assert store.responses.of_delivery("a", "v1") == []
+        assert len(store.responses.of_delivery("a", "v2")) == 1  # pending, so kept
+
+
+class StoreContract(SpoolContract, ResponseStoreContract):
     def _table(self) -> pa.Table:
         return records_to_table(upserts(("k", {"x": 1})))
 

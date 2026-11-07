@@ -821,6 +821,23 @@ def route_deliveries(request: Request, actor: CurrentActor, route: str) -> HTMLR
     return _deliveries_page(request, actor, route)
 
 
+@router.get("/routes/{route}/deliveries/{version_id}", response_class=HTMLResponse)
+def delivery_detail(request: Request, actor: CurrentActor, route: str, version_id: str) -> HTMLResponse:
+    """One delivery: its attempts and what the destination answered for each record (ruling 5)."""
+    try:
+        detail = reads(request).delivery_detail(route, version_id)
+    except KeyError:
+        return _not_found(request, f"No delivery of {version_id!r} to {route!r}.")
+    return render(
+        request,
+        "delivery_detail.html",
+        title=f"{route} delivery",
+        actor=actor,
+        detail=detail,
+        run=request.query_params.get("run", ""),
+    )
+
+
 def _delivery_page(
     request: Request,
     actor: Actor,
