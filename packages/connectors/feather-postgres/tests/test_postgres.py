@@ -294,3 +294,21 @@ def test_staged_chunks_survive_a_server_crash(target, make_ctx):  # Review C2
         r"select relpersistence from pg_class where relname like '\_feather\_stage\_%'"
     ).fetchall()
     assert persistence == [("p",)]
+
+
+@pytest.mark.postgres
+def test_a_replace_stages_a_chunk_in_a_few_statements(target, make_ctx, monkeypatch):  # Stage 4 M6
+    target.execute("create table daily (id text primary key, day text, v int)")
+    sink = postgres.Table("wh", table="daily", key_columns=["id"])
+    sent: list[str] = []
+    real = psycopg.Cursor.execute
+
+    def counting(self: Any, query: Any, *args: Any, **kwargs: Any) -> Any:
+        sent.append(query.as_string(self) if hasattr(query, "as_string") else str(query))
+        return real(self, query, *args, **kwargs)
+
+    monkeypatch.setattr(psycopg.Cursor, "execute", counting)
+    records = [up(f"k{i}", id=f"k{i}", day="d1", v=i) for i in range(500)]
+    sink.apply(make_ctx(), batch(records, mode="replace_partition", partition="day=d1"))
+    assert len(rows(target, "daily")) == 500
+    assert sum(s.lstrip().lower().startswith("insert into") for s in sent) <= 4

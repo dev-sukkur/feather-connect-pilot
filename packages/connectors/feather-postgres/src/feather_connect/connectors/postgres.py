@@ -203,6 +203,10 @@ def _key_text(key: Key) -> str:
     return key if isinstance(key, str) else canonical_json(list(key)).decode("utf-8")
 
 
+class _Undo(Exception):
+    """Rolls back the savepoint it leaves."""
+
+
 def _value(value: Any) -> Any:
     return Jsonb(value) if isinstance(value, dict | list) else value
 
@@ -426,32 +430,69 @@ class Table(_Postgres, connector.Sink):
         conn.execute(sql.SQL("delete from {} where _fc_chunk = %s").format(stage), (batch.chunk_no,))
         now = datetime.now(UTC)
         upserts = [r for r in batch.records if r.op != "delete" and r.payload is not None]
-        for record in upserts:
-            row = {
-                **self._fields(record, columns),
-                **self._fc(batch, record, now),
-                "_fc_chunk": batch.chunk_no,
-                "_fc_moved_from": record.moved_from,
-            }
-            names = list(row)
-            try:
-                with conn.transaction():
-                    conn.execute(
+        staged = [
+            (
+                record,
+                {
+                    **self._fields(record, columns),
+                    **self._fc(batch, record, now),
+                    "_fc_chunk": batch.chunk_no,
+                    "_fc_moved_from": record.moved_from,
+                },
+            )
+            for record in upserts
+        ]
+        by_columns: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+        for _, row in staged:
+            by_columns.setdefault(tuple(row), []).append(row)
+        try:
+            with conn.transaction(), conn.cursor() as cursor:  # one statement per set of columns, not per row
+                for names, group in by_columns.items():
+                    cursor.executemany(
                         sql.SQL("insert into {} ({}) values ({})").format(
                             stage,
                             sql.SQL(", ").join(map(sql.Identifier, names)),
                             sql.SQL(", ").join(sql.Placeholder() * len(names)),
                         ),
-                        [_value(row[n]) for n in names],
+                        [[_value(row[n]) for n in names] for row in group],
                     )
-            except _ROW_ERRORS as error:  # a replace can't leave a record out
-                raise PermanentError(
-                    f"{self.spec.name}: record {_key_text(record.key)} can't be written, and replacing the slice "
-                    f"can't leave it out: {type(error).__name__}: {str(error).strip()}"
-                ) from None
+        except _ROW_ERRORS:
+            self._name_the_bad_row(conn, stage, staged)
+            raise
         if batch.is_last:
             self._swap(conn, schema, columns, batch, stage)
         return ApplyResult(len(upserts))
+
+    def _name_the_bad_row(
+        self,
+        conn: psycopg.Connection[Any],
+        stage: sql.Composable,
+        staged: list[tuple[ApplyRecord, dict[str, Any]]],
+    ) -> None:
+        """Insert the rows again one at a time, all undone at the end, to find the first that the stage turns down,
+        and raise `PermanentError` naming it: a replace can't leave a record out."""
+        try:
+            with conn.transaction():
+                for record, row in staged:
+                    names = list(row)
+                    try:
+                        with conn.transaction():
+                            conn.execute(
+                                sql.SQL("insert into {} ({}) values ({})").format(
+                                    stage,
+                                    sql.SQL(", ").join(map(sql.Identifier, names)),
+                                    sql.SQL(", ").join(sql.Placeholder() * len(names)),
+                                ),
+                                [_value(row[n]) for n in names],
+                            )
+                    except _ROW_ERRORS as error:
+                        raise PermanentError(
+                            f"{self.spec.name}: record {_key_text(record.key)} can't be written, and replacing the "
+                            f"slice can't leave it out: {type(error).__name__}: {str(error).strip()}"
+                        ) from None
+                raise _Undo
+        except _Undo:
+            pass
 
     def _swap(
         self,
