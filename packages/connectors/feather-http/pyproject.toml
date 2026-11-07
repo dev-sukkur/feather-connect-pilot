@@ -10,6 +10,7 @@ dependencies = [
 ]
 
 [project.entry-points."feather_connect.connectors"]
+"http.call" = "feather_connect.connectors.http:Call"
 "http.rest" = "feather_connect.connectors.http:Rest"
 
 [tool.uv.sources]

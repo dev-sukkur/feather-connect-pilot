@@ -33,9 +33,22 @@ import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from feather_connect.core import connector
-from feather_connect.core.connector import CheckResult, ConnectorSpec, ReadRequest, Secret, StreamSchema
+from feather_connect.core.connector import (
+    ApplyBatch,
+    ApplyRecord,
+    ApplyResult,
+    CheckResult,
+    ConnectorSpec,
+    Key,
+    ReadRequest,
+    RecordResponse,
+    Rejection,
+    Secret,
+    StreamSchema,
+)
 from feather_connect.core.context import Context
 from feather_connect.core.errors import PartitionError, PermanentError, TransientError
+from feather_connect.core.records import canonical_json
 from feather_connect.runtime.http import (
     ApiKey,
     Auth,
@@ -43,11 +56,12 @@ from feather_connect.runtime.http import (
     Bearer,
     FeatherHttp,
     HttpRetry,
+    HttpStatusError,
     OAuth2ClientCredentials,
     OAuth2RefreshToken,
 )
 
-__all__ = ["Cursor", "HttpConfig", "Link", "Offset", "Page", "Rest"]
+__all__ = ["Call", "Cursor", "HttpConfig", "Link", "Offset", "Page", "Rest"]
 
 AuthScheme = Literal[
     "none", "api_key", "basic", "bearer", "oauth2_client_credentials", "oauth2_refresh_token"
@@ -438,3 +452,149 @@ def _in_partition(req: ReadRequest, row: Mapping[str, Any]) -> bool:
         return req.contains(row)
     except PartitionError:
         return True
+
+
+# The outbound call sink.
+
+Template = str | Callable[[Mapping[str, Any]], str]
+BodyTemplate = Mapping[str, Any] | Callable[[Mapping[str, Any]], Mapping[str, Any]]
+_ALREADY_APPLIED = 409
+
+
+def _fill(template: Any, record: Mapping[str, Any]) -> Any:
+    """Fill a body template in from a record: a string that is one `{field}` alone takes the field's value as it is,
+    any other string is formatted, and mappings and lists are filled in item by item."""
+    if isinstance(template, str):
+        if template.startswith("{") and template.endswith("}") and template[1:-1].isidentifier():
+            return record[template[1:-1]]
+        return template.format_map(dict(record))
+    if isinstance(template, Mapping):
+        return {str(k): _fill(v, record) for k, v in cast(Mapping[Any, Any], template).items()}
+    if isinstance(template, list | tuple):
+        return [_fill(v, record) for v in cast(list[Any], template)]
+    return template
+
+
+def _plain(value: Mapping[str, Any]) -> dict[str, Any]:
+    """The JSON a body is sent as, read back: decimals as text and dates in ISO 8601, as `canonical_json` writes them."""
+    return cast(dict[str, Any], json.loads(canonical_json(dict(value))))
+
+
+def _key_text(key: Key) -> str:
+    return key if isinstance(key, str) else canonical_json(list(key)).decode("utf-8")
+
+
+class Call(_HttpConnector, connector.Sink):
+    """A sink that sends one HTTP request per record, such as a POST of each order to an ERP.
+
+    `url` is a template filled in from the record (`/orders/{order_id}`) or a function of the record, and so is
+    `body`: a mapping whose strings are filled in (a string that is just `{field}` keeps the field's type), or a
+    function that returns the body. Without `body` the record is sent as it is. `headers` go with every request.
+
+    Each request carries `key_header` with a key made from the chunk's idempotency key and the record's key, the same
+    each time the record is sent again, so that the destination can tell a repeat. A 2xx applies the record, and so
+    does a 409, which says it was applied already. Any other 4xx rejects the record, which keeps the body it was sent
+    with. A 429, a 5xx or a timeout is tried again by the client, and then fails the chunk for the runtime to retry.
+
+    `response_map` names fields to keep from each JSON answer, `{"erp_id": "data.id"}`, by dotted path; the runtime
+    keeps them with the delivery. A delete is rejected unless `on_delete="skip"`, which counts it as applied and sends
+    nothing.
+    """
+
+    spec = ConnectorSpec(
+        name="http.call",
+        config=HttpConfig,
+        modes=frozenset({"upsert", "append"}),
+        cost={"default": 1},
+    )
+
+    def __init__(
+        self,
+        connection: str,
+        *,
+        method: str,
+        url: Template,
+        body: BodyTemplate | None = None,
+        headers: Mapping[str, str] | None = None,
+        response_map: Mapping[str, str] | None = None,
+        key_header: str = "Idempotency-Key",
+        on_delete: Literal["reject", "skip"] = "reject",
+    ) -> None:
+        super().__init__()
+        self.connection = connection
+        self.method = method.upper()
+        self.url = url
+        self.body = body
+        self.headers = dict(headers or {})
+        self.response_map = dict(response_map or {})
+        self.key_header = key_header
+        self.on_delete = on_delete
+
+    def _probe(self, ctx: Context) -> None:
+        self.client(ctx)  # checks the settings: a call would change the destination
+
+    def apply(self, ctx: Context, batch: ApplyBatch) -> ApplyResult:
+        client = self.client(ctx)
+        applied = 0
+        rejected: list[Rejection] = []
+        responses: list[RecordResponse] = []
+        for record in batch.records:
+            if record.op == "delete" or record.payload is None:
+                if self.on_delete == "skip":
+                    applied += 1
+                else:
+                    rejected.append(
+                        Rejection(record.key, "DeleteNotSupported", "http.Call doesn't send deletes")
+                    )
+                continue
+            try:
+                url, body = self._render(record)
+            except PermanentError as error:  # this record lacks a field the templates need
+                rejected.append(Rejection(record.key, "TemplateError", str(error)))
+                continue
+            key = hashlib.sha256(f"{batch.idempotency_key}:{_key_text(record.key)}".encode()).hexdigest()
+            try:
+                response = client.request(
+                    self.method,
+                    url,
+                    content=canonical_json(body),
+                    headers={**self.headers, "Content-Type": "application/json", self.key_header: key},
+                    budget=ctx.budget,
+                )
+            except HttpStatusError as error:
+                if error.status_code == _ALREADY_APPLIED:
+                    applied += 1
+                    responses.append(RecordResponse(record.key, error.status_code))
+                else:
+                    rejected.append(Rejection(record.key, "HttpStatusError", str(error)))
+                    responses.append(RecordResponse(record.key, error.status_code, sent=body))
+                continue
+            applied += 1
+            responses.append(RecordResponse(record.key, response.status_code, self._mapped(response)))
+        return ApplyResult(applied, rejected, responses=responses)
+
+    def _render(self, record: ApplyRecord) -> tuple[str, dict[str, Any]]:
+        payload = cast(Mapping[str, Any], record.payload)
+        try:
+            url = self.url(payload) if callable(self.url) else self.url.format_map(dict(payload))
+            if self.body is None:
+                body: Mapping[str, Any] = payload
+            elif callable(self.body):
+                body = self.body(payload)
+            else:
+                body = cast(Mapping[str, Any], _fill(self.body, payload))
+        except (KeyError, IndexError) as error:
+            raise PermanentError(
+                f"http.Call: record {_key_text(record.key)!r} has no field {error}"
+            ) from None
+        return url, _plain(body)
+
+    def _mapped(self, response: httpx.Response) -> dict[str, Any]:
+        """The fields of `response_map` from a JSON answer; none from an answer that isn't JSON."""
+        if not self.response_map:
+            return {}
+        try:
+            answer = response.json()
+        except ValueError:
+            return {}
+        return {name: dig(answer, path) for name, path in self.response_map.items()}
