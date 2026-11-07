@@ -103,9 +103,10 @@ def compose() -> Iterator[Stack]:
     stack = Stack(env, env["FEATHER_SECRET_KEY"], env["POSTGRES_PASSWORD"])
     stack.compose("down", "--volumes", "--remove-orphans", check=False)
     stack.compose("build")
-    stack.compose("up", "-d", "--wait", "postgres", check=False)
-    stack.compose("up", "-d")
-    try:
+    try:  # a failed start must not leave the volume, with this run's password, to the next run
+        stack.compose("up", "-d", "--wait", "postgres", check=False)
+        started = stack.compose("up", "-d", check=False)
+        assert started.returncode == 0, started.stdout + started.stderr + stack.compose("logs", check=False).stdout
         stack.wait_ready()
         yield stack
     finally:
