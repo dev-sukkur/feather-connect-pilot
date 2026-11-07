@@ -161,11 +161,10 @@ def run(
     if not local:
         if sim:
             fail("--sim runs only with --local", hint="add --local", json_mode=json_mode)
-        fail(
-            "a run on the server needs the remote commands",
-            hint="add --local to run it here",
-            json_mode=json_mode,
-        )
+        from feather_cli.commands.remote import start_run
+
+        start_run(flow, partition, project=project, env=env, server=server, token=token, json_mode=json_mode)
+        return
     found = _load(project, env, sim, json_mode)
     chosen = _flow(found, flow, json_mode)
     if not sim:
