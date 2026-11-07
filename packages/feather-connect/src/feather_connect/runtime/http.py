@@ -5,9 +5,10 @@ token outlives the context of one read or one chunk. The budget is the context's
 attempt, retries included, takes its units from it before it goes out. A wait for budget is the handle's business, and
 `BudgetDeferred` passes through untouched.
 
-Retries cover a 429, a 5xx, a timeout and a connection that fails, with equal-jitter backoff. A `Retry-After` is
-honoured; one longer than 60 seconds raises `TransientError` at once, so that the engine waits instead of a worker
-thread. Any other 4xx raises `HttpStatusError`, a `PermanentError` with the status and a redacted excerpt of the body.
+Retries cover a 429, a 5xx, a timeout and a connection that fails, with equal-jitter backoff, and OAuth2 token fetches
+go through the same retries and the same budget. A `Retry-After` is honoured; one longer than 60 seconds raises
+`TransientError` at once, so that the engine waits instead of a worker thread. A 3xx (unless a GET asks to follow it)
+and any other 4xx raise `HttpStatusError`, a `PermanentError` with the status and a redacted excerpt of the body.
 """
 
 import base64
@@ -25,8 +26,8 @@ from typing import Any, Protocol, cast
 import httpx
 
 from feather_connect.core.errors import PermanentError, TransientError
+from feather_connect.logs import MIN_SECRET_LENGTH, register_secrets, unregister_secrets
 from feather_connect.logs import redact as redact_known
-from feather_connect.logs import register_secrets
 from feather_connect.runtime.budgets import BudgetHandle
 
 __all__ = [
@@ -61,11 +62,14 @@ _TOKEN_PATTERNS = (
     ),
 )
 _EARLY_REFRESH_S = 60.0  # a token this close to expiry is refreshed before use
+_TOKENS_KEPT = 2  # tokens still masked once replaced: the one before may still be in a call's lines
+TOKEN_COST_KEY = "token"  # what a token fetch costs, by the client's `cost`; a key it lacks costs 1
 
 
 def redact(text: str, secrets: Sequence[str] = ()) -> str:
-    """Return `text` with `secrets`, common token patterns and every registered secret replaced by `***`."""
-    for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+    """Return `text` with `secrets`, common token patterns and every registered secret replaced by `***`. A secret
+    shorter than four characters is left alone, as it would blot out ordinary text."""
+    for secret in sorted((s for s in secrets if len(s) >= MIN_SECRET_LENGTH), key=len, reverse=True):
         text = text.replace(secret, _MASK)
     for pattern, replacement in _TOKEN_PATTERNS:
         text = pattern.sub(replacement, text)
@@ -88,12 +92,18 @@ class HttpRetry:
 
 
 class HttpStatusError(PermanentError):
-    """The server answered with a status that trying again won't change, such as a 400 or a 422."""
+    """The server answered with a status that trying again won't change, such as a 400, a 422 or a redirect.
 
-    def __init__(self, message: str, status_code: int, excerpt: str) -> None:
+    `response` is the answer itself, for a caller that reads fields from it (a 409's body, say); it is never logged.
+    """
+
+    def __init__(
+        self, message: str, status_code: int, excerpt: str, response: httpx.Response | None = None
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.excerpt = excerpt
+        self.response = response
 
 
 class Auth(Protocol):
@@ -155,9 +165,15 @@ class Bearer:
         return "Bearer(token='***')"
 
 
+TokenPost = Callable[[str, Mapping[str, str]], httpx.Response]
+
+
 class _OAuth2:
     """An access token fetched from `token_url`, kept until shortly before it expires, and fetched again once if the
-    server turns it down. One lock covers the fetch, so threads that find it expired together fetch it once."""
+    server turns it down. One lock covers the fetch, so threads that find it expired together fetch it once.
+
+    Each token fetched is masked in logs; once two newer ones replace it, it no longer is.
+    """
 
     def __init__(self, token_url: str, client_id: str, client_secret: str, scheme: str) -> None:
         self.token_url = token_url
@@ -167,15 +183,21 @@ class _OAuth2:
         self._lock = threading.Lock()
         self._token: str | None = None
         self._expires_at = 0.0
+        self._issued: list[str] = []
         self.fetches = 0
 
     def _form(self) -> dict[str, str]:
         raise NotImplementedError
 
     def headers(self, client: httpx.Client) -> Mapping[str, str]:
+        return self.headers_using(lambda url, form: _post_once(client, url, form))
+
+    def headers_using(self, post: TokenPost) -> Mapping[str, str]:
+        """The `Authorization` header, with a token fetched by `post` when none is in hand (`FeatherHttp` passes one
+        that retries and meters)."""
         with self._lock:
             if self._token is None or time.monotonic() >= self._expires_at - _EARLY_REFRESH_S:
-                self._fetch(client)
+                self._fetch(post)
             assert self._token is not None
             return {"Authorization": f"{self.scheme} {self._token}"}
 
@@ -185,16 +207,9 @@ class _OAuth2:
             if token_sent is None or f"{self.scheme} {self._token}" == token_sent:
                 self._token = None
 
-    def _fetch(self, client: httpx.Client) -> None:
+    def _fetch(self, post: TokenPost) -> None:
         form = {"client_id": self.client_id, "client_secret": self._client_secret, **self._form()}
-        try:
-            response = client.post(self.token_url, data=form, headers={"Accept": "application/json"})
-        except httpx.TimeoutException as error:
-            raise TransientError(f"the token request to {self.token_url} timed out") from error
-        except httpx.TransportError as error:
-            raise TransientError(
-                f"the token request to {self.token_url} failed: {type(error).__name__}"
-            ) from error
+        response = post(self.token_url, form)
         self.fetches += 1
         found = _json_or_none(response)
         body = cast(dict[str, Any], found) if isinstance(found, dict) else {}
@@ -207,6 +222,10 @@ class _OAuth2:
                 f"the token endpoint {self.token_url} gave no access token (HTTP {response.status_code}): {excerpt}"
             )
         register_secrets(token)
+        self._issued.append(token)
+        if len(self._issued) > _TOKENS_KEPT:
+            unregister_secrets(*self._issued[:-_TOKENS_KEPT])
+            del self._issued[:-_TOKENS_KEPT]
         expires_in = body.get("expires_in")
         lifetime = float(expires_in) if isinstance(expires_in, int | float) else 3600.0
         self._token = token
@@ -261,6 +280,16 @@ class OAuth2RefreshToken(_OAuth2):
 
     def secrets(self) -> Sequence[str]:
         return (*super().secrets(), self._refresh_token)
+
+
+def _post_once(client: httpx.Client, url: str, form: Mapping[str, str]) -> httpx.Response:
+    """Post a token request once, with no retries and no budget: for an `Auth` used outside `FeatherHttp`."""
+    try:
+        return client.post(url, data=dict(form), headers={"Accept": "application/json"})
+    except httpx.TimeoutException as error:
+        raise TransientError(f"the token request to {url} timed out") from error
+    except httpx.TransportError as error:
+        raise TransientError(f"the token request to {url} failed: {type(error).__name__}") from error
 
 
 def _json_or_none(response: httpx.Response) -> Any:
@@ -335,6 +364,10 @@ class FeatherHttp:
     def close(self) -> None:
         self._client.close()
 
+    @property
+    def closed(self) -> bool:
+        return self._client.is_closed
+
     def secrets(self) -> tuple[str, ...]:
         return (*self._secrets, *(self.auth.secrets() if self.auth is not None else ()))
 
@@ -348,30 +381,48 @@ class FeatherHttp:
         *,
         cost_key: str = "default",
         budget: BudgetHandle | None = None,
+        follow_redirects: bool = False,
         **kwargs: Any,
     ) -> httpx.Response:
-        """Send a request and return a 2xx or 3xx response.
+        """Send a request and return a 2xx response.
 
         Raises `TransientError` when the retries run out or a `Retry-After` is too long to wait here, and
-        `HttpStatusError` for any other 4xx. A 401 with OAuth2 fetches a new token once and tries again.
+        `HttpStatusError` for any other 4xx and for a 3xx, which only a GET may ask to follow. A 401 with OAuth2
+        fetches a new token once and tries again.
         """
+        if follow_redirects and method.upper() != "GET":
+            raise ValueError(f"only a GET may follow redirects, not a {method}")
         meter = budget or self._budget
         units = self._cost.get(cost_key, 1)
+        call = {**kwargs, "follow_redirects": follow_redirects}
         refreshed = False
-        failed = 0
         while True:
-            if meter is not None:
-                meter.acquire(units)  # BudgetDeferred goes up as it is
-            response, error = self._send(method, url, kwargs)
-            if response is not None and response.status_code == 401 and isinstance(self.auth, _OAuth2):
+            response = self._retrying(method, url, meter, units, lambda: self._send(method, url, call, meter))
+            if response.status_code == 401 and isinstance(self.auth, _OAuth2):
                 if refreshed:
                     raise self._status_error(method, url, response, "even after a new access token")
                 refreshed = True
                 self.auth.expire(response.request.headers.get("authorization"))
                 continue
+            if response.status_code >= 300:
+                raise self._status_error(method, url, response)
+            return response
+
+    def _retrying(
+        self,
+        method: str,
+        url: str | httpx.URL,
+        meter: BudgetHandle | None,
+        units: int,
+        send: Callable[[], tuple[httpx.Response | None, str | None]],
+    ) -> httpx.Response:
+        """Send until an answer comes that trying again won't change, metering every attempt, and return it."""
+        failed = 0
+        while True:
+            if meter is not None:
+                meter.acquire(units)  # BudgetDeferred goes up as it is
+            response, error = send()
             if response is not None and not _transient_status(response.status_code):
-                if response.status_code >= 400:
-                    raise self._status_error(method, url, response)
                 return response
             failed += 1
             wait = self.retry.delay(failed)
@@ -401,16 +452,38 @@ class FeatherHttp:
             self._sleep(wait)
 
     def _send(
-        self, method: str, url: str | httpx.URL, kwargs: Mapping[str, Any]
+        self,
+        method: str,
+        url: str | httpx.URL,
+        kwargs: Mapping[str, Any],
+        meter: BudgetHandle | None,
     ) -> tuple[httpx.Response | None, str | None]:
         """Send once. Returns the response, or None and what went wrong when none came back."""
         call: dict[str, Any] = dict(kwargs)
         headers: dict[str, str] = dict(call.get("headers") or {})
-        if self.auth is not None:
+        if isinstance(self.auth, _OAuth2):
+            headers.update(self.auth.headers_using(lambda to, form: self._post_token(to, form, meter)))
+        elif self.auth is not None:
             headers.update(self.auth.headers(self._client))
         call["headers"] = headers
+        return self._attempt(lambda: self._client.request(method, url, **call))
+
+    def _post_token(self, url: str, form: Mapping[str, str], meter: BudgetHandle | None) -> httpx.Response:
+        """Post a token request with the retries and the budget of any other call."""
+        units = self._cost.get(TOKEN_COST_KEY, 1)
+        headers = {"Accept": "application/json"}
+        return self._retrying(
+            "POST",
+            url,
+            meter,
+            units,
+            lambda: self._attempt(lambda: self._client.post(url, data=dict(form), headers=headers)),
+        )
+
+    @staticmethod
+    def _attempt(send: Callable[[], httpx.Response]) -> tuple[httpx.Response | None, str | None]:
         try:
-            return self._client.request(method, url, **call), None
+            return send(), None
         except httpx.TimeoutException as error:
             return None, f"timed out ({type(error).__name__})"
         except httpx.TransportError as error:
@@ -428,6 +501,7 @@ class FeatherHttp:
             f"{method} {self._where(url)}: HTTP {response.status_code}{suffix}: {excerpt}",
             response.status_code,
             excerpt,
+            response,
         )
 
     def __repr__(self) -> str:

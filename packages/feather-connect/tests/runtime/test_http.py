@@ -301,3 +301,58 @@ def test_timeout_is_transient(client, sleeps):
     with pytest.raises(TransientError, match="timed out"):
         client.request("GET", "/x")
     assert len(sleeps) == 5
+
+
+@respx.mock
+def test_a_3xx_is_never_success_and_only_a_get_may_follow(client):  # I2
+    respx.post(f"{BASE}/orders").mock(
+        return_value=httpx.Response(301, headers={"location": "https://api.example.test/new"})
+    )
+    with pytest.raises(HttpStatusError, match="HTTP 301") as e:
+        client.request("POST", "/orders", content=b"{}")
+    assert e.value.status_code == 301
+    respx.get(f"{BASE}/old").mock(return_value=httpx.Response(302, headers={"location": f"{BASE}/new"}))
+    respx.get(f"{BASE}/new").mock(return_value=httpx.Response(200, json={"ok": True}))
+    with pytest.raises(HttpStatusError, match="HTTP 302"):
+        client.request("GET", "/old")
+    assert client.request("GET", "/old", follow_redirects=True).json() == {"ok": True}
+    with pytest.raises(ValueError, match="GET"):
+        client.request("POST", "/orders", follow_redirects=True)
+
+
+@respx.mock
+def test_token_fetches_are_retried_and_metered(sleeps):  # M2
+    answers = iter(
+        [
+            httpx.Response(503),
+            httpx.Response(429, headers={"retry-after": "2"}),
+            httpx.Response(200, json={"access_token": "tok-after-retry", "expires_in": 3600}),
+        ]
+    )
+    token_route = respx.post(TOKEN_URL).mock(side_effect=lambda request: next(answers))
+    respx.get(f"{BASE}/x").mock(return_value=httpx.Response(200))
+    handle, store = budget(["100/minute"])
+    client = FeatherHttp(
+        base_url=BASE, auth=refresh_auth(), sleep=sleeps.append, retry=HttpRetry(jitter=False)
+    )
+    client.request("GET", "/x", budget=handle)
+    assert token_route.call_count == 3 and sleeps == [1.0, 2.0]
+    assert used(store) == 4  # three token attempts and the call itself
+
+
+@respx.mock
+def test_only_the_last_two_tokens_stay_registered(sleeps):  # M3
+    tokens = iter(["tok-one", "tok-two", "tok-three"])
+    respx.post(TOKEN_URL).mock(
+        side_effect=lambda request: httpx.Response(200, json={"access_token": next(tokens), "expires_in": 30})
+    )
+    respx.get(f"{BASE}/x").mock(return_value=httpx.Response(200))
+    client = FeatherHttp(base_url=BASE, auth=refresh_auth(), sleep=sleeps.append)
+    for _ in range(3):
+        client.request("GET", "/x")  # 30 s is inside the minute kept in hand, so each call fetches
+    assert redact_registered("tok-one tok-two tok-three") == "tok-one *** ***"
+
+
+def test_short_secrets_are_not_masked():  # M12
+    assert redact("the api answered", ["api", ""]) == "the api answered"
+    assert redact("key abcd", ["abcd"]) == "key ***"
