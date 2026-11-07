@@ -7,6 +7,7 @@ license = "MIT"
 dependencies = [
     "feather-connect[postgres]",
     "feather-engine-dbos",
+    "feather-generic",
     "feather-server",
     "httpx",
     "typer",
@@ -19,7 +20,15 @@ feather = "feather_cli.main:app"
 [tool.uv.sources]
 feather-connect = { workspace = true }
 feather-engine-dbos = { workspace = true }
+feather-generic = { workspace = true }
 feather-server = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/feather_cli"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# The template projects that `feather new flow --template` copies from, shipped inside the package.
+"../../templates" = "feather_cli/templates"
 
 [build-system]
 requires = ["hatchling>=1.27"]
