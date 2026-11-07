@@ -347,3 +347,84 @@ def test_readme_example_runs(files: Files, tmp_path: Path):
 def test_unknown_format_is_refused():
     with pytest.raises(ValueError, match="format"):
         s3.Files("landing", path="memory://x/*", format="xml")  # pyright: ignore[reportArgumentType]
+
+
+def test_a_last_chunk_retried_after_a_failed_marker_keeps_every_chunk(
+    files: Files, monkeypatch: pytest.MonkeyPatch
+):
+    # Review C1: the staged chunks must outlive the marker, or the retry rebuilds the slice from the last chunk.
+    sink = s3.PartitionFiles("lake", path_template=files.url("out/{partition}.jsonl"), format="jsonl")
+    sink.apply(context(), apply_batch([up("a", id="a")], partition="d1", last=False))
+    last = apply_batch([up("b", id="b")], partition="d1", chunk=1)
+    real = s3._put  # pyright: ignore[reportPrivateUsage]
+
+    def flaky(fs: Any, path: str, data: bytes) -> None:
+        if "_feather_applied" in path:
+            raise ConnectionResetError("the connection was reset")
+        real(fs, path, data)
+
+    monkeypatch.setattr(s3, "_put", flaky)
+    with pytest.raises(fc.TransientError):
+        sink.apply(context(), last)
+    monkeypatch.setattr(s3, "_put", real)
+    sink.apply(context(), last)
+    lines = files.fs.cat_file(f"{files.prefix}/out/d1.jsonl").decode().splitlines()
+    assert sorted(json.loads(line)["id"] for line in lines) == ["a", "b"]
+    assert files.fs.glob(f"{files.prefix}/out/_staging/**/*.jsonl") == []
+
+
+def test_an_object_gone_between_listing_and_reading_is_transient(
+    files: Files, monkeypatch: pytest.MonkeyPatch
+):
+    # Review I2: another tool moved the file away; the retry lists again.
+    files.put("in/a.jsonl", '{"id": 1}\n')
+    source = s3.Files("landing", path=files.url("in/*.jsonl"), format="jsonl")
+    listed = source.objects(context(), ReadRequest("*", fc.partition.none()))
+    monkeypatch.setattr(source, "objects", lambda ctx, req: listed)
+    files.fs.rm(f"{files.prefix}/in/a.jsonl")
+    with pytest.raises(fc.TransientError, match="gone"):
+        read(source, context())
+
+
+def test_a_replay_stages_apart_from_the_first_attempt(files: Files):  # Review M1
+    sink = s3.PartitionFiles("lake", path_template=files.url("out/{partition}.jsonl"), format="jsonl")
+    first = ApplyBatch("r", "v1", 0, "d1", "replace_partition", [up("a", id="a")], "r:v1:0:0", True, False)
+    sink.apply(context(), first)
+    replay = ApplyBatch("r", "v1", 1, "d1", "replace_partition", [up("b", id="b")], "r:v1:1:1", False, True)
+    sink.apply(context(), replay)  # the replay's chunk 0 never came: the first attempt's must not join in
+    lines = files.fs.cat_file(f"{files.prefix}/out/d1.jsonl").decode().splitlines()
+    assert [json.loads(line)["id"] for line in lines] == ["b"]
+
+
+def test_a_failed_local_write_leaves_no_temporary_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # M3
+    fs = fsspec.filesystem("file")
+
+    def fail(src: str, dst: str) -> None:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(s3.os, "replace", fail)
+    with pytest.raises(PermissionError):
+        s3._put(fs, (tmp_path / "x.json").as_posix(), b"{}")  # pyright: ignore[reportPrivateUsage]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_partition_in_the_bucket_is_refused():  # Review M4
+    with pytest.raises(ValueError, match="bucket"):
+        s3.PartitionFiles("lake", path_template="s3://{partition}/data.csv", format="csv")
+
+
+def test_storage_option_secrets_stay_out_of_errors():  # Review M2
+    config = s3.S3Config(storage_options={"account_key": "azure-key-0123456789"})
+    assert "azure-key-0123456789" in config.secrets()
+
+
+def test_a_csv_column_whose_type_changes_late_is_named_and_can_be_fixed(files: Files):  # Review I4
+    files.put("in/a.csv", "id,qty\n" + "".join(f"{n},{n}\n" for n in range(2000)) + "2000,unknown\n")
+    source = s3.Files("landing", path=files.url("in/*.csv"), format="csv")
+    source.block_size = 4096  # the first block holds numbers only
+    with pytest.raises(PermanentError, match=r"in/a\.csv.*column 'qty'.*column_types"):
+        read(source, context())
+    fixed = s3.Files("landing", path=files.url("in/*.csv"), format="csv", column_types={"qty": "string"})
+    fixed.block_size = 4096
+    rows, _ = read(fixed, context())
+    assert len(rows) == 2001 and rows[-1]["qty"] == "unknown"

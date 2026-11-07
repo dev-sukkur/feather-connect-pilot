@@ -28,6 +28,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
@@ -68,8 +69,10 @@ MTIME_FIELD = "_object_mtime"
 STAGING = "_staging"
 APPLIED = "_feather_applied"
 DEFAULT_BATCH_ROWS = 10_000
+_CSV_BLOCK = 1 << 20
 _S3 = frozenset({"s3", "s3a"})
 _MASK = "***"
+_SECRET_WORDS = ("key", "secret", "token", "password", "credential", "sas")
 _SUFFIX: dict[str, str] = {"csv": ".csv", "json": ".json", "jsonl": ".jsonl", "parquet": ".parquet"}
 
 
@@ -97,9 +100,16 @@ class S3Config(BaseModel):
 
     def secrets(self) -> list[str]:
         held = (self.access_key_id, self.secret_access_key, self.session_token)
-        return [
+        found = [
             secret.get_secret_value() for secret in held if secret is not None and secret.get_secret_value()
         ]
+        # What fsspec's other stores take as credentials, such as Azure's `account_key`: masked by any name that says so.
+        found += [
+            str(value)
+            for name, value in self.storage_options.items()
+            if isinstance(value, str) and len(value) >= 8 and any(w in name.lower() for w in _SECRET_WORDS)
+        ]
+        return found
 
     def options(self, protocol: str) -> dict[str, Any]:
         """What fsspec is given for a URL of `protocol`. s3fs is told to skip its caches, so that a listing sees
@@ -210,6 +220,7 @@ class Files(_Store, connector.Source):
         delimiter: str = ",",
         stable_after: str = "60s",
         batch_rows: int = DEFAULT_BATCH_ROWS,
+        column_types: Mapping[str, str] | None = None,
     ) -> None:
         if format not in _SUFFIX:
             raise ValueError(f"format must be one of {sorted(_SUFFIX)}, not {format!r}")
@@ -221,6 +232,8 @@ class Files(_Store, connector.Source):
         self.delimiter = delimiter
         self.stable_after = parse_duration(stable_after)
         self.batch_rows = batch_rows
+        self.column_types = dict(column_types or {})
+        self.block_size = _CSV_BLOCK  # what a CSV's types are inferred from; tests make it small
 
     def check(self, ctx: Context) -> CheckResult:
         try:
@@ -282,6 +295,10 @@ class Files(_Store, connector.Source):
                             yield _in_partition(rows, req)
             except (PermanentError, TransientError):
                 raise
+            except FileNotFoundError:
+                raise TransientError(
+                    f"{self.spec.name}: {path} is gone since it was listed; the read lists again"
+                ) from None
             except Exception as error:  # noqa: BLE001 - mapped to Feather's errors
                 raise self._error(error, config) from None
 
@@ -307,12 +324,17 @@ class Files(_Store, connector.Source):
         encoding = "utf-8-sig" if codecs.lookup(self.encoding).name == "utf-8" else self.encoding
         reader = pa_csv.open_csv(
             stream,
-            read_options=pa_csv.ReadOptions(encoding=encoding),
+            read_options=pa_csv.ReadOptions(encoding=encoding, block_size=self.block_size),
             parse_options=pa_csv.ParseOptions(delimiter=self.delimiter, invalid_row_handler=invalid),
+            convert_options=pa_csv.ConvertOptions(
+                column_types={
+                    name: pa.type_for_alias(cast(Any, kind)) for name, kind in self.column_types.items()
+                }
+            ),
         )
         pending: list[pa.RecordBatch] = []
         size = 0
-        for batch in reader:
+        for batch in _typed(reader, path):
             pending.append(batch)
             size += batch.num_rows
             if size >= self.batch_rows:
@@ -364,6 +386,25 @@ class Files(_Store, connector.Source):
                 else:
                     chunk.append(Unreadable(raw=json.dumps(item), reason=f"{path} item {n}: not an object"))
             yield chunk
+
+
+def _typed(reader: Any, path: str) -> Iterator[pa.RecordBatch]:
+    """The batches of a CSV reader. A later block whose value doesn't fit the type inferred from the first fails the
+    file with the column named, and how to give it a type (review I4)."""
+    names = [field.name for field in reader.schema]
+    while True:
+        try:
+            batch = reader.read_next_batch()
+        except StopIteration:
+            return
+        except pa.ArrowInvalid as error:
+            found = re.search(r"column #(\d+)", str(error))
+            column = names[int(found.group(1))] if found and int(found.group(1)) < len(names) else "?"
+            raise PermanentError(
+                f"{path}: column {column!r} holds a value its inferred type doesn't take ({error}); "
+                f"give it one with column_types={{{column!r}: 'string'}}"
+            ) from None
+        yield batch
 
 
 def _bookkeeping(path: str) -> bool:
@@ -422,6 +463,8 @@ class PartitionFiles(_Store, connector.Sink):
         self.path_template = path_template
         self.format: Format = format
         self.root = path_template.split("{partition}", 1)[0].rsplit("/", 1)[0]
+        if "://" in path_template and not self.root.partition("://")[2].strip("/"):
+            raise ValueError(f"path_template {path_template!r} must name a bucket before {{partition}}")
 
     def check(self, ctx: Context) -> CheckResult:
         try:
@@ -451,11 +494,20 @@ class PartitionFiles(_Store, connector.Sink):
         try:
             if fs.exists(marker):
                 return _result_of(json.loads(fs.cat_file(marker)))
+            staging = self._staging(root, batch)
             if batch.mode == "append":
                 result = self._append(ctx, fs, batch)
             else:
-                result = self._replace(ctx, fs, root, batch)
+                result = self._replace(ctx, fs, staging, batch)
+            # The result first, the staged chunks after: a retry that finds no result must find every chunk (C1).
             _put(fs, marker, json.dumps(_record_of(result)).encode("utf-8"))
+            if batch.mode == "replace_partition" and batch.is_last:
+                try:
+                    fs.rm(staging, recursive=True)
+                except OSError as error:
+                    ctx.log.warning(
+                        "%s: staged chunks left at %s: %s", self.spec.name, staging, type(error).__name__
+                    )
         except (PermanentError, TransientError):
             raise
         except Exception as error:  # noqa: BLE001 - mapped to Feather's errors
@@ -489,8 +541,13 @@ class PartitionFiles(_Store, connector.Sink):
             _put(fs, cast(str, path), _encode(self._rows(batch, kept), self.format))
         return ApplyResult(len(kept), rejected)
 
-    def _replace(self, ctx: Context, fs: Any, root: str, batch: ApplyBatch) -> ApplyResult:
-        staging = f"{root}/{STAGING}/{_hash(f'{batch.route}:{batch.version_id}:{batch.partition}')}"
+    @staticmethod
+    def _staging(root: str, batch: ApplyBatch) -> str:
+        """Where a delivery's chunks wait for the last: by route, version, partition and replay (M1)."""
+        replays = batch.idempotency_key.rsplit(":", 1)[-1]
+        return f"{root}/{STAGING}/{_hash(f'{batch.route}:{batch.version_id}:{batch.partition}:{replays}')}"
+
+    def _replace(self, ctx: Context, fs: Any, staging: str, batch: ApplyBatch) -> ApplyResult:
         kept = [r for r in batch.records if r.op != "delete"]
         rows = self._rows(batch, kept)
         for row, record in zip(rows, kept, strict=True):
@@ -515,7 +572,6 @@ class PartitionFiles(_Store, connector.Sink):
             fs.rm(target)  # the slice became empty
         for partition, keys in moved.items():
             self._remove(fs, partition, keys)
-        fs.rm(staging, recursive=True)
         return ApplyResult(len(kept))
 
     def _remove(self, fs: Any, partition: str, keys: set[str]) -> None:
@@ -552,9 +608,14 @@ def _put(fs: Any, path: str, data: bytes) -> None:
         directory = os.path.dirname(path)
         os.makedirs(directory, exist_ok=True)
         temporary = os.path.join(directory, f".{os.path.basename(path)}.{uuid.uuid4().hex}.tmp")
-        with open(temporary, "wb") as out:
-            out.write(data)
-        os.replace(temporary, path)
+        try:
+            with open(temporary, "wb") as out:
+                out.write(data)
+            os.replace(temporary, path)
+        except BaseException:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+            raise
         return
     fs.pipe_file(path, data)
 

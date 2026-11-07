@@ -45,7 +45,9 @@ array of objects), `jsonl` and `parquet`, in batches of `batch_rows`. Each row g
 `_object_mtime`, the object's modified time, which a `by_stamp` dataset uses as its stamp: a read then takes only the
 objects modified since the watermark. An object modified less than `stable_after` ago is left for the next read, as
 it may still be being written. A CSV row with the wrong number of fields, or a JSON line that does not parse, goes to
-quarantine with its text, and the rest of the file is read. No matching object is an empty read.
+quarantine with its text, and the rest of the file is read. CSV types are inferred from the first block; a column
+whose later value does not fit fails the file naming it, and `column_types={"qty": "string"}` fixes its type. No
+matching object is an empty read, and an object gone since the listing is a transient error.
 
 `PartitionFiles(path_template="s3://lake/sales/day={partition}/data.parquet", format="parquet")` supports
 `replace_partition`, which stages a version's chunks under `_staging/` and writes the partition's object in one PUT
