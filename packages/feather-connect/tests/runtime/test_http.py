@@ -356,3 +356,16 @@ def test_only_the_last_two_tokens_stay_registered(sleeps):  # M3
 def test_short_secrets_are_not_masked():  # M12
     assert redact("the api answered", ["api", ""]) == "the api answered"
     assert redact("key abcd", ["abcd"]) == "key ***"
+
+
+@respx.mock
+def test_connections_with_the_same_grant_share_one_token():  # PR 7: one token per (token_url, client) in a process
+    route = respx.post(TOKEN_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "one", "expires_in": 3600})
+    )
+    respx.get(f"{BASE}/x").mock(return_value=httpx.Response(200))
+    for _ in range(3):
+        FeatherHttp(base_url=BASE, auth=refresh_auth()).request("GET", "/x")
+    other = OAuth2RefreshToken(TOKEN_URL, "cid", "csecret-123", "another-refresh-token")
+    FeatherHttp(base_url=BASE, auth=other).request("GET", "/x")
+    assert route.call_count == 2  # once for the shared grant, once for the other refresh token
