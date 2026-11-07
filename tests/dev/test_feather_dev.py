@@ -271,6 +271,19 @@ def test_docker_installed_but_not_answering_explains_what_to_do(fake_docker_daem
     assert "Docker" in r.stderr and "FEATHER_DATABASE_URL" in r.stderr
 
 
+def test_an_unreachable_database_url_is_explained_without_a_traceback(monkeypatch, tmp_path):  # M4
+    monkeypatch.setenv("FEATHER_DATABASE_URL", f"postgresql://nobody:x@127.0.0.1:{free_port()}/none")
+    project = tmp_path / "plain"
+    (project / "flows").mkdir(parents=True)
+    (project / "flows" / "__init__.py").write_text("")
+    (project / "feather.yaml").write_text("name: plain\nmodules: []\n")
+    (project / "env").mkdir()
+    (project / "env" / "dev.yaml").write_text("{}\n")
+    r = CliRunner().invoke(app, ["dev", "--no-browser", "--port", str(free_port()), "--project", str(project)])
+    assert r.exit_code != 0
+    assert "FEATHER_DATABASE_URL" in r.stderr and "Traceback" not in r.stderr + r.stdout
+
+
 def test_port_taken_names_the_port_and_the_flag(monkeypatch):
     monkeypatch.delenv("FEATHER_DATABASE_URL", raising=False)
     with socket.socket() as taken:

@@ -31,6 +31,7 @@ import httpx
 import psycopg
 import typer
 import uvicorn
+from sqlalchemy.exc import SQLAlchemyError
 from watchfiles import PythonFilter, watch
 
 from feather_cli.commands.helpers import HelperError, Helpers, HelperStopped, busy_ports, clashing_ports
@@ -116,21 +117,25 @@ def _database_url(port: int) -> str:
     return f"postgresql://feather:feather@{HOST}:{port}/feather"
 
 
-def _start_postgres_container(json_mode: bool) -> str:
-    """Start the dev container (making it the first time) and return its URL once it accepts connections."""
+def _start_postgres_container(json_mode: bool, started: list[bool]) -> str:
+    """Start the dev container (making it the first time) and return its URL once it accepts connections. `started`
+    gets True when this call started it, so that only then does this run stop it: another `feather dev` may be using
+    it (M4)."""
     found = _docker("inspect", CONTAINER)
     if found.returncode == 0:
         info: dict[str, Any] = json.loads(found.stdout)[0]
         port = int(info["Config"]["Labels"][PORT_LABEL])
         if not info["State"]["Running"]:
-            started = _docker("start", CONTAINER)
-            if started.returncode != 0:
+            started.append(True)
+            begun = _docker("start", CONTAINER)
+            if begun.returncode != 0:
                 fail(
-                    f"could not start the container {CONTAINER}: {_first_line(started.stderr)}",
+                    f"could not start the container {CONTAINER}: {_first_line(begun.stderr)}",
                     hint=f"free port {port} on this machine, or remove the container with: docker rm {CONTAINER}",
                     json_mode=json_mode,
                 )
     else:
+        started.append(True)
         port = _free_port()  # chosen once, then kept in the container's labels
         typer.echo(f"creating the Postgres container {CONTAINER} (the first time pulls {IMAGE})...", err=True)
         made = _docker(
@@ -160,6 +165,18 @@ def _start_postgres_container(json_mode: bool) -> str:
                     json_mode=json_mode,
                 )
             time.sleep(0.5)
+
+
+def _check_reachable(url: str, json_mode: bool) -> None:
+    """Fail with a message, not a traceback, when the database of FEATHER_DATABASE_URL does not answer (M4)."""
+    try:
+        psycopg.connect(url, connect_timeout=5).close()
+    except psycopg.Error as error:
+        fail(
+            f"the database of FEATHER_DATABASE_URL does not answer: {_first_line(str(error))}",
+            hint="check the URL and that Postgres is running, or unset FEATHER_DATABASE_URL to use Docker",
+            json_mode=json_mode,
+        )
 
 
 def _stop_postgres_container() -> None:
@@ -352,7 +369,9 @@ def dev(
             json_mode=json_mode,
         )
     own_database = os.environ.get("FEATHER_DATABASE_URL")
-    if not own_database:
+    if own_database:
+        _check_reachable(own_database, json_mode)
+    else:
         _check_docker(json_mode)
 
     stop = threading.Event()
@@ -364,19 +383,32 @@ def dev(
         if (number := getattr(signal, name, None)) is not None:
             signal.signal(number, on_signal)
 
-    container = not own_database
+    started: list[bool] = []
     helpers = Helpers(root, lambda line: typer.echo(line, err=True))
     try:
-        _run(root, env, port, own_database, no_browser, reset_password, json_mode, stop, helpers, processes)
+        _run(
+            root,
+            env,
+            port,
+            own_database,
+            no_browser,
+            reset_password,
+            json_mode,
+            stop,
+            helpers,
+            processes,
+            started,
+        )
     except HelperStopped:
         pass  # Ctrl+C while the helpers started: stop what started, and nothing else to say
     except HelperError as error:
         fail(str(error), hint="its output above says more", json_mode=json_mode)
-    except (RuntimeError, psycopg.Error) as error:
-        fail(str(error), hint="the log above says more", json_mode=json_mode)
+    except (RuntimeError, OSError, subprocess.SubprocessError, psycopg.Error, SQLAlchemyError) as error:
+        log.debug("feather dev stopped", exc_info=True)
+        fail(_first_line(str(error)), hint="the log above says more", json_mode=json_mode)
     finally:
         helpers.stop()
-        if container:
+        if started:
             _stop_postgres_container()
 
 
@@ -391,8 +423,9 @@ def _run(
     stop: threading.Event,
     helpers: Helpers,
     processes: tuple[DevProcess, ...],
+    started: list[bool],
 ) -> None:
-    database_url = own_database or _start_postgres_container(json_mode)
+    database_url = own_database or _start_postgres_container(json_mode, started)
     migrate(database_url)
     os.environ["FEATHER_DATABASE_URL"] = (
         database_url  # for the helpers, and a `${secret:env:...}` of the project
@@ -413,7 +446,12 @@ def _run(
         project=root,
     )
     stack = Stack(settings)
-    stack.start(port)
+    try:
+        stack.start(port)
+    except BaseException:
+        if password:  # it is stored hashed, so this is the only chance to see it (M4)
+            typer.echo(f"the {DEV_USER} user was made, password: {password}", err=True)
+        raise
     try:
         _wait_ready(port)
         url = f"http://localhost:{port}"
@@ -484,7 +522,7 @@ def _watch(
         try:
             stack.start(port)
             _wait_ready(port)
-        except RuntimeError as error:
+        except Exception as error:  # noqa: BLE001  (whatever it is, keep watching for the fix: M4)
             typer.echo(f"reload failed, nothing is running now; fix it and save again: {error}", err=True)
         else:
             typer.echo("reloaded", err=True)
