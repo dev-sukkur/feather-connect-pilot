@@ -2,17 +2,21 @@
 filtered by `last_modified_time`, and each invoice on its own with its line items.
 
 New invoices appear as time passes and some existing ones change (sent, then paid), so each run of the flow has
-something new to read. A few calls answer 429 or 503 on purpose, as a real API now and then does.
+something new to read. A few calls answer 429 or 503 on purpose, as a real API now and then does. With `--state`,
+the invoices are kept in a JSON file, so a restart carries on where it stopped instead of raising the same invoices
+again with new times.
 
-    python sims/zakya.py --port 29100
+    python sims/zakya.py --port 29100 --state .data/zakya.json
 """
 
 import argparse
+import json
 import random
 import secrets
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import uvicorn
@@ -50,10 +54,17 @@ class Zakya:
     """The simulated organisation: its invoices, the access tokens it has issued, and how often it fails a call.
 
     `every` is how many seconds pass between changes (None: only when `add` or `change` is called, as tests do).
+    `state` is a JSON file that keeps the invoices across restarts (None: in memory only).
     """
 
     def __init__(
-        self, *, seed: int = 7, start: int = 5, every: float | None = 20.0, fault_rate: float = 0.04
+        self,
+        *,
+        seed: int = 7,
+        start: int = 5,
+        every: float | None = 20.0,
+        fault_rate: float = 0.04,
+        state: Path | None = None,
     ) -> None:
         self._random = random.Random(seed)
         self._lock = threading.Lock()
@@ -61,9 +72,25 @@ class Zakya:
         self.tokens: set[str] = set()
         self.every = every
         self.fault_rate = fault_rate
+        self._state = state
         self._next = 1
         self._last_tick = time.monotonic()
-        self.add(start)
+        if state is not None and state.is_file():
+            kept = json.loads(state.read_text(encoding="utf-8"))
+            self.invoices = kept["invoices"]
+            self._next = kept["next"]
+            self._random.seed(seed + self._next)
+        else:
+            self.add(start)
+
+    def _save(self) -> None:
+        """Write the invoices to the state file, if there is one. Called with the lock held."""
+        if self._state is None:
+            return
+        self._state.parent.mkdir(parents=True, exist_ok=True)
+        draft = self._state.with_suffix(".tmp")
+        draft.write_text(json.dumps({"next": self._next, "invoices": self.invoices}), encoding="utf-8")
+        draft.replace(self._state)
 
     def add(self, count: int = 1) -> list[str]:
         """Raise `count` new invoices, now."""
@@ -103,6 +130,7 @@ class Zakya:
                     "line_items": lines,
                 }
                 made.append(invoice_id)
+            self._save()
         return made
 
     def change(self, invoice_id: str | None = None) -> str | None:
@@ -114,6 +142,7 @@ class Zakya:
                 return None
             invoice = self.invoices[chosen]
             invoice.update(status="paid", balance=0.0, last_modified_time=_stamp(datetime.now(IST)))
+            self._save()
             return chosen
 
     def tick(self) -> None:
@@ -216,8 +245,9 @@ def main() -> None:
     parser.add_argument(
         "--fault-rate", type=float, default=0.04, help="share of calls that answer 429 or 503"
     )
+    parser.add_argument("--state", type=Path, help="a JSON file that keeps the invoices across restarts")
     args = parser.parse_args()
-    app = create_app(Zakya(every=args.every, fault_rate=args.fault_rate))
+    app = create_app(Zakya(every=args.every, fault_rate=args.fault_rate, state=args.state))
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
 

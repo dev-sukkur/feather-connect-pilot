@@ -30,5 +30,5 @@ the ERP id each invoice got.
 The credentials in `secrets/` are fake, and only the simulators take them. Their paths in `env/dev.yaml` are read
 against the project directory, so the demo runs from any directory.
 
-To run the simulators alone, from this directory: `python sims/zakya.py --port 29100` and
+To run the simulators alone, from this directory: `python sims/zakya.py --port 29100 --state .data/zakya.json` and
 `python sims/receiver.py --port 29101`.

@@ -139,3 +139,13 @@ def test_each_invoice_reaches_the_receiver_once_and_a_changed_one_again(sims, mo
     engine.run_until_idle()
     assert store.runs.get_run(third).status == "succeeded"
     assert len(_received(db)) == 7
+
+
+def test_the_zakya_simulator_keeps_its_invoices_across_a_restart(tmp_path):
+    zakya_sim = _module("zakya")
+    state = tmp_path / "zakya.json"
+    first = zakya_sim.Zakya(start=3, every=None, fault_rate=0, state=state)
+    first.change()
+    again = zakya_sim.Zakya(start=3, every=None, fault_rate=0, state=state)
+    assert again.invoices == first.invoices
+    assert again.add() == ["4600000000004"]
