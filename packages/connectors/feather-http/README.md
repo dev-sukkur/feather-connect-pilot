@@ -7,6 +7,8 @@ HTTP connectors for Feather Connect.
   summaries and serve each record on its own.
 - `http.Call`: a sink that sends one request per record, with an `Idempotency-Key`, and keeps fields of each
   response.
+- `http.Webhook`: a push source for signed webhooks (HMAC-SHA256 over timestamp and body, or a scheme of your
+  own), with `records_path`, deletes, and an event id from the body or a header.
 - `graphql.Source`: a source that walks a GraphQL cursor connection (`edges { node }` or `nodes`, and `pageInfo`).
 - `graphql.Mutation`: a sink that sends a mutation per record and rejects a record its `userErrors` turn down.
 
@@ -135,3 +137,44 @@ products_to_shop = fc.Flow(
     triggers=[fc.every("15m")],
 )
 ```
+
+## Webhooks
+
+`http.Webhook` verifies each request against the secret its connection names under `auth`, checking the timestamp
+against when the request arrived, and `receive` only parses the body. A webhook with no `signature_secret` must say
+`unsigned=True`, or the project does not load.
+
+```yaml
+connections:
+  partner:
+    connector: http.webhook
+    auth: {signature_secret: "${secret:env:PARTNER_WEBHOOK_SECRET}"}
+```
+
+```python
+partner_orders = fc.Dataset(
+    "partner-orders",
+    source=http.Webhook(
+        "partner",
+        signature_secret="signature_secret",  # the entry under the connection's auth
+        signature_header="X-Signature",  # "sha256=<hex>" over "<timestamp>.<body>"
+        timestamp_header="X-Timestamp",  # None for a scheme without one
+        records_path="orders",  # a body may carry several records
+        event_id_header="X-Event-Id",  # or event_id_path="event.id" in the body
+        deleted_field="deleted",
+    ),
+    key="order_id",
+    strategy=fc.strategy.push(),
+)
+
+partner_orders_to_erp = fc.Flow(
+    "partner-orders-to-erp",
+    reads=partner_orders,
+    deliver=[fc.to(http.Call("erp", method="PUT", url="/orders/{order_id}", on_delete="skip"))],
+    triggers=[fc.on_event(partner_orders)],
+)
+```
+
+`verify=` takes a function of the secret, the request and when it arrived, for a scheme of another kind; it raises
+`http.SignatureInvalid` to refuse, which the sender gets as a 401. A secret that is not configured gives a 503, and
+the sender tries again.

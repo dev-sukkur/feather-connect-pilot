@@ -14,6 +14,7 @@ dependencies = [
 "graphql.source" = "feather_connect.connectors.graphql:Source"
 "http.call" = "feather_connect.connectors.http:Call"
 "http.rest" = "feather_connect.connectors.http:Rest"
+"http.webhook" = "feather_connect.connectors.http:Webhook"
 
 [tool.uv.sources]
 feather-connect = { workspace = true }

@@ -1,4 +1,5 @@
-"""HTTP connectors: `Rest`, a source that pages through a JSON API, and `Call`, a sink that sends a request per record.
+"""HTTP connectors: `Rest`, a source that pages through a JSON API, `Webhook`, a push source that takes signed
+webhooks, and `Call`, a sink that sends a request per record.
 
 Both read their connection from `Context.config`: `base_url`, the auth scheme and its settings at the top level, and
 the credentials under `auth`, which must be secret references (ruling 3). A connector keeps one `FeatherHttp` for as
@@ -26,7 +27,7 @@ import threading
 import time
 from collections.abc import Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, ClassVar, Literal, Protocol, cast
 from urllib.parse import quote
 
@@ -40,6 +41,8 @@ from feather_connect.core.connector import (
     ApplyResult,
     CheckResult,
     ConnectorSpec,
+    Deleted,
+    InboundRequest,
     Key,
     ReadRequest,
     RecordResponse,
@@ -50,6 +53,8 @@ from feather_connect.core.connector import (
 from feather_connect.core.context import Context
 from feather_connect.core.errors import BudgetDeferred, PartitionError, PermanentError, TransientError
 from feather_connect.core.records import canonical_json
+from feather_connect.core.strategies import parse_duration
+from feather_connect.core.webhooks import SignatureInvalid, verify_hmac
 from feather_connect.runtime.http import (
     ApiKey,
     Auth,
@@ -62,7 +67,7 @@ from feather_connect.runtime.http import (
     OAuth2RefreshToken,
 )
 
-__all__ = ["Call", "Cursor", "HttpConfig", "Link", "Offset", "Page", "Rest"]
+__all__ = ["Call", "Cursor", "HttpConfig", "Link", "Offset", "Page", "Rest", "SignatureInvalid", "Webhook"]
 
 AuthScheme = Literal[
     "none", "api_key", "basic", "bearer", "oauth2_client_credentials", "oauth2_refresh_token"
@@ -582,6 +587,127 @@ def _in_partition(req: ReadRequest, row: Mapping[str, Any]) -> bool:
         return req.contains(row)
     except PartitionError:
         return True
+
+
+# The webhook push source.
+
+CustomVerify = Callable[[str, InboundRequest, datetime], None]
+
+
+class Webhook:
+    """A push source for webhooks a sender signs with HMAC-SHA256, such as an order system calling on each change.
+
+    `signature_secret` names the entry under the connection's `auth` that holds the shared secret; `unsigned=True`
+    instead says that anybody may send, and loading a project refuses a webhook with neither (design 13.5). The
+    signature is read from `signature_header` and covers `<timestamp>.<body>` with the timestamp of
+    `timestamp_header`, which must be within `tolerance` of when the request arrived (not when it is verified, S4).
+    `timestamp_header=None` is a scheme without one, which a replay can pass. `verify`, a function of the secret, the
+    request and when it arrived, is a scheme of another kind; it raises `SignatureInvalid` to refuse.
+
+    `receive` only parses the body, a JSON object or list, and never calls out: `records_path` (dotted) is where the
+    records are, and a record whose `deleted_field` is true is a delete. The event id, by which a repeat is stored
+    once, is the `event_id_header` or what `event_id_path` names in the body. Header names are in lower case.
+    """
+
+    spec = ConnectorSpec(name="http.webhook", strategies=frozenset({"push"}), deletes="explicit")
+
+    def __init__(
+        self,
+        connection: str,
+        *,
+        signature_secret: str | None = None,
+        unsigned: bool = False,
+        signature_header: str = "x-signature",
+        timestamp_header: str | None = "x-timestamp",
+        tolerance: str = "5m",
+        records_path: str | None = None,
+        event_id_path: str | None = None,
+        event_id_header: str | None = None,
+        deleted_field: str | None = None,
+        verify: CustomVerify | None = None,
+    ) -> None:
+        if unsigned and signature_secret is not None:
+            raise ValueError("a webhook is signed with signature_secret or unsigned, not both")
+        self.connection = connection
+        self.unsigned = unsigned
+        self.signature_secret = signature_secret
+        self.signature_header = signature_header.lower()
+        self.timestamp_header = timestamp_header.lower() if timestamp_header else None
+        self.tolerance: timedelta = parse_duration(tolerance)
+        self.records_path = records_path
+        self.event_id_path = event_id_path
+        self.event_id_header = event_id_header.lower() if event_id_header else None
+        self.deleted_field = deleted_field
+        self.custom_verify = verify
+
+    def _secret(self, ctx: Context) -> str:
+        if self.signature_secret is None:
+            raise PermanentError(f"webhook on {self.connection!r} names no signature_secret")
+        return ctx.secret(self.signature_secret)
+
+    def check(self, ctx: Context) -> CheckResult:
+        if self.unsigned:
+            return CheckResult(ok=True)
+        try:
+            self._secret(ctx)
+        except PermanentError as error:
+            return CheckResult(ok=False, message=str(error))
+        return CheckResult(ok=True)
+
+    def discover(self, ctx: Context) -> list[StreamSchema]:
+        return [StreamSchema(self.connection, {})]
+
+    def verify(self, ctx: Context, request: InboundRequest) -> None:
+        """Raise `SignatureInvalid` unless the request is signed with the connection's secret, and `PermanentError` if
+        the secret is not configured, which tells the sender to retry."""
+        if self.unsigned:
+            return
+        secret = self._secret(ctx)
+        if self.custom_verify is not None:
+            self.custom_verify(secret, request, request.received_at)
+            return
+        timestamp = request.headers.get(self.timestamp_header) if self.timestamp_header else None
+        verify_hmac(
+            secret,
+            request.body,
+            request.headers.get(self.signature_header, ""),
+            timestamp,
+            now=request.received_at,
+            tolerance=self.tolerance,
+            require_timestamp=self.timestamp_header is not None,
+        )
+
+    def event_id(self, request: InboundRequest) -> str | None:
+        """The event's id: the `event_id_header`, else the text or number at `event_id_path` in the body."""
+        if self.event_id_header is not None:
+            found = request.headers.get(self.event_id_header)
+            if found:
+                return found
+        if self.event_id_path is None:
+            return None
+        value = dig(json.loads(request.body), self.event_id_path)
+        return str(value) if isinstance(value, str | int) and not isinstance(value, bool) else None
+
+    def receive(self, ctx: Context, request: InboundRequest) -> list[Mapping[str, Any] | Deleted]:
+        """Return the records in the body. Raises `PermanentError` for a body that holds anything but objects, which
+        sends that event to quarantine, with no part of the body in the message."""
+        try:
+            body: Any = json.loads(request.body)
+        except ValueError:
+            raise PermanentError("the webhook's body is not JSON") from None
+        found = dig(body, self.records_path)
+        if found is None and self.records_path is not None:
+            raise PermanentError(f"the webhook's body has no {self.records_path}")
+        items = cast(list[Any], found) if isinstance(found, list) else [found]
+        records: list[Mapping[str, Any] | Deleted] = []
+        for n, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise PermanentError(f"record {n} of the webhook is not a JSON object")
+            row = cast(dict[str, Any], item)
+            records.append(
+                Deleted(row) if self.deleted_field and row.get(self.deleted_field) is True else row
+            )
+        return records
 
 
 # The outbound call sink.
