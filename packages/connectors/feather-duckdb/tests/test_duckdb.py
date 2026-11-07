@@ -238,3 +238,10 @@ def test_motherduck_round_trip():
     finally:
         with duck.connect("md:", config={"motherduck_token": token}) as conn:
             conn.execute(f"drop table if exists {table}")
+
+
+def test_an_empty_slice_on_a_table_not_made_yet_applies_nothing(db: Path):  # Review I1
+    sink = duckdb.Table("lake", table="daily", key_columns=["id"])
+    result = sink.apply(context(str(db)), batch([], mode="replace_partition", partition="day=d1"))
+    assert result.applied == 0
+    assert sink.apply(context(str(db)), batch([], mode="replace_partition", partition="day=d1")).applied == 0

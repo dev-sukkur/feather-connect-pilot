@@ -164,7 +164,7 @@ class Query(_DuckDb, connector.Source):
         if conditions:
             statement += " where " + " and ".join(conditions)
         with self._connect(ctx) as conn:
-            reader = conn.execute(statement, params).fetch_record_batch(self.batch_rows)
+            reader = conn.execute(statement, params).to_arrow_reader(self.batch_rows)
             for batch in reader:
                 if batch.num_rows:
                     yield batch
@@ -355,6 +355,8 @@ class Table(_DuckDb, connector.Sink):
             columns = self._ensure(conn, rows, add=False)
         else:
             columns = self._columns(conn, self.table)
+            if not columns and batch.chunk_no == 0 and batch.is_last:
+                return ApplyResult(0)  # an empty slice, and no table yet: nothing to replace (I1)
             if not columns:
                 raise PermanentError(
                     f"{self.spec.name}: there is no table {self.table} to replace a slice of"
