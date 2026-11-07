@@ -370,11 +370,11 @@ def test_keep_state_tracks_moves_and_latest(clock: FrozenClock):
 def test_state_missed_by_a_crash_after_sealing_is_caught_up_by_the_next_batch(
     clock: FrozenClock, monkeypatch: pytest.MonkeyPatch
 ):  # S11
-    from feather_connect.runtime import sealer
+    from feather_connect.runtime import extract, sealer
 
     world = World(MemoryStore(clock), MemorySpool(clock), clock, keep_state=True, partition=by_fields("b"))
     world.post({"id": 1, "b": "a"})
-    real = sealer.update_state
+    real = extract.update_state
 
     def crash(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("the process died here")
