@@ -137,6 +137,7 @@ The design leaves these open, or they became clear only when working through the
 | `snapshot_diff` with a `replace_partition` route also stores the whole slice | A version otherwise holds only the changes |
 | Budget tokens aren't leased in blocks in M1 | One `UPDATE` per API call is cheap at these rates. Add leasing if the performance suite asks for it. |
 | Libraries: `cronsim` (schedules), `typer` (CLI), `argon2-cffi` (passwords), `fsspec` and `s3fs` (S3 connector), `axe-playwright-python` (accessibility) | Small and well known. The `objects` spool backend is M2, so D6 stays open for it. |
+| Templates ship as library functions first, such as `zakya_invoices_to_erp(map=..., extra_routes=...)`, and `feather new flow --template` copies one into the project only when a customer wants full control. Decided 7 Nov 2026 | A customer who calls the function gets our fixes on upgrade. A copied template is the customer's code and gets none. Plan 4 Task 9 and Plan 6's `feather new` follow this |
 | Test Postgres runs on `127.0.0.1:25433` | Port 5432 and others are taken on the main development machine |
 
 ## Deferred past M1
