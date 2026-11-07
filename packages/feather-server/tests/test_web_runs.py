@@ -1,9 +1,9 @@
 import re
-import pytest
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from feather_connect.core.errors import PermanentError, TransientError
