@@ -1,0 +1,25 @@
+# The demo project, a copy of templates/fan-out-demo: a JSON simulation of a shop's orders, delivered to Postgres,
+# DuckDB and an HTTP API. `feather dev` runs it with env/dev.yaml, which points the three at real targets on this
+# machine. `feather validate --project examples/demo` checks it.
+name: demo
+modules: [flows.orders]
+settings: {timezone: UTC}
+connections:
+  shop: {connector: simulation.source}
+  warehouse:
+    connector: postgres.table
+    schema: public
+    auth: {dsn: "${secret:env:WAREHOUSE_DSN}"}
+  lake:
+    connector: duckdb.table
+    database: lake.duckdb
+  erp:
+    connector: http.call
+    base_url: https://erp.example.com
+    auth_scheme: bearer
+    auth: {token: "${secret:env:ERP_TOKEN}"}
+# `feather dev` starts this first, in this directory, once its Postgres is up, and stops it with the rest. It makes
+# the warehouse's table (sims/demo.sql) and then answers the ERP's calls.
+dev:
+  processes:
+    - {name: demo-targets, command: [python, sims/targets.py, --port, "29001", --data, .data], port: 29001}

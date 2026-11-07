@@ -217,16 +217,14 @@ def test_demo_runs_and_reaches_destinations(dev, database, pg_connect):
         done = store.ledger.list_deliveries(route=route, status="applied")
         return bool(done) and sum(d.rows_applied for d in done) > 0
 
-    def failed(route: str) -> bool:
-        return bool(store.ledger.list_deliveries(route=route, status="failed"))
-
-    # The archive route refuses a delivery now and then on purpose (examples/demo/flows/orders.py), so a failure on
-    # it, which the dashboard shows, is as good here as rows applied.
+    # dev delivers to real targets: the demo schema of this database, a DuckDB file and sims/targets.py.
     wait_until(
-        lambda: applied("warehouse") and (applied("archive") or failed("archive")),
+        lambda: all(applied(route) for route in ("warehouse", "lake", "erp")),
         90,
-        "rows applied on the warehouse route, and the archive route reached",
+        "rows applied on all three routes",
     )
+    with psycopg.connect(database) as conn:
+        assert conn.execute("select count(*) from demo.orders").fetchone() == (5,)
     page = client.get("/flows").text
     assert "orders" in page
 
@@ -234,14 +232,14 @@ def test_demo_runs_and_reaches_destinations(dev, database, pg_connect):
 @needs_postgres
 def test_editing_a_flow_reloads_it(start_dev, database, tmp_path, pg_connect):
     project = tmp_path / "demo"
-    shutil.copytree(DEMO, project, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(DEMO, project, ignore=shutil.ignore_patterns("__pycache__", ".data"))
     running = start_dev("--project", str(project), env={"FEATHER_DATABASE_URL": database})
     running.wait_ready()
     store, _ = pg_connect(database)
     flow_file = project / "flows" / "orders.py"
     assert store.catalog.flow("orders").spec["owner"] == "demo"
 
-    flow_file.write_text(flow_file.read_text().replace('owner="demo"', 'owner="reloaded"'))
+    flow_file.write_text(flow_file.read_text().replace('owner = "demo"', 'owner = "reloaded"'))
     wait_until(lambda: store.catalog.flow("orders").spec["owner"] == "reloaded", 60, "the reloaded flow")
     # the worker registers the new code before the restarted server is back
     wait_until(
@@ -255,7 +253,7 @@ def test_editing_a_flow_reloads_it(start_dev, database, tmp_path, pg_connect):
     assert store.catalog.flow("orders").spec["owner"] == "reloaded"
 
     flow_file.write_text(
-        DEMO.joinpath("flows", "orders.py").read_text().replace('owner="demo"', 'owner="fixed"')
+        DEMO.joinpath("flows", "orders.py").read_text().replace('owner = "demo"', 'owner = "fixed"')
     )
     wait_until(lambda: store.catalog.flow("orders").spec["owner"] == "fixed", 60, "the repaired flow")
 

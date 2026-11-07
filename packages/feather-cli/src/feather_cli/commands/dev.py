@@ -1,9 +1,10 @@
 """`feather dev`: the whole stack on this machine (design 18.2).
 
 Postgres comes from `FEATHER_DATABASE_URL`, or else from a container named `feather-dev-postgres` with a named volume.
-The server and one worker then run in this process, on the demo project unless `--project` says another, and are
-started again whenever a file under `flows/` or `env/`, or `feather.yaml`, changes. The helper processes the project
-declares under `dev.processes` start first and keep running across reloads. Ctrl+C stops them all and the
+The server and one worker then run in this process, in the project directory, on the demo project unless `--project`
+says another, and are started again whenever a file under `flows/` or `env/`, or `feather.yaml`, changes. The helper
+processes the project declares under `dev.processes` start once Postgres is up and keep running across reloads. They,
+and the project's secrets, see its URL as `FEATHER_DATABASE_URL`, so that a project can deliver to its own schema there. Ctrl+C stops them all and the
 container; the data stays in the volume. The generated password of the `dev` user is printed to the console when the
 user is made, or again with `--reset-password`, and never goes to a log.
 """
@@ -36,7 +37,7 @@ from feather_cli.commands.helpers import HelperError, Helpers, HelperStopped, bu
 from feather_cli.options import Env, Json
 from feather_cli.output import emit, fail
 from feather_connect.logs import TaskLogHandler
-from feather_connect.project import ProjectError, load_project
+from feather_connect.project import DevProcess, ProjectError, load_project
 from feather_connect.storage.port import Store
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import migrate
@@ -317,9 +318,10 @@ def dev(
     json_mode: Json = False,
 ) -> None:
     """Run Postgres, the server and a worker here, on the demo project, and open the dashboard."""
-    root = project or _demo_project()
-    if root is None:
+    found = project or _demo_project()
+    if found is None:
         fail("the demo project is not here", hint="name a project with --project", json_mode=json_mode)
+    root = found.resolve()
     if not (root / "feather.yaml").is_file():
         fail(
             f"no feather.yaml in {root.resolve()}",
@@ -365,8 +367,7 @@ def dev(
     container = not own_database
     helpers = Helpers(root, lambda line: typer.echo(line, err=True))
     try:
-        helpers.start(processes, stop)
-        _run(root, env, port, own_database, no_browser, reset_password, json_mode, stop)
+        _run(root, env, port, own_database, no_browser, reset_password, json_mode, stop, helpers, processes)
     except HelperStopped:
         pass  # Ctrl+C while the helpers started: stop what started, and nothing else to say
     except HelperError as error:
@@ -388,9 +389,16 @@ def _run(
     reset_password: bool,
     json_mode: bool,
     stop: threading.Event,
+    helpers: Helpers,
+    processes: tuple[DevProcess, ...],
 ) -> None:
     database_url = own_database or _start_postgres_container(json_mode)
     migrate(database_url)
+    os.environ["FEATHER_DATABASE_URL"] = (
+        database_url  # for the helpers, and a `${secret:env:...}` of the project
+    )
+    os.chdir(root)  # a relative path in the project's settings, such as a DuckDB file, is the project's
+    helpers.start(processes, stop)
     store, _ = connect(database_url)
     try:
         password = _ensure_dev_user(store, reset_password)
