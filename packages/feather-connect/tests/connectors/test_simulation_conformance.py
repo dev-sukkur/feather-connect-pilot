@@ -1,13 +1,20 @@
 """The simulation connector against the conformance kit, faults included."""
 
+import logging
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from feather_connect.connectors import simulation
+from feather_connect.core.connector import InboundRequest
+from feather_connect.core.context import Context
 from feather_connect.core.errors import PermanentError
-from feather_connect.testing.conformance import SinkConformance, SourceConformance
+from feather_connect.core.webhooks import sign
+from feather_connect.testing.conformance import PushSourceConformance, SinkConformance, SourceConformance
+
+T0 = datetime(2026, 11, 7, 9, tzinfo=UTC)
 
 
 class TestSimulationSource(SourceConformance):
@@ -41,3 +48,27 @@ class TestSimulationSink(SinkConformance):
     @pytest.fixture
     def permanent_fault(self, sink: simulation.Sink) -> Callable[[], None]:
         return lambda: sink.fail_next(PermanentError("simulated refusal"))
+
+
+class TestSimulationPushSource(PushSourceConformance):
+    secret = "push-kit-secret-0123"
+
+    @pytest.fixture
+    def source(self) -> simulation.Source:
+        return simulation.Source("hooks", generator={"id": simulation.seq()}, rows_per_partition=0)
+
+    @pytest.fixture
+    def ctx(self) -> Context:
+        return Context({"signature_secret": self.secret}, logging.getLogger("push-kit"), T0, "UTC")
+
+    @pytest.fixture
+    def sign_with(self) -> Callable[[str, bytes], InboundRequest]:
+        def make(secret: str, body: bytes) -> InboundRequest:
+            stamp = str(int(T0.timestamp()))
+            headers = {
+                simulation.SIGNATURE_HEADER: sign(secret, body, stamp),
+                simulation.TIMESTAMP_HEADER: stamp,
+            }
+            return InboundRequest("POST", "/ingress/default/hooks", headers, body, T0)
+
+        return make

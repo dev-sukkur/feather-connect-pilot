@@ -3,6 +3,7 @@ end to end on the runtime, the local engine, the memory store and the sealer."""
 
 import json
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from feather_connect.runtime.runtime import Runtime
 from feather_connect.runtime.sealer import seal_once
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.spool import MemorySpool
+from feather_connect.testing.conformance import PushSourceConformance
 from feather_connect.testing.readme import run_readme_examples
 
 SECRET = "whsec-0d1e2f3a4b5c6d7e"
@@ -170,3 +172,32 @@ def test_webhook_to_call_end_to_end_under_the_harness():
 def test_readme_example_runs(tmp_path: Path):
     names = run_readme_examples(Path(__file__).resolve().parents[1] / "README.md", tmp_path)
     assert isinstance(names["partner_orders"].source, http.Webhook)
+
+
+class TestWebhookConformance(PushSourceConformance):  # ruling 10: beta once this passes
+    secret = SECRET
+
+    @pytest.fixture
+    def source(self) -> Any:
+        return hook(event_id_header="x-event-id")
+
+    @pytest.fixture
+    def ctx(self) -> Context:
+        return context()
+
+    @pytest.fixture
+    def sign_with(self) -> Callable[[str, bytes], InboundRequest]:
+        def make(secret: str, body: bytes) -> InboundRequest:
+            stamp = str(int(ARRIVED.timestamp()))
+            headers = {
+                "x-signature": "sha256=" + sign(secret, body, stamp),
+                "x-timestamp": stamp,
+                "x-event-id": "e1",
+            }
+            return InboundRequest("POST", "/hooks/orders", headers, body, ARRIVED)
+
+        return make
+
+
+def test_the_webhook_is_beta():
+    assert http.Webhook.spec.maturity == "beta"

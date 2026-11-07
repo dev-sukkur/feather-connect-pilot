@@ -609,7 +609,9 @@ class Webhook:
     once, is the `event_id_header` or what `event_id_path` names in the body. Header names are in lower case.
     """
 
-    spec = ConnectorSpec(name="http.webhook", strategies=frozenset({"push"}), deletes="explicit")
+    spec = ConnectorSpec(
+        name="http.webhook", strategies=frozenset({"push"}), deletes="explicit", maturity="beta"
+    )
 
     def __init__(
         self,

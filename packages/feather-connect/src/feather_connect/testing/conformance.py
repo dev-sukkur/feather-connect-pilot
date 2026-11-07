@@ -16,7 +16,9 @@ The kit's rows have a text `id` and a few plain fields. A connector marks itself
 """
 
 import gc
+import json
 import logging
+import socket
 import tracemalloc
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -33,21 +35,28 @@ from feather_connect.core.connector import (
     ApplyRecord,
     Batch,
     ConnectorSpec,
+    Deleted,
+    InboundRequest,
     Maturity,
+    PushSource,
     ReadRequest,
     RouteMode,
     Sink,
     Source,
     Unreadable,
+    event_id_of,
+    is_unsigned,
+    signature_secret_of,
 )
 from feather_connect.core.context import Context
 from feather_connect.core.errors import PermanentError, TransientError
 from feather_connect.core.partitions import none
+from feather_connect.core.webhooks import SignatureInvalid
 from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.port import BudgetSpec, parse_limits
 
-__all__ = ["LARGE_READ_ROWS", "SinkConformance", "SourceConformance", "kit_rows"]
+__all__ = ["LARGE_READ_ROWS", "PushSourceConformance", "SinkConformance", "SourceConformance", "kit_rows"]
 
 NOW = datetime(2026, 11, 7, 9, tzinfo=UTC)
 LARGE_READ_ROWS = 200_000
@@ -320,3 +329,89 @@ class SinkConformance(_Common):
         budgeted, store = _budgeted(ctx)
         sink.apply(budgeted, self.batch(self.upserts(kit_rows(2))))
         assert _used(store) > 0
+
+
+class PushSourceConformance(_Common):
+    """What every push source must do (design 13.5, S2, S4).
+
+    A subclass gives `source`, `ctx` (holding the secret under the source's `signature_secret`) and
+    `sign_with(secret, body) -> InboundRequest`, a request signed the source's way with `secret`; `secret` is the class
+    attribute that `ctx` holds. `body` is one record as JSON, a kit row by default. An unsigned source skips the
+    signature tests.
+    """
+
+    secret: ClassVar[str] = "conformance-secret"
+
+    @pytest.fixture
+    def body(self) -> bytes:
+        return json.dumps(kit_rows(1)[0]).encode()
+
+    @staticmethod
+    def arrived(ctx: Context, request: InboundRequest) -> Context:
+        """The context an ingress verifies with: `now` is when the request arrived."""
+        return replace(ctx, now=request.received_at)
+
+    def test_spec_is_valid(self, source: PushSource):
+        _check_spec(source.spec)
+        assert "push" in source.spec.strategies, "a push source serves the push strategy"
+
+    def test_says_how_it_verifies(self, source: PushSource):
+        assert is_unsigned(source) or signature_secret_of(source), (
+            "name a signature_secret, or say unsigned=True"
+        )
+
+    def test_a_signed_request_passes(
+        self, source: PushSource, ctx: Context, sign_with: Callable[[str, bytes], InboundRequest], body: bytes
+    ):
+        request = sign_with(self.secret, body)
+        source.verify(self.arrived(ctx, request), request)
+
+    def test_a_request_signed_with_another_secret_is_refused(
+        self, source: PushSource, ctx: Context, sign_with: Callable[[str, bytes], InboundRequest], body: bytes
+    ):
+        if is_unsigned(source):
+            pytest.skip("the source takes requests with no check")
+        request = sign_with("another-secret-altogether", body)
+        with pytest.raises(SignatureInvalid):
+            source.verify(self.arrived(ctx, request), request)
+
+    def test_a_changed_body_is_refused(
+        self, source: PushSource, ctx: Context, sign_with: Callable[[str, bytes], InboundRequest], body: bytes
+    ):
+        if is_unsigned(source):
+            pytest.skip("the source takes requests with no check")
+        request = replace(sign_with(self.secret, body), body=body.replace(b"row", b"ROW"))
+        with pytest.raises(SignatureInvalid):
+            source.verify(self.arrived(ctx, request), request)
+
+    def test_a_missing_secret_is_permanent(
+        self, source: PushSource, ctx: Context, sign_with: Callable[[str, bytes], InboundRequest], body: bytes
+    ):
+        if is_unsigned(source):
+            pytest.skip("the source takes requests with no check")
+        request = sign_with(self.secret, body)
+        bare = replace(ctx, config={}, now=request.received_at)
+        with pytest.raises(PermanentError):  # the ingress answers 503, and the sender tries again
+            source.verify(bare, request)
+
+    def test_receive_only_parses(
+        self,
+        source: PushSource,
+        ctx: Context,
+        sign_with: Callable[[str, bytes], InboundRequest],
+        body: bytes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        def no_network(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("receive opened a connection")
+
+        monkeypatch.setattr(socket, "socket", no_network)
+        monkeypatch.setattr(socket, "create_connection", no_network)
+        records = source.receive(ctx, sign_with(self.secret, body))
+        assert records and all(isinstance(r, Mapping | Deleted) for r in records)
+
+    def test_event_id_is_the_same_for_the_same_request(
+        self, source: PushSource, sign_with: Callable[[str, bytes], InboundRequest], body: bytes
+    ):
+        request = sign_with(self.secret, body)
+        assert event_id_of(source, request) == event_id_of(source, request)
