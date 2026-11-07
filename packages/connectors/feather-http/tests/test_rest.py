@@ -226,14 +226,14 @@ def test_both_budget_windows_hold_a_read_back(make_ctx, make_budget):
 
 @respx.mock
 def test_token_expiry_mid_read_refreshes_and_continues(make_ctx):  # Review Focus 2
-    tokens = iter(["first", "second"])
+    tokens = iter(["tok-first-1", "tok-second-2"])  # registered as secrets for the whole test process
     token_route = respx.post(TOKEN_URL).mock(
         side_effect=lambda r: httpx.Response(200, json={"access_token": next(tokens), "expires_in": 3600})
     )
 
     def api(request: httpx.Request) -> httpx.Response:
         page = int(request.url.params["page"])
-        if page == 2 and request.headers["authorization"] == "Zoho-oauthtoken first":
+        if page == 2 and request.headers["authorization"] == "Zoho-oauthtoken tok-first-1":
             return httpx.Response(401, json={"code": 57, "message": "token expired"})
         return page_api(request)
 
