@@ -15,10 +15,23 @@ from feather_connect.core.partitions import PartitionScheme
 from feather_connect.core.records import Op
 
 RouteMode = Literal["upsert", "append", "replace_partition", "side_effect"]
+# How far a connector has come: `beta` once its conformance subclass passes.
+Maturity = Literal["experimental", "beta", "stable"]
 # A key as a sink gets it (see `decode_key`): the text for one key field, a tuple of the parts for several.
 Key = str | tuple[Any, ...]
-# What a source yields: an Arrow record batch, or rows as dicts.
-Batch = pa.RecordBatch | list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class Unreadable:
+    """What a source yields in a batch for a row it could not parse, such as a CSV row with too few fields. The
+    runtime quarantines it with its `raw` text and the `reason`, and the rest of the read goes on (B5)."""
+
+    raw: str
+    reason: str
+
+
+# What a source yields: an Arrow record batch, or rows as dicts, among which a row it could not read.
+Batch = pa.RecordBatch | list[dict[str, Any]] | list[dict[str, Any] | Unreadable]
 # The type of a secret field in a connector's config model: its value stays out of `repr`, logs and errors.
 Secret = SecretStr
 
@@ -29,7 +42,8 @@ class ConnectorSpec:
 
     `strategies` are the change strategies a source can serve and `modes` the route modes a sink can apply.
     `deletes` says how the connector reports deleted records, `"none"` when it doesn't. `config` is the
-    Pydantic model of its connection settings and `cost` the budget units each kind of call uses.
+    Pydantic model of its connection settings and `cost` the budget units each kind of call uses. `maturity` says how
+    far it has come, and `resumable` that a source's read saves checkpoints and can start again from one.
     """
 
     name: str
@@ -38,6 +52,8 @@ class ConnectorSpec:
     modes: AbstractSet[RouteMode] = frozenset({"upsert"})
     deletes: str = "none"
     cost: Mapping[str, int] = field(default_factory=dict[str, int])
+    maturity: Maturity = "experimental"
+    resumable: bool = False
 
 
 @dataclass(frozen=True)

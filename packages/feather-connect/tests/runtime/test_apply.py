@@ -302,6 +302,7 @@ def test_sink_rejection_quarantines_and_continues():
     assert delivery.status == "applied" and (delivery.rows_applied, delivery.rows_rejected) == (2, 1)
     row = QUARANTINE.list_open()[0]
     assert (row.key, row.error, row.route, row.version_id) == ("2", "bad sku", "r", v1)
+    assert row.payload == {"id": 2, "v": "b"}  # kept, so that it can be looked at and retried (ruling 11)
 
 
 class AnsweringSink(Sink):

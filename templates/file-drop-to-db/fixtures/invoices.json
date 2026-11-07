@@ -1,0 +1,38 @@
+[
+  {
+    "invoice_id": "INV-00001",
+    "store_id": "BLR-01",
+    "invoice_date": "2026-11-06",
+    "total": "1180.00",
+    "tax": "180.00",
+    "_object_path": "landing/invoices/BLR-01-2026-11-06.csv",
+    "_object_mtime": "2026-11-07T02:01:00+00:00"
+  },
+  {
+    "invoice_id": "INV-00002",
+    "store_id": "BLR-01",
+    "invoice_date": "2026-11-06",
+    "total": "590.00",
+    "tax": "90.00",
+    "_object_path": "landing/invoices/BLR-01-2026-11-06.csv",
+    "_object_mtime": "2026-11-07T02:02:00+00:00"
+  },
+  {
+    "invoice_id": "INV-00003",
+    "store_id": "MAA-02",
+    "invoice_date": "2026-11-06",
+    "total": "236.00",
+    "tax": "36.00",
+    "_object_path": "landing/invoices/MAA-02-2026-11-06.csv",
+    "_object_mtime": "2026-11-07T02:03:00+00:00"
+  },
+  {
+    "invoice_id": "INV-00004",
+    "store_id": "MAA-02",
+    "invoice_date": "2026-11-06",
+    "total": "4720.00",
+    "tax": "720.00",
+    "_object_path": "landing/invoices/MAA-02-2026-11-06.csv",
+    "_object_mtime": "2026-11-07T02:04:00+00:00"
+  }
+]

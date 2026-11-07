@@ -1,0 +1,27 @@
+[project]
+name = "feather-duckdb"
+version = "0.1.0"
+description = "DuckDB and MotherDuck connectors for Feather Connect: a query source and a table sink."
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "feather-connect",
+    "duckdb>=1.4,<2",
+    "pyarrow",
+]
+
+[project.entry-points."feather_connect.connectors"]
+"duckdb.query" = "feather_connect.connectors.duckdb:Query"
+"duckdb.table" = "feather_connect.connectors.duckdb:Table"
+
+[tool.uv.sources]
+feather-connect = { workspace = true }
+
+# The package adds modules to the namespace `feather_connect.connectors` and has no `__init__.py` there, nor in
+# `feather_connect`, which belongs to the feather-connect distribution.
+[tool.hatch.build.targets.wheel]
+packages = ["src/feather_connect"]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"

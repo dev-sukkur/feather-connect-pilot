@@ -1,0 +1,18 @@
+# Store prices from a paged REST API, within the API's limits, to a MotherDuck bronze table.
+name: api-to-warehouse
+modules: [flows.prices]
+settings: {timezone: UTC}
+budgets:
+  pricing-api: {limits: ["60/minute", "20000/day"]}
+connections:
+  pricing_api:
+    connector: http.rest
+    budget: pricing-api
+    base_url: https://pricing.example.com
+    auth_scheme: api_key
+    api_key_header: X-API-Key
+    auth: {api_key: "${secret:env:PRICING_API_KEY}"}
+  warehouse:
+    connector: duckdb.table
+    database: md:bronze
+    auth: {token: "${secret:env:MOTHERDUCK_TOKEN}"}

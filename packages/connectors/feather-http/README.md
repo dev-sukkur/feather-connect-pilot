@@ -7,6 +7,10 @@ HTTP connectors for Feather Connect.
   summaries and serve each record on its own.
 - `http.Call`: a sink that sends one request per record, with an `Idempotency-Key`, and keeps fields of each
   response.
+- `http.Webhook`: a push source for signed webhooks (HMAC-SHA256 over timestamp and body, or a scheme of your
+  own), with `records_path`, deletes, and an event id from the body or a header.
+- `graphql.Source`: a source that walks a GraphQL cursor connection (`edges { node }` or `nodes`, and `pageInfo`).
+- `graphql.Mutation`: a sink that sends a mutation per record and rejects a record its `userErrors` turn down.
 
 Both share Feather's HTTP client (`feather_connect.runtime.http`): API-key, basic, bearer and OAuth2 auth (client
 credentials and refresh token, the token cached and refreshed once on a 401), retries of 429, 5xx and timeouts
@@ -88,3 +92,89 @@ delivery's page on the dashboard shows per record. Deletes are rejected unless `
 Each list call and each detail call takes one unit from the connection's budget (`cost_key` and
 `detail_cost_key` name them in the spec's `cost`), retries included, and so does each OAuth2 token request. A wait of under a minute is slept off;
 a longer one defers the task durably.
+
+## GraphQL
+
+`graphql.Source` posts `query` with `$first` and `$after` and walks the connection at `connection_path` under
+`data`, saving each `endCursor` as the checkpoint. For `by_stamp`, `stamp_variable` takes the watermark. Every answer's
+`errors` array is checked, even with a 200 and partial `data`: a rate limit (`THROTTLED`, `RATE_LIMITED`) is
+transient, anything else fails the read. `graphql.Mutation` sends `mutation` with `variables(record)`, a delete
+included, and an `Idempotency-Key`; a payload's `userErrors` reject that record.
+
+```python
+from feather_connect.connectors import graphql
+
+PRODUCTS = """query Products($first: Int!, $after: String, $since: String) {
+  products(first: $first, after: $after, query: $since) {
+    edges { node { id title updatedAt } } pageInfo { hasNextPage endCursor } }
+}"""
+SET_PRICE = """mutation SetPrice($id: ID!, $price: String!) {
+  productUpdate(input: {id: $id, price: $price}) { product { id } userErrors { field message } }
+}"""
+
+products = fc.Dataset(
+    "products",
+    source=graphql.Source("shop", query=PRODUCTS, connection_path="products", stamp_variable="since"),
+    key="id",
+    strategy=fc.strategy.by_stamp("updatedAt"),
+)
+
+products_to_shop = fc.Flow(
+    "prices-to-shop",
+    reads=products,
+    deliver=[
+        fc.to(
+            graphql.Mutation(
+                "shop",
+                mutation=SET_PRICE,
+                variables=lambda record: {
+                    "id": record.key,
+                    "price": str((record.payload or {}).get("price")),
+                },
+            )
+        )
+    ],
+    triggers=[fc.every("15m")],
+)
+```
+
+## Webhooks
+
+`http.Webhook` verifies each request against the secret its connection names under `auth`, checking the timestamp
+against when the request arrived, and `receive` only parses the body. A webhook with no `signature_secret` must say
+`unsigned=True`, or the project does not load.
+
+```yaml
+connections:
+  partner:
+    connector: http.webhook
+    auth: {signature_secret: "${secret:env:PARTNER_WEBHOOK_SECRET}"}
+```
+
+```python
+partner_orders = fc.Dataset(
+    "partner-orders",
+    source=http.Webhook(
+        "partner",
+        signature_secret="signature_secret",  # the entry under the connection's auth
+        signature_header="X-Signature",  # "sha256=<hex>" over "<timestamp>.<body>"
+        timestamp_header="X-Timestamp",  # None for a scheme without one
+        records_path="orders",  # a body may carry several records
+        event_id_header="X-Event-Id",  # or event_id_path="event.id" in the body
+        deleted_field="deleted",
+    ),
+    key="order_id",
+    strategy=fc.strategy.push(),
+)
+
+partner_orders_to_erp = fc.Flow(
+    "partner-orders-to-erp",
+    reads=partner_orders,
+    deliver=[fc.to(http.Call("erp", method="PUT", url="/orders/{order_id}", on_delete="skip"))],
+    triggers=[fc.on_event(partner_orders)],
+)
+```
+
+`verify=` takes a function of the secret, the request and when it arrived, for a scheme of another kind; it raises
+`http.SignatureInvalid` to refuse, which the sender gets as a 401. A secret that is not configured gives a 503, and
+the sender tries again.

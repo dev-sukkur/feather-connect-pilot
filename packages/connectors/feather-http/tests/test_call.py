@@ -2,8 +2,6 @@
 
 import hashlib
 import json
-import re
-import runpy
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -15,6 +13,7 @@ import respx
 from feather_connect.connectors import http  # pyright: ignore[reportAttributeAccessIssue]
 from feather_connect.core.connector import ApplyBatch, ApplyRecord
 from feather_connect.core.errors import PermanentError, TransientError
+from feather_connect.testing.readme import run_readme_examples
 
 BASE = "https://api.example.test"
 CHUNK_KEY = "orders-to-erp:v1:0:0"
@@ -144,12 +143,7 @@ def test_a_delete_is_rejected_by_default(make_ctx):
 
 
 def test_readme_example_runs(tmp_path: Path):
-    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
-    blocks = re.findall(r"```python\n(.*?)```", readme, re.DOTALL)
-    assert blocks
-    example = tmp_path / "example.py"
-    example.write_text("\n".join(blocks), encoding="utf-8")
-    flow = runpy.run_path(str(example))["flow"]
+    flow = run_readme_examples(Path(__file__).resolve().parents[1] / "README.md", tmp_path)["flow"]
     (route,) = flow.routes
     assert isinstance(route.sink, http.Call) and route.sink.response_map == {"erp_id": "id"}
 

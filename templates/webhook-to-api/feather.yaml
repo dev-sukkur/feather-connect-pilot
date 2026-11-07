@@ -1,0 +1,13 @@
+# A delivery partner's signed order webhooks, mapped and upserted into the ERP as they arrive.
+name: webhook-to-api
+modules: [flows.orders]
+settings: {timezone: UTC}
+connections:
+  partner:
+    connector: http.webhook
+    auth: {signature_secret: "${secret:env:PARTNER_WEBHOOK_SECRET}"}
+  erp:
+    connector: http.call
+    base_url: https://erp.example.com
+    auth_scheme: bearer
+    auth: {token: "${secret:env:ERP_TOKEN}"}

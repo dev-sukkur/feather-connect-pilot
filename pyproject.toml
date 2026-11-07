@@ -23,6 +23,7 @@ dev = [
     "types-pyyaml",
     "httpx",
     "respx",
+    "moto[server]",
 ]
 
 [tool.ruff]
@@ -41,6 +42,8 @@ known-first-party = ["feather_connect", "feather_engine_dbos", "feather_server",
 # Check the packages only: spikes/ is throwaway code with its own dependencies.
 include = ["packages"]
 strict = ["packages/feather-connect/src"]
+# Tests import the shared helpers of tests/support, which pytest puts on the path.
+extraPaths = ["tests/support"]
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
 pythonpath = ["tests/support"]

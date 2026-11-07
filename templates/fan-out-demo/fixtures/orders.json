@@ -1,0 +1,42 @@
+[
+  {
+    "order_id": "ORD-00001",
+    "store_id": "BLR-01",
+    "customer": "Asha Traders",
+    "status": "new",
+    "total": "290.00",
+    "placed_at": "2026-11-07T10:01:00Z"
+  },
+  {
+    "order_id": "ORD-00002",
+    "store_id": "MAA-02",
+    "customer": "Ravi Stores",
+    "status": "packed",
+    "total": "520.00",
+    "placed_at": "2026-11-07T10:02:00Z"
+  },
+  {
+    "order_id": "ORD-00003",
+    "store_id": "BLR-01",
+    "customer": "Meena K",
+    "status": "shipped",
+    "total": "228.00",
+    "placed_at": "2026-11-07T10:03:00Z"
+  },
+  {
+    "order_id": "ORD-00004",
+    "store_id": "DEL-03",
+    "customer": "Kiran & Sons",
+    "status": "new",
+    "total": "1450.00",
+    "placed_at": "2026-11-07T10:04:00Z"
+  },
+  {
+    "order_id": "ORD-00005",
+    "store_id": "MAA-02",
+    "customer": "Lakshmi Mart",
+    "status": "packed",
+    "total": "86.00",
+    "placed_at": "2026-11-07T10:05:00Z"
+  }
+]

@@ -673,10 +673,21 @@ class _Quarantine(QuarantineStore):
         error: str,
         dataset: str | None = None,
         partition: str | None = None,
+        *,
+        payload: Mapping[str, Any] | None = None,
+        raw: str | None = None,
     ) -> None:
         with self._d.lock:
             self._d.quarantine[(route, version_id, key, dataset)] = QuarantineRow(
-                route, version_id, key, error, "open", dataset, partition
+                route,
+                version_id,
+                key,
+                error,
+                "open",
+                dataset,
+                partition,
+                None if payload is None else copy.deepcopy(dict(payload)),
+                raw,
             )
 
     def open_extraction_keys(self, dataset: str, keys: Iterable[str], outside: str | None = None) -> set[str]:

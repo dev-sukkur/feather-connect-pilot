@@ -1,0 +1,3 @@
+flows:
+  items-to-warehouse:
+    triggers: {every: 5m}

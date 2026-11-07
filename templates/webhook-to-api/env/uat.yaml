@@ -1,0 +1,1 @@
+connections: {erp: {base_url: https://erp-uat.example.com}}

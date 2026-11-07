@@ -1,0 +1,2 @@
+# qa runs on simulation stand-ins of the real connectors, with fixtures/ as data (B2).
+connections: {warehouse: {connector: simulation.sink}, lake: {connector: simulation.sink}, erp: {connector: simulation.sink}}

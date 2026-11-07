@@ -1,0 +1,42 @@
+[
+  {
+    "item_id": "ITM-0001",
+    "sku": "TEA-250",
+    "name": "Assam tea 250 g",
+    "category": "beverages",
+    "uom": "EA",
+    "updated_at": "2026-11-07T08:01:00Z"
+  },
+  {
+    "item_id": "ITM-0002",
+    "sku": "RICE-5K",
+    "name": "Basmati rice 5 kg",
+    "category": "staples",
+    "uom": "EA",
+    "updated_at": "2026-11-07T08:02:00Z"
+  },
+  {
+    "item_id": "ITM-0003",
+    "sku": "SOAP-100",
+    "name": "Neem soap 100 g",
+    "category": "personal care",
+    "uom": "EA",
+    "updated_at": "2026-11-07T08:03:00Z"
+  },
+  {
+    "item_id": "ITM-0004",
+    "sku": "OIL-1L",
+    "name": "Sunflower oil 1 l",
+    "category": "staples",
+    "uom": "EA",
+    "updated_at": "2026-11-07T08:04:00Z"
+  },
+  {
+    "item_id": "ITM-0005",
+    "sku": "DAL-1K",
+    "name": "Toor dal 1 kg",
+    "category": "staples",
+    "uom": "EA",
+    "updated_at": "2026-11-07T08:05:00Z"
+  }
+]

@@ -1,0 +1,29 @@
+[project]
+name = "feather-generic"
+version = "0.1.0"
+description = "Generic flow templates for Feather Connect, as library functions: database, API, files and webhooks to warehouses, databases and APIs."
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "feather-connect",
+    "feather-http",
+    "feather-postgres",
+    "feather-duckdb",
+    "feather-s3",
+]
+
+[tool.uv.sources]
+feather-connect = { workspace = true }
+feather-http = { workspace = true }
+feather-postgres = { workspace = true }
+feather-duckdb = { workspace = true }
+feather-s3 = { workspace = true }
+
+# The package adds modules to the namespace `feather_connect.templates` and has no `__init__.py` there, nor in
+# `feather_connect`, which belongs to the feather-connect distribution.
+[tool.hatch.build.targets.wheel]
+packages = ["src/feather_connect"]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"

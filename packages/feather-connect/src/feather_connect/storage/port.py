@@ -191,6 +191,8 @@ class QuarantineRow:
     status: QuarantineStatus
     dataset: str | None = None
     partition: str | None = None
+    payload: Mapping[str, Any] | None = None
+    raw: str | None = None
 
 
 class RunJournal(Protocol):
@@ -494,8 +496,14 @@ class QuarantineStore(Protocol):
         error: str,
         dataset: str | None = None,
         partition: str | None = None,
+        *,
+        payload: Mapping[str, Any] | None = None,
+        raw: str | None = None,
     ) -> None:
-        """Adding the same (route, version, key, dataset) again replaces the entry and reopens it."""
+        """Adding the same (route, version, key, dataset) again replaces the entry and reopens it.
+
+        `payload` is the record as the sink got it, and `raw` the text of a row its source could not read, so that
+        the entry can be looked at and retried (ruling 11). Both are redacted before they get here."""
         ...
 
     def open_extraction_keys(self, dataset: str, keys: Iterable[str], outside: str | None = None) -> set[str]:

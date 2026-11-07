@@ -1,0 +1,13 @@
+# The item master in the shop's Postgres, copied to a MotherDuck bronze table by its change stamp.
+name: db-to-warehouse
+modules: [flows.items]
+settings: {timezone: UTC}
+connections:
+  app_db:
+    connector: postgres.query
+    schema: public
+    auth: {dsn: "${secret:env:APP_DB_DSN}"}
+  warehouse:
+    connector: duckdb.table
+    database: md:bronze
+    auth: {token: "${secret:env:MOTHERDUCK_TOKEN}"}

@@ -23,6 +23,8 @@ from feather_connect.core.context import Context
 from feather_connect.core.errors import PermanentError, RecordRejected
 from feather_connect.core.strategies import read_stamp
 
+BATCH_ROWS = 10_000  # rows per batch a read yields, so that a large read holds little at a time
+
 
 def changed_since(row: Mapping[str, Any], req: ReadRequest) -> bool:
     """Return whether the row's stamp is `req.since` or later. A row without a stamp never is.
@@ -45,6 +47,7 @@ class Source(connector.Source):
     spec = ConnectorSpec(
         name="memory.source",
         strategies=frozenset({"by_stamp", "snapshot_diff", "replace", "push"}),
+        maturity="beta",
     )
 
     def __init__(self, connection: str = "memory", rows: Iterable[Mapping[str, Any]] = ()) -> None:
@@ -69,8 +72,14 @@ class Source(connector.Source):
         return [StreamSchema("rows", fields)]
 
     def read(self, ctx: Context, req: ReadRequest) -> Iterator[list[dict[str, Any]]]:
-        """Yield the matching rows as a single batch, or nothing if none match. A read never resumes."""
-        rows = [row for row in self._rows if req.contains(row) and changed_since(row, req)]
+        """Yield the matching rows in batches of `BATCH_ROWS`, or nothing if none match. A read never resumes."""
+        rows: list[dict[str, Any]] = []
+        for row in self._rows:
+            if req.contains(row) and changed_since(row, req):
+                rows.append(row)
+                if len(rows) >= BATCH_ROWS:
+                    yield rows
+                    rows = []
         if rows:
             yield rows
 
@@ -82,7 +91,9 @@ class Sink(connector.Sink):
     `apply` that returned, repeats included. `fail_next` and `reject` make it misbehave on purpose.
     """
 
-    spec = ConnectorSpec(name="memory.sink", modes=frozenset({"upsert", "append", "replace_partition"}))
+    spec = ConnectorSpec(
+        name="memory.sink", modes=frozenset({"upsert", "append", "replace_partition"}), maturity="beta"
+    )
 
     def __init__(self, connection: str = "memory") -> None:
         self.connection = connection

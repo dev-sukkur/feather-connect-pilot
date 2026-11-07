@@ -1093,16 +1093,30 @@ class _Quarantine(QuarantineStore):
         error: str,
         dataset: str | None = None,
         partition: str | None = None,
+        *,
+        payload: Mapping[str, Any] | None = None,
+        raw: str | None = None,
     ) -> None:
         with self._db.tx() as conn:
             conn.execute(
                 """insert into feather.quarantine (tenant_id, route, version_id, key, dataset, partition, error,
-                                                   status, updated_at)
-                   values (%s, %s, %s, %s, %s, %s, %s, 'open', %s)
+                                                   status, updated_at, payload, raw)
+                   values (%s, %s, %s, %s, %s, %s, %s, 'open', %s, %s, %s)
                    on conflict (tenant_id, route, version_id, key, dataset) do update set
                        partition = excluded.partition, error = excluded.error, status = 'open',
-                       updated_at = excluded.updated_at""",
-                (self._db.tenant, route, version_id, key, dataset, partition, error, self._db.clock.now()),
+                       updated_at = excluded.updated_at, payload = excluded.payload, raw = excluded.raw""",
+                (
+                    self._db.tenant,
+                    route,
+                    version_id,
+                    key,
+                    dataset,
+                    partition,
+                    error,
+                    self._db.clock.now(),
+                    None if payload is None else _json(dict(payload)),
+                    raw,
+                ),
             )
 
     def open_extraction_keys(self, dataset: str, keys: Iterable[str], outside: str | None = None) -> set[str]:
@@ -1147,7 +1161,15 @@ class _Quarantine(QuarantineStore):
             ).fetchall()
         return [
             QuarantineRow(
-                r["route"], r["version_id"], r["key"], r["error"], r["status"], r["dataset"], r["partition"]
+                r["route"],
+                r["version_id"],
+                r["key"],
+                r["error"],
+                r["status"],
+                r["dataset"],
+                r["partition"],
+                None if r["payload"] is None else _unjson(r["payload"]),
+                r["raw"],
             )
             for r in rows
         ]

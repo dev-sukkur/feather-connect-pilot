@@ -292,8 +292,10 @@ class _ChunkSender:
                 "so this delivery can't be marked applied"
             )
         self._keep_responses(chunk_no, result.responses, complete=True)
+        sent = {_key_text(r.key): r.payload for r in records}
         for rejection in result.rejected:
-            self._reject(_key_text(rejection.key), rejection.message)
+            key = _key_text(rejection.key)
+            self._reject(key, rejection.message, sent.get(key))
         return _Counts(result.applied, rejected + len(result.rejected))
 
     def _keep_responses(self, chunk_no: int, responses: Sequence[RecordResponse], *, complete: bool) -> None:
@@ -386,7 +388,7 @@ class _ChunkSender:
                     f"the map of route {self._route.name!r} failed on record {record.key}, "
                     f"which replacing the slice can't leave out: {error}"
                 ) from error
-            self._reject(record.key, str(error))
+            self._reject(record.key, str(error), record.payload)
             return None
         return [self._apply_record(version, record.key, "upsert", p, moved_from) for p in payloads]
 
@@ -452,8 +454,9 @@ class _ChunkSender:
             }
         return ApplyRecord(decode_key(key, self._dataset.key), op, payload, moved_from)
 
-    def _reject(self, key: str, message: str) -> None:
-        """Quarantine a record, unless the dataset says to fail or the route replaces whole slices."""
+    def _reject(self, key: str, message: str, payload: Mapping[str, Any] | None = None) -> None:
+        """Quarantine a record with its payload, redacted, unless the dataset says to fail or the route replaces whole
+        slices."""
         name = self._route.name
         if self._dataset.on_record_error == "fail":
             raise PermanentError(
@@ -464,7 +467,8 @@ class _ChunkSender:
                 f"route {name!r}: the sink rejected record {key} and has already applied its batch, "
                 f"so the destination may hold a partial slice: {message}"
             )
-        self._deps.store.quarantine.add(name, self._delivery.version_id, key, redact(message))
+        kept = None if payload is None else _redacted(payload)
+        self._deps.store.quarantine.add(name, self._delivery.version_id, key, redact(message), payload=kept)
 
 
 def _fail(delivery: Delivery, error: str, deps: RuntimeDeps) -> None:

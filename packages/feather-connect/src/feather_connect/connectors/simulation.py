@@ -120,6 +120,7 @@ class Source(connector.Source):
     spec = ConnectorSpec(
         name="simulation.source",
         strategies=frozenset({"by_stamp", "snapshot_diff", "replace", "push"}),
+        maturity="beta",
     )
 
     def __init__(
@@ -146,6 +147,11 @@ class Source(connector.Source):
         self._late: list[dict[str, Any]] = []  # held back by `late`, served by the next read
         self._schema_changed = False
 
+    def load(self, rows: list[dict[str, Any]]) -> None:
+        """Make `rows` all of the source's contents, in place of the fixture's or the generator's."""
+        self._rows = [dict(row) for row in rows]
+        self._late = []
+
     def _make_rows(
         self, fixture: str | Path | None, generator: Mapping[str, FieldSpec] | None, count: int
     ) -> list[dict[str, Any]]:
@@ -168,7 +174,8 @@ class Source(connector.Source):
         return [StreamSchema("rows", fields)]
 
     def read(self, ctx: Context, req: ReadRequest) -> Iterator[list[dict[str, Any]]]:
-        """Yield the matching rows as a single batch, with this read's faults, or nothing if none match."""
+        """Yield the matching rows in batches of `memory.BATCH_ROWS`, with this read's faults, or nothing if none
+        match."""
         self.reads += 1
         rng = random.Random(f"{self.seed}:{self.reads}")
         self._raise_transient(rng)
@@ -190,6 +197,9 @@ class Source(connector.Source):
             rows.append(dict(row))
             if rng.random() < self.faults.duplicate:
                 rows.append(dict(row))
+            if len(rows) >= memory.BATCH_ROWS:
+                yield rows
+                rows = []
         if rows:
             yield rows
 
@@ -282,7 +292,7 @@ class Sink(memory.Sink):
     remembers which it refused in memory only, so a sink that is built anew refuses them once more.
     """
 
-    spec = ConnectorSpec(name="simulation.sink", modes=memory.Sink.spec.modes)
+    spec = ConnectorSpec(name="simulation.sink", modes=memory.Sink.spec.modes, maturity="beta")
 
     def __init__(
         self,
@@ -320,3 +330,32 @@ class Sink(memory.Sink):
         if random.Random(f"{self.seed}:{batch.version_id}").random() < self.fail_rate:
             self._refused.add(batch.version_id)
             raise PermanentError(f"simulated delivery failure to {self.connection}")
+
+
+# Stand-ins (B2): what a connection runs on in an environment that names `simulation.source` or `simulation.sink`.
+
+
+def stand_in_source(real: connector.Source | connector.PushSource, fixture: str | Path) -> Source:
+    """A simulation source of `fixture`'s rows in place of `real`, with `real`'s spec and connection, so that the flow
+    is checked as it will run for real. A push source's stand-in is signed as `real` is."""
+
+    class StandIn(Source):
+        spec = real.spec
+        stands_in = True
+
+    return StandIn(
+        real.connection,
+        fixture=fixture,
+        signature_secret=connector.signature_secret_of(real) or "signature_secret",
+        unsigned=connector.is_unsigned(real),
+    )
+
+
+def stand_in_sink(real: connector.Sink) -> Sink:
+    """A simulation sink in place of `real`, with `real`'s spec and connection."""
+
+    class StandIn(Sink):
+        spec = real.spec
+        stands_in = True
+
+    return StandIn(real.connection)

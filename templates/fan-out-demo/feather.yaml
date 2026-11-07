@@ -1,0 +1,18 @@
+# The feather dev demo: a JSON simulation of a shop's orders, delivered to Postgres, DuckDB and an HTTP API.
+name: fan-out-demo
+modules: [flows.orders]
+settings: {timezone: UTC}
+connections:
+  shop: {connector: simulation.source}
+  warehouse:
+    connector: postgres.table
+    schema: public
+    auth: {dsn: "${secret:env:WAREHOUSE_DSN}"}
+  lake:
+    connector: duckdb.table
+    database: lake.duckdb
+  erp:
+    connector: http.call
+    base_url: https://erp.example.com
+    auth_scheme: bearer
+    auth: {token: "${secret:env:ERP_TOKEN}"}

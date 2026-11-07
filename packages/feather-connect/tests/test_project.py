@@ -274,3 +274,77 @@ def test_code_sha_comes_from_env_then_git(project_dir, monkeypatch):
     assert load_project(project_dir, "prod").code_sha == head
     monkeypatch.setenv("FEATHER_CODE_SHA", "fromenv")
     assert load_project(project_dir, "prod").code_sha == "fromenv"
+
+
+# B2: an environment that names simulation runs the project's own flows on stand-ins.
+
+REAL_FLOW = """
+    from typing import ClassVar
+
+    import feather_connect as fc
+    from feather_connect.connectors import memory
+    from feather_connect.core.connector import ConnectorSpec
+
+
+    class AcmeSource(memory.Source):
+        spec: ClassVar[ConnectorSpec] = ConnectorSpec(name="acme.source", strategies=frozenset({"replace"}))
+
+
+    class AcmeSink(memory.Sink):
+        spec: ClassVar[ConnectorSpec] = ConnectorSpec(name="acme.sink", modes=frozenset({"upsert"}))
+
+
+    orders = fc.Dataset("orders", source=AcmeSource("shop"), key="id", strategy=fc.strategy.replace())
+    demo = fc.Flow("demo", reads=orders, deliver=[fc.to(AcmeSink("warehouse"))], triggers=[fc.manual()])
+"""
+
+
+def simulated_project(root: Path, *, fixture: bool = True) -> None:
+    write(
+        root,
+        "feather.yaml",
+        """
+        name: p
+        modules: [flows.demo]
+        connections:
+          shop: {connector: acme.source, url: https://shop.example.com}
+          warehouse: {connector: acme.sink}
+        """,
+    )
+    write(root, "env/prod.yaml", "")
+    write(
+        root,
+        "env/dev.yaml",
+        "connections: {shop: {connector: simulation.source}, warehouse: {connector: simulation.sink}}",
+    )
+    write(root, "flows/__init__.py", "")
+    write(root, "flows/demo.py", REAL_FLOW)
+    if fixture:
+        write(root, "fixtures/orders.json", '[{"id": 1, "total": 5}, {"id": 2, "total": 7}]')
+
+
+def test_an_env_that_names_simulation_runs_the_flow_on_stand_ins(tmp_path):  # B2
+    from feather_connect.core.connector import ReadRequest
+    from feather_connect.core.partitions import none
+
+    simulated_project(tmp_path)
+    dev = load_project(tmp_path, "dev")
+    (flow,) = dev.flows
+    source, sink = flow.datasets[0].source, flow.routes[0].sink
+    assert (source.spec.name, sink.spec.name) == (
+        "acme.source",
+        "acme.sink",
+    )  # the real specs, checked as they run
+    assert getattr(source, "stands_in", False) and getattr(sink, "stands_in", False)
+    assert (source.connection, sink.connection) == ("shop", "warehouse")
+    rows = [row for batch in source.read(None, ReadRequest("*", none())) for row in batch]  # pyright: ignore
+    assert rows == [{"id": 1, "total": 5}, {"id": 2, "total": 7}]
+    assert validate_project(dev) == []
+    (real,) = load_project(tmp_path, "prod").flows
+    assert not getattr(real.datasets[0].source, "stands_in", False)
+
+
+def test_a_simulated_dataset_without_fixtures_is_refused(tmp_path):  # B2
+    simulated_project(tmp_path, fixture=False)
+    with pytest.raises(ProjectError, match=r"dataset 'orders'.*fixtures/orders\.json"):
+        load_project(tmp_path, "dev")

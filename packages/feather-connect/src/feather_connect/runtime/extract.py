@@ -17,7 +17,7 @@ from typing import Any, Literal, cast, overload
 import pyarrow as pa
 from pydantic import BaseModel
 
-from feather_connect.core.connector import ReadRequest, Source
+from feather_connect.core.connector import ReadRequest, Source, Unreadable
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import MissingKeyError, PartitionError
 from feather_connect.core.flow import RouteSpec
@@ -140,6 +140,12 @@ class _Read:
         if self._buffered >= spool_settings.CHUNK_ROWS:
             self.flush()
 
+    def add_unreadable(self, row: Unreadable) -> None:
+        """Quarantine a row the source could not read, with its raw text (B5, ruling 11). It is named by a hash of that
+        text, so that each keeps its own entry and a read again finds the same one."""
+        name = f"<unreadable {hashlib.sha256(row.raw.encode()).hexdigest()[:12]}>"
+        self._reject(None, self._partition, ValueError(row.reason), name=name, raw=row.raw)
+
     def _accepted_stamp(self, row: Mapping[str, Any]) -> Any:
         """Return the row's stamp as it compares, or None if it has none. Raises if it can't count to a watermark.
 
@@ -158,8 +164,16 @@ class _Read:
         self._stamp_kind = kind
         return stamp
 
-    def _reject(self, key: str | None, partition: str | None, error: Exception) -> None:
-        name = _MISSING_KEY if key is None else key
+    def _reject(
+        self,
+        key: str | None,
+        partition: str | None,
+        error: Exception,
+        *,
+        name: str | None = None,
+        raw: str | None = None,
+    ) -> None:
+        name = name or (_MISSING_KEY if key is None else key)
         if self._dataset.on_record_error == "fail":
             raise ExtractFailed(
                 f"dataset {self._dataset.name!r}: record {name} is invalid and on_record_error is 'fail': {error}"
@@ -170,7 +184,13 @@ class _Read:
             return
         version_id = None if partition is None else self._version_id(partition)
         self._deps.store.quarantine.add(
-            None, version_id, name, redact(str(error)), self._dataset.name, partition
+            None,
+            version_id,
+            name,
+            redact(str(error)),
+            self._dataset.name,
+            partition,
+            raw=None if raw is None else redact(raw),
         )
 
     def flush(self) -> None:
@@ -222,8 +242,9 @@ def _stamp_kind(stamp: Any) -> str:
     raise TypeError(f"change stamp {stamp!r} is not a date, a datetime, ISO-8601 text or a finite number")
 
 
-def _rows_of(batch: Any) -> list[dict[str, Any]]:
-    return batch.to_pylist() if isinstance(batch, pa.RecordBatch) else batch
+def _rows_of(batch: Any) -> list[dict[str, Any] | Unreadable]:
+    rows = batch.to_pylist() if isinstance(batch, pa.RecordBatch) else batch
+    return cast(list[dict[str, Any] | Unreadable], rows)
 
 
 def _read_since(dataset: Dataset, strategy: ByStamp, watermark: Any) -> Any:
@@ -247,7 +268,10 @@ def _read_source(dataset: Dataset, read: _Read, since: Any, deps: RuntimeDeps, p
     source = cast(Source, dataset.source)
     for batch in source.read(deps.make_context(source.connection), request):
         for row in _rows_of(batch):
-            read.add(row)
+            if isinstance(row, Unreadable):
+                read.add_unreadable(row)
+            else:
+                read.add(row)
     read.flush()
 
 

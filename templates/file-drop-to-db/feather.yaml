@@ -1,0 +1,16 @@
+# Invoice CSV files that stores drop in S3, loaded into the back office's Postgres.
+name: file-drop-to-db
+modules: [flows.invoices]
+settings: {timezone: UTC}
+connections:
+  landing:
+    connector: s3.files
+    endpoint_url: https://s3.ap-south-1.amazonaws.com
+    region: ap-south-1
+    auth:
+      access_key_id: "${secret:env:LANDING_KEY_ID}"
+      secret_access_key: "${secret:env:LANDING_SECRET}"
+  app_db:
+    connector: postgres.table
+    schema: public
+    auth: {dsn: "${secret:env:APP_DB_DSN}"}

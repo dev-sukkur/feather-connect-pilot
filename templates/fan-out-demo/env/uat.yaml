@@ -1,0 +1,1 @@
+connections: {lake: {database: md:lake_uat, auth: {token: "${secret:env:MOTHERDUCK_TOKEN}"}}}

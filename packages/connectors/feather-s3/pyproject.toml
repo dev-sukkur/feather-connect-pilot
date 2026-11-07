@@ -1,0 +1,28 @@
+[project]
+name = "feather-s3"
+version = "0.1.0"
+description = "S3-compatible files connectors for Feather Connect: a files source and a partition files sink."
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "feather-connect",
+    "fsspec>=2024.6",
+    "s3fs>=2024.6",
+    "pyarrow",
+]
+
+[project.entry-points."feather_connect.connectors"]
+"s3.files" = "feather_connect.connectors.s3:Files"
+"s3.partition_files" = "feather_connect.connectors.s3:PartitionFiles"
+
+[tool.uv.sources]
+feather-connect = { workspace = true }
+
+# The package adds modules to the namespace `feather_connect.connectors` and has no `__init__.py` there, nor in
+# `feather_connect`, which belongs to the feather-connect distribution.
+[tool.hatch.build.targets.wheel]
+packages = ["src/feather_connect"]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
