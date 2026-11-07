@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import logging
 import secrets
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import cache
@@ -46,7 +47,12 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _MAX_NAME = 200
 CSP = "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
-_THROTTLE_KEYS = 10_000  # failures of more distinct users than this are forgotten early, to bound memory
+_THROTTLE_KEYS = (
+    10_000  # failures of more distinct users than this are forgotten early, oldest first, to bound memory
+)
+MAX_ADDRESS_FAILURES = 20  # failed logins from one address, whatever the user, before the next one is refused
+MAX_PASSWORD = 1024  # characters: a longer password is refused before Argon2 spends time on it
+_ANY_USER = "*"
 
 _templates = Jinja2Templates(directory=Path(__file__).parent / "web" / "templates")
 
@@ -126,6 +132,17 @@ def _bearer_actor(request: Request, state: "AppState") -> Actor:
 class _Session:
     sid: str
     user: str | None = None
+    epoch: str | None = (
+        None  # see `_epoch`: a session from before a logout or a new password no longer matches
+    )
+
+
+def _epoch(state: "AppState", user: str, password_hash: str) -> str:
+    """What a signed-in session must carry to stay valid: it changes when the user logs out or gets a new password,
+    so that a copied cookie stops working then, not 12 hours later (M1)."""
+    logouts = state.store.overrides.get(f"session:{user}", "logouts") or 0
+    key = state.settings.secret_key.encode()
+    return hmac.new(key, f"epoch:{user}:{logouts}:{password_hash}".encode(), hashlib.sha256).hexdigest()[:32]
 
 
 def _serializer(state: "AppState") -> URLSafeTimedSerializer:
@@ -136,9 +153,9 @@ def _session(request: Request) -> _Session | None:
     return request.state.session
 
 
-def _start_session(request: Request, user: str | None = None) -> _Session:
+def _start_session(request: Request, user: str | None = None, epoch: str | None = None) -> _Session:
     """Replace the session with a new one, so that a CSRF token or a cookie from before is of no use."""
-    request.state.session = session = _Session(secrets.token_urlsafe(24), user)
+    request.state.session = session = _Session(secrets.token_urlsafe(24), user, epoch)
     request.state.session_dirty = True
     return session
 
@@ -158,8 +175,13 @@ async def require_csrf(request: Request) -> None:
     if sent is None and "form" in request.headers.get("content-type", ""):
         value = (await request.form()).get("csrf_token")
         sent = value if isinstance(value, str) else None
-    if _session(request) is None or sent is None or not hmac.compare_digest(sent, csrf_token(request)):
+    if _session(request) is None or sent is None or not _same(sent, csrf_token(request)):
         raise AuthError(403, "Forbidden", "the CSRF token is missing or wrong")
+
+
+def _same(sent: str, expected: str) -> bool:
+    """`compare_digest` on bytes, as on text it raises for a non-ASCII value, which must be a refusal (M3)."""
+    return hmac.compare_digest(sent.encode("utf-8", "surrogateescape"), expected.encode())
 
 
 def current_actor(request: Request) -> Actor:
@@ -168,8 +190,14 @@ def current_actor(request: Request) -> Actor:
     if "authorization" in request.headers:
         return _bearer_actor(request, state)
     session = _session(request)
-    if session is not None and session.user is not None and state.store.users.get_user(session.user):
-        return Actor("human", session.user)
+    if session is not None and session.user is not None:
+        user = state.store.users.get_user(session.user)
+        if (
+            user is not None
+            and session.epoch is not None
+            and _same(session.epoch, _epoch(state, user.username, user.password_hash))
+        ):
+            return Actor("human", session.user)
     raise AuthError(401, "Unauthorized", "sign in, or send a bearer token")
 
 
@@ -185,7 +213,8 @@ class LoginThrottle:
 
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
-        self._failures: dict[tuple[str, str], list[datetime]] = {}
+        self._failures: dict[tuple[str, str], list[datetime]] = {}  # oldest key first, as dicts keep order
+        self._lock = threading.Lock()  # the login route runs in a thread pool
 
     def _recent(self, key: tuple[str, str]) -> list[datetime]:
         cutoff = self._clock.now() - FAILURE_WINDOW
@@ -197,16 +226,24 @@ class LoginThrottle:
         return recent
 
     def blocked(self, key: tuple[str, str]) -> bool:
-        return len(self._recent(key)) >= MAX_FAILURES
+        """Whether the user and address, or the address with any user, has failed too often (M2)."""
+        with self._lock:
+            return (
+                len(self._recent(key)) >= MAX_FAILURES
+                or len(self._recent((_ANY_USER, key[1]))) >= MAX_ADDRESS_FAILURES
+            )
 
     def fail(self, key: tuple[str, str]) -> None:
-        if len(self._failures) >= _THROTTLE_KEYS:
-            for stale in list(self._failures):
-                self._recent(stale)
-        self._failures[key] = [*self._recent(key), self._clock.now()]
+        with self._lock:
+            for counted in (key, (_ANY_USER, key[1])):
+                self._failures[counted] = [*self._recent(counted), self._clock.now()]
+                self._failures[counted] = self._failures.pop(counted)  # now the newest key
+            while len(self._failures) > _THROTTLE_KEYS:
+                del self._failures[next(iter(self._failures))]
 
     def clear(self, key: tuple[str, str]) -> None:
-        self._failures.pop(key, None)
+        with self._lock:
+            self._failures.pop(key, None)
 
 
 # The routes.
@@ -235,6 +272,9 @@ def login(request: Request, username: Annotated[str, Form()], password: Annotate
     if throttle.blocked(key):
         log.warning("login refused for too many failures from %s", key[1])
         return _login_page(request, "Too many failed attempts. Try again later.", 429)
+    if len(password) > MAX_PASSWORD:
+        throttle.fail(key)
+        return _login_page(request, "The username or the password is wrong.", 401)
     user = state.store.users.get_user(username) if len(username) <= _MAX_NAME else None
     # An unknown user is checked against a decoy, so that nothing tells the two failures apart.
     valid = verify_password(user.password_hash if user else _decoy_hash(), password)
@@ -244,7 +284,7 @@ def login(request: Request, username: Annotated[str, Form()], password: Annotate
         state.store.audit.record("human", "anonymous", "login", None, ip, "failed")
         return _login_page(request, "The username or the password is wrong.", 401)
     throttle.clear(key)
-    _start_session(request, user.username)
+    _start_session(request, user.username, _epoch(state, user.username, user.password_hash))
     state.store.audit.record("human", user.username, "login", None, ip, "ok")
     return RedirectResponse("/", status_code=303)
 
@@ -252,6 +292,10 @@ def login(request: Request, username: Annotated[str, Form()], password: Annotate
 @router.post("/logout", dependencies=[Depends(require_csrf)])
 def logout(request: Request, actor: CurrentActor) -> Response:
     state: AppState = request.app.state.feather
+    if actor.kind == "human":  # every session of the user ends, a copied cookie's too (M1)
+        target = f"session:{actor.name}"
+        logouts = state.store.overrides.get(target, "logouts") or 0
+        state.store.overrides.set(target, "logouts", logouts + 1, actor=actor.name, reason="logout")
     _start_session(request)
     state.store.audit.record(actor.kind, actor.name, "logout", None, {}, "ok")
     return RedirectResponse("/login", status_code=303)
@@ -306,7 +350,7 @@ class _SessionCookie:
         if raw:
             try:
                 data = _serializer(self._state).loads(raw, max_age=int(SESSION_TTL.total_seconds()))
-                request.state.session = _Session(str(data["sid"]), data.get("user"))
+                request.state.session = _Session(str(data["sid"]), data.get("user"), data.get("epoch"))
             except (BadSignature, KeyError, TypeError):
                 pass  # a cookie that can't be trusted is as good as none
 
@@ -323,7 +367,9 @@ class _SessionCookie:
             cookie = Response()
             cookie.set_cookie(
                 SESSION_COOKIE,
-                _serializer(self._state).dumps({"sid": session.sid, "user": session.user}),
+                _serializer(self._state).dumps(
+                    {"sid": session.sid, "user": session.user, "epoch": session.epoch}
+                ),
                 max_age=int(SESSION_TTL.total_seconds()),
                 httponly=True,
                 secure=self._secure,

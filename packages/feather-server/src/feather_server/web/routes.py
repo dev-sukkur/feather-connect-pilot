@@ -204,6 +204,25 @@ def _state_of(flow: FlowSummary) -> str:
     return flow.last_run.status if flow.last_run else "never"
 
 
+def _good_failure_cursor(cursor: str) -> bool:
+    try:
+        found = json.loads(cursor)
+    except ValueError:
+        return False
+    return isinstance(found, list) and len(found) == 3  # pyright: ignore[reportUnknownArgumentType]
+
+
+def _good_delivery_cursor(cursor: str) -> bool:
+    seq, _, route = cursor.partition(":")
+    return seq.isascii() and seq.isdigit() and bool(route)
+
+
+def _bad_cursor(request: Request) -> HTMLResponse:
+    """A cursor that no page of ours made, which a store would choke on (M3)."""
+    message = "The link's cursor is not one this page made: start again from the first page."
+    return render(request, "error.html", status=422, title="Not a cursor", message=message)
+
+
 def _not_found(request: Request, what: str) -> HTMLResponse:
     return render(request, "error.html", status=404, title="Not found", message=what)
 
@@ -745,7 +764,10 @@ def _failures_page(
 ) -> HTMLResponse:
     route = request.query_params.get("route") or None
     limit = _page_size(request, _FAILURES_PAGE, 100)
-    views = reads(request).failure_views(route, request.query_params.get("cursor") or None, limit)
+    cursor = request.query_params.get("cursor") or None
+    if cursor is not None and not _good_failure_cursor(cursor):
+        return _bad_cursor(request)
+    views = reads(request).failure_views(route, cursor, limit)
     return render(
         request,
         "failures.html",
@@ -791,12 +813,11 @@ def _deliveries_page(
         )
     limit = _page_size(request, _DELIVERIES_PAGE, 500)
     partition = request.query_params.get("partition") or None
+    cursor = request.query_params.get("cursor") or None
+    if cursor is not None and not _good_delivery_cursor(cursor):
+        return _bad_cursor(request)
     found = reads(request).deliveries(
-        route,
-        next((s for s in _DELIVERY_STATUSES if s == chosen), None),
-        partition,
-        limit,
-        request.query_params.get("cursor") or None,
+        route, next((s for s in _DELIVERY_STATUSES if s == chosen), None), partition, limit, cursor
     )
     return render(
         request,

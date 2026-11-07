@@ -112,7 +112,8 @@ class PreviewTokens:
         that fails any check but `PreviewUsed` is left unused.
         """
         body, _, signature = token.partition(".")
-        if not body or not hmac.compare_digest(signature, self._sign(body)):
+        sent = signature.encode("utf-8", "surrogateescape")  # as bytes: text that isn't ASCII raises (M3)
+        if not body or not hmac.compare_digest(sent, self._sign(body).encode()):
             raise PreviewInvalid("this is not a confirmation token from this server")
         try:
             claims = json.loads(_unb64(body))
