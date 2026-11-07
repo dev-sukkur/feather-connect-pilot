@@ -346,7 +346,12 @@ class VersionStore(Protocol):
         ...
 
     def since_watermark(self, dataset: str, partition: str, since: Any) -> list[Version]:
-        """Sealed versions whose stored watermark is `>= since`, newest first. A None watermark never matches."""
+        """Sealed versions whose stored watermark is `>= since`, newest first, up to the first one below `since`. A
+        None watermark never matches.
+
+        Stopping there keeps a tick's read to the lookback rather than the dataset's history. It loses nothing while
+        the lookback stays the same: a read from `since` stamps its version with at least `since`, and `since` only
+        grows, so a version below it is older than the lookback, and so is any version before it."""
         ...
 
     def last_sealed_at(self, dataset: str) -> datetime | None:

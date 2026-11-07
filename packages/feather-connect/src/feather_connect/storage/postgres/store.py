@@ -102,6 +102,7 @@ def _unjson(value: Any) -> Any:
     return json.loads(json.dumps(value), object_hook=decode_json_value)
 
 
+_WATERMARK_PAGE = 16  # versions within a lookback are usually few
 _HIGHEST_CHARACTER = "\U0010ffff"  # sorts after any text that starts with a prefix, in the C collation
 
 
@@ -593,6 +594,8 @@ class _Versions(VersionStore):
             ).fetchone()
             assert sealed is not None
             found[version_id] = sealed
+            if sealed["watermark"] is not None:
+                self._raise_watermark(conn, sealed["dataset"], _unjson(sealed["watermark"]))
             for route in routes:
                 conn.execute(
                     """insert into feather.delivery (tenant_id, route, version_id, dataset, partition,
@@ -654,16 +657,33 @@ class _Versions(VersionStore):
         return None if row is None else _version(row)
 
     def since_watermark(self, dataset: str, partition: str, since: Any) -> list[Version]:
-        # Watermarks are compared in Python, as the in-memory store does: they may be numbers, text or datetimes.
-        with self._db.tx() as conn:
-            rows = conn.execute(
-                """select * from feather.version
-                   where tenant_id = %s and dataset = %s and partition = %s and status = 'sealed'
-                     and watermark is not null
-                   order by seal_seq desc""",
-                (self._db.tenant, dataset, partition),
-            ).fetchall()
-        return [v for v in map(_version, rows) if v.watermark >= since]
+        # Watermarks are compared in Python, as the in-memory store does: they may be numbers, text or datetimes. So
+        # the versions are read newest first, a page at a time, up to the first one below `since` (see the port).
+        found: list[Version] = []
+        before: int | None = None
+        while True:
+            with self._db.tx() as conn:
+                rows = conn.execute(
+                    """select * from feather.version
+                       where tenant_id = %(tenant)s and dataset = %(dataset)s and partition = %(partition)s
+                         and status = 'sealed' and watermark is not null
+                         and (%(before)s::bigint is null or seal_seq < %(before)s)
+                       order by seal_seq desc limit %(page)s""",
+                    {
+                        "tenant": self._db.tenant,
+                        "dataset": dataset,
+                        "partition": partition,
+                        "before": before,
+                        "page": _WATERMARK_PAGE,
+                    },
+                ).fetchall()
+            for version in map(_version, rows):
+                if version.watermark < since:
+                    return found
+                found.append(version)
+            if len(rows) < _WATERMARK_PAGE:
+                return found
+            before = rows[-1]["seal_seq"]
 
     def last_sealed_at(self, dataset: str) -> datetime | None:
         with self._db.tx() as conn:
@@ -677,12 +697,37 @@ class _Versions(VersionStore):
 
     def latest_watermark(self, dataset: str) -> Any | None:
         with self._db.tx() as conn:
+            row = conn.execute(
+                "select watermark from feather.dataset_watermark where tenant_id = %s and dataset = %s",
+                (self._db.tenant, dataset),
+            ).fetchone()
+            if row is not None:
+                return _unjson(row["watermark"])
+            # Sealed before migration 0012, or not yet: work it out once, under the sealers' lock, and keep it.
+            conn.execute(SEAL_LOCK)
             rows = conn.execute(
                 """select watermark from feather.version
                    where tenant_id = %s and dataset = %s and status = 'sealed' and watermark is not null""",
                 (self._db.tenant, dataset),
             ).fetchall()
-        return max((_unjson(r["watermark"]) for r in rows), default=None)
+            found = max((_unjson(r["watermark"]) for r in rows), default=None)
+            if found is not None:
+                self._raise_watermark(conn, dataset, found)
+        return found
+
+    def _raise_watermark(self, conn: psycopg.Connection[DictRow], dataset: str, watermark: Any) -> None:
+        """Keep `watermark` as the dataset's if it is greater. The caller holds SEAL_LOCK."""
+        row = conn.execute(
+            "select watermark from feather.dataset_watermark where tenant_id = %s and dataset = %s",
+            (self._db.tenant, dataset),
+        ).fetchone()
+        if row is not None and not watermark > _unjson(row["watermark"]):
+            return
+        conn.execute(
+            """insert into feather.dataset_watermark (tenant_id, dataset, watermark) values (%s, %s, %s)
+               on conflict (tenant_id, dataset) do update set watermark = excluded.watermark""",
+            (self._db.tenant, dataset, _json(watermark)),
+        )
 
     def register_slices(self, run_id: str, dataset: str, partitions: Iterable[str]) -> None:
         with self._db.tx() as conn:

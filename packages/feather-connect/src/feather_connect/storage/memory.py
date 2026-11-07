@@ -385,12 +385,15 @@ class _Versions(VersionStore):
         return next(iter(found), None)
 
     def since_watermark(self, dataset: str, partition: str, since: Any) -> list[Version]:
+        found: list[Version] = []
         with self._d.lock:
-            return [
-                v
-                for v in self._sealed(dataset, partition)
-                if v.watermark is not None and v.watermark >= since
-            ]
+            for version in self._sealed(dataset, partition):
+                if version.watermark is None:
+                    continue
+                if version.watermark < since:
+                    break  # see the port
+                found.append(version)
+        return found
 
     def last_sealed_at(self, dataset: str) -> datetime | None:
         with self._d.lock:

@@ -720,6 +720,19 @@ class StoreContract(SpoolContract, ResponseStoreContract):
         assert got == ["v4", "v2"]
         assert store.versions.since_watermark("d", "p", 31) == []
 
+    def test_since_watermark_stops_at_the_first_version_below_it(self, store: Store):  # S6
+        seal(store, "v1", ["a"], wm=50)  # older than the lookback, whatever its mark
+        seal(store, "v2", ["a"], wm=10)
+        seal(store, "v3", ["a"], wm=30)
+        assert [v.version_id for v in store.versions.since_watermark("d", "p", 20)] == ["v3"]
+
+    def test_latest_watermark_follows_new_seals(self, store: Store):
+        seal(store, "v1", ["a"], wm=10)
+        assert store.versions.latest_watermark("d") == 10
+        seal(store, "v2", ["a"], wm=40)
+        seal(store, "v3", ["a"], wm=20)
+        assert store.versions.latest_watermark("d") == 40
+
     def test_finish_slice_reports_when_all_are_done(self, store: Store):
         store.versions.register_slices("r1", "d", ["p1", "p2"])
         assert store.versions.finish_slice("r1", "d", "p1") is False

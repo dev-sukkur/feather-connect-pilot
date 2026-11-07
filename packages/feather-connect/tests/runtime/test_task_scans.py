@@ -24,7 +24,7 @@ from feather_connect.runtime.runtime import Runtime
 from feather_connect.runtime.scheduler import tick
 from feather_connect.runtime.sweeper import sweep_once
 from feather_connect.storage.postgres.spool import PostgresSpool
-from feather_connect.storage.postgres.store import PostgresStore
+from feather_connect.storage.postgres.store import PostgresStore, _json, _unjson  # pyright: ignore[reportPrivateUsage]
 from feather_connect.storage.postgres.store import _Db as Db  # pyright: ignore[reportPrivateUsage]
 
 pytestmark = pytest.mark.postgres
@@ -191,3 +191,29 @@ def test_the_reads_of_a_stream_run_use_their_indexes(world: World, recorder: Rec
     assert world.store.reads.retried_tasks([run_id]) == {}
     used = [s for s in recorder.statements if _touches_a_run(s)]
     assert [(_seq_scans(world.pg, s), s.query) for s in used if _seq_scans(world.pg, s)] == []
+
+
+def test_a_tick_does_not_read_every_watermark_of_its_dataset(world: World, recorder: Recorder):  # S6
+    world.one_tick()
+    world.one_tick()
+    newest = world.pg.execute(
+        """select partition, watermark from feather.version
+           where dataset = 'd' and status = 'sealed' and watermark is not null order by seal_seq desc limit 1"""
+    ).fetchone()
+    older = _unjson(newest["watermark"])
+    older = older - timedelta(days=1) if isinstance(older, datetime) else type(older)(T0 - timedelta(days=1))
+    world.pg.execute(  # a year of earlier versions, sealed before the ones the ticks made
+        """insert into feather.version (tenant_id, version_id, dataset, partition, run_id, complete, upserts,
+                                        deletes, content_hash, code_sha, status, seal_seq, sealed_at, watermark)
+           select 'default', 'mark-' || n, 'd', %(partition)s, 'old-run', false, 1, 0, 'h', 'sha', 'sealed',
+                  -n, %(at)s, %(mark)s
+           from generate_series(1, %(count)s) n""",
+        {"partition": newest["partition"], "count": MANY, "at": T0, "mark": _json(older)},
+    )
+    world.pg.execute("analyze feather.version")
+    recorder.statements.clear()
+    world.one_tick()
+    read = [
+        (s.rows, s.query) for s in recorder.statements if "feather.version" in s.query and s.rows > FEW_ROWS
+    ]
+    assert read == []
