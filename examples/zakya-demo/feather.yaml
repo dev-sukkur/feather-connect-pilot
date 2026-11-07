@@ -16,3 +16,8 @@ connections:
   erp:
     connector: http.call
     auth_scheme: bearer
+# `feather dev` starts these first, in this directory, and stops them with the rest.
+dev:
+  processes:
+    - {name: zakya-sim, command: [python, sims/zakya.py, --port, "29100"], port: 29100}
+    - {name: erp-sim, command: [python, sims/receiver.py, --port, "29101", --db, .data/receiver.sqlite], port: 29101}

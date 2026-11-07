@@ -33,6 +33,7 @@ from feather_connect.storage.port import BudgetSpec, parse_limits
 __all__ = [
     "ConfigValue",
     "ConnectionConfig",
+    "DevProcess",
     "Project",
     "ProjectError",
     "effective_config",
@@ -76,6 +77,17 @@ class ConnectionConfig:
 
 
 @dataclass(frozen=True)
+class DevProcess:
+    """A helper process that `feather dev` runs beside the stack, such as a simulator of an external system: its
+    `name`, the `command` it runs in the project directory (a leading `python` is the interpreter feather runs on),
+    and the `port` it listens on, if any. Other commands ignore them."""
+
+    name: str
+    command: tuple[str, ...]
+    port: int | None = None
+
+
+@dataclass(frozen=True)
 class Project:
     """A loaded project for one environment.
 
@@ -93,6 +105,7 @@ class Project:
     code_sha: str
     config: Mapping[str, Any] = field(default_factory=dict[str, Any], repr=False)
     layers: Mapping[str, str] = field(default_factory=dict[str, str], repr=False)
+    dev_processes: tuple[DevProcess, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -147,11 +160,22 @@ def load_project(root: Path, env: str) -> Project:
     name = _text(config, "name", layers)
     budgets = _budgets(config, layers)
     connections = _connections(config, layers, budgets)
+    dev_processes = _dev_processes(config, layers)
     settings: Mapping[str, Any] = config.get("settings", {})
     flows = _apply_overlay(_import_flows(root, config, layers), config, layers, str(settings["timezone"]))
     _check_push_sources(flows, connections, env)
     return Project(
-        name, root, env, flows, connections, budgets, settings, _code_sha(root), copy.deepcopy(config), layers
+        name,
+        root,
+        env,
+        flows,
+        connections,
+        budgets,
+        settings,
+        _code_sha(root),
+        copy.deepcopy(config),
+        layers,
+        dev_processes,
     )
 
 
@@ -286,6 +310,33 @@ def _budgets(config: Mapping[str, Any], layers: Mapping[str, str]) -> dict[str, 
         except (ValueError, TypeError, AttributeError):
             raise ProjectError(f"{_where(layers, path)}: limits and reserve are not valid") from None
     return found
+
+
+def _dev_processes(config: Mapping[str, Any], layers: Mapping[str, str]) -> tuple[DevProcess, ...]:
+    """Read `dev.processes`: a list of `{name, command, port}`, names unique."""
+    raw = _mapping(config, "dev", layers).get("processes", [])
+    where = _where(layers, "dev.processes")
+    if not isinstance(raw, list):
+        raise ProjectError(f"{where}: must be a list of {{name, command, port}}")
+    found: list[DevProcess] = []
+    for i, item in enumerate(cast(list[Any], raw)):
+        if not isinstance(item, dict):
+            raise ProjectError(f"{where}[{i}]: must be a mapping with name, command and port")
+        body = _strkeys(item)
+        name, command, port = body.get("name"), body.get("command"), body.get("port")
+        if unknown := sorted(body.keys() - {"name", "command", "port"}):
+            raise ProjectError(f"{where}[{i}]: unknown key {unknown[0]!r}; use name, command and port")
+        if not isinstance(name, str) or not name:
+            raise ProjectError(f"{where}[{i}].name: is required and must be text")
+        if name in {p.name for p in found}:
+            raise ProjectError(f"{where}[{i}].name: {name!r} is used twice")
+        words = cast(list[Any], command) if isinstance(command, list) else []
+        if not words or not all(isinstance(w, str | int) and not isinstance(w, bool) for w in words):
+            raise ProjectError(f"{where}[{i}].command: give a list of words, such as [python, sims/api.py]")
+        if port is not None and (isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536):
+            raise ProjectError(f"{where}[{i}].port: must be a port number from 1 to 65535")
+        found.append(DevProcess(name, tuple(str(w) for w in words), port))
+    return tuple(found)
 
 
 def _connections(

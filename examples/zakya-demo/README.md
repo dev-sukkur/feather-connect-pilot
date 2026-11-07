@@ -22,9 +22,10 @@ From the repository root:
 uv run feather dev --project examples/zakya-demo
 ```
 
-That starts Postgres, the server, a worker and both simulators; Ctrl+C stops them all. Sign in to the dashboard
-with the password it prints, and watch the runs of `zakya-invoices`. Each delivery's page lists the ERP id each
-invoice got.
+That starts both simulators (declared under `dev.processes` in `feather.yaml`), Postgres, the server and a
+worker; Ctrl+C stops them all. Their output shows in the same console, prefixed `[zakya-sim]` and `[erp-sim]`. Sign
+in to the dashboard with the password it prints, and watch the runs of `zakya-invoices`. Each delivery's page lists
+the ERP id each invoice got.
 
 The credentials in `secrets/` are fake, and only the simulators take them. Their paths in `env/dev.yaml` are read
 from the directory feather runs in, so run it from the repository root.
