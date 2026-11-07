@@ -41,6 +41,8 @@ from feather_connect.storage.port import (
     QuarantineStore,
     ReadStore,
     RecordStateStore,
+    ResponseRow,
+    ResponseStore,
     RouteRow,
     Run,
     RunJournal,
@@ -90,6 +92,10 @@ class _Data:
     state: dict[str, dict[str, StateRow]] = field(default_factory=dict[str, dict[str, StateRow]])
     quarantine: dict[tuple[str | None, str | None, str, str | None], QuarantineRow] = field(
         default_factory=dict[tuple[str | None, str | None, str, str | None], QuarantineRow]
+    )
+    # By delivery (route, version), then by (chunk, key).
+    responses: dict[tuple[str, str], dict[tuple[int, str], ResponseRow]] = field(
+        default_factory=dict[tuple[str, str], dict[tuple[int, str], ResponseRow]]
     )
 
     flows: list[FlowRow] = field(default_factory=list[FlowRow])
@@ -629,6 +635,7 @@ class _Ledger(Ledger):
                 del self._d.deliveries[key]
                 del self._d.attempts[key]
                 del self._d.changed[key]
+                self._d.responses.pop(key, None)
             return len(gone)
 
 
@@ -714,6 +721,40 @@ class _Quarantine(QuarantineStore):
                 for r in self._d.quarantine.values()
                 if r.status == "open" and (route is None or r.route == route)
             ]
+
+
+class _Responses(ResponseStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def record(self, rows: Sequence[ResponseRow]) -> None:
+        with self._d.lock:
+            now = self._d.clock.now()
+            for row in rows:
+                found = self._d.responses.setdefault((row.route, row.version_id), {})
+                before = found.get((row.chunk_no, row.key))
+                fields = row.fields or (before.fields if before is not None else {})
+                kept = replace(row, fields=copy.deepcopy(dict(fields)), sent=copy.deepcopy(row.sent), at=now)
+                found[(row.chunk_no, row.key)] = kept
+
+    def replace_chunk(self, route: str, version_id: str, chunk_no: int, rows: Sequence[ResponseRow]) -> None:
+        with self._d.lock:
+            keys = {row.key for row in rows}
+            found = self._d.responses.get((route, version_id), {})
+            for chunk, key in [k for k in found if k[0] == chunk_no and k[1] not in keys]:
+                del found[(chunk, key)]
+            self.record(rows)
+
+    def of_delivery(self, route: str, version_id: str, limit: int = 1000) -> list[ResponseRow]:
+        with self._d.lock:
+            found = self._d.responses.get((route, version_id), {})
+            return [copy.deepcopy(found[k]) for k in sorted(found)[:limit]]
+
+    def find(self, route: str, version_id: str, key: str) -> ResponseRow | None:
+        with self._d.lock:
+            found = self._d.responses.get((route, version_id), {})
+            chunks = sorted(chunk for chunk, k in found if k == key)
+            return copy.deepcopy(found[(chunks[-1], key)]) if chunks else None
 
 
 @dataclass
@@ -1244,4 +1285,5 @@ class MemoryStore(Store):
             audit=_Audit(data),
             reads=_Reads(data),
             inbox=_Inbox(data, versions),
+            responses=_Responses(data),
         )

@@ -4,10 +4,13 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from feather_connect.core.errors import PermanentError
 from feather_connect.runtime.budgets import BudgetHandle
+
+if TYPE_CHECKING:
+    from feather_connect.core.connector import RecordResponse
 
 
 @dataclass(eq=False)  # a context is a handle that remembers a checkpoint, not a value to compare
@@ -26,6 +29,7 @@ class Context:
     budget: BudgetHandle | None = None
     http: Any | None = None
     _checkpoint: str | None = field(default=None, init=False, repr=False)
+    _answers: list["RecordResponse"] = field(default_factory=list["RecordResponse"], init=False, repr=False)
 
     def secret(self, name: str) -> str:
         """Return the secret `name` from the configuration.
@@ -45,3 +49,12 @@ class Context:
         if value is not None:
             self._checkpoint = value
         return self._checkpoint
+
+    def answered(self, response: "RecordResponse") -> None:
+        """Note what the destination answered for one record, as it arrives, so that the answers of a chunk that fails
+        part-way are kept all the same. A sink still returns every answer in its `ApplyResult`."""
+        self._answers.append(response)
+
+    def answers(self) -> list["RecordResponse"]:
+        """The answers noted so far."""
+        return list(self._answers)

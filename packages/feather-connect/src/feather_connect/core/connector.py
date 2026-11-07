@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, ClassVar, Literal, Protocol
 
 import pyarrow as pa
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 from feather_connect.core.context import Context
 from feather_connect.core.errors import PermanentError
@@ -19,6 +19,8 @@ RouteMode = Literal["upsert", "append", "replace_partition", "side_effect"]
 Key = str | tuple[Any, ...]
 # What a source yields: an Arrow record batch, or rows as dicts.
 Batch = pa.RecordBatch | list[dict[str, Any]]
+# The type of a secret field in a connector's config model: its value stays out of `repr`, logs and errors.
+Secret = SecretStr
 
 
 @dataclass(frozen=True)
@@ -115,8 +117,21 @@ class Rejection:
 
 
 @dataclass(frozen=True)
+class RecordResponse:
+    """What the destination answered for one record: its HTTP `status` and the `fields` a sink's `response_map` took
+    from the answer. `sent` is the body of a rejected record, so that it can be looked at and retried. The runtime
+    keeps these with the delivery (ruling 5); a sink must never put a raw body or headers here."""
+
+    key: Key
+    status: int
+    fields: Mapping[str, Any] = field(default_factory=dict[str, Any])
+    sent: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
 class ApplyResult:
-    """What a sink did with a batch: how many records it applied and which it rejected.
+    """What a sink did with a batch: how many records it applied and which it rejected, and what the destination
+    answered for each record when the sink reports that.
 
     A sink that accepts a batch and reports the outcome later returns `pending_confirmation` instead.
     """
@@ -124,6 +139,7 @@ class ApplyResult:
     applied: int
     rejected: Sequence[Rejection] = ()
     pending_confirmation: str | None = None
+    responses: Sequence[RecordResponse] = ()
 
 
 @dataclass(frozen=True)

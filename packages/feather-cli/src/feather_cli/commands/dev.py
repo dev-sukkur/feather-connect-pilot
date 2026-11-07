@@ -2,7 +2,8 @@
 
 Postgres comes from `FEATHER_DATABASE_URL`, or else from a container named `feather-dev-postgres` with a named volume.
 The server and one worker then run in this process, on the demo project unless `--project` says another, and are
-started again whenever a file under `flows/` or `env/`, or `feather.yaml`, changes. Ctrl+C stops them and the
+started again whenever a file under `flows/` or `env/`, or `feather.yaml`, changes. The helper processes the project
+declares under `dev.processes` start first and keep running across reloads. Ctrl+C stops them all and the
 container; the data stays in the volume. The generated password of the `dev` user is printed to the console when the
 user is made, or again with `--reset-password`, and never goes to a log.
 """
@@ -31,6 +32,7 @@ import typer
 import uvicorn
 from watchfiles import PythonFilter, watch
 
+from feather_cli.commands.helpers import HelperError, Helpers, HelperStopped, busy_ports, clashing_ports
 from feather_cli.options import Env, Json
 from feather_cli.output import emit, fail
 from feather_connect.logs import TaskLogHandler
@@ -332,9 +334,21 @@ def dev(
             json_mode=json_mode,
         )
     try:
-        load_project(root, env)
+        processes = load_project(root, env).dev_processes
     except ProjectError as error:
         fail(str(error), hint="run: feather validate", json_mode=json_mode)
+    for clash in clashing_ports(processes, port):
+        fail(
+            f"the helper process {clash.name!r} wants port {port}, which the server takes",
+            hint=f"pick another server port with --port, or give {clash.name} another port under dev.processes",
+            json_mode=json_mode,
+        )
+    for busy in busy_ports(processes, _in_use):
+        fail(
+            f"port {busy.port} of the helper process {busy.name!r} is already in use",
+            hint=f"stop what is using it, or give {busy.name} another port under dev.processes in feather.yaml",
+            json_mode=json_mode,
+        )
     own_database = os.environ.get("FEATHER_DATABASE_URL")
     if not own_database:
         _check_docker(json_mode)
@@ -349,11 +363,18 @@ def dev(
             signal.signal(number, on_signal)
 
     container = not own_database
+    helpers = Helpers(root, lambda line: typer.echo(line, err=True))
     try:
+        helpers.start(processes, stop)
         _run(root, env, port, own_database, no_browser, reset_password, json_mode, stop)
+    except HelperStopped:
+        pass  # Ctrl+C while the helpers started: stop what started, and nothing else to say
+    except HelperError as error:
+        fail(str(error), hint="its output above says more", json_mode=json_mode)
     except (RuntimeError, psycopg.Error) as error:
         fail(str(error), hint="the log above says more", json_mode=json_mode)
     finally:
+        helpers.stop()
         if container:
             _stop_postgres_container()
 

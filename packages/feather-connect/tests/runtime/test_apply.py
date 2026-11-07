@@ -11,12 +11,13 @@ from pydantic import BaseModel
 import feather_connect as fc
 from feather_connect.clock import FrozenClock
 from feather_connect.connectors.memory import Sink, Source
-from feather_connect.core.connector import ApplyResult
+from feather_connect.core.connector import ApplyResult, RecordResponse
 from feather_connect.core.context import Context
 from feather_connect.core.errors import BudgetDeferred, PermanentError, RecordRejected, TransientError
 from feather_connect.core.records import Record, row_hash
 from feather_connect.engine.local import LocalEngine
 from feather_connect.engine.port import RetryPolicy, TaskCall
+from feather_connect.logs import register_secrets
 from feather_connect.runtime.apply import run_apply
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import finalize_versions, run_extract
@@ -301,6 +302,68 @@ def test_sink_rejection_quarantines_and_continues():
     assert delivery.status == "applied" and (delivery.rows_applied, delivery.rows_rejected) == (2, 1)
     row = QUARANTINE.list_open()[0]
     assert (row.key, row.error, row.route, row.version_id) == ("2", "bad sku", "r", v1)
+
+
+class AnsweringSink(Sink):
+    """A sink that reports what a destination answered, as an HTTP call sink does. With `fail_after`, the chunk fails
+    once that many records have been answered, as a call that runs out of retries part-way does."""
+
+    def __init__(self, name: str, fail_after: int | None = None, skip: frozenset[str] = frozenset()) -> None:
+        super().__init__(name)
+        self.fail_after = fail_after
+        self.skip = skip
+
+    def apply(self, ctx: Context, batch: Any) -> ApplyResult:
+        responses: list[RecordResponse] = []
+        for record in batch.records:
+            if record.key in self.skip:
+                continue
+            if self.fail_after is not None and len(responses) == self.fail_after:
+                raise TransientError("the destination went away")
+            fields = {"erp_id": f"e-{record.key}", "token": "Bearer leaked-123", "plan": "Basic membership"}
+            response = RecordResponse(record.key, 201, fields)
+            ctx.answered(response)
+            responses.append(response)
+        return ApplyResult(len(responses), responses=responses)
+
+
+def test_what_the_destination_answered_is_kept_redacted_and_logged(caplog):  # ruling 5, M4, M7
+    register_secrets("leaked-123")
+    caplog.set_level(logging.INFO)
+    ds = dataset()
+    route = fc.to(AnsweringSink("r"), name="r")
+    [v1] = seal_versions(ds, [ROWS], route)
+    apply(ds, route, v1)
+    rows = DEPS.store.responses.of_delivery("r", v1)
+    assert [(r.key, r.status, r.fields["erp_id"]) for r in rows] == [
+        ("1", 201, "e-1"),
+        ("2", 201, "e-2"),
+        ("3", 201, "e-3"),
+    ]
+    assert all(r.fields["token"] == "Bearer ***" for r in rows) and "leaked-123" not in caplog.text
+    assert rows[0].fields["plan"] == "Basic membership"  # only known secret values are masked in stored data
+    lines = [r.getMessage() for r in caplog.records if "answers" in r.getMessage()]
+    assert lines == ["route r, chunk 0: 3 answers (HTTP 201: 3)"]  # one line per chunk, not one per record
+
+
+def test_answers_that_came_before_a_chunk_failed_are_kept():  # I3
+    ds = dataset()
+    route = fc.to(AnsweringSink("r", fail_after=2), name="r")
+    [v1] = seal_versions(ds, [ROWS], route)
+    apply(ds, route, v1)
+    assert [r.key for r in DEPS.store.responses.of_delivery("r", v1)] == ["1", "2"]
+
+
+def test_a_chunk_sent_again_shows_only_its_latest_answers(monkeypatch):  # M8
+    ds = dataset()
+    sink = AnsweringSink("r")
+    route = fc.to(sink, name="r")
+    [v1] = seal_versions(ds, [ROWS], route)
+    apply(ds, route, v1)
+    sink.skip = frozenset({"2"})  # say the map now turns record 2 down
+    DEPS.store.ledger.transition("r", v1, "pending", actor="t", reason="replay")
+    apply(ds, route, v1)
+    assert [r.key for r in DEPS.store.responses.of_delivery("r", v1)] == ["1", "3"]
 
 
 def test_sink_rejection_with_on_record_error_fail_fails_the_version():

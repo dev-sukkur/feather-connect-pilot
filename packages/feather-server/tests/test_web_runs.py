@@ -6,6 +6,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from feather_connect.core.errors import PermanentError, TransientError
+from feather_connect.storage.port import ResponseRow
 from feather_server.testing import World, day
 
 
@@ -233,3 +234,25 @@ def test_a_stream_run_of_a_past_day_is_closed_and_stops_refreshing(client: TestC
     world.clock.advance(timedelta(days=1))
     page = client.get(f"/runs/{run_id}").text
     assert "closed" in page and 'hx-trigger="every 3s"' not in page
+
+
+def test_a_delivery_shows_what_the_destination_answered_per_record(
+    client: TestClient, world: World
+) -> None:  # ruling 5
+    run_id = world.run([day(17)])
+    delivery = world.reads.run_detail(run_id).deliveries[0]
+    route, version_id = delivery.route, delivery.version_id
+    world.store.responses.record(
+        [
+            ResponseRow(route, version_id, 0, "o-1", 201, {"erp_id": "<e-1>"}),
+            ResponseRow(route, version_id, 0, "o-2", 422, {}, sent={"customer": "c-9"}),
+        ]
+    )
+    link = f"/routes/{route}/deliveries/{version_id}?run={run_id}"
+    assert link in client.get(f"/runs/{run_id}").text
+    html = client.get(link).text
+    assert "What the destination answered" in html and "<code>o-1</code>" in html
+    assert "<code>erp_id</code>: &lt;e-1&gt;" in html  # escaped
+    assert "422" in html and "<code>customer</code>: c-9" in html  # a rejected record keeps what it was sent
+    assert "Attempts" in html and f'href="/runs/{run_id}"' in html
+    assert client.get(f"/routes/{route}/deliveries/nothing").status_code == 404

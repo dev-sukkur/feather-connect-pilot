@@ -17,12 +17,20 @@ from typing import Any, TextIO
 
 from feather_connect.storage.port import Store
 
-__all__ = ["TaskLogHandler", "bind", "bound_ids", "configure_logging", "redact", "register_secrets"]
+__all__ = [
+    "TaskLogHandler",
+    "bind",
+    "bound_ids",
+    "configure_logging",
+    "redact",
+    "register_secrets",
+    "unregister_secrets",
+]
 
 ID_NAMES = ("tenant", "flow", "run", "task", "dataset", "partition", "version", "route")
 TASK_LOG_LIMIT = 64 * 1024  # bytes kept per task
 _MASK = "***"
-_MIN_SECRET = 4  # a shorter value would blot out ordinary text
+MIN_SECRET_LENGTH = 4  # a shorter value would blot out ordinary text
 
 _ids: ContextVar[Mapping[str, str]] = ContextVar("feather_log_ids", default=MappingProxyType({}))
 _secrets: set[str] = set()
@@ -30,7 +38,12 @@ _secrets: set[str] = set()
 
 def register_secrets(*values: str | None) -> None:
     """Make every later record mask these values. Empty and very short ones are ignored."""
-    _secrets.update(v for v in values if v and len(v) >= _MIN_SECRET)
+    _secrets.update(v for v in values if v and len(v) >= MIN_SECRET_LENGTH)
+
+
+def unregister_secrets(*values: str | None) -> None:
+    """Stop masking values that are no longer secret anywhere, such as an access token that a new one replaced."""
+    _secrets.difference_update(v for v in values if v)
 
 
 def redact(text: str) -> str:

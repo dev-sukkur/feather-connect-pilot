@@ -7,9 +7,9 @@
 package = false
 
 [tool.uv.workspace]
-members = ["packages/*", "packages/connectors/*"]
-# packages/connectors holds packages but is not one.
-exclude = ["packages/connectors"]
+members = ["packages/*", "packages/connectors/*", "packages/templates/*"]
+# packages/connectors and packages/templates hold packages but are not ones.
+exclude = ["packages/connectors", "packages/templates"]
 
 [dependency-groups]
 dev = [
@@ -22,6 +22,7 @@ dev = [
     "pyarrow-stubs",
     "types-pyyaml",
     "httpx",
+    "respx",
 ]
 
 [tool.ruff]
@@ -40,7 +41,6 @@ known-first-party = ["feather_connect", "feather_engine_dbos", "feather_server",
 # Check the packages only: spikes/ is throwaway code with its own dependencies.
 include = ["packages"]
 strict = ["packages/feather-connect/src"]
-
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
 pythonpath = ["tests/support"]

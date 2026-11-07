@@ -6,6 +6,7 @@ after a crash or a retry can't apply it twice. A replay of a delivery has a new 
 """
 
 import logging
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import timedelta
@@ -15,7 +16,7 @@ from typing import Any, cast
 
 import pyarrow as pa
 
-from feather_connect.core.connector import ApplyBatch, ApplyRecord, ApplyResult, Key
+from feather_connect.core.connector import ApplyBatch, ApplyRecord, ApplyResult, Key, RecordResponse
 from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import BudgetDeferred, PermanentError, TransientError
@@ -26,7 +27,15 @@ from feather_connect.engine.port import RetryPolicy, TaskContext
 from feather_connect.logs import redact
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import NOT_DELIVERED
-from feather_connect.storage.port import CLOSED, Delivery, DeliveryStatus, Version, delivery_cursor, is_paused
+from feather_connect.storage.port import (
+    CLOSED,
+    Delivery,
+    DeliveryStatus,
+    ResponseRow,
+    Version,
+    delivery_cursor,
+    is_paused,
+)
 from feather_connect.storage.spool import ChunkKind, table_to_records
 
 log = logging.getLogger(__name__)
@@ -188,6 +197,22 @@ def _start(route: RouteSpec, delivery: Delivery, deps: RuntimeDeps) -> _Plan:
     return _counting_a_try(delivery, deps, lambda: _plan_of(route, deps.store.versions.get(version_id), deps))
 
 
+def _redacted(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy with every known secret value masked in the text it holds, at any depth. Not the token patterns
+    of error text: stored data must stay what was sent, "Basic membership" and all (M4)."""
+
+    def mask(item: Any) -> Any:
+        if isinstance(item, str):
+            return redact(item)
+        if isinstance(item, Mapping):
+            return {str(k): mask(v) for k, v in cast(Mapping[Any, Any], item).items()}
+        if isinstance(item, list | tuple):
+            return [mask(v) for v in cast(Sequence[Any], item)]
+        return item
+
+    return cast(dict[str, Any], mask(value))
+
+
 def _key_text(key: Key) -> str:
     """Undo `decode_key`, to name a record the way the store does."""
     return key if isinstance(key, str) else canonical_json(list(key)).decode("utf-8")
@@ -256,15 +281,50 @@ class _ChunkSender:
             is_first=chunk_no == plan.chunks[0],
             is_last=chunk_no == plan.chunks[-1],
         )
-        result: ApplyResult = route.sink.apply(context, batch)
+        try:
+            result: ApplyResult = route.sink.apply(context, batch)
+        except Exception:
+            self._keep_responses(chunk_no, context.answers(), complete=False)  # then it goes up as it is
+            raise
         if result.pending_confirmation is not None:
             raise PermanentError(
                 f"{route.sink.spec.name} asked to confirm later, and confirm-later sinks arrive in M2, "
                 "so this delivery can't be marked applied"
             )
+        self._keep_responses(chunk_no, result.responses, complete=True)
         for rejection in result.rejected:
             self._reject(_key_text(rejection.key), rejection.message)
         return _Counts(result.applied, rejected + len(result.rejected))
+
+    def _keep_responses(self, chunk_no: int, responses: Sequence[RecordResponse], *, complete: bool) -> None:
+        """Keep what the destination answered for each record, redacted, in the store, and a line of counts in the
+        task's log (ruling 5).
+
+        A chunk sent in full replaces the chunk's answers, so that records not sent this time show none (M8); one that
+        failed part-way adds the answers it got. Before the rejections are quarantined, so that an entry can show the
+        body its record was sent with.
+        """
+        name, version_id = self._route.name, self._delivery.version_id
+        rows = [
+            ResponseRow(
+                name,
+                version_id,
+                chunk_no,
+                _key_text(response.key),
+                response.status,
+                _redacted(response.fields),
+                None if response.sent is None else _redacted(response.sent),
+            )
+            for response in responses
+        ]
+        if complete:
+            self._deps.store.responses.replace_chunk(name, version_id, chunk_no, rows)
+        elif rows:
+            self._deps.store.responses.record(rows)
+        if rows:
+            counts = Counter(row.status for row in rows)
+            by_status = ", ".join(f"HTTP {status}: {n}" for status, n in sorted(counts.items()))
+            log.info("route %s, chunk %d: %d answers (%s)", name, chunk_no, len(rows), by_status)
 
     def _records(self, version: Version, chunk_no: int, context: Context) -> tuple[list[ApplyRecord], int]:
         """Return what the sink gets of a chunk, and how many records were turned down on the way."""
