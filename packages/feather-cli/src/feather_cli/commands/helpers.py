@@ -83,6 +83,8 @@ def _kill_on_close_job() -> int | None:
 
 
 def _join_job(job: int, pid: int) -> None:
+    if sys.platform != "win32":
+        return
     import ctypes
     from ctypes import wintypes
 
