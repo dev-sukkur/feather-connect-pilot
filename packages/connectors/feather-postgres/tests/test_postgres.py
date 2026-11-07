@@ -281,6 +281,7 @@ def test_readme_example_runs(target, target_url, tmp_path: Path, monkeypatch):
     assert isinstance(route.sink, postgres.Table) and isinstance(flow.datasets[0].source, postgres.Query)
 
 
+@pytest.mark.postgres
 def test_staged_chunks_survive_a_server_crash(target, make_ctx):  # Review C2
     # An unlogged table is emptied by crash recovery, while its chunks are marked applied: it must be a logged one.
     target.execute("create table daily (id text primary key, day text, v int)")
