@@ -13,7 +13,7 @@ x-feather: &feather
   environment: &feather-env
     FEATHER_DATABASE_URL: postgresql://feather:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}@postgres:5432/feather
     FEATHER_SECRET_KEY: ${FEATHER_SECRET_KEY:?set FEATHER_SECRET_KEY in deploy/.env (see .env.example)}
-    FEATHER_ENV: ${FEATHER_ENV:-dev}
+    FEATHER_ENV: ${FEATHER_ENV:-qa}
     FEATHER_BASE_URL: ${FEATHER_BASE_URL:-http://127.0.0.1:8080}
     FEATHER_LOG_LEVEL: ${FEATHER_LOG_LEVEL:-INFO}
   volumes:

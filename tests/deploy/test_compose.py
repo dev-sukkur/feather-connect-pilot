@@ -12,6 +12,7 @@ import secrets
 import shutil
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -97,7 +98,7 @@ def compose() -> Iterator[Stack]:
         "POSTGRES_PASSWORD": secrets.token_urlsafe(16),
         "FEATHER_PORT": str(PORT),
         "FEATHER_BASE_URL": f"http://127.0.0.1:{PORT}",
-        "FEATHER_ENV": "dev",
+        "FEATHER_ENV": "qa",  # dev delivers to targets on the host; qa is all simulation
     }
     stack = Stack(env, env["FEATHER_SECRET_KEY"], env["POSTGRES_PASSWORD"])
     stack.compose("down", "--volumes", "--remove-orphans", check=False)
