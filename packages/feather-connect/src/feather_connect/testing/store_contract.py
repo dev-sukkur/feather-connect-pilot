@@ -1300,6 +1300,18 @@ class StoreContract(SpoolContract, ResponseStoreContract):
         store.versions.seal(["v1"], ["a"])
         assert store.versions.abandoned() == []
 
+    def test_stream_leftovers_are_staged_tick_versions_of_stream_runs(self, store: Store):  # S12
+        stream = store.runs.stream_run("f", "2026-10-18")
+        manual = store.runs.create_run("f", "manual", "ann", {})
+        store.versions.stage(replace(draft("v1", run=stream), tick="t1"))
+        store.versions.stage(draft("v2", run=stream))  # a push version: the sealer's, with no tick
+        store.versions.stage(replace(draft("v3", run=manual), tick="t1"))
+        store.versions.stage(replace(draft("v4", run=stream), tick="t2"))
+        assert [v.version_id for v in store.versions.stream_leftovers()] == ["v1", "v4"]
+        assert [v.version_id for v in store.versions.stream_leftovers(limit=1)] == ["v1"]
+        store.versions.seal(["v1"], ["a"])
+        assert [v.version_id for v in store.versions.stream_leftovers()] == ["v4"]
+
     def test_open_versions_are_those_with_a_delivery_that_is_not_closed(self, store: Store):
         for vid, part in (("v1", "p"), ("v2", "q"), ("v3", "r")):
             seal(store, vid, ["a", "b"], part=part)

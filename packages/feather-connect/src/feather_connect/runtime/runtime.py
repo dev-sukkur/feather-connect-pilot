@@ -62,6 +62,7 @@ _SKIP = "skip"  # the kind of the row of a tick that didn't go ahead
 _RUNS_LOOKED_AT = (
     20  # rows of tasks still reading that one tick looks at: there are few, as ticks don't overlap
 )
+_STREAM_RUNS_LOOKED_AT = 200  # running runs a sweep looks through for earlier days' stream runs
 _LOST_AFTER = timedelta(minutes=1)  # how long a tick's plan may stay unstarted before it is submitted again
 _READS_IN_VAIN = (
     5  # reads that spend budget and still come up short, each after the longest wait, before giving up
@@ -460,6 +461,28 @@ class Runtime:
                 tick = row.ref.removeprefix(f"tick:{run_id}:").removesuffix(":plan")
                 self._engine.submit(self._tick_plan_call(runs.get_run(run_id).flow, run_id, tick))
         return going
+
+    def sweep_stream_runs(self) -> list[str]:
+        """Look after what stream ticks leave behind, and return the ids of the staged versions discarded (S12).
+
+        An earlier day's stream run that still says running gets no more ticks, so nothing else looks at it: its rows
+        are checked as a tick would, and it settles once none runs. A staged version of a tick, while no task of its
+        run reads, is one that a tick left when it ended without discarding it, and nothing would seal it.
+        """
+        runs = self._deps.store.runs
+        today = self._clock.now().astimezone(ZoneInfo(self._timezone)).date().isoformat()
+        for run in runs.list_runs(status="running", limit=_STREAM_RUNS_LOOKED_AT):
+            if run.trigger != STREAM_TRIGGER or str(run.params.get("day", today)) >= today:
+                continue
+            self.tick_in_flight(run.run_id)
+            self._settle_run(run.run_id)
+        discarded: list[str] = []
+        for version in self._deps.store.versions.stream_leftovers():
+            if runs.list_tasks(version.run_id, status="running", kinds=_READING, limit=1):
+                continue
+            discard_abandoned(version.version_id, self._deps)
+            discarded.append(version.version_id)
+        return discarded
 
     def _tick_plan_call(self, flow: str, run_id: str, tick: str) -> TaskCall:
         return TaskCall(

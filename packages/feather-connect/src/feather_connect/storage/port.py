@@ -397,6 +397,11 @@ class VersionStore(Protocol):
         """Staged versions of runs that failed or were cancelled, which nothing will seal, oldest staged first."""
         ...
 
+    def stream_leftovers(self, limit: int = 1000) -> list[Version]:
+        """Staged versions of stream runs' ticks, oldest staged first. A tick seals its own, so one that is staged while
+        no task of its run reads is a leftover of a tick that ended without discarding it (S12)."""
+        ...
+
     def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:
         """Sealed versions sealed before `cutoff` that retention may forget, oldest first.
 

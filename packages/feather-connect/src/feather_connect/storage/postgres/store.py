@@ -798,6 +798,17 @@ class _Versions(VersionStore):
             ).fetchall()
         return [_version(r) for r in rows]
 
+    def stream_leftovers(self, limit: int = 1000) -> list[Version]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select v.* from feather.version v join feather.run r
+                     on r.tenant_id = v.tenant_id and r.run_id = v.run_id
+                   where v.tenant_id = %s and v.status = 'staged' and v.tick is not null and r.trigger = %s
+                   order by v.stage_seq limit %s""",
+                (self._db.tenant, STREAM_TRIGGER, limit),
+            ).fetchall()
+        return [_version(r) for r in rows]
+
     def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:
         with self._db.tx() as conn:
             rows = conn.execute(

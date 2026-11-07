@@ -480,6 +480,16 @@ class _Versions(VersionStore):
                 and self._d.runs[v.run_id].trigger != STREAM_TRIGGER
             ][:limit]
 
+    def stream_leftovers(self, limit: int = 1000) -> list[Version]:
+        with self._d.lock:
+            return [
+                v
+                for v in self._d.versions.values()
+                if v.status == "staged"
+                and v.tick is not None
+                and self._d.runs[v.run_id].trigger == STREAM_TRIGGER
+            ][:limit]
+
     def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:
         with self._d.lock:
             newest = {(v.dataset, v.partition): v.version_id for v in self._sealed_all()}
