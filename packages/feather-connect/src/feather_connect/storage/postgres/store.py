@@ -2063,7 +2063,9 @@ class _Inbox(InboxStore):
                 "select to_regclass(%s) as found", (f"feather.{self._partition(day)}",)
             ).fetchone()
             if found is not None and found["found"] is not None:
-                # Nothing can write to the day between this look and the drop.
+                # Nothing can write to the day between this look and the drop. The parent first, as
+                # the drop takes it anyway: a `take` holding the parent can't then wait on us (S14).
+                conn.execute("lock table feather.inbox in access exclusive mode")
                 conn.execute(sql.SQL("lock table {} in access exclusive mode").format(partition))
                 waiting = conn.execute(
                     sql.SQL("select 1 from {} where sealed_at is null limit 1").format(partition)
