@@ -501,8 +501,15 @@ def _quarantine_event(runtime: Runtime, dataset: Dataset, event: InboxEvent, err
     _hold(batch, runtime.deps)
 
 
-def _is_due(age: timedelta, count: int, max_events: int, max_age: timedelta) -> bool:
-    return count >= max_events or age >= max_age
+MAX_BATCH_BYTES = 64 * 1024 * 1024  # the bodies one batch holds in memory, at most (S20)
+
+
+def _is_full(events: Sequence[InboxEvent], max_events: int, max_bytes: int) -> bool:
+    return len(events) >= max_events or sum(len(e.request.body) for e in events) >= max_bytes
+
+
+def _is_due(age: timedelta, full: bool, max_age: timedelta) -> bool:
+    return full or age >= max_age
 
 
 def _seal_dataset(
@@ -513,6 +520,7 @@ def _seal_dataset(
     now: datetime,
     max_events: int,
     max_age: timedelta,
+    max_bytes: int = MAX_BATCH_BYTES,
 ) -> None:
     """Add to `sealed` as each batch seals, so that a later batch failing doesn't lose sight of the earlier ones."""
     flows = _flows_of(runtime, dataset)
@@ -524,8 +532,9 @@ def _seal_dataset(
         age = inbox.oldest_age(dataset.name, now)
         if age is None:
             break
-        events = inbox.take(dataset.name, max_events)
-        if not events or not _is_due(age, len(events), max_events, max_age):
+        events = inbox.take(dataset.name, max_events, max_bytes)
+        full = _is_full(events, max_events, max_bytes)
+        if not events or not _is_due(age, full, max_age):
             break
         if events[0].retry_at is not None and events[0].retry_at > now:
             break  # the first is to be read again later, and the others wait behind it
@@ -533,7 +542,7 @@ def _seal_dataset(
             ctx = runtime.make_context(cast(PushSource, dataset.source).connection)
         if _seal_split(runtime, dataset, flows, ctx, events, now, sealed):
             break
-        if len(events) < max_events:
+        if not full:
             break
 
 
@@ -543,7 +552,12 @@ def _push_datasets(runtime: Runtime) -> list[Dataset]:
 
 
 def seal_once(
-    runtime: Runtime, *, now: datetime, max_events: int = 500, max_age: timedelta = timedelta(seconds=1)
+    runtime: Runtime,
+    *,
+    now: datetime,
+    max_events: int = 500,
+    max_age: timedelta = timedelta(seconds=1),
+    max_bytes: int = MAX_BATCH_BYTES,
 ) -> list[Version]:
     """Seal what is due of each push dataset as of `now`, and return the new versions.
 
@@ -553,7 +567,9 @@ def seal_once(
     sealed: list[Version] = []
     for dataset in _push_datasets(runtime):
         try:
-            _seal_dataset(runtime, dataset, sealed, now=now, max_events=max_events, max_age=max_age)
+            _seal_dataset(
+                runtime, dataset, sealed, now=now, max_events=max_events, max_age=max_age, max_bytes=max_bytes
+            )
         except (StaleWriter, VersionSealed) as error:
             log.info("sealer: another sealer is at dataset %s: %s", dataset.name, type(error).__name__)
         except Exception as error:  # noqa: BLE001 - the next tick tries again, and the other datasets mustn't wait

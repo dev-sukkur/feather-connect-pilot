@@ -602,8 +602,11 @@ class InboxStore(Protocol):
         """Store (dataset, request, event id) in that order, all or none, and say of each what `put` would have."""
         ...
 
-    def take(self, dataset: str, limit: int) -> list[InboxEvent]:
-        """The dataset's oldest events neither sealed nor held, in arrival order. They stay there until `seal_batch`."""
+    def take(self, dataset: str, limit: int, max_bytes: int | None = None) -> list[InboxEvent]:
+        """The dataset's oldest events neither sealed nor held, in arrival order. They stay there until `seal_batch`.
+
+        With `max_bytes`, the events stop at the first whose body takes their bodies past it, that one included: the
+        first event always comes, however large (S20)."""
         ...
 
     def oldest_age(self, dataset: str, now: datetime) -> timedelta | None:

@@ -1222,9 +1222,19 @@ class _Inbox(InboxStore):
             row.sealed_at = self._d.clock.now()
             return True
 
-    def take(self, dataset: str, limit: int) -> list[InboxEvent]:
+    def take(self, dataset: str, limit: int, max_bytes: int | None = None) -> list[InboxEvent]:
         with self._d.lock:
-            return self._open(dataset)[:limit]
+            found = self._open(dataset)[:limit]
+        if max_bytes is None:
+            return found
+        kept: list[InboxEvent] = []
+        size = 0
+        for event in found:
+            if size >= max_bytes:
+                break
+            kept.append(event)
+            size += len(event.request.body)
+        return kept
 
     def oldest_age(self, dataset: str, now: datetime) -> timedelta | None:
         with self._d.lock:

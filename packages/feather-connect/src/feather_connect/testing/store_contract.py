@@ -1401,6 +1401,15 @@ class StoreContract(SpoolContract, ResponseStoreContract):
         assert events[0].event_seq < events[1].event_seq < events[2].event_seq
         assert [e.request.body for e in store.inbox.take("d", 2)] == [b"0", b"1"]
 
+    def test_inbox_take_stops_at_a_size(self, store: Store):  # S20
+        for body in (b"a" * 40, b"b" * 40, b"c" * 40, b"d"):
+            store.inbox.put("d", inbound(body))
+        assert [len(e.request.body) for e in store.inbox.take("d", 10, max_bytes=50)] == [40, 40]
+        assert [len(e.request.body) for e in store.inbox.take("d", 10, max_bytes=10)] == [
+            40
+        ]  # the first always
+        assert len(store.inbox.take("d", 10, max_bytes=None)) == 4
+
     def test_inbox_keeps_a_request_exactly(self, store: Store):
         body = b'\x00\xff{"not": "text"}'
         store.inbox.put("d", inbound(body, {"x-signature": "abc"}), "e1")

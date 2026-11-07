@@ -1937,13 +1937,18 @@ class _Inbox(InboxStore):
                 )
         return stored
 
-    def take(self, dataset: str, limit: int) -> list[InboxEvent]:
+    def take(self, dataset: str, limit: int, max_bytes: int | None = None) -> list[InboxEvent]:
         with self._db.tx() as conn:
             rows = conn.execute(
-                """select * from feather.inbox
-                   where tenant_id = %s and dataset = %s and sealed_at is null and held_at is null
-                   order by event_seq limit %s""",
-                (self._db.tenant, dataset, limit),
+                """with firsts as (
+                       select * from feather.inbox
+                       where tenant_id = %s and dataset = %s and sealed_at is null and held_at is null
+                       order by event_seq limit %s),
+                   sized as (
+                       select *, sum(octet_length(body)) over (order by event_seq) - octet_length(body) as before
+                       from firsts)
+                   select * from sized where %s::bigint is null or before < %s::bigint order by event_seq""",
+                (self._db.tenant, dataset, limit, max_bytes, max_bytes),
             ).fetchall()
         return [
             InboxEvent(
