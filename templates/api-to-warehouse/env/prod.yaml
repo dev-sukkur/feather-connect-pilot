@@ -1,0 +1,2 @@
+budgets:
+  pricing-api: {limits: ["120/minute", "50000/day"]}

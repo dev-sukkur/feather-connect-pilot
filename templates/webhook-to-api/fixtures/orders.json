@@ -1,0 +1,44 @@
+[
+  {
+    "order_id": "ORD-00001",
+    "store_id": "BLR-01",
+    "customer": "Asha Traders",
+    "placed_at": "2026-11-07T09:11:00Z",
+    "items": [
+      {
+        "sku": "TEA-250",
+        "qty": 2,
+        "price": "145.00"
+      }
+    ],
+    "total": "290.00"
+  },
+  {
+    "order_id": "ORD-00002",
+    "store_id": "MAA-02",
+    "customer": "Ravi Stores",
+    "placed_at": "2026-11-07T09:12:00Z",
+    "items": [
+      {
+        "sku": "RICE-5K",
+        "qty": 1,
+        "price": "520.00"
+      }
+    ],
+    "total": "520.00"
+  },
+  {
+    "order_id": "ORD-00003",
+    "store_id": "BLR-01",
+    "customer": "Meena K",
+    "placed_at": "2026-11-07T09:13:00Z",
+    "items": [
+      {
+        "sku": "SOAP-100",
+        "qty": 6,
+        "price": "38.00"
+      }
+    ],
+    "total": "228.00"
+  }
+]

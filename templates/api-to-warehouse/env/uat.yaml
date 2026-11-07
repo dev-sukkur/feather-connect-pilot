@@ -1,0 +1,1 @@
+connections: {pricing_api: {base_url: https://pricing-uat.example.com}, warehouse: {database: md:bronze_uat}}

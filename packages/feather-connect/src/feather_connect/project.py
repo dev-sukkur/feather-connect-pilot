@@ -42,6 +42,9 @@ __all__ = [
     "validate_project",
 ]
 
+# The connectors an environment names to run a connection on simulation stand-ins (B2).
+SIMULATED = frozenset({"simulation.source", "simulation.sink"})
+
 # What the code itself decides when no file does.
 DEFAULTS: dict[str, Any] = {"settings": {"timezone": "UTC"}}
 _DEFAULTS_LAYER = "defaults"
@@ -173,6 +176,7 @@ def load_project(root: Path, env: str) -> Project:
     dev_processes = _dev_processes(config, layers)
     settings: Mapping[str, Any] = config.get("settings", {})
     flows = _apply_overlay(_import_flows(root, config, layers), config, layers, str(settings["timezone"]))
+    flows = _simulated(flows, connections, root)
     _check_push_sources(flows, connections, env)
     return Project(
         name,
@@ -481,6 +485,65 @@ def _triggers(raw: Any, path: str, layers: Mapping[str, str], timezone: str) -> 
     return tuple(found)
 
 
+def _fixture_of(root: Path, dataset: str, connection: str) -> Path:
+    for suffix in (".json", ".jsonl"):
+        path = root / "fixtures" / f"{dataset}{suffix}"
+        if path.is_file():
+            return path
+    raise ProjectError(
+        f"connection {connection!r} runs on simulation, and dataset {dataset!r} reads it: "
+        f"add its rows as fixtures/{dataset}.json or fixtures/{dataset}.jsonl"
+    )
+
+
+def _simulated(
+    flows: Sequence[Flow], connections: Mapping[str, ConnectionConfig], root: Path
+) -> tuple[Flow, ...]:
+    """Swap the sources and sinks of each connection whose `connector:` is `simulation.source` or `simulation.sink`
+    for simulation stand-ins that keep the real spec (B2): dev and qa run the project's own flows on fixtures from
+    `fixtures/<dataset>.json[l]`. A connector that is a simulation one already stays as it is."""
+    from feather_connect.connectors import simulation
+
+    def simulated(connection: str, name: str) -> bool:
+        config = connections.get(connection)
+        return config is not None and config.connector == name
+
+    result: list[Flow] = []
+    for flow in flows:
+        datasets = {
+            d.name: replace(
+                d, source=simulation.stand_in_source(d.source, _fixture_of(root, d.name, d.source.connection))
+            )
+            for d in flow.datasets
+            if simulated(d.source.connection, "simulation.source")
+            and d.source.spec.name != "simulation.source"
+        }
+        routes = [
+            replace(r, sink=simulation.stand_in_sink(r.sink))
+            if simulated(r.sink.connection, "simulation.sink") and r.sink.spec.name != "simulation.sink"
+            else r
+            for r in flow.routes
+        ]
+        if not datasets and routes == list(flow.routes):
+            result.append(flow)
+            continue
+        changed = copy.copy(flow)
+        changed.datasets = [datasets.get(d.name, d) for d in flow.datasets]
+        changed.routes = routes
+        changed.triggers = tuple(_retargeted(t, datasets) for t in flow.triggers)
+        result.append(changed)
+    return tuple(result)
+
+
+def _retargeted(trigger: Trigger, datasets: Mapping[str, Any]) -> Trigger:
+    """An `on_event` trigger names its dataset: point it at the dataset with the stand-in."""
+    if isinstance(trigger, OnEvent):
+        found = datasets.get(trigger.dataset.name)
+        if found is not None:
+            return replace(trigger, dataset=found)
+    return trigger
+
+
 def _check_push_sources(flows: Sequence[Flow], connections: Mapping[str, ConnectionConfig], env: str) -> None:
     """Refuse a push source that would take events from anybody, unless it says that is what it means (design 13.5).
 
@@ -538,9 +601,10 @@ def validate_project(project: Project) -> list[Problem]:
     problems: list[Problem] = []
     for flow in project.flows:
         problems += [replace(p, path=f"{flow.name}.{p.path}") for p in flow.validate()]
-        uses = [(f"reads[{i}]", d.source.connection, d.source.spec.name) for i, d in enumerate(flow.datasets)]
-        uses += [(f"deliver[{i}]", r.sink.connection, r.sink.spec.name) for i, r in enumerate(flow.routes)]
-        for where, connection, connector in uses:
+        uses: list[tuple[str, Any]] = [(f"reads[{i}]", d.source) for i, d in enumerate(flow.datasets)]
+        uses += [(f"deliver[{i}]", r.sink) for i, r in enumerate(flow.routes)]
+        for where, obj in uses:
+            connection, connector = obj.connection, obj.spec.name
             path = f"{flow.name}.{where}"
             config = project.connections.get(connection)
             if config is None:
@@ -553,7 +617,9 @@ def validate_project(project: Project) -> list[Problem]:
                         f"add {connection!r} under connections: in feather.yaml or env/{project.env}.yaml",
                     )
                 )
-            elif config.connector != connector:
+            elif config.connector != connector and not (
+                config.connector in SIMULATED and getattr(obj, "stands_in", False)
+            ):
                 problems.append(
                     Problem(
                         "error",

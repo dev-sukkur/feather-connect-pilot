@@ -1,0 +1,2 @@
+# qa runs on simulation stand-ins of the real connectors, with fixtures/ as data (B2).
+connections: {landing: {connector: simulation.source}, app_db: {connector: simulation.sink}}

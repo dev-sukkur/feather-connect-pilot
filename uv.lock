@@ -12,6 +12,7 @@ members = [
     "feather-connect",
     "feather-duckdb",
     "feather-engine-dbos",
+    "feather-generic",
     "feather-http",
     "feather-postgres",
     "feather-retail",
@@ -1009,6 +1010,27 @@ dependencies = [
 requires-dist = [
     { name = "dbos", specifier = "==3.4.0" },
     { name = "feather-connect", extras = ["postgres"], editable = "packages/feather-connect" },
+]
+
+[[package]]
+name = "feather-generic"
+version = "0.1.0"
+source = { editable = "packages/templates/feather-generic" }
+dependencies = [
+    { name = "feather-connect" },
+    { name = "feather-duckdb" },
+    { name = "feather-http" },
+    { name = "feather-postgres" },
+    { name = "feather-s3" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "feather-connect", editable = "packages/feather-connect" },
+    { name = "feather-duckdb", editable = "packages/connectors/feather-duckdb" },
+    { name = "feather-http", editable = "packages/connectors/feather-http" },
+    { name = "feather-postgres", editable = "packages/connectors/feather-postgres" },
+    { name = "feather-s3", editable = "packages/connectors/feather-s3" },
 ]
 
 [[package]]

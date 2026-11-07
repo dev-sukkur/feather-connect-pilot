@@ -1,0 +1,3 @@
+flows:
+  invoice-files-to-db:
+    triggers: {every: 5m}

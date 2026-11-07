@@ -1,0 +1,2 @@
+# dev runs on simulation stand-ins of the real connectors, with fixtures/ as data (B2).
+connections: {partner: {connector: simulation.source}, erp: {connector: simulation.sink}}

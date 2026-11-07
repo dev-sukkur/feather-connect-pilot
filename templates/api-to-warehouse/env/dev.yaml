@@ -1,0 +1,2 @@
+# dev runs on simulation stand-ins of the real connectors, with fixtures/ as data (B2).
+connections: {pricing_api: {connector: simulation.source}, warehouse: {connector: simulation.sink}}
