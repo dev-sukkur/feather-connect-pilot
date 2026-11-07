@@ -1,0 +1,24 @@
+# A Feather worker: it runs the tasks of the project's flows. A flow image is built FROM this one:
+#   FROM ghcr.io/<org>/feather-worker
+#   COPY --chown=feather:feather . /project
+# It runs as a non-root user and holds no secrets: the database URL and the connections' secrets come at run time.
+
+FROM python:3.13-slim AS build
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /bin/uv
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never UV_PROJECT_ENVIRONMENT=/opt/feather/venv
+WORKDIR /src
+COPY pyproject.toml uv.lock ./
+COPY packages packages
+COPY templates templates
+RUN uv sync --frozen --no-dev --all-packages --no-editable
+
+FROM python:3.13-slim
+RUN groupadd --system --gid 10001 feather && useradd --system --uid 10001 --gid feather --home-dir /home/feather --create-home feather
+COPY --from=build /opt/feather/venv /opt/feather/venv
+COPY --chown=feather:feather examples/demo /project
+ENV PATH=/opt/feather/venv/bin:$PATH PYTHONUNBUFFERED=1 FEATHER_PROJECT=/project FEATHER_ENV=dev
+USER feather
+WORKDIR /project
+# A worker has no port: it is healthy while its process runs, and the server's overview shows its heartbeat.
+ENTRYPOINT ["feather"]
+CMD ["worker"]

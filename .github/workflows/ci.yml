@@ -125,3 +125,25 @@ jobs:
         run: uv sync --all-extras
       - if: steps.changes.outputs.run == 'true'
         run: uv run pytest tests/chaos tests/perf tests/e2e/test_webhook_latency.py -s
+
+  # The images and the Compose stack: built for linux/amd64 and checked by tests/deploy, every night and on a pull
+  # request that touches deploy/ or the packages the images hold. Images are built here, never pushed.
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Decide whether the images changed
+        id: changes
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]             || ! git diff --quiet "${{ github.event.pull_request.base.sha }}" HEAD -- deploy packages templates examples uv.lock .dockerignore; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - if: steps.changes.outputs.run == 'true'
+        run: uv sync --all-extras
+      - if: steps.changes.outputs.run == 'true'
+        run: uv run pytest tests/deploy -q
