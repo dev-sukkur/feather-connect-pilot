@@ -355,3 +355,26 @@ def test_spec_dict_describes_the_flow_as_json():
         {"kind": "cron", "expr": "*/15 * * * *", "tz": "Asia/Kolkata"},
         {"kind": "manual"},
     ]
+
+
+def test_fail_on_record_error_is_refused_on_a_push_dataset():  # S17
+    events = fc.Dataset(
+        "events", source=memory.Source(), key="id", strategy=fc.strategy.push(), on_record_error="fail"
+    )
+    flow = fc.Flow("hooks", reads=events, deliver=[fc.to(memory.Sink("dst"))])
+    (problem,) = [p for p in flow.validate() if p.code == "push_cannot_fail"]
+    assert problem.severity == "error" and problem.path == "reads[0].on_record_error"
+
+
+def test_a_poller_refuses_a_complete_dataset_of_several_slices_at_load():  # S18
+    daily = fc.Dataset(
+        "daily",
+        source=memory.Source(),
+        key="id",
+        strategy=fc.strategy.replace(),
+        partition=fc.partition.by_day("day", tz="UTC"),
+    )
+    poller = fc.Flow("poll", reads=daily, deliver=[fc.to(memory.Sink("dst"))], triggers=[fc.every("30s")])
+    assert "poller_needs_one_slice" in codes(poller)
+    slow = fc.Flow("slow", reads=daily, deliver=[fc.to(memory.Sink("dst"))], triggers=[fc.every("15m")])
+    assert "poller_needs_one_slice" not in codes(slow)
