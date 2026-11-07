@@ -1,0 +1,16 @@
+# The simulators on this machine. The credentials are obviously fake files in secrets/, read relative to the
+# directory feather runs in: run from the repository root.
+connections:
+  zakya:
+    base_url: http://127.0.0.1:29100
+    token_url: http://127.0.0.1:29100/oauth/v2/token
+    retry_attempts: 4
+    auth:
+      client_id: ${secret:file:examples/zakya-demo/secrets/zakya-client-id.txt}
+      client_secret: ${secret:file:examples/zakya-demo/secrets/zakya-client-secret.txt}
+      refresh_token: ${secret:file:examples/zakya-demo/secrets/zakya-refresh-token.txt}
+  erp:
+    base_url: http://127.0.0.1:29101
+    retry_attempts: 4
+    auth:
+      token: ${secret:file:examples/zakya-demo/secrets/erp-token.txt}

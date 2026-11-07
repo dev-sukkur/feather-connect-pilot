@@ -25,3 +25,6 @@ htmlcov/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# The demo receiver's SQLite file
+examples/zakya-demo/.data/
