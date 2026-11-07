@@ -1569,6 +1569,22 @@ class _Schedules(ScheduleStore):
                 (self._db.tenant, flow, trigger_id, at),
             )
 
+    def advance_tick(self, flow: str, trigger_id: str, seen: datetime | None, at: datetime) -> bool:
+        with self._db.tx() as conn:
+            if seen is None:
+                done = conn.execute(
+                    """insert into feather.schedule (tenant_id, flow, trigger_id, last_tick) values (%s, %s, %s, %s)
+                       on conflict (tenant_id, flow, trigger_id) do nothing""",
+                    (self._db.tenant, flow, trigger_id, at),
+                )
+            else:
+                done = conn.execute(
+                    """update feather.schedule set last_tick = %s
+                       where tenant_id = %s and flow = %s and trigger_id = %s and last_tick = %s""",
+                    (at, self._db.tenant, flow, trigger_id, seen),
+                )
+        return done.rowcount == 1
+
 
 class _Overrides(OverrideStore):
     def __init__(self, db: _Db) -> None:

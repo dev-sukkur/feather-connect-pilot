@@ -1022,6 +1022,14 @@ class StoreContract(SpoolContract, ResponseStoreContract):
 
     # workers
 
+    def test_advance_tick_lets_one_of_two_leaders_fire(self, store: Store):  # Stage 2 M9
+        t1, t2 = T0 + timedelta(minutes=1), T0 + timedelta(minutes=2)
+        assert store.schedules.advance_tick("f", "t", None, T0) is True  # first seen
+        assert store.schedules.advance_tick("f", "t", None, T0) is False
+        assert store.schedules.advance_tick("f", "t", T0, t1) is True
+        assert store.schedules.advance_tick("f", "t", T0, t2) is False  # the other leader read T0 too
+        assert store.schedules.last_tick("f", "t") == t1
+
     def test_workers_heartbeat_and_list(self, store: Store, clock: FrozenClock):
         store.workers.heartbeat("w2", {"pool": "x"}, "sha2", 4)
         store.workers.heartbeat("w1", {}, "sha1", 8)

@@ -954,6 +954,13 @@ class _Schedules(ScheduleStore):
         with self._d.lock:
             self._d.ticks[(flow, trigger_id)] = at
 
+    def advance_tick(self, flow: str, trigger_id: str, seen: datetime | None, at: datetime) -> bool:
+        with self._d.lock:
+            if self._d.ticks.get((flow, trigger_id)) != seen:
+                return False
+            self._d.ticks[(flow, trigger_id)] = at
+            return True
+
 
 class _Overrides(OverrideStore):
     def __init__(self, data: _Data) -> None:

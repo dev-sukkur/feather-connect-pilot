@@ -905,6 +905,11 @@ class ScheduleStore(Protocol):
 
     def set_last_tick(self, flow: str, trigger_id: str, at: datetime) -> None: ...
 
+    def advance_tick(self, flow: str, trigger_id: str, seen: datetime | None, at: datetime) -> bool:
+        """Set the last tick to `at` only if it is still `seen` (None: never set), and say whether it was. Of two
+        schedulers that read the same tick, one wins and fires it (Stage 2 M9)."""
+        ...
+
 
 @dataclass(frozen=True)
 class PartitionRow:
