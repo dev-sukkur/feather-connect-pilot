@@ -139,7 +139,9 @@ sys.stdin.read()
 """
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="a job object is Windows only")
+@pytest.mark.skipif(
+    sys.platform not in ("win32", "linux"), reason="a job object on Windows, PR_SET_PDEATHSIG on Linux"
+)
 def test_helpers_die_with_a_feather_that_is_killed(tmp_path: Path):  # M10
     (tmp_path / "serve.py").write_text(SERVE, encoding="utf-8")
     (tmp_path / "orphan.py").write_text(ORPHAN, encoding="utf-8")
@@ -168,3 +170,27 @@ def test_helpers_die_with_a_feather_that_is_killed(tmp_path: Path):  # M10
     finally:
         if feather.poll() is None:
             feather.kill()
+
+
+LAUNCHER = """import subprocess, sys
+child = subprocess.Popen([sys.executable, "serve.py", sys.argv[1]])
+child.wait()
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a session and its process group are POSIX")
+def test_stopping_a_helper_stops_what_it_started(tmp_path: Path):
+    (tmp_path / "serve.py").write_text(SERVE, encoding="utf-8")
+    (tmp_path / "launch.py").write_text(LAUNCHER, encoding="utf-8")
+    port = free_port()
+    helpers = Helpers(tmp_path, lambda line: None)
+    helpers.start([DevProcess("web", ("python", "launch.py", str(port)), port)])
+    helpers.stop()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+        except OSError:
+            return
+        time.sleep(0.2)
+    pytest.fail(f"what the helper started still listens on port {port}")
