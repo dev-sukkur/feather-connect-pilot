@@ -5,7 +5,7 @@ import sys
 
 import typer
 
-from feather_cli.commands import dev, processes, validate
+from feather_cli.commands import describe, dev, processes, validate
 from feather_connect.logs import configure_logging
 
 app = typer.Typer(
@@ -24,6 +24,7 @@ def main() -> None:
 
 
 app.command()(validate.validate)
+app.add_typer(describe.describe_app, name="describe")
 app.add_typer(processes.server_app, name="server")
 app.command()(processes.worker)
 app.command()(dev.dev)
