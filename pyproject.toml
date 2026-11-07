@@ -23,6 +23,7 @@ dev = [
     "types-pyyaml",
     "httpx",
     "respx",
+    "moto[server]",
 ]
 
 [tool.ruff]

@@ -215,20 +215,23 @@ class SourceConformance(_Common):
 
 
 class SinkConformance(_Common):
-    """What every sink must do. `deletes_supported` is False for a sink that turns deletes down by design."""
+    """What every sink must do. `deletes_supported` is False for a sink that turns deletes down by design, and
+    `default_mode` the mode of the tests that name none, for a sink that does not upsert."""
 
     restart_safe: ClassVar[bool] = True
     deletes_supported: ClassVar[bool] = True
+    default_mode: ClassVar[RouteMode] = "upsert"
 
     def batch(
         self,
         records: list[ApplyRecord],
         *,
-        mode: RouteMode = "upsert",
+        mode: RouteMode | None = None,
         version: str = "v1",
         partition: str = "*",
         key: str | None = None,
     ) -> ApplyBatch:
+        mode = mode or self.default_mode
         idempotency_key = key or f"conformance:{version}:{mode}:{partition}"
         return ApplyBatch("conformance", version, 0, partition, mode, records, idempotency_key, True, True)
 
