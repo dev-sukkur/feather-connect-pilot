@@ -98,7 +98,7 @@ def test_flow_detail_has_effective_config_with_layers_and_no_secret(world: World
     assert by_path["connections.warehouse.auth.token"].value == "***"
     assert SECRET not in repr(detail)
     assert detail.summary.name == "orders" and detail.summary.owner == "ops"
-    assert detail.summary.triggers == ("every 0:15:00",)
+    assert detail.summary.triggers == ("every 15 min",)
     assert [r.name for r in detail.summary.routes] == ["warehouse", "gofrugal"]
     assert [r.status for r in detail.recent_runs] == ["succeeded"]
     with pytest.raises(KeyError):

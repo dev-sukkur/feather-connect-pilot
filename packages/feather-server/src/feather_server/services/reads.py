@@ -29,6 +29,7 @@ from feather_connect.storage.port import (
     Version,
     WorkerRow,
 )
+from feather_server.services.text import span
 
 if TYPE_CHECKING:
     from feather_server.app import AppState
@@ -244,7 +245,7 @@ def _describe(trigger: Trigger) -> str:
         case Cron(expr, tz):
             return f"cron {expr} ({tz})"
         case Every(interval):
-            return f"every {interval}"
+            return f"every {span(interval)}"  # 15 min, not 0:15:00 (Stage 2 M13)
         case Manual():
             return "manual"
         case OnEvent(dataset):

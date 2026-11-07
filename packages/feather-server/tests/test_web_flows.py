@@ -31,7 +31,7 @@ def test_flows_list_shows_status_last_run_freshness_owner_tags_sha(client: TestC
     assert "Succeeded" in html and "just now" in html  # last run, and how fresh the data is
     assert ">ops<" in html and "retail" in html  # owner and tags
     assert world.state.project.code_sha[:8] in html
-    assert "every 0:15:00" in html  # what starts it
+    assert "every 15 min" in html  # what starts it
 
 
 def test_filters_live_in_the_query_string(client: TestClient, world: World) -> None:

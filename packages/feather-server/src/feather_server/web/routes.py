@@ -5,7 +5,7 @@ decides anything the service layer does not.
 import json
 import re
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote, urlencode
@@ -28,6 +28,7 @@ from feather_server.services import actions as action_limits
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.previews import Preview, PreviewError, PreviewExpired, PreviewInvalid
 from feather_server.services.reads import FlowSummary, Reads
+from feather_server.services.text import span
 from feather_server.web.charts import meter, sparkline
 from feather_server.web.flow_graph import flow_graph
 
@@ -56,15 +57,6 @@ def ago(moment: datetime | None, now: datetime) -> str:
         if seconds >= size:
             return f"{seconds // size} {unit} ago"
     return "just now"
-
-
-def span(duration: timedelta | int) -> str:
-    """A length of time (or a number of seconds) in words: `15 min`."""
-    seconds = int(duration.total_seconds() if isinstance(duration, timedelta) else duration)
-    for size, unit in ((86400, "d"), (3600, "h"), (60, "min")):
-        if seconds >= size and seconds % size == 0:
-            return f"{seconds // size} {unit}"
-    return f"{seconds} s" if seconds < 60 else f"{seconds // 60} min {seconds % 60} s"
 
 
 def stamp(moment: datetime) -> str:
