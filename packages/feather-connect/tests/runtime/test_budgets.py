@@ -363,3 +363,37 @@ def test_reads_competing_for_a_budget_only_wait():  # F12: being told to wait is
     run = world.runtime.start_run("f", partitions=both)
     world.engine.run_until_idle()
     assert world.store.runs.get_run(run).status == "succeeded"
+
+
+class ContendedSource(Source):
+    """Each of the first `contended` reads takes 3 calls and is then told to wait a second: other reads got there
+    first. The read fits the budget's short window easily."""
+
+    def __init__(self, connection: str, rows: list[dict[str, Any]], contended: int) -> None:
+        super().__init__(connection, rows)
+        self.contended, self.reads = contended, 0
+
+    def read(self, ctx: Context, req: ReadRequest) -> Iterator[list[dict[str, Any]]]:
+        self.reads += 1
+        if self.reads <= self.contended:
+            raise BudgetDeferred(timedelta(seconds=1), "z", taken=3)
+        yield from super().read(ctx, req)
+
+
+def test_waits_under_contention_stop_doubling_at_the_short_window_that_holds_the_read():  # S23
+    source = ContendedSource("src", ROWS, contended=12)
+    world = World(
+        BudgetSpec("z", parse_limits(["10/minute", "1000/day"])),
+        [
+            fc.Flow(
+                "f",
+                reads=fc.Dataset("d", source=source, key="id", strategy=fc.strategy.replace()),
+                deliver=[fc.to(Sink("dst"), name="r")],
+            )
+        ],
+        {"src": "z"},
+    )
+    run = world.runtime.start_run("f")
+    world.engine.run_until_idle()
+    assert world.store.runs.get_run(run).status == "succeeded"  # it never gave up while it fits
+    assert world.clock.now() - T0 <= timedelta(minutes=12)  # each wait at most the minute window, not a day
