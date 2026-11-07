@@ -495,6 +495,11 @@ class Actions:
             ),
         )
 
+    @staticmethod
+    def tokens_action(token: str) -> str:
+        """The action a confirmation token says it confirms, before it is checked."""
+        return PreviewTokens.action_of(token)
+
     def apply_deliveries(self, actor: Actor, token: str, *, reason: str | None = None) -> list[str]:
         """Do the previewed retry, skip or replay. Returns `route:version` for each delivery it moved.
 

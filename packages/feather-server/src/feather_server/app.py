@@ -21,7 +21,7 @@ from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import at_head, migrate
 from feather_connect.storage.spool import Spool
 from feather_connect.worker import config_of
-from feather_server import auth, ingress, web
+from feather_server import api, auth, ingress, web
 from feather_server.loops import LoopRunner, default_loops
 from feather_server.services.actions import Actions
 from feather_server.services.reads import Reads
@@ -132,7 +132,7 @@ def create_app(
                 runner.stop()
             state.close()
 
-    app = FastAPI(title="Feather Connect", lifespan=lifespan)
+    app = FastAPI(title="Feather Connect", version="1", lifespan=lifespan)
     app.state.feather = state
     if not state.settings.secret_key:
         raise ValueError(
@@ -142,6 +142,7 @@ def create_app(
     app.state.actions = Actions(state)
     ingress.install(app, state)  # first, as routes are tried in order, and this one takes bursts
     auth.install(app, state)
+    api.install(app)
     web.install(app, state)
 
     @app.get("/healthz")

@@ -361,6 +361,17 @@ class Reads:
             )
         return found
 
+    def budgets(self) -> list[BudgetUse]:
+        """Every budget of the project with its use now, by window."""
+        return self._budgets()
+
+    def budget(self, name: str) -> BudgetUse:
+        """One budget's use now. Raises `KeyError` for a budget the project doesn't define."""
+        if name not in self._state.project.budgets:
+            raise KeyError(f"no budget named {name!r}")
+        found = next((b for b in self._budgets() if b.name == name), None)
+        return found or BudgetUse(name, ())
+
     def _kept(self) -> tuple[KeptDay, ...]:
         """Why old days are being kept, worked out here because retention's own report is only on the replica that
         leads it. Two requests at once may both work it out, which does no harm."""
