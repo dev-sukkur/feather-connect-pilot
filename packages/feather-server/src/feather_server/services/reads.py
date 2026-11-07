@@ -299,13 +299,9 @@ class Reads:
         )
 
     def _freshness(self, flow: Flow) -> datetime | None:
-        sealed = [
-            v.sealed_at
-            for d in flow.datasets
-            for v in self._store.versions.list_versions(d.name, limit=1)
-            if v.sealed_at is not None
-        ]
-        return max(sealed, default=None)
+        # The newest sealed, not the newest staged: a staged version must not hide them (Stage 2 M8).
+        sealed = [self._store.versions.last_sealed_at(d.name) for d in flow.datasets]
+        return max((at for at in sealed if at is not None), default=None)
 
     def flows(self) -> list[FlowSummary]:
         return [self._summary(flow) for flow in self._rt.flows()]
@@ -344,9 +340,7 @@ class Reads:
             if every is None or not flow.enabled or self._rt.is_flow_paused(flow.name):
                 continue
             for dataset in flow.datasets:
-                newest = self._store.versions.list_versions(dataset.name, limit=1)
-                sealed = [v for v in newest if v.sealed_at is not None]
-                last = sealed[0].sealed_at if sealed else None
+                last = self._store.versions.last_sealed_at(dataset.name)
                 if last is None or now - last > every * STALE_AFTER_RUNS:
                     stale.append(StaleDataset(dataset.name, flow.name, last, every))
         return stale
@@ -391,7 +385,7 @@ class Reads:
         return Overview(
             counts,
             counts.get("failed", 0),
-            len(self._store.quarantine.list_open()),
+            self._store.quarantine.count_open(),  # a count, not every open row each poll (Stage 2 M7)
             len(runs.list_runs(status="failed", limit=_FAILED_RUNS_SHOWN)),
             len(runs.list_runs(status="running", limit=_FAILED_RUNS_SHOWN)),
             tuple(f"{o.target}" for o in self._store.overrides.list_all() if o.key == "paused"),
@@ -559,13 +553,20 @@ class Reads:
             tuple(self._store.responses.of_delivery(route, version_id, _RESPONSES_SHOWN)),
         )
 
-    def quarantine(self, route: str | None = None) -> list[QuarantineRow]:
-        return self._store.quarantine.list_open(route)
+    def quarantine(
+        self, route: str | None = None, *, limit: int | None = None, offset: int = 0
+    ) -> list[QuarantineRow]:
+        return self._store.quarantine.list_open(route, limit=limit, offset=offset)
 
-    def quarantine_entries(self, route: str | None = None) -> list[QuarantineEntry]:
-        """The open quarantine rows with their dataset and partition."""
+    def quarantine_count(self, route: str | None = None) -> int:
+        return self._store.quarantine.count_open(route)
+
+    def quarantine_entries(
+        self, route: str | None = None, *, limit: int | None = None, offset: int = 0
+    ) -> list[QuarantineEntry]:
+        """The open quarantine rows with their dataset and partition: `limit` of them from `offset` on, or all."""
         found: list[QuarantineEntry] = []
-        for row in self.quarantine(route):
+        for row in self.quarantine(route, limit=limit, offset=offset):
             dataset, partition = row.dataset, row.partition
             if dataset is None and row.version_id is not None:
                 try:

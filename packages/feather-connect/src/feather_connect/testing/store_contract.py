@@ -940,6 +940,22 @@ class StoreContract(SpoolContract, ResponseStoreContract):
         store.quarantine.add(None, "v1", "k", "bad again", dataset="d", partition="p")  # reopened
         assert store.quarantine.open_extraction_keys("d", ["k"]) == {"k"}
 
+    def test_quarantine_pages_and_counts_the_open_entries(self, store: Store):  # Stage 2 M7
+        for n in range(5):
+            store.quarantine.add("a" if n % 2 else "b", "v1", f"k{n}", "bad")
+        assert store.quarantine.count_open() == 5 and store.quarantine.count_open("a") == 2
+        first = [q.key for q in store.quarantine.list_open(limit=2)]
+        rest = [q.key for q in store.quarantine.list_open(limit=10, offset=2)]
+        assert first == ["k0", "k1"] and rest == ["k2", "k3", "k4"]
+        assert [q.key for q in store.quarantine.list_open("b", limit=1, offset=1)] == ["k2"]
+
+    def test_the_last_sealed_time_of_a_dataset_ignores_a_staged_version(self, store: Store):  # Stage 2 M8
+        assert store.versions.last_sealed_at("d") is None
+        seal(store, "v1", ["a"], part="p")
+        sealed = store.versions.get("v1").sealed_at
+        store.versions.stage(draft("v2", part="q"))  # staged later, so the newest by stage order
+        assert sealed is not None and store.versions.last_sealed_at("d") == sealed
+
     def test_quarantine_lists_by_route_and_add_is_idempotent(self, store: Store):
         store.quarantine.add("a", "v1", "k", "first")
         store.quarantine.add("a", "v1", "k", "second")

@@ -665,6 +665,16 @@ class _Versions(VersionStore):
             ).fetchall()
         return [v for v in map(_version, rows) if v.watermark >= since]
 
+    def last_sealed_at(self, dataset: str) -> datetime | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select sealed_at as at from feather.version
+                   where tenant_id = %s and dataset = %s and status = 'sealed'
+                   order by stage_seq desc limit 1""",  # version_dataset_idx, past the few staged at its top
+                (self._db.tenant, dataset),
+            ).fetchone()
+        return None if row is None else row["at"]
+
     def latest_watermark(self, dataset: str) -> Any | None:
         with self._db.tx() as conn:
             rows = conn.execute(
@@ -1162,13 +1172,24 @@ class _Quarantine(QuarantineStore):
             )
         return closed.rowcount
 
-    def list_open(self, route: str | None = None) -> list[QuarantineRow]:
+    def count_open(self, route: str | None = None) -> int:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select count(*) as n from feather.quarantine
+                   where tenant_id = %s and status = 'open' and (%s::text is null or route = %s)""",
+                (self._db.tenant, route, route),
+            ).fetchone()
+        return 0 if row is None else int(row["n"])
+
+    def list_open(
+        self, route: str | None = None, *, limit: int | None = None, offset: int = 0
+    ) -> list[QuarantineRow]:
         with self._db.tx() as conn:
             rows = conn.execute(
                 """select * from feather.quarantine
                    where tenant_id = %s and status = 'open' and (%s::text is null or route = %s)
-                   order by quarantine_id""",
-                (self._db.tenant, route, route),
+                   order by quarantine_id limit %s offset %s""",
+                (self._db.tenant, route, route, limit, offset),
             ).fetchall()
         return [
             QuarantineRow(

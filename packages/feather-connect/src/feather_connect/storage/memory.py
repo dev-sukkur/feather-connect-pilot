@@ -392,6 +392,11 @@ class _Versions(VersionStore):
                 if v.watermark is not None and v.watermark >= since
             ]
 
+    def last_sealed_at(self, dataset: str) -> datetime | None:
+        with self._d.lock:
+            sealed = [v.sealed_at for v in self._d.versions.values() if v.dataset == dataset and v.sealed_at]
+            return sealed[-1] if sealed else None  # by staging, as the versions are kept in that order
+
     def latest_watermark(self, dataset: str) -> Any | None:
         with self._d.lock:
             marks = [v.watermark for v in self._sealed(dataset, None) if v.watermark is not None]
@@ -735,13 +740,19 @@ class _Quarantine(QuarantineStore):
                     closed += 1
             return closed
 
-    def list_open(self, route: str | None = None) -> list[QuarantineRow]:
+    def list_open(
+        self, route: str | None = None, *, limit: int | None = None, offset: int = 0
+    ) -> list[QuarantineRow]:
         with self._d.lock:
-            return [
+            found = [
                 r
                 for r in self._d.quarantine.values()
                 if r.status == "open" and (route is None or r.route == route)
             ]
+        return found[offset:] if limit is None else found[offset : offset + limit]
+
+    def count_open(self, route: str | None = None) -> int:
+        return len(self.list_open(route))
 
 
 class _Responses(ResponseStore):

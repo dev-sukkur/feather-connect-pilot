@@ -378,3 +378,20 @@ def test_a_non_ascii_confirmation_token_is_refused(client, csrf):  # M3
         "/deliveries/confirm", data={"csrf_token": csrf(), "token": "abc.é", "action": "retry"}
     )
     assert answer.status_code != 500
+
+
+def test_quarantine_pages_through_every_entry(client: TestClient, world: World, monkeypatch) -> None:  # M7
+    from feather_server.web import routes
+
+    monkeypatch.setattr(routes, "_QUARANTINE_SHOWN", 2)
+    world.run([day(17)])
+    version = world.store.versions.latest_sealed("orders", day(17))
+    assert version
+    for key in ("k1", "k2", "k3"):
+        world.store.quarantine.add("warehouse", version.version_id, key, "bad")
+    first = client.get("/quarantine").text
+    assert "k1" in first and "k3" not in first and "1 to 2 of 3" in first
+    link = re.search(r'href="(/quarantine\?[^"]*offset=2[^"]*)"', first)
+    assert link, first
+    second = client.get(htmllib.unescape(link.group(1))).text
+    assert "k3" in second and "k1" not in second

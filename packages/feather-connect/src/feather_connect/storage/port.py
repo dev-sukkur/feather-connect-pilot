@@ -349,6 +349,10 @@ class VersionStore(Protocol):
         """Sealed versions whose stored watermark is `>= since`, newest first. A None watermark never matches."""
         ...
 
+    def last_sealed_at(self, dataset: str) -> datetime | None:
+        """When the dataset's newest sealed version, by staging, was sealed, in any partition; None if none is."""
+        ...
+
     def latest_watermark(self, dataset: str) -> Any | None:
         """The greatest watermark of the dataset's sealed versions."""
         ...
@@ -526,7 +530,15 @@ class QuarantineStore(Protocol):
         """
         ...
 
-    def list_open(self, route: str | None = None) -> list[QuarantineRow]: ...
+    def list_open(
+        self, route: str | None = None, *, limit: int | None = None, offset: int = 0
+    ) -> list[QuarantineRow]:
+        """The open entries, oldest first: `limit` of them from `offset` on, or all."""
+        ...
+
+    def count_open(self, route: str | None = None) -> int:
+        """How many entries are open, without reading them."""
+        ...
 
 
 @dataclass(frozen=True)

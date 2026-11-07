@@ -11,7 +11,7 @@
 </form>
 
 {% if entries %}
-{% if total > entries | length %}<p class="notice notice-warn" role="status">Showing the first {{ entries | length }} of {{ total }} entries. Filter by route to see the rest.</p>{% endif %}
+{% if total > entries | length %}<p class="muted" role="status">Entries {{ first }} to {{ last }} of {{ total }}.</p>{% endif %}
 <div class="table-wrap"><table>
   <caption class="sr-only">Open quarantine entries</caption>
   <thead><tr><th scope="col">Record</th><th scope="col">Route</th><th scope="col">Partition</th><th scope="col">Why</th><th scope="col">Dismiss</th></tr></thead>
@@ -40,6 +40,7 @@
   {% endfor %}
   </tbody>
 </table></div>
+{% if previous_href or next_href %}<nav class="pager" aria-label="Quarantine pages">{% if previous_href %}<a href="{{ previous_href }}">Previous entries</a>{% endif %}{% if next_href %} <a href="{{ next_href }}">Next entries</a>{% endif %}</nav>{% endif %}
 {% else %}
 <p class="empty"><span class="icon" aria-hidden="true">✓</span> No records are in quarantine{% if route %} for {{ route }}{% endif %}.</p>
 {% endif %}

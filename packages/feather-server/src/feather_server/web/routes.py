@@ -939,7 +939,12 @@ def _quarantine_page(
     request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
 ) -> HTMLResponse:
     route = request.query_params.get("route") or None
-    entries = reads(request).quarantine_entries(route)
+    raw_offset = request.query_params.get("offset", "0")
+    offset = int(raw_offset) if raw_offset.isascii() and raw_offset.isdigit() else 0
+    entries = reads(request).quarantine_entries(route, limit=_QUARANTINE_SHOWN, offset=offset)
+    total = reads(request).quarantine_count(route)  # a page at a time, and a count (Stage 2 M7)
+    after = offset + len(entries)
+    query = {"route": route} if route else {}
     if notice is None and request.query_params.get("dismissed"):
         notice = ("ok", "The entry is dismissed.")
     return render(
@@ -948,8 +953,16 @@ def _quarantine_page(
         status=status,
         title="Quarantine",
         actor=actor,
-        entries=entries[:_QUARANTINE_SHOWN],
-        total=len(entries),
+        entries=entries,
+        total=total,
+        first=offset + 1,
+        last=after,
+        next_href=f"/quarantine?{urlencode({**query, 'offset': after})}" if after < total else None,
+        previous_href=(
+            f"/quarantine?{urlencode({**query, 'offset': max(0, offset - _QUARANTINE_SHOWN)})}"
+            if offset
+            else None
+        ),
         route=route or "",
         notice=notice,
     )
