@@ -30,7 +30,10 @@ DEMO = ROOT / "examples" / "demo"
 DDL = (DEMO / "sims" / "demo.sql").read_text(encoding="utf-8")
 FIXTURE = json.loads((DEMO / "fixtures" / "orders.json").read_text(encoding="utf-8"))
 EXPECTED = {row["order_id"] for row in FIXTURE}
-SETTLE = 240  # a run, its three deliveries, and on a down route its retries
+SETTLE = 240  # a run and its three deliveries
+GIVING_UP = (
+    480  # a delivery's 6 attempts, 10 s doubling to 160 s with jitter: up to 310 s of waits (RetryPolicy)
+)
 
 
 def wait_until(check: Callable[[], object], timeout: float, what: str) -> None:
@@ -118,10 +121,13 @@ class Demo:
             base_url=f"{stack.url}/api/v1", headers={"Authorization": f"Bearer {token}"}, timeout=30
         )
 
-    def run_and_wait(self) -> str:
+    def start_run(self) -> str:
         answer = self.api.post("/flows/orders:run")
         assert answer.status_code == 202, answer.text
-        run_id = answer.json()["run_id"]
+        return answer.json()["run_id"]
+
+    def run_and_wait(self) -> str:
+        run_id = self.start_run()
         wait_until(
             lambda: self.stack.store.runs.get_run(run_id).status in ("succeeded", "failed"), SETTLE, "the run"
         )
@@ -161,9 +167,12 @@ def test_demo_fans_out_to_postgres_duckdb_and_http(running: Demo, http_echo: Ech
 
 def test_a_down_route_does_not_hold_the_others_and_catches_up(running: Demo, http_echo: Echo):  # FR-B1, H6
     http_echo.go_down()
-    running.run_and_wait()
-    wait_until(lambda: running.deliveries("erp", "failed"), SETTLE, "the ERP's delivery to fail")
-    assert set(running.pg_rows()) == set(running.duck_rows()) == EXPECTED
+    running.start_run()  # it ends only once the ERP's delivery has given up
+    wait_until(
+        lambda: set(running.pg_rows()) == set(running.duck_rows()) == EXPECTED, SETTLE, "the other two routes"
+    )
+    assert http_echo.received_keys() == set()  # they did not wait for the ERP
+    wait_until(lambda: running.deliveries("erp", "failed"), GIVING_UP, "the ERP's delivery to fail")
     assert http_echo.received_keys() == set()
 
     http_echo.come_up()

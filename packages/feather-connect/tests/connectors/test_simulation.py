@@ -85,6 +85,18 @@ def test_fixture_file_is_read(tmp_path: Path) -> None:
         sim.Source(fixture=not_a_list)
 
 
+def test_a_fixture_that_changes_is_read_again(tmp_path: Path) -> None:
+    fixture = tmp_path / "rows.json"
+    fixture.write_text(json.dumps([{"id": 1, "v": "a"}]), encoding="utf-8")
+    s = sim.Source(fixture=fixture)
+    assert read_all(s) == [{"id": 1, "v": "a"}]
+    fixture.write_text(json.dumps([{"id": 1, "v": "changed"}, {"id": 2, "v": "new"}]), encoding="utf-8")
+    assert read_all(s) == [{"id": 1, "v": "changed"}, {"id": 2, "v": "new"}]
+    s.load([{"id": 9}])  # rows a test loads stay, whatever the file does
+    fixture.write_text(json.dumps([{"id": 3}]), encoding="utf-8")
+    assert read_all(s) == [{"id": 9}]
+
+
 def test_duplicates_fault_repeats_rows() -> None:
     rows = read_all(source(sim.Faults(duplicate=1.0)))
     assert len(rows) == 40
