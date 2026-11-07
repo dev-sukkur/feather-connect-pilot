@@ -4,6 +4,7 @@ their data over a restart, scale workers, and hold no secret. They need Docker a
     uv run pytest tests/deploy -q
 
 They run nightly and on changes to deploy/. The stack is its own Compose project on port 29000.
+The run removes the images it built; FEATHER_COMPOSE_KEEP_IMAGES=1 keeps them.
 """
 
 import json
@@ -111,6 +112,8 @@ def compose() -> Iterator[Stack]:
         yield stack
     finally:
         stack.compose("down", "--volumes", "--remove-orphans", check=False)
+        if os.environ.get("FEATHER_COMPOSE_KEEP_IMAGES") != "1":  # the images are 700 MB each; this run built them
+            subprocess.run(["docker", "image", "rm", *IMAGES], capture_output=True, check=False)
 
 
 def test_compose_refuses_to_start_without_the_secret_key() -> None:
