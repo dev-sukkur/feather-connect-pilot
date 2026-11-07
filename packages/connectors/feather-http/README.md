@@ -7,6 +7,8 @@ HTTP connectors for Feather Connect.
   summaries and serve each record on its own.
 - `http.Call`: a sink that sends one request per record, with an `Idempotency-Key`, and keeps fields of each
   response.
+- `graphql.Source`: a source that walks a GraphQL cursor connection (`edges { node }` or `nodes`, and `pageInfo`).
+- `graphql.Mutation`: a sink that sends a mutation per record and rejects a record its `userErrors` turn down.
 
 Both share Feather's HTTP client (`feather_connect.runtime.http`): API-key, basic, bearer and OAuth2 auth (client
 credentials and refresh token, the token cached and refreshed once on a 401), retries of 429, 5xx and timeouts
@@ -88,3 +90,48 @@ delivery's page on the dashboard shows per record. Deletes are rejected unless `
 Each list call and each detail call takes one unit from the connection's budget (`cost_key` and
 `detail_cost_key` name them in the spec's `cost`), retries included, and so does each OAuth2 token request. A wait of under a minute is slept off;
 a longer one defers the task durably.
+
+## GraphQL
+
+`graphql.Source` posts `query` with `$first` and `$after` and walks the connection at `connection_path` under
+`data`, saving each `endCursor` as the checkpoint. For `by_stamp`, `stamp_variable` takes the watermark. Every answer's
+`errors` array is checked, even with a 200 and partial `data`: a rate limit (`THROTTLED`, `RATE_LIMITED`) is
+transient, anything else fails the read. `graphql.Mutation` sends `mutation` with `variables(record)`, a delete
+included, and an `Idempotency-Key`; a payload's `userErrors` reject that record.
+
+```python
+from feather_connect.connectors import graphql
+
+PRODUCTS = """query Products($first: Int!, $after: String, $since: String) {
+  products(first: $first, after: $after, query: $since) {
+    edges { node { id title updatedAt } } pageInfo { hasNextPage endCursor } }
+}"""
+SET_PRICE = """mutation SetPrice($id: ID!, $price: String!) {
+  productUpdate(input: {id: $id, price: $price}) { product { id } userErrors { field message } }
+}"""
+
+products = fc.Dataset(
+    "products",
+    source=graphql.Source("shop", query=PRODUCTS, connection_path="products", stamp_variable="since"),
+    key="id",
+    strategy=fc.strategy.by_stamp("updatedAt"),
+)
+
+products_to_shop = fc.Flow(
+    "prices-to-shop",
+    reads=products,
+    deliver=[
+        fc.to(
+            graphql.Mutation(
+                "shop",
+                mutation=SET_PRICE,
+                variables=lambda record: {
+                    "id": record.key,
+                    "price": str((record.payload or {}).get("price")),
+                },
+            )
+        )
+    ],
+    triggers=[fc.every("15m")],
+)
+```

@@ -10,6 +10,8 @@ dependencies = [
 ]
 
 [project.entry-points."feather_connect.connectors"]
+"graphql.mutation" = "feather_connect.connectors.graphql:Mutation"
+"graphql.source" = "feather_connect.connectors.graphql:Source"
 "http.call" = "feather_connect.connectors.http:Call"
 "http.rest" = "feather_connect.connectors.http:Rest"
 
