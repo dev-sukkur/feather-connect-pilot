@@ -20,6 +20,13 @@ postgres = [
     "psycopg[binary,pool]",
 ]
 
+# The connector registry finds connectors by these; each name is the connector's `spec.name`.
+[project.entry-points."feather_connect.connectors"]
+"memory.sink" = "feather_connect.connectors.memory:Sink"
+"memory.source" = "feather_connect.connectors.memory:Source"
+"simulation.sink" = "feather_connect.connectors.simulation:Sink"
+"simulation.source" = "feather_connect.connectors.simulation:Source"
+
 [build-system]
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"

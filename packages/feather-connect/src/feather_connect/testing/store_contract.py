@@ -917,6 +917,13 @@ class StoreContract(SpoolContract, ResponseStoreContract):
         assert remaining == {("a", "v3", "k"), ("a", "v1", "other"), ("b", "v1", "k"), (None, None, "k")}
         assert store.quarantine.supersede("a", "k", seq["v3"] or 0) == 0  # already closed
 
+    def test_a_quarantined_record_keeps_its_payload_or_raw_text(self, store: Store):  # ruling 11, B5
+        store.quarantine.add("a", "v1", "k", "HTTP 422", payload={"total": Decimal("9.50"), "lines": [1]})
+        store.quarantine.add(None, "v1", "<missing>", "short row", dataset="d", partition="p", raw="a;b")
+        by_key = {q.key: q for q in store.quarantine.list_open()}
+        assert by_key["k"].payload == {"total": Decimal("9.50"), "lines": [1]} and by_key["k"].raw is None
+        assert by_key["<missing>"].raw == "a;b" and by_key["<missing>"].payload is None
+
     def test_extraction_entries_are_found_and_closed_by_dataset(self, store: Store):
         store.quarantine.add(None, "v1", "k", "bad", dataset="d", partition="p")
         store.quarantine.add(None, None, "m", "no partition", dataset="d")

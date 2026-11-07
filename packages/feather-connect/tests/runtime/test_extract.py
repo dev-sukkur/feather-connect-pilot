@@ -668,3 +668,30 @@ def test_a_dry_run_of_an_unchanged_source_finds_nothing_and_leaves_the_quarantin
     found = run_extract(ds, "verify", "_", routes=(), stage_only=False, deps=DEPS, dry_run=True)
     assert (found.upserts, found.deletes) == (0, 0)
     assert DEPS.store.quarantine.list_open() == []
+
+
+class _WithUnreadable(Source):
+    """A source whose read holds rows it could not parse, as a CSV source's short rows (B5)."""
+
+    def read(self, ctx: Any, req: Any) -> Any:
+        yield [{"id": 1}, fc.Unreadable("1;2", "short row: 2 fields of 3"), {"id": 2}]
+        yield [fc.Unreadable("x;y", "short row: 2 fields of 3")]
+
+
+def test_an_unreadable_row_is_quarantined_with_its_raw_text_and_the_rest_proceed():  # B5, ruling 11
+    v = run_extract(
+        dataset(fc.strategy.replace(), source=_WithUnreadable()),
+        "r1",
+        "_",
+        routes=route_specs(("a",)),
+        stage_only=False,
+        deps=DEPS,
+    )[0]
+    assert sorted(r.key for r in recs(v)) == ["1", "2"]
+    rows = sorted(DEPS.store.quarantine.list_open(), key=lambda q: q.raw or "")
+    assert [(q.raw, q.route, q.dataset, q.version_id) for q in rows] == [
+        ("1;2", None, "d", v.version_id),
+        ("x;y", None, "d", v.version_id),
+    ]
+    assert all(q.key.startswith("<unreadable ") and "short row" in q.error for q in rows)
+    assert rows[0].key != rows[1].key  # each keeps its own raw text

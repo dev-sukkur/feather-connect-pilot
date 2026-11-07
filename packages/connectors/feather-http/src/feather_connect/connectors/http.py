@@ -371,6 +371,8 @@ class Rest(_HttpConnector, connector.Source):
         config=HttpConfig,
         strategies=frozenset({"by_stamp", "replace", "snapshot_diff"}),
         cost={"default": 1, "detail": 1},
+        resumable=True,
+        maturity="beta",
     )
 
     def __init__(
@@ -641,6 +643,7 @@ class Call(_HttpConnector, connector.Sink):
         config=HttpConfig,
         modes=frozenset({"upsert", "append"}),
         cost={"default": 1},
+        maturity="beta",
     )
 
     def __init__(

@@ -15,6 +15,7 @@ from feather_connect.core.connector import (
     Secret,
     Sink,
     Source,
+    Unreadable,
 )
 from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
@@ -42,6 +43,7 @@ __all__ = [
     "Sink",
     "Source",
     "TransientError",
+    "Unreadable",
     "__version__",
     "batch_map",
     "cron",
