@@ -1173,29 +1173,48 @@ class _Responses(ResponseStore):
     def record(self, rows: Sequence[ResponseRow]) -> None:
         if not rows:
             return
-        now = self._db.clock.now()
         with self._db.tx() as conn, conn.cursor() as cursor:
-            cursor.executemany(
-                """insert into feather.delivery_response
-                       (tenant_id, route, version_id, chunk_no, key, status, fields, sent, at)
-                   values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                   on conflict (tenant_id, route, version_id, chunk_no, key) do update set
-                       status = excluded.status, fields = excluded.fields, sent = excluded.sent, at = excluded.at""",
-                [
-                    (
-                        self._db.tenant,
-                        row.route,
-                        row.version_id,
-                        row.chunk_no,
-                        row.key,
-                        row.status,
-                        _json(dict(row.fields)),
-                        None if row.sent is None else _json(dict(row.sent)),
-                        now,
-                    )
-                    for row in rows
-                ],
+            self._upsert(cursor, rows)
+
+    def replace_chunk(self, route: str, version_id: str, chunk_no: int, rows: Sequence[ResponseRow]) -> None:
+        with self._db.tx() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                """delete from feather.delivery_response
+                   where tenant_id = %s and route = %s and version_id = %s and chunk_no = %s
+                     and not (key = any(%s::text[]))""",
+                (self._db.tenant, route, version_id, chunk_no, [row.key for row in rows]),
             )
+            if rows:
+                self._upsert(cursor, rows)
+
+    def _upsert(self, cursor: psycopg.Cursor[Row], rows: Sequence[ResponseRow]) -> None:
+        """A row with no fields keeps the fields of the row before it (I3)."""
+        now = self._db.clock.now()
+        cursor.executemany(
+            """insert into feather.delivery_response
+                   (tenant_id, route, version_id, chunk_no, key, status, fields, sent, at)
+               values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+               on conflict (tenant_id, route, version_id, chunk_no, key) do update set
+                   status = excluded.status,
+                   fields = case when excluded.fields = '{}'::jsonb then delivery_response.fields
+                                 else excluded.fields end,
+                   sent = excluded.sent,
+                   at = excluded.at""",
+            [
+                (
+                    self._db.tenant,
+                    row.route,
+                    row.version_id,
+                    row.chunk_no,
+                    row.key,
+                    row.status,
+                    _json(dict(row.fields)),
+                    None if row.sent is None else _json(dict(row.sent)),
+                    now,
+                )
+                for row in rows
+            ],
+        )
 
     def of_delivery(self, route: str, version_id: str, limit: int = 1000) -> list[ResponseRow]:
         with self._db.tx() as conn:

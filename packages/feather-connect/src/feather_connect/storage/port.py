@@ -540,7 +540,13 @@ class ResponseStore(Protocol):
 
     def record(self, rows: Sequence[ResponseRow]) -> None:
         """Keep the rows, stamped with the store's time. A row for the same route, version, chunk and key replaces the
-        one before, so a chunk sent again keeps its latest answers."""
+        one before, so a chunk sent again keeps its latest answers, except that a row with no fields keeps the fields
+        of the one before (a resend answered "applied already" often says nothing more)."""
+        ...
+
+    def replace_chunk(self, route: str, version_id: str, chunk_no: int, rows: Sequence[ResponseRow]) -> None:
+        """Keep the rows of a chunk that was sent in full, as `record` does, and drop the chunk's rows of records
+        that are not among them, so that the chunk shows the answers of its latest send only."""
         ...
 
     def of_delivery(self, route: str, version_id: str, limit: int = 1000) -> list[ResponseRow]:

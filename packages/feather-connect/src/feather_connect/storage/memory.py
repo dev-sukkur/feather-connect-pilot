@@ -731,10 +731,19 @@ class _Responses(ResponseStore):
         with self._d.lock:
             now = self._d.clock.now()
             for row in rows:
-                kept = replace(
-                    row, fields=copy.deepcopy(dict(row.fields)), sent=copy.deepcopy(row.sent), at=now
-                )
-                self._d.responses.setdefault((row.route, row.version_id), {})[(row.chunk_no, row.key)] = kept
+                found = self._d.responses.setdefault((row.route, row.version_id), {})
+                before = found.get((row.chunk_no, row.key))
+                fields = row.fields or (before.fields if before is not None else {})
+                kept = replace(row, fields=copy.deepcopy(dict(fields)), sent=copy.deepcopy(row.sent), at=now)
+                found[(row.chunk_no, row.key)] = kept
+
+    def replace_chunk(self, route: str, version_id: str, chunk_no: int, rows: Sequence[ResponseRow]) -> None:
+        with self._d.lock:
+            keys = {row.key for row in rows}
+            found = self._d.responses.get((route, version_id), {})
+            for chunk, key in [k for k in found if k[0] == chunk_no and k[1] not in keys]:
+                del found[(chunk, key)]
+            self.record(rows)
 
     def of_delivery(self, route: str, version_id: str, limit: int = 1000) -> list[ResponseRow]:
         with self._d.lock:

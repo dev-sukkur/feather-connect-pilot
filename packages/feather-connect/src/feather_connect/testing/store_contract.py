@@ -264,6 +264,35 @@ class ResponseStoreContract:
         (row,) = store.responses.of_delivery("a", "v1")
         assert (row.status, row.fields, row.at) == (201, {"try": 2}, T0 + timedelta(minutes=1))
 
+    def test_an_answer_with_no_fields_keeps_the_fields_before(self, store: Store):  # I3
+        store.responses.record([ResponseRow("a", "v1", 0, "k", 201, {"erp_id": "e-1"})])
+        store.responses.record(
+            [ResponseRow("a", "v1", 0, "k", 409, {})]
+        )  # a resend, answered "applied already"
+        (row,) = store.responses.of_delivery("a", "v1")
+        assert (row.status, row.fields) == (409, {"erp_id": "e-1"})
+        store.responses.replace_chunk("a", "v1", 0, [ResponseRow("a", "v1", 0, "k", 409, {})])
+        assert store.responses.of_delivery("a", "v1")[0].fields == {"erp_id": "e-1"}
+
+    def test_replacing_a_chunk_drops_the_answers_of_records_not_sent_again(self, store: Store):  # M8
+        store.responses.record(
+            [
+                ResponseRow("a", "v1", 0, "k1", 201, {"erp_id": "e-1"}),
+                ResponseRow("a", "v1", 0, "k2", 201, {"erp_id": "e-2"}),
+                ResponseRow("a", "v1", 1, "k3", 201, {"erp_id": "e-3"}),
+            ]
+        )
+        store.responses.replace_chunk(
+            "a", "v1", 0, [ResponseRow("a", "v1", 0, "k2", 200, {"erp_id": "e-2b"})]
+        )
+        rows = store.responses.of_delivery("a", "v1")
+        assert [(r.chunk_no, r.key, r.fields["erp_id"]) for r in rows] == [
+            (0, "k2", "e-2b"),
+            (1, "k3", "e-3"),
+        ]
+        store.responses.replace_chunk("a", "v1", 1, [])  # a chunk that got no answers keeps none
+        assert [r.key for r in store.responses.of_delivery("a", "v1")] == ["k2"]
+
     def test_find_gives_the_latest_answer_for_a_record(self, store: Store):
         store.responses.record(
             [ResponseRow("a", "v1", 0, "k", 422, {}, sent={"x": 1}), ResponseRow("a", "v1", 3, "k", 201, {})]
