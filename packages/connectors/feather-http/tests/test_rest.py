@@ -311,3 +311,137 @@ def test_the_spec_declares_the_strategies_and_the_config():
     assert "client_secret" in spec.config.model_json_schema()["properties"]
     secret = http.HttpConfig(base_url=BASE, client_secret="hidden-value")
     assert "hidden-value" not in repr(secret)
+
+
+class ChangingList:
+    """A list sorted by stamp, ascending, in which A is changed after the first page is read, and so moves to the end:
+    [A, B, C, D, E] becomes [B, C, D, E, A'] (I1)."""
+
+    def __init__(self) -> None:
+        self.rows = [{"id": name, "modified": f"2026-11-07T10:0{n}:00"} for n, name in enumerate("ABCDE")]
+        self.calls = 0
+
+    def page(self, request: httpx.Request) -> httpx.Response:
+        if self.calls == 1:
+            self.rows = [*self.rows[1:], {"id": "A", "modified": "2026-11-07T10:09:00"}]
+        self.calls += 1
+        params = request.url.params
+        since = params.get("modified_since", "")
+        rows = [r for r in self.rows if r["modified"] >= since]
+        page, size = int(params["page"]), int(params["per_page"])
+        chunk = rows[(page - 1) * size : page * size]
+        return httpx.Response(200, json={"items": chunk, "more": page * size < len(rows)})
+
+
+@pytest.mark.parametrize(
+    "pagination",
+    [http.Page(page_size=2, has_more_path="more"), http.Page(page_size=2)],
+    ids=["has-more", "by-size"],
+)
+@respx.mock
+def test_a_stamp_read_pages_by_stamp_so_a_change_mid_read_misses_nothing(pagination, make_ctx):  # I1
+    api = ChangingList()
+    respx.get(f"{BASE}/items").mock(side_effect=api.page)
+    source = http.Rest(
+        "api", path="/items", records_path="items", pagination=pagination, stamp_param="modified_since"
+    )
+    got = read_all(source, make_ctx(), everything(stamp_field="modified"))
+    assert sorted({row["id"] for row in got}) == ["A", "B", "C", "D", "E"]
+    assert [row["id"] for row in got].count("B") == 1  # a boundary row read again is not yielded again
+    assert {"id": "A", "modified": "2026-11-07T10:09:00"} in got
+
+
+@respx.mock
+def test_an_offset_stamp_read_pages_by_stamp_too(make_ctx):  # I1
+    api = ChangingList()
+
+    def offset(request: httpx.Request) -> httpx.Response:
+        limit, start = int(request.url.params["limit"]), int(request.url.params["offset"])
+        page = 1 + start // limit
+        return api.page(
+            httpx.Request("GET", request.url.copy_merge_params({"page": page, "per_page": limit}))
+        )
+
+    respx.get(f"{BASE}/items").mock(side_effect=offset)
+    source = http.Rest(
+        "api",
+        path="/items",
+        records_path="items",
+        pagination=http.Offset(page_size=2),
+        stamp_param="modified_since",
+    )
+    got = read_all(source, make_ctx(), everything(stamp_field="modified"))
+    assert sorted({row["id"] for row in got}) == ["A", "B", "C", "D", "E"]
+
+
+@respx.mock
+def test_pagination_that_never_says_last_stops(make_ctx):  # I6
+    respx.get(f"{BASE}/empty").mock(
+        side_effect=lambda request: httpx.Response(
+            200,
+            json={"items": [], "page_context": {"page": request.url.params["page"], "has_more_page": True}},
+        )
+    )
+    paged = http.Page(page_size=3, has_more_path="page_context.has_more_page")
+    with pytest.raises(PermanentError, match="no records.*more"):
+        read_all(http.Rest("api", path="/empty", records_path="items", pagination=paged), make_ctx())
+    respx.get(f"{BASE}/nomore").mock(return_value=httpx.Response(200, json={"items": ROWS[:3]}))
+    with pytest.raises(PermanentError, match="page_context.has_more_page"):
+        read_all(http.Rest("api", path="/nomore", records_path="items", pagination=paged), make_ctx())
+    cycle = {"A": "B", "B": "A"}
+    respx.get(f"{BASE}/cycle").mock(
+        side_effect=lambda request: httpx.Response(
+            200,
+            json={
+                "items": [{"id": request.url.params.get("cursor", "A")}],
+                "next": cycle[request.url.params.get("cursor", "A")],
+            },
+        )
+    )
+    with pytest.raises(PermanentError, match="cursor 'B'.*already"):
+        read_all(
+            http.Rest("api", path="/cycle", records_path="items", pagination=http.Cursor(next_path="next")),
+            make_ctx(),
+        )
+
+
+@respx.mock
+def test_offset_stops_on_an_empty_page_not_a_short_one(make_ctx):  # I6
+    def capped(request: httpx.Request) -> httpx.Response:  # the server gives at most 2 whatever the limit
+        offset = int(request.url.params["offset"])
+        return httpx.Response(200, json={"items": ROWS[offset : offset + 2]})
+
+    respx.get(f"{BASE}/items").mock(side_effect=capped)
+    source = http.Rest("api", path="/items", records_path="items", pagination=http.Offset(page_size=3))
+    assert read_all(source, make_ctx()) == ROWS
+
+
+@respx.mock
+def test_a_link_to_another_origin_is_refused(make_ctx):  # M5
+    respx.get(f"{BASE}/items").mock(
+        return_value=httpx.Response(
+            200, json={"items": ROWS[:1]}, headers={"Link": '<https://other.example/items?p=2>; rel="next"'}
+        )
+    )
+    with pytest.raises(PermanentError, match="other.example"):
+        read_all(http.Rest("api", path="/items", records_path="items", pagination=http.Link()), make_ctx())
+
+
+@respx.mock
+def test_detail_values_are_percent_encoded(make_ctx):  # M6
+    respx.get(f"{BASE}/items").mock(return_value=httpx.Response(200, json=[{"id": "a/../b"}]))
+    detail = respx.get(url__startswith=f"{BASE}/items/").mock(
+        return_value=httpx.Response(200, json={"id": "x"})
+    )
+    read_all(http.Rest("api", path="/items", detail_path="/items/{id}"), make_ctx())
+    assert detail.calls.last.request.url.raw_path == b"/items/a%2F..%2Fb"
+
+
+@respx.mock
+def test_check_fails_when_the_budget_is_spent(make_ctx, make_budget):  # M9
+    respx.get(f"{BASE}/items").mock(return_value=httpx.Response(200, json=[]))
+    budget = make_budget(["1/day"])
+    handle = budget.handle()
+    handle.acquire(1)
+    result = http.Rest("api", path="/items").check(make_ctx(budget=handle))
+    assert not result.ok and "budget" in result.message

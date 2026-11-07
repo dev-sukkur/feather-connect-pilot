@@ -24,10 +24,11 @@ import hashlib
 import json
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, ClassVar, Literal, Protocol, cast
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -47,7 +48,7 @@ from feather_connect.core.connector import (
     StreamSchema,
 )
 from feather_connect.core.context import Context
-from feather_connect.core.errors import PartitionError, PermanentError, TransientError
+from feather_connect.core.errors import BudgetDeferred, PartitionError, PermanentError, TransientError
 from feather_connect.core.records import canonical_json
 from feather_connect.runtime.http import (
     ApiKey,
@@ -68,6 +69,8 @@ AuthScheme = Literal[
 ]
 DEFAULT_MAX_PAGES = 100_000
 _EXCERPT = 200
+# Secret fields that name who calls rather than prove it: not masked in text, where a short one would blot out words.
+_NOT_REDACTED = frozenset({"username", "client_id"})
 
 
 class HttpConfig(BaseModel):
@@ -141,6 +144,7 @@ class _HttpConnector:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._clients: dict[str, FeatherHttp] = {}
+        self._retired: list[FeatherHttp] = []
         self.transport: httpx.BaseTransport | None = None  # for tests, as is `sleep`
         self.sleep: Callable[[float], None] = time.sleep
 
@@ -159,7 +163,11 @@ class _HttpConnector:
         with self._lock:
             found = self._clients.get(digest)
             if found is None:
-                secrets = [v.get_secret_value() for _, v in config if isinstance(v, Secret)]
+                secrets = [
+                    v.get_secret_value()
+                    for k, v in config
+                    if isinstance(v, Secret) and k not in _NOT_REDACTED
+                ]
                 found = FeatherHttp(
                     base_url=config.base_url,
                     auth=_auth_of(config),
@@ -172,14 +180,18 @@ class _HttpConnector:
                     sleep=self.sleep,
                     transport=self.transport,
                 )
-                # Settings that changed leave the old client to the calls still using it, and it is not kept.
+                # Settings that changed leave the old client to the calls still using it, and close it at the next
+                # change, by when they are done with it.
+                for old in self._retired:
+                    old.close()
+                self._retired = list(self._clients.values())
                 self._clients = {digest: found}
             return found
 
     def check(self, ctx: Context) -> CheckResult:
         try:
             self._probe(ctx)
-        except (PermanentError, TransientError) as error:
+        except (PermanentError, TransientError, BudgetDeferred) as error:  # a check never waits for budget
             return CheckResult(ok=False, message=str(error))
         return CheckResult(ok=True)
 
@@ -197,6 +209,21 @@ def dig(body: Any, path: str | None) -> Any:
             return None
         found = cast(dict[str, Any], found)[part]
     return found
+
+
+def _has(body: Any, path: str) -> bool:
+    """Whether the dotted `path` names something in `body`, None included."""
+    found = body
+    for part in path.split("."):
+        if not isinstance(found, dict) or part not in found:
+            return False
+        found = cast(dict[str, Any], found)[part]
+    return True
+
+
+def _filled(template: str, record: Mapping[str, Any]) -> str:
+    """Fill a URL template in from a record, each value percent-encoded, so that `A/B` or `..` stays one segment."""
+    return template.format_map({str(k): quote(str(v), safe="") for k, v in record.items()})
 
 
 def _json_of(response: httpx.Response, client: FeatherHttp, what: str) -> Any:
@@ -237,7 +264,8 @@ class _Single:
 
 @dataclass(frozen=True)
 class Offset:
-    """`?limit=100&offset=200`. A page shorter than `page_size` is the last."""
+    """`?limit=100&offset=200`. An empty page is the last: a server may give fewer than `page_size` and still have
+    more."""
 
     limit_param: str = "limit"
     offset_param: str = "offset"
@@ -247,13 +275,14 @@ class Offset:
         return path, {self.limit_param: self.page_size, self.offset_param: int(token or 0)}
 
     def next_token(self, token: str | None, body: Any, response: httpx.Response, count: int) -> str | None:
-        return None if count < self.page_size else str(int(token or 0) + count)
+        return None if count == 0 else str(int(token or 0) + count)
 
 
 @dataclass(frozen=True)
 class Page:
     """`?page=2&per_page=100`, from `start`. With `has_more_path`, such as Zoho's `page_context.has_more_page`, the
-    response says whether another page follows; without it, a page shorter than `page_size` is the last."""
+    response says whether another page follows, and a response without it is an error; without it, a page shorter
+    than `page_size` is the last."""
 
     page_param: str = "page"
     size_param: str = "per_page"
@@ -265,7 +294,14 @@ class Page:
         return path, {self.page_param: int(token or self.start), self.size_param: self.page_size}
 
     def next_token(self, token: str | None, body: Any, response: httpx.Response, count: int) -> str | None:
-        more = bool(dig(body, self.has_more_path)) if self.has_more_path else count >= self.page_size
+        if self.has_more_path is None:
+            more = count >= self.page_size
+        elif not _has(body, self.has_more_path):
+            raise PermanentError(
+                f"page {token or self.start} has no {self.has_more_path} to say if more follow"
+            )
+        else:
+            more = bool(dig(body, self.has_more_path))
         return str(int(token or self.start) + 1) if more else None
 
 
@@ -286,7 +322,8 @@ class Cursor:
 
 @dataclass(frozen=True)
 class Link:
-    """The URL of the next page in the `Link` header (RFC 8288), `rel="next"`."""
+    """The URL of the next page in the `Link` header (RFC 8288), `rel="next"`. A read refuses one on another origin
+    than the connection's `base_url`, which would get its credentials."""
 
     def request(self, path: str, token: str | None) -> tuple[str, dict[str, Any]]:
         return token or path, {}
@@ -318,8 +355,15 @@ class Rest(_HttpConnector, connector.Source):
     summaries and serves the whole record on its own (Zoho does). `cost_key` and `detail_cost_key` name each kind of
     call in the spec's costs, for the budget.
 
-    A page whose body repeats the one before stops the read, and so does a read past `max_pages`, each with an error
-    naming the page. The token of each next page is saved as the checkpoint, and a read given `resume` starts there.
+    A `by_stamp` read with `Page` or `Offset` pages by stamp: after a full page it asks again from the first page with
+    the stamp filter set to the last record's stamp, and skips the records it has read already (by their content,
+    which holds key and stamp). A list sorted by stamp moves a record changed during the read to its end, so paging
+    by page number would skip a record for good; by stamp, none is missed. The list must be sorted by the stamp,
+    ascending, and the stamp filter must keep records at the stamp it is given (`>=`).
+
+    A page whose body repeats the one before stops the read, and so do a cursor seen before, an empty page that says
+    more follow and a read past `max_pages`, each with an error naming the page. The token of each next page (the
+    stamp, when paging by stamp) is saved as the checkpoint, and a read given `resume` starts there.
     """
 
     spec = ConnectorSpec(
@@ -377,30 +421,29 @@ class Rest(_HttpConnector, connector.Source):
         if req.since is not None and self.stamp_param is not None:
             since = format_stamp(req.since, self.stamp_format)
         client = self.client(ctx)
-        for records in self._pages(ctx, since, req.resume):
+        by_stamp = (
+            req.stamp_field is not None
+            and self.stamp_param is not None
+            and isinstance(self.pagination, Page | Offset)
+        )
+        pages = (
+            self._pages_by_stamp(ctx, cast(str, req.stamp_field), req.resume or since)
+            if by_stamp
+            else self._pages(ctx, since, req.resume)
+        )
+        for records in pages:
             rows = [self._detail(ctx, client, record) for record in records] if self.detail_path else records
             rows = [row for row in rows if _in_partition(req, row)]
             if rows:
                 yield rows
 
     def _pages(self, ctx: Context, since: str | None, resume: str | None) -> Iterator[list[dict[str, Any]]]:
-        client = self.client(ctx)
-        config = self._config(ctx)
         token = resume
         last_digest: str | None = None
+        seen_tokens: set[str | None] = {token}
         for number in range(1, self.max_pages + 2):
-            if number > self.max_pages:
-                raise PermanentError(
-                    f"{self.path}: still more pages after {self.max_pages}, the most a read takes; "
-                    "the API may be paging in a loop. Raise max_pages if it really has that many"
-                )
-            url, page_params = self.pagination.request(self.path, token)
-            params = {**config.params, **self.params, **page_params}
-            if since is not None and self.stamp_param is not None:
-                params[self.stamp_param] = since
-            # Merged into the URL, which may carry a query of its own (a `Link` does), as `params=` would replace it.
-            full = httpx.URL(url).copy_merge_params(params)
-            response = client.request("GET", full, cost_key=self.cost_key, budget=ctx.budget)
+            self._within_max_pages(number)
+            records, body, response = self._page(ctx, token, since, number)
             digest = hashlib.sha256(response.content).hexdigest()
             if digest == last_digest:
                 raise PermanentError(
@@ -408,30 +451,111 @@ class Rest(_HttpConnector, connector.Source):
                     "so the pagination would never end"
                 )
             last_digest = digest
-            body = _json_of(response, client, f"{self.path}, page {number}")
-            found = dig(body, self.records_path)
-            if not isinstance(found, list):
-                raise PermanentError(
-                    f"{self.path}, page {number}: {self.records_path or 'the body'} is not a list of records"
-                )
-            records = [cast(dict[str, Any], r) for r in cast(list[Any], found) if isinstance(r, dict)]
-            if len(records) != len(cast(list[Any], found)):
-                raise PermanentError(f"{self.path}, page {number}: a record is not a JSON object")
             yield records
-            following = self.pagination.next_token(token, body, response, len(records))
+            following = self._next_token(token, body, response, records, number)
             if following is None:
                 return
-            if following == token:
+            if following in seen_tokens:
                 raise PermanentError(
-                    f"{self.path}: page {number} points to itself as the next page ({token!r})"
+                    f"{self.path}: page {number} points to cursor {following!r}, read already in this read, "
+                    "so the pagination would never end"
                 )
+            seen_tokens.add(following)
             token = following
             ctx.checkpoint(token)
+
+    def _pages_by_stamp(
+        self, ctx: Context, stamp_field: str, since: str | None
+    ) -> Iterator[list[dict[str, Any]]]:
+        """Page by stamp (I1): each full page is followed by the first page from its last record's stamp. A page whose
+        last stamp is the stamp it was asked from (more records share a stamp than a page holds) is followed by the
+        next page from the same stamp."""
+        page_size = cast(Page | Offset, self.pagination).page_size
+        seen: set[str] = set()
+        token: str | None = None
+        for number in range(1, self.max_pages + 2):
+            self._within_max_pages(number)
+            records, body, response = self._page(ctx, token, since, number)
+            new = [r for r in records if _digest(r) not in seen]
+            seen.update(_digest(r) for r in new)
+            if new:
+                yield new
+            following = self._next_token(token, body, response, records, number)
+            if following is None or (not new and len(records) < page_size):
+                return
+            if stamp_field not in records[-1]:
+                raise PermanentError(f"{self.path}, page {number}: a listed record has no {stamp_field}")
+            last = format_stamp(records[-1][stamp_field], self.stamp_format)
+            if last == since:
+                token = following  # still at the same stamp: on to the next page
+            else:
+                since, token = last, None
+                ctx.checkpoint(since)
+
+    def _within_max_pages(self, number: int) -> None:
+        if number > self.max_pages:
+            raise PermanentError(
+                f"{self.path}: still more pages after {self.max_pages}, the most a read takes; "
+                "the API may be paging in a loop. Raise max_pages if it really has that many"
+            )
+
+    def _page(
+        self, ctx: Context, token: str | None, since: str | None, number: int
+    ) -> tuple[list[dict[str, Any]], Any, httpx.Response]:
+        """Fetch the page that `token` names, and return its records, its body and the response."""
+        client = self.client(ctx)
+        config = self._config(ctx)
+        url, page_params = self.pagination.request(self.path, token)
+        params = {**config.params, **self.params, **page_params}
+        if since is not None and self.stamp_param is not None:
+            params[self.stamp_param] = since
+        # Merged into the URL, which may carry a query of its own (a `Link` does), as `params=` would replace it.
+        full = httpx.URL(url).copy_merge_params(params)
+        base = httpx.URL(config.base_url)
+        if full.is_absolute_url and (full.scheme, full.host, full.port) != (
+            base.scheme,
+            base.host,
+            base.port,
+        ):
+            raise PermanentError(
+                f"{self.path}: page {number} is on {full.scheme}://{full.host}, not on the connection's "
+                f"{base.scheme}://{base.host}, and would get its credentials"
+            )
+        response = client.request("GET", full, cost_key=self.cost_key, budget=ctx.budget)
+        body = _json_of(response, client, f"{self.path}, page {number}")
+        found = dig(body, self.records_path)
+        if not isinstance(found, list):
+            raise PermanentError(
+                f"{self.path}, page {number}: {self.records_path or 'the body'} is not a list of records"
+            )
+        records = [cast(dict[str, Any], r) for r in cast(list[Any], found) if isinstance(r, dict)]
+        if len(records) != len(cast(list[Any], found)):
+            raise PermanentError(f"{self.path}, page {number}: a record is not a JSON object")
+        return records, body, response
+
+    def _next_token(
+        self,
+        token: str | None,
+        body: Any,
+        response: httpx.Response,
+        records: list[dict[str, Any]],
+        number: int,
+    ) -> str | None:
+        try:
+            following = self.pagination.next_token(token, body, response, len(records))
+        except PermanentError as error:
+            raise PermanentError(f"{self.path}: {error}") from None
+        if following is not None and not records:
+            raise PermanentError(
+                f"{self.path}: page {number} has no records but says more follow, "
+                "so the pagination would never end"
+            )
+        return following
 
     def _detail(self, ctx: Context, client: FeatherHttp, record: Mapping[str, Any]) -> dict[str, Any]:
         assert self.detail_path is not None
         try:
-            url = self.detail_path.format_map(dict(record))
+            url = _filled(self.detail_path, record)
         except (KeyError, IndexError, ValueError) as error:
             raise PermanentError(
                 f"{self.detail_path}: a listed record has no {error} to fill it in"
@@ -444,6 +568,10 @@ class Rest(_HttpConnector, connector.Source):
         if not isinstance(found, dict):
             raise PermanentError(f"{url}: {self.detail_records_path or 'the body'} is not a record")
         return cast(dict[str, Any], found)
+
+
+def _digest(record: Mapping[str, Any]) -> str:
+    return hashlib.sha256(canonical_json(dict(record))).hexdigest()
 
 
 def _in_partition(req: ReadRequest, row: Mapping[str, Any]) -> bool:
@@ -459,6 +587,8 @@ def _in_partition(req: ReadRequest, row: Mapping[str, Any]) -> bool:
 Template = str | Callable[[Mapping[str, Any]], str]
 BodyTemplate = Mapping[str, Any] | Callable[[Mapping[str, Any]], Mapping[str, Any]]
 _ALREADY_APPLIED = 409
+# Answers that say the call is set up wrong rather than the record is: they fail the chunk, and the delivery.
+DEFAULT_FAIL_STATUSES = frozenset({401, 403, 404, 405, 407})
 
 
 def _fill(template: Any, record: Mapping[str, Any]) -> Any:
@@ -495,9 +625,14 @@ class Call(_HttpConnector, connector.Sink):
     each time the record is sent again, so that the destination can tell a repeat. A 2xx applies the record, and so
     does a 409, which says it was applied already. Any other 4xx rejects the record, which keeps the body it was sent
     with. A 429, a 5xx or a timeout is tried again by the client, and then fails the chunk for the runtime to retry.
+    A status in `fail_statuses` (by default 401, 403, 404, 405 and 407: a wrong token, path or right) and any 3xx
+    fail the chunk with `PermanentError`, so that the delivery fails and blocks rather than every record being
+    rejected. A 409 means "applied already" only if the destination says so for the same content; an upsert by the
+    record's own id (`PUT /invoices/{invoice_id}`) suits a record that changes better than a POST.
 
-    `response_map` names fields to keep from each JSON answer, `{"erp_id": "data.id"}`, by dotted path; the runtime
-    keeps them with the delivery. A delete is rejected unless `on_delete="skip"`, which counts it as applied and sends
+    `response_map` names fields to keep from each JSON answer, a 409's included, `{"erp_id": "data.id"}`, by dotted
+    path; the runtime keeps them with the delivery, and each as it arrives. Values filled into `url` are
+    percent-encoded. A delete is rejected unless `on_delete="skip"`, which counts it as applied and sends
     nothing.
     """
 
@@ -519,6 +654,7 @@ class Call(_HttpConnector, connector.Sink):
         response_map: Mapping[str, str] | None = None,
         key_header: str = "Idempotency-Key",
         on_delete: Literal["reject", "skip"] = "reject",
+        fail_statuses: Collection[int] = DEFAULT_FAIL_STATUSES,
     ) -> None:
         super().__init__()
         self.connection = connection
@@ -529,6 +665,7 @@ class Call(_HttpConnector, connector.Sink):
         self.response_map = dict(response_map or {})
         self.key_header = key_header
         self.on_delete = on_delete
+        self.fail_statuses = frozenset(fail_statuses)
 
     def _probe(self, ctx: Context) -> None:
         self.client(ctx)  # checks the settings: a call would change the destination
@@ -562,21 +699,27 @@ class Call(_HttpConnector, connector.Sink):
                     budget=ctx.budget,
                 )
             except HttpStatusError as error:
+                if error.status_code in self.fail_statuses or error.status_code < 400:
+                    raise PermanentError(
+                        f"{error}; every record would get the same, so the chunk fails"
+                    ) from error
                 if error.status_code == _ALREADY_APPLIED:
                     applied += 1
-                    responses.append(RecordResponse(record.key, error.status_code))
+                    answer = RecordResponse(record.key, error.status_code, self._mapped(error.response))
                 else:
                     rejected.append(Rejection(record.key, "HttpStatusError", str(error)))
-                    responses.append(RecordResponse(record.key, error.status_code, sent=body))
-                continue
-            applied += 1
-            responses.append(RecordResponse(record.key, response.status_code, self._mapped(response)))
+                    answer = RecordResponse(record.key, error.status_code, sent=body)
+            else:
+                applied += 1
+                answer = RecordResponse(record.key, response.status_code, self._mapped(response))
+            ctx.answered(answer)  # kept even if a later record fails the chunk
+            responses.append(answer)
         return ApplyResult(applied, rejected, responses=responses)
 
     def _render(self, record: ApplyRecord) -> tuple[str, dict[str, Any]]:
         payload = cast(Mapping[str, Any], record.payload)
         try:
-            url = self.url(payload) if callable(self.url) else self.url.format_map(dict(payload))
+            url = self.url(payload) if callable(self.url) else _filled(self.url, payload)
             if self.body is None:
                 body: Mapping[str, Any] = payload
             elif callable(self.body):
@@ -589,9 +732,9 @@ class Call(_HttpConnector, connector.Sink):
             ) from None
         return url, _plain(body)
 
-    def _mapped(self, response: httpx.Response) -> dict[str, Any]:
+    def _mapped(self, response: httpx.Response | None) -> dict[str, Any]:
         """The fields of `response_map` from a JSON answer; none from an answer that isn't JSON."""
-        if not self.response_map:
+        if not self.response_map or response is None:
             return {}
         try:
             answer = response.json()
