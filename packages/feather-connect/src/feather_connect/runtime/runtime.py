@@ -648,7 +648,8 @@ class Runtime:
             if row.status == "failed":
                 deps.store.runs.finish_task(row.task_id, "cancelled", row.error)
         if to == "pending":
-            deps.store.runs.set_run_status(run_id, "running")
+            if deps.store.runs.get_run(run_id).status != "cancelled":  # a cancel stands (Stage 2 M11)
+                deps.store.runs.set_run_status(run_id, "running")
             self.submit_apply(route, version_id)
         else:
             self._submit_next(delivery)
