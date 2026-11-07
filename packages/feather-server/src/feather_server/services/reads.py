@@ -41,6 +41,7 @@ STALE_AFTER_RUNS = (
 _RECENT_RUNS = 10
 _TASKS_A_PAGE = 100
 _RESPONSES_SHOWN = 500
+_FAILED_SHOWN = 500  # failed deliveries of a route looked at for a run's older versions
 _VERSIONS_SHOWN = 50  # of each dataset, on a run's page: a stream run holds a day of them
 _RECENT_VERSIONS = 15
 _FAILED_RUNS_SHOWN = 100
@@ -183,6 +184,7 @@ class RunDetail:
     task_total: int = 0
     tasks_failed: int = 0
     ticks: TickCounts | None = None  # of a stream run
+    versions_total: int = 0  # sealed versions of the run, of which `versions` are the newest
 
 
 @dataclass(frozen=True)
@@ -450,17 +452,40 @@ class Reads:
         run = self._store.runs.get_run(run_id)
         versions: list[Version] = []
         deliveries: list[Delivery] = []
+        total = 0
         if run.flow in {f.name for f in self._rt.flows()}:
             flow = self._rt.flow(run.flow)
             for dataset in flow.datasets:
                 newest = self._store.versions.newest_sealed_for_run(run_id, dataset.name, _VERSIONS_SHOWN)
                 versions.extend(reversed(newest))
+                total += (
+                    len(newest)
+                    if len(newest) < _VERSIONS_SHOWN
+                    else len(self._store.versions.sealed_for_run(run_id, dataset.name))
+                )
+            shown = {v.version_id for v in versions}
             for version in versions:
                 for route in flow.routes:
                     try:
                         deliveries.append(self._store.ledger.get(route.name, version.version_id))
                     except KeyError:  # not delivered to this route (yet)
                         pass
+            if total > len(versions):  # S15: a failed delivery of an older version of the run is shown too
+                for route in flow.routes:
+                    failed = [
+                        d
+                        for d in self._store.ledger.list_deliveries(
+                            route=route.name, status="failed", limit=_FAILED_SHOWN
+                        )
+                        if d.version_id not in shown
+                    ]
+                    ours = {
+                        v.version_id
+                        for v in self._store.versions.get_many({d.version_id for d in failed})
+                        if v.run_id == run_id
+                    }
+                    deliveries.extend(d for d in failed if d.version_id in ours)
+        deliveries.sort(key=lambda d: d.status != "failed")  # failed first, each group in its own order
         tasks = self._store.runs.list_tasks(
             run_id, limit=limit, after_task=cursor, newest_first=run.trigger == STREAM_TRIGGER
         )
@@ -474,6 +499,7 @@ class Reads:
             sum(counts.values()),
             sum(n for (_, status), n in counts.items() if status == "failed"),
             self._ticks(run, counts),
+            total,
         )
 
     def task_logs(self, task_id: str) -> list[str]:
