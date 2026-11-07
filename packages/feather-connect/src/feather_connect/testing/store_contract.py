@@ -59,8 +59,8 @@ def seal(store: Store, vid: str, routes: list[str], **kw: Any) -> None:
     store.versions.seal([vid], routes)
 
 
-def inbound(body: bytes = b"{}", at: datetime = T0, **headers: str) -> InboundRequest:
-    return InboundRequest("POST", "/ingress/default/d", headers, body, at)
+def inbound(body: bytes = b"{}", headers: dict[str, str] | None = None, at: datetime = T0) -> InboundRequest:
+    return InboundRequest("POST", "/ingress/default/d", headers or {}, body, at)
 
 
 def upserts(*pairs: tuple[str, dict[str, Any]]) -> list[Record]:
@@ -1390,16 +1390,6 @@ class StoreContract(SpoolContract, ResponseStoreContract):
         assert store.runs.delete_logs_before(T0 + timedelta(days=30)) == 1
         assert store.runs.task_logs(task) == ["info: new"]
 
-
-def flow_spec(name: str, routes: list[str], owner: str | None = None) -> dict[str, Any]:
-    return {
-        "name": name,
-        "owner": owner,
-        "datasets": [{"name": f"{name}_ds"}],
-        "routes": [{"name": route, "connection": route} for route in routes],
-        "triggers": [],
-    }
-
     # The inbox.
 
     def test_inbox_take_is_in_arrival_order(self, store: Store):
@@ -1413,14 +1403,14 @@ def flow_spec(name: str, routes: list[str], owner: str | None = None) -> dict[st
 
     def test_inbox_keeps_a_request_exactly(self, store: Store):
         body = b'\x00\xff{"not": "text"}'
-        store.inbox.put("d", inbound(body, **{"x-signature": "abc"}), "e1")
+        store.inbox.put("d", inbound(body, {"x-signature": "abc"}), "e1")
         [event] = store.inbox.take("d", 1)
         assert (event.dataset, event.event_id, event.received_at) == ("d", "e1", T0)
-        assert event.request == inbound(body, **{"x-signature": "abc"})
+        assert event.request == inbound(body, {"x-signature": "abc"})
 
     def test_inbox_put_many_stores_in_order_and_says_what_put_would(self, store: Store):
         store.inbox.put("d", inbound(b"old"), "seen")
-        request = inbound(b"\x00raw", **{"x-signature": "abc"})
+        request = inbound(b"\x00raw", {"x-signature": "abc"})
         stored = store.inbox.put_many(
             [
                 ("d", request, "e1"),
@@ -1576,3 +1566,13 @@ def flow_spec(name: str, routes: list[str], owner: str | None = None) -> dict[st
         store.inbox.ensure_partitions()
         assert store.inbox.drop_day(T0.date()) is True
         assert store.inbox.drop_day(T0.date()) is True
+
+
+def flow_spec(name: str, routes: list[str], owner: str | None = None) -> dict[str, Any]:
+    return {
+        "name": name,
+        "owner": owner,
+        "datasets": [{"name": f"{name}_ds"}],
+        "routes": [{"name": route, "connection": route} for route in routes],
+        "triggers": [],
+    }
