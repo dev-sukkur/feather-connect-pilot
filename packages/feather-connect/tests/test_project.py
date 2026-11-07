@@ -112,6 +112,13 @@ def test_secret_providers(tmp_path, monkeypatch):
     assert resolve_secret(f"${{secret:file:{tmp_path / 's'}}}") == "y"
 
 
+def test_a_relative_file_secret_is_read_against_the_project(tmp_path, monkeypatch):
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "token.txt").write_text("t0ken\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path.parent)
+    assert resolve_secret("${secret:file:secrets/token.txt}", tmp_path) == "t0ken"
+
+
 def test_a_connection_resolves_its_credentials_only_when_asked(project_dir, monkeypatch):
     monkeypatch.delenv("TOKEN", raising=False)
     p = load_project(project_dir, "prod")  # TOKEN is not set, and loading does not mind

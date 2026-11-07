@@ -28,7 +28,7 @@ in to the dashboard with the password it prints, and watch the runs of `zakya-in
 the ERP id each invoice got.
 
 The credentials in `secrets/` are fake, and only the simulators take them. Their paths in `env/dev.yaml` are read
-from the directory feather runs in, so run it from the repository root.
+against the project directory, so the demo runs from any directory.
 
 To run the simulators alone, from this directory: `python sims/zakya.py --port 29100` and
 `python sims/receiver.py --port 29101`.

@@ -83,7 +83,7 @@ def test_the_zakya_demo_project_is_sound():
 
 def test_each_invoice_reaches_the_receiver_once_and_a_changed_one_again(sims, monkeypatch):
     zakya, db, urls = sims
-    monkeypatch.chdir(REPO)  # the demo's fake secret files are named from the repository root
+    monkeypatch.chdir(DEMO.parent)  # the fake secret files are read against the project, wherever this runs
     project = load_project(DEMO, "dev")
     clock = FrozenClock(datetime(2026, 11, 7, 10, tzinfo=UTC))
     store, spool, engine = MemoryStore(clock), MemorySpool(clock), LocalEngine(clock)

@@ -70,10 +70,15 @@ class ConnectionConfig:
     secret_refs: Mapping[str, str]
     site: str | None = None
     budget: str | None = None
+    root: Path | None = None
+    """The project directory, which a relative `file` secret's path is read against."""
 
     def resolve(self) -> dict[str, Any]:
         """Return the settings with every credential resolved, as a connector's `Context.config` holds them."""
-        return {**self.options, **{key: resolve_secret(ref) for key, ref in self.secret_refs.items()}}
+        return {
+            **self.options,
+            **{key: resolve_secret(ref, self.root) for key, ref in self.secret_refs.items()},
+        }
 
 
 @dataclass(frozen=True)
@@ -117,8 +122,10 @@ class ConfigValue:
     layer: str
 
 
-def resolve_secret(ref: str) -> str:
+def resolve_secret(ref: str, root: Path | None = None) -> str:
     """Return the value that the reference `${secret:env:NAME}` or `${secret:file:PATH}` points to.
+
+    A relative file path is read against `root`, the project directory, when one is given.
 
     The other providers arrive in M3. An error names the reference, never the value.
     """
@@ -133,7 +140,10 @@ def resolve_secret(ref: str) -> str:
             raise ProjectError(f"secret {ref}: the environment variable {path!r} is not set")
         return value
     try:
-        return Path(path).read_text(encoding="utf-8").rstrip("\r\n")
+        file = Path(path)
+        if root is not None and not file.is_absolute():
+            file = root / file
+        return file.read_text(encoding="utf-8").rstrip("\r\n")
     except OSError as error:
         raise ProjectError(f"secret {ref}: can't read the file ({error.strerror})") from None
 
@@ -159,7 +169,7 @@ def load_project(root: Path, env: str) -> Project:
     _check_secrets(config, layers)
     name = _text(config, "name", layers)
     budgets = _budgets(config, layers)
-    connections = _connections(config, layers, budgets)
+    connections = _connections(config, layers, budgets, root)
     dev_processes = _dev_processes(config, layers)
     settings: Mapping[str, Any] = config.get("settings", {})
     flows = _apply_overlay(_import_flows(root, config, layers), config, layers, str(settings["timezone"]))
@@ -340,7 +350,7 @@ def _dev_processes(config: Mapping[str, Any], layers: Mapping[str, str]) -> tupl
 
 
 def _connections(
-    config: Mapping[str, Any], layers: Mapping[str, str], budgets: Mapping[str, BudgetSpec]
+    config: Mapping[str, Any], layers: Mapping[str, str], budgets: Mapping[str, BudgetSpec], root: Path
 ) -> dict[str, ConnectionConfig]:
     found: dict[str, ConnectionConfig] = {}
     for name, raw in _mapping(config, "connections", layers).items():
@@ -358,7 +368,7 @@ def _connections(
         options = {k: v for k, v in body.items() if k not in _CONNECTION_KEYS}
         site = body.get("site")
         found[name] = ConnectionConfig(
-            name, connector, options, auth, None if site is None else str(site), budget
+            name, connector, options, auth, None if site is None else str(site), budget, root
         )
     return found
 
