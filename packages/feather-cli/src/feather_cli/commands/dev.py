@@ -32,7 +32,7 @@ import typer
 import uvicorn
 from watchfiles import PythonFilter, watch
 
-from feather_cli.commands.helpers import HelperError, Helpers, busy_ports
+from feather_cli.commands.helpers import HelperError, Helpers, HelperStopped, busy_ports, clashing_ports
 from feather_cli.options import Env, Json
 from feather_cli.output import emit, fail
 from feather_connect.logs import TaskLogHandler
@@ -337,6 +337,12 @@ def dev(
         processes = load_project(root, env).dev_processes
     except ProjectError as error:
         fail(str(error), hint="run: feather validate", json_mode=json_mode)
+    for clash in clashing_ports(processes, port):
+        fail(
+            f"the helper process {clash.name!r} wants port {port}, which the server takes",
+            hint=f"pick another server port with --port, or give {clash.name} another port under dev.processes",
+            json_mode=json_mode,
+        )
     for busy in busy_ports(processes, _in_use):
         fail(
             f"port {busy.port} of the helper process {busy.name!r} is already in use",
@@ -359,8 +365,10 @@ def dev(
     container = not own_database
     helpers = Helpers(root, lambda line: typer.echo(line, err=True))
     try:
-        helpers.start(processes)
+        helpers.start(processes, stop)
         _run(root, env, port, own_database, no_browser, reset_password, json_mode, stop)
+    except HelperStopped:
+        pass  # Ctrl+C while the helpers started: stop what started, and nothing else to say
     except HelperError as error:
         fail(str(error), hint="its output above says more", json_mode=json_mode)
     except (RuntimeError, psycopg.Error) as error:

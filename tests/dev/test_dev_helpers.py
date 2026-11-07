@@ -3,13 +3,16 @@ project directory on feather's interpreter with their output prefixed, refused e
 stopped. No Docker and no stack: the parts are tested on their own."""
 
 import socket
+import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
-from feather_cli.commands.helpers import HelperError, Helpers
+from feather_cli.commands.helpers import HelperError, Helpers, HelperStopped
 from feather_cli.main import app
 from feather_connect.project import DevProcess, ProjectError, load_project
 
@@ -101,3 +104,67 @@ def test_feather_dev_refuses_a_busy_helper_port_before_starting_anything(tmp_pat
         )
     assert result.exit_code == 1
     assert f"port {port} of the helper process 'sim' is already in use" in result.output
+
+
+def test_a_stop_while_a_helper_starts_ends_the_wait(tmp_path: Path):  # M10
+    stop = threading.Event()
+    helpers = Helpers(tmp_path, print)
+    threading.Timer(0.5, stop.set).start()
+    started = time.monotonic()
+    with pytest.raises(HelperStopped):
+        helpers.start(
+            [DevProcess("slow", ("python", "-c", "import time; time.sleep(60)"), free_port())], stop
+        )
+    assert time.monotonic() - started < 10
+
+
+def test_feather_dev_refuses_a_helper_on_the_server_port(tmp_path: Path):  # M10
+    port = free_port()
+    root = project(
+        tmp_path, f"dev:\n  processes:\n    - {{name: sim, command: [python, x.py], port: {port}}}\n"
+    )
+    result = CliRunner().invoke(app, ["dev", "--project", str(root), "--port", str(port), "--no-browser"])
+    assert result.exit_code == 1
+    assert f"the helper process 'sim' wants port {port}, which the server takes" in result.output
+
+
+ORPHAN = """import sys
+from pathlib import Path
+from feather_cli.commands.helpers import Helpers
+from feather_connect.project import DevProcess
+helpers = Helpers(Path(sys.argv[1]), print)
+helpers.start([DevProcess("web", ("python", "serve.py", sys.argv[2]), int(sys.argv[2]))])
+print("ready", flush=True)
+sys.stdin.read()
+"""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a job object is Windows only")
+def test_helpers_die_with_a_feather_that_is_killed(tmp_path: Path):  # M10
+    (tmp_path / "serve.py").write_text(SERVE, encoding="utf-8")
+    (tmp_path / "orphan.py").write_text(ORPHAN, encoding="utf-8")
+    port = free_port()
+    feather = subprocess.Popen(
+        [sys.executable, str(tmp_path / "orphan.py"), str(tmp_path), str(port)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert feather.stdout is not None
+        while (line := feather.stdout.readline()) and line.strip() != "ready":
+            pass
+        assert line, "the helper did not start"
+        feather.kill()  # as Task Manager would: no chance to stop the helpers
+        feather.wait(10)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+            except OSError:
+                return
+            time.sleep(0.2)
+        pytest.fail(f"the helper still listens on port {port} after feather was killed")
+    finally:
+        if feather.poll() is None:
+            feather.kill()
