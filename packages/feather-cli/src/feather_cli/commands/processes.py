@@ -1,8 +1,9 @@
 """`feather server` and `feather worker`: the two long-running processes, and the server's admin commands."""
 
+import logging
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -24,6 +25,8 @@ from feather_connect.worker import run_worker
 from feather_server.app import create_app
 from feather_server.auth import hash_password, issue_token
 from feather_server.settings import Settings, SettingsError
+
+log = logging.getLogger(__name__)
 
 server_app = typer.Typer(
     help="Run the server, or administer it: migrate, create-user, create-token.",
@@ -74,6 +77,28 @@ def _store(url: str | None, json_mode: bool) -> Iterator[Store]:
         store.close()
 
 
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def bind_warnings(host: str, environ: Mapping[str, str]) -> list[str]:
+    """What to warn about when the server listens on `host` beyond this machine (Stage 2 M12)."""
+    if host in _LOCAL_HOSTS:
+        return []
+    warned: list[str] = []
+    base = environ.get("FEATHER_BASE_URL", "")
+    if not base.startswith("https://"):
+        warned.append(
+            f"listening on {host} with FEATHER_BASE_URL {base or 'unset'}: the session cookie is not Secure. "
+            "Set FEATHER_BASE_URL to the https address people use"
+        )
+    if not environ.get("FEATHER_SECRET_KEY"):
+        warned.append(
+            "FEATHER_SECRET_KEY is not set: this process signs sessions with a key of its own, so a restart signs "
+            "everyone out and replicas do not share sessions"
+        )
+    return warned
+
+
 @server_app.callback()
 def server(
     ctx: typer.Context,
@@ -98,6 +123,9 @@ def server(
     except SettingsError as error:
         fail(str(error), hint=_NO_DATABASE_HINT, json_mode=json_mode)
     _reachable(settings.database_url, json_mode)
+    for warning in bind_warnings(host, environ):
+        log.warning(warning)
+        typer.echo(f"warning: {warning}", err=True)
     try:
         app = create_app(settings)
     except ProjectError as error:

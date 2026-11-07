@@ -89,7 +89,7 @@ def test_settings_come_from_the_environment() -> None:
             "FEATHER_ENV": "prod",
             "FEATHER_DATABASE_URL": "postgresql://h/db",
             "FEATHER_PROJECT": "/srv/flows",
-            "FEATHER_ENGINE": "local",
+            "FEATHER_ENGINE": "dbos",
             "FEATHER_ENGINE_POLL_S": "2",
             "FEATHER_SECRET_KEY": "k",
             "FEATHER_BASE_URL": "https://feather.example",
@@ -98,7 +98,7 @@ def test_settings_come_from_the_environment() -> None:
     assert (settings.env, settings.database_url, settings.engine, settings.engine_poll_s) == (
         "prod",
         "postgresql://h/db",
-        "local",
+        "dbos",
         2.0,
     )
     assert (settings.spool, settings.secret_key, settings.base_url) == (
@@ -107,6 +107,12 @@ def test_settings_come_from_the_environment() -> None:
         "https://feather.example",
     )
     assert str(settings.project).replace("\\", "/") == "/srv/flows"
+
+
+def test_the_server_refuses_the_local_engine(  # Stage 2 M10: nothing would run its tasks
+) -> None:
+    with pytest.raises(SettingsError, match="FEATHER_ENGINE=local"):
+        Settings.from_env({"FEATHER_DATABASE_URL": "x", "FEATHER_PROJECT": "p", "FEATHER_ENGINE": "local"})
 
 
 def test_settings_have_defaults_and_say_what_is_missing_or_wrong() -> None:
