@@ -22,7 +22,7 @@ from types import FrameType
 from typing import Any
 
 from feather_connect.core.errors import PermanentError
-from feather_connect.logs import TaskLogHandler, configure_logging, register_secrets
+from feather_connect.logs import configure_logging, install_task_logs, register_secrets
 from feather_connect.project import Project, ProjectError, load_project
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.port import Store
@@ -100,8 +100,7 @@ def run_worker(
     _check_connections(project)
     migrate(database_url)
     store, spool = connect(database_url)
-    task_logs = TaskLogHandler(store)
-    logging.getLogger().addHandler(task_logs)
+    remove_task_logs = install_task_logs(store)
     engine: DbosEngine | None = None
     try:
         store.catalog.sync(project.name, project.code_sha, {f.name: f.spec_dict() for f in project.flows})
@@ -120,7 +119,7 @@ def run_worker(
         )
         return _work(runtime, store, database_url, worker_id, labels, slots, poll_s, stop, project.code_sha)
     finally:  # a reload in `feather dev` runs this again in the same process
-        logging.getLogger().removeHandler(task_logs)
+        remove_task_logs()
         if engine is not None:
             engine.close()
         store.close()

@@ -126,3 +126,30 @@ def test_tasks_bind_their_ids(out: io.StringIO) -> None:
     assert all(line["dataset"] == "d" for line in mine)
     extract = next(t for t in store.runs.list_tasks(run_id) if t.kind == "extract")
     assert any("reading" in line for line in store.runs.task_logs(extract.task_id))
+
+
+def test_a_process_saves_each_task_line_once_however_many_install_the_handler(out: io.StringIO) -> None:  # M5
+    store = MemoryStore(FrozenClock(datetime(2026, 10, 18, tzinfo=UTC)))
+    remove_worker = logs.install_task_logs(store)  # a worker and a server in one process, as feather dev runs them
+    remove_server = logs.install_task_logs(store)
+    try:
+        with bind(task="t1"):
+            logging.getLogger("demo").info("once")
+    finally:
+        remove_server()
+        remove_worker()
+    assert store.runs.task_logs("t1") == ["INFO: once"]
+    assert not any(isinstance(h, TaskLogHandler) for h in logging.getLogger().handlers)
+
+
+def test_the_handler_forgets_old_tasks(out: io.StringIO) -> None:  # M5
+    store = MemoryStore(FrozenClock(datetime(2026, 10, 18, tzinfo=UTC)))
+    handler = TaskLogHandler(store)
+    logging.getLogger().addHandler(handler)
+    try:
+        for n in range(logs.TASKS_REMEMBERED + 10):
+            with bind(task=f"t{n}"):
+                logging.getLogger("demo").info("x")
+    finally:
+        logging.getLogger().removeHandler(handler)
+    assert len(handler._used) <= logs.TASKS_REMEMBERED  # pyright: ignore[reportPrivateUsage]
