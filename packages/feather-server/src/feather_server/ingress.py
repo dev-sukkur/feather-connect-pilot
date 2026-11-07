@@ -75,7 +75,9 @@ def _problem(status: int, headers: Mapping[str, str] | None = None) -> Response:
 
 
 class RateLimiter:
-    """A token bucket per source, holding a second's worth of requests.
+    """A token bucket per key, holding a second's worth of requests. Ingress keeps two: one per source and caller
+    address, taken before verifying, and one per source, taken only by requests that verified (S5). So a caller who
+    can't sign uses up its own bucket and never the source's.
 
     It lives in this process, as `LoginThrottle` does: with several replicas behind a load balancer each counts for
     itself, so a source can get up to the limit times the number of replicas. It protects a replica, and is not a promise
@@ -176,10 +178,45 @@ def _event_id(dataset: Dataset, source: PushSource, request: InboundRequest) -> 
     return None
 
 
-def _refusal(state: "AppState", dataset: Dataset, request: InboundRequest) -> Response | None:
-    """Return why this request is refused, or None if it is to be stored."""
+class _SampledLog:
+    """Logs the first refusal of a kind, then one in `every`, so a flood of refusals can't flood the log too."""
+
+    def __init__(self, every: int = 100) -> None:
+        self._every = every
+        self._counts: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def warning(self, key: str, message: str, *args: object) -> None:
+        with self._lock:
+            n = self._counts.get(key, 0)
+            self._counts[key] = n + 1 if len(self._counts) < 10_000 else 1
+        if n % self._every == 0:
+            log.warning(message + (f" ({n + 1} so far)" if n else ""), *args)
+
+
+_REFUSALS = _SampledLog()
+
+
+def _over_rate(limiter: RateLimiter | None, key: str, name: str) -> Response | None:
+    if limiter is None:
+        return None
+    wait = limiter.wait_for(key)
+    if not wait:
+        return None
+    _REFUSALS.warning(f"rate:{name}", "ingress %s: refused: over the rate limit", name)
+    return _problem(429, {"Retry-After": str(max(1, math.ceil(wait)))})
+
+
+def _refusal(
+    state: "AppState", dataset: Dataset, request: InboundRequest, limiter: RateLimiter | None = None
+) -> Response | None:
+    """Return why this request is refused, or None if it is to be stored. The source's rate counts only requests that
+    verified."""
     source = cast(PushSource, dataset.source)
     refused = _verified(state, dataset, source, request)
+    if refused is not None:
+        return refused
+    refused = _over_rate(limiter, f"source:{dataset.name}", dataset.name)
     if refused is not None:
         return refused
     if not _is_json(request.body):
@@ -229,8 +266,9 @@ class IngressWorker:
     When the database is away, a batch is answered 503 whole, without trying each event against it.
     """
 
-    def __init__(self, state: "AppState") -> None:
+    def __init__(self, state: "AppState", limiter: RateLimiter | None = None) -> None:
         self._state = state
+        self._limiter = limiter
         self._queue: queue.Queue[_Arrival | None] = queue.Queue(state.settings.ingress_queue_max)
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -293,7 +331,7 @@ class IngressWorker:
         to_store: list[_Arrival] = []
         for arrival in batch:
             try:
-                refused = _refusal(self._state, arrival.dataset, arrival.request)
+                refused = _refusal(self._state, arrival.dataset, arrival.request, self._limiter)
             except Exception as error:  # noqa: BLE001 - the message may quote the body
                 log.error(
                     "ingress %s: could not check an event: %s", arrival.dataset.name, type(error).__name__
@@ -346,10 +384,10 @@ async def ingress(request: Request, tenant: str, source: str) -> Response:
     dataset = _push_dataset(state, tenant, source)
     if dataset is None:
         return _problem(404)
-    wait = cast(RateLimiter, request.app.state.ingress_rate).wait_for(source)
-    if wait:
-        log.warning("ingress %s: refused: over the rate limit", source)
-        return _problem(429, {"Retry-After": str(max(1, math.ceil(wait)))})
+    address = request.client.host if request.client else "unknown"
+    refused = _over_rate(request.app.state.ingress_rate, f"address:{source}:{address}", source)
+    if refused is not None:
+        return refused
     limit = state.settings.ingress_max_bytes
     declared = request.headers.get("content-length")
     if declared is not None:
@@ -394,7 +432,7 @@ _ACCESS_FILTER = _NoLineForAnAcceptedEvent()
 def install(app: FastAPI, state: "AppState") -> None:
     """Add the ingress route to `app`."""
     app.state.ingress_rate = RateLimiter(state.settings.ingress_rate_per_s, state.clock)
-    app.state.ingress_worker = IngressWorker(state)
+    app.state.ingress_worker = IngressWorker(state, app.state.ingress_rate)
     state.closers.append(app.state.ingress_worker.close)
     logging.getLogger("uvicorn.access").addFilter(_ACCESS_FILTER)
     app.include_router(router)

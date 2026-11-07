@@ -511,3 +511,23 @@ def test_verify_checks_the_timestamp_against_when_the_request_arrived(h: Harness
 def test_a_content_length_too_long_to_be_a_number_is_413(h: Harness):
     status, _ = _drive(h.app, [(b"content-length", b"9" * 5000)], [b"{}"])
     assert status == 413
+
+
+def test_unsigned_callers_cannot_use_up_a_sources_rate(clock: FrozenClock):  # S5
+    h = Harness(clock, rate=2.0)
+    attacker = TestClient(h.app, base_url="http://localhost:8000", client=("203.0.113.9", 4000))
+    sender = TestClient(h.app, base_url="http://localhost:8000", client=("198.51.100.7", 4000))
+    refused = [attacker.post(URL, content=b'{"id": 1}').status_code for _ in range(10)]
+    assert refused[:2] == [401, 401] and set(refused[2:]) == {429}  # its own address's bucket ran out
+    body = b'{"id": 2}'
+    assert sender.post(URL, content=body, headers=h.signed(body)).status_code == 202
+    assert len(h.stored()) == 1
+
+
+def test_the_sources_bucket_counts_only_verified_requests(clock: FrozenClock):  # S5
+    h = Harness(clock, rate=2.0)
+    senders = [
+        TestClient(h.app, base_url="http://localhost:8000", client=(f"198.51.100.{n}", 1)) for n in range(4)
+    ]
+    codes = [c.post(URL, content=b'{"id": 1}', headers=h.signed()).status_code for c in senders]
+    assert codes == [202, 202, 429, 429]  # two verified requests take the source's second
