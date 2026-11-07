@@ -70,8 +70,19 @@ def sims(tmp_path: Path) -> Iterator[tuple[Any, Path, dict[str, str]]]:
 
 def _received(db: Path) -> list[dict[str, Any]]:
     with sqlite3.connect(db) as conn:
-        rows = conn.execute("select body, idempotency_key, headers from requests order by id").fetchall()
-    return [{**json.loads(body), "_key": key, "_headers": json.loads(headers)} for body, key, headers in rows]
+        rows = conn.execute(
+            "select body, idempotency_key, headers, erp_id, method, path from requests order by id"
+        ).fetchall()
+    return [
+        {
+            **json.loads(body),
+            "_key": key,
+            "_headers": json.loads(headers),
+            "_erp_id": erp_id,
+            "_call": f"{m} {p}",
+        }
+        for body, key, headers, erp_id, m, p in rows
+    ]
 
 
 def test_the_zakya_demo_project_is_sound():
@@ -79,6 +90,10 @@ def test_the_zakya_demo_project_is_sound():
     assert [f.name for f in project.flows] == ["zakya-invoices"]
     assert [r.name for r in project.flows[0].routes] == ["erp"]
     assert validate_project(project) == []
+    (budget,) = (
+        project.budgets.values()
+    )  # M13: a dev day of the simulator takes far more than Zoho's 1400 calls
+    assert [(w.units, w.seconds) for w in budget.windows] == [(90, 60), (20000, 86400)]
 
 
 def test_each_invoice_reaches_the_receiver_once_and_a_changed_one_again(sims, monkeypatch):
@@ -117,6 +132,7 @@ def test_each_invoice_reaches_the_receiver_once_and_a_changed_one_again(sims, mo
     received = _received(db)
     assert sorted(r["external_id"] for r in received) == sorted(zakya.invoices)  # each invoice once
     assert all(r["lines"] and r["status"] == "sent" for r in received)
+    assert all(r["_call"] == f"PUT /invoices/{r['external_id']}" for r in received)  # an upsert by invoice id
     assert all("authorization" not in r["_headers"] for r in received)  # the receiver keeps no credentials
     (delivery,) = store.ledger.list_deliveries(route="erp")
     answers = store.responses.of_delivery("erp", delivery.version_id)
@@ -133,6 +149,10 @@ def test_each_invoice_reaches_the_receiver_once_and_a_changed_one_again(sims, mo
     assert len(received) == 7
     again = [r for r in received if r["external_id"] == changed]
     assert [r["status"] for r in again] == ["sent", "paid"] and again[0]["_key"] != again[1]["_key"]
+    assert (
+        again[0]["_erp_id"] == again[1]["_erp_id"]
+    )  # the paid invoice updates the ERP's record, not a new one
+    assert len({r["_erp_id"] for r in received}) == 6
     assert [r["external_id"] for r in received].count(added) == 1
 
     third = runtime.start_run("zakya-invoices")  # nothing new: nothing is sent

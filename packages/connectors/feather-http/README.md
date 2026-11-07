@@ -64,17 +64,27 @@ invoices = fc.Dataset(
 flow = fc.Flow(
     "invoices-to-erp",
     reads=invoices,
-    deliver=[fc.to(http.Call("erp", method="POST", url="/sales-orders", response_map={"erp_id": "id"}))],
+    deliver=[
+        fc.to(http.Call("erp", method="PUT", url="/invoices/{invoice_id}", response_map={"erp_id": "id"}))
+    ],
     triggers=[fc.cron("*/5 * * * *", tz="UTC")],
 )
 ```
 
+A `by_stamp` read with `Page` or `Offset` pages by stamp: after a full page it asks again from the first page with
+the stamp filter set to the last record's stamp, skipping what it has read, so that a record changed during the read
+(and so moved to the end of a list sorted by stamp) is not skipped. A read stops with an error on an empty page that
+says more follow, a response without `has_more_path`, a cursor seen before, or a `Link` to another origin.
+
 `http.Call` sends one request per record, `url` and `body` filled in from the record (templates such as
-`/orders/{order_id}`, or functions of the record), with an `Idempotency-Key` made from the chunk and the record's
-key. A 2xx or a 409 (applied already) applies the record; any other 4xx rejects it and keeps the body it was sent
-with; a 429, a 5xx or a timeout is retried. `response_map` keeps fields of each JSON answer by dotted path, which the
+`/orders/{order_id}`, values percent-encoded, or functions of the record), with an `Idempotency-Key` made from the
+chunk and the record's key. A record that changes is best sent as an upsert by its own id (`PUT /invoices/{id}`):
+each version gets a new key, so a POST would create it again. A 2xx or a 409 (applied already) applies the record;
+a 3xx, or a status in `fail_statuses` (401, 403, 404, 405 and 407 by default), fails the chunk and the delivery, as
+every record would get the same; any other 4xx rejects the record and keeps the body it was sent with; a 429, a 5xx
+or a timeout is retried. `response_map` keeps fields of each JSON answer by dotted path, a 409's too, which the
 delivery's page on the dashboard shows per record. Deletes are rejected unless `on_delete="skip"`.
 
 Each list call and each detail call takes one unit from the connection's budget (`cost_key` and
-`detail_cost_key` name them in the spec's `cost`), retries included. A wait of under a minute is slept off;
+`detail_cost_key` name them in the spec's `cost`), retries included, and so does each OAuth2 token request. A wait of under a minute is slept off;
 a longer one defers the task durably.

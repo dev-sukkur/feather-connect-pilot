@@ -1,7 +1,8 @@
 """Retail flow templates, as library functions (ruling 12): a project calls one with what it changes, and gets the
 template's fixes when it upgrades. `feather new flow --template` copies one into a project for full control.
 
-`zakya_invoices_to_erp` reads new and changed invoices from Zakya (Zoho Inventory's API) and posts each to an ERP:
+`zakya_invoices_to_erp` reads new and changed invoices from Zakya (Zoho Inventory's API) and upserts each into an ERP,
+`PUT {erp_path}/{invoice_id}`, so that a changed invoice updates the one the ERP has rather than making another:
 
     connections:
       zakya:
@@ -99,21 +100,23 @@ def zakya_invoices_to_erp(
     schedule: Trigger | Sequence[Trigger] = EVERY_MINUTE,
     name: str = "zakya-invoices-to-erp",
     erp_path: str = "/invoices",
+    method: str = "PUT",
     response_map: Mapping[str, str] | None = None,
     page_size: int = 200,
     lookback: str = "0s",
 ) -> fc.Flow:
-    """A flow that posts each new or changed Zakya invoice to an ERP, one request each.
+    """A flow that upserts each new or changed Zakya invoice into an ERP, one request each.
 
     `source` and `destination` name the connections. `map` turns an invoice into the ERP's body (`erp_invoice`
-    when None), and `erp_path` is where it goes. The ERP's answer gives `response_map`'s fields, by default its `id`
+    when None), and it goes to `{erp_path}/{invoice_id}` with `method`, an upsert by the invoice's id: a changed
+    invoice (paid, say) is a second request for the same ERP record. An ERP that only creates may take a POST there. The ERP's answer gives `response_map`'s fields, by default its `id`
     as `erp_id`. `extra_routes` deliver the same invoices elsewhere too, and `schedule` says when the flow runs.
     """
     triggers = list(schedule) if isinstance(schedule, Sequence) else [schedule]
     erp = http.Call(
         destination,
-        method="POST",
-        url=erp_path,
+        method=method,
+        url=f"{erp_path.rstrip('/')}/{{invoice_id}}",
         body=map or erp_invoice,
         response_map={"erp_id": "id"} if response_map is None else response_map,
     )

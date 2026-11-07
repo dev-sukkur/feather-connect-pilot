@@ -1,9 +1,11 @@
 """A small stand-in for an ERP that takes invoices, for the demo. Every request it takes is kept in SQLite, and the
 page at `/` lists them, newest first.
 
-A POST to any path is stored with its method, path, headers (without credentials), body, idempotency key and time,
-and answered `{"id": ...}`. A request whose idempotency key was seen before is not stored again: it gets the same id,
-and the stored one counts the repeat. A few requests answer 503 on purpose.
+A PUT or a POST to any path is stored with its method, path, headers (without credentials), body, idempotency key and
+time, and answered `{"id": ...}`. A PUT is an upsert by its path (`/invoices/{invoice_id}`): the first one for a path
+makes an ERP id, answered 201, and each later one is stored too but keeps that id, answered 200. A POST always makes a
+new id. A request whose idempotency key was seen before is not stored again: it gets the same id, and the stored one
+counts the repeat. A few requests answer 503 on purpose.
 
     python sims/receiver.py --port 29101 --db .data/receiver.sqlite
 """
@@ -67,8 +69,17 @@ class Receiver:
                         "update requests set repeats = repeats + 1 where idempotency_key = ?", (key,)
                     )
                     return seen["erp_id"], False
-            number = self._db.execute("select coalesce(max(id), 0) + 1 from requests").fetchone()[0]
-            erp_id = f"ERP-{number:06d}"
+            known = None
+            if method == "PUT":
+                known = self._db.execute(
+                    "select erp_id from requests where method = 'PUT' and path = ? order by id limit 1",
+                    (path,),
+                ).fetchone()
+            if known is not None:
+                erp_id = known["erp_id"]
+            else:
+                number = self._db.execute("select count(distinct erp_id) + 1 from requests").fetchone()[0]
+                erp_id = f"ERP-{number:06d}"
             self._db.execute(
                 """insert into requests (erp_id, method, path, headers, body, idempotency_key, received_at)
                    values (?, ?, ?, ?, ?, ?, ?)""",
@@ -82,15 +93,17 @@ class Receiver:
                     datetime.now(UTC).isoformat(timespec="seconds"),
                 ),
             )
-            return erp_id, True
+            return erp_id, known is None
 
     def newest(self, limit: int = SHOWN) -> list[sqlite3.Row]:
         with self._lock:
             return self._db.execute("select * from requests order by id desc limit ?", (limit,)).fetchall()
 
-    def count(self) -> int:
+    def count(self) -> tuple[int, int]:
+        """How many requests are stored, and how many ERP records they made."""
         with self._lock:
-            return self._db.execute("select count(*) from requests").fetchone()[0]
+            found = self._db.execute("select count(*), count(distinct erp_id) from requests").fetchone()
+            return found[0], found[1]
 
     def fails_now(self) -> bool:
         with self._lock:
@@ -125,6 +138,7 @@ def _page(receiver: Receiver) -> str:
             str(row["repeats"]) if row["repeats"] else "",
         ]
         rows.append("<tr>" + "".join(f"<td>{html.escape(c)}</td>" for c in cells) + "</tr>")
+    requests, records = receiver.count()
     body = "\n".join(rows) or '<tr><td colspan="9" class="empty">No requests yet.</td></tr>'
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -141,7 +155,8 @@ def _page(receiver: Receiver) -> str:
 </style></head>
 <body>
 <h1>ERP receiver</h1>
-<p>{receiver.count()} invoices received, newest first. A repeat with the same idempotency key is not stored again.</p>
+<p>{requests} requests for {records} ERP invoices, newest first. A PUT for an invoice the ERP has updates it under
+the same ERP id. A repeat with the same idempotency key is not stored again.</p>
 <table>
 <thead><tr><th>Received</th><th>ERP id</th><th>Request</th><th>Invoice</th><th>Customer</th><th>Status</th>
 <th>Total</th><th>Idempotency key</th><th>Repeats</th></tr></thead>

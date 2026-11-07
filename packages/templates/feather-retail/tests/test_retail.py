@@ -97,8 +97,8 @@ def test_the_flow_reads_zakya_invoices_page_by_page_with_details():
 
 
 @respx.mock
-def test_each_invoice_is_posted_to_the_erp_in_the_default_shape():
-    route = respx.post(f"{ERP}/invoices").mock(return_value=httpx.Response(201, json={"id": "ERP-9"}))
+def test_each_invoice_is_put_to_the_erp_by_its_id_in_the_default_shape():  # I5: an upsert, not a new POST
+    route = respx.put(f"{ERP}/invoices/inv-1").mock(return_value=httpx.Response(201, json={"id": "ERP-9"}))
     flow = zakya_invoices_to_erp()
     (erp,) = flow.routes
     assert erp.name == "erp" and tuple(flow.triggers) == (fc.cron("* * * * *", tz="UTC"),)
@@ -112,6 +112,10 @@ def test_each_invoice_is_posted_to_the_erp_in_the_default_shape():
         {"sku": "TEA-1", "name": "Tea", "quantity": 2, "rate": 500.0, "amount": 1000.0}
     ]
     assert [(r.status, dict(r.fields)) for r in result.responses] == [(201, {"erp_id": "ERP-9"})]
+    custom = respx.post(f"{ERP}/api/v2/invoices/inv-1").mock(return_value=httpx.Response(200, json={}))
+    (other,) = zakya_invoices_to_erp(erp_path="/api/v2/invoices", method="POST").routes
+    other.sink.apply(ctx(base_url=ERP), batch)
+    assert custom.called
 
 
 def test_what_a_customer_changes_is_taken():

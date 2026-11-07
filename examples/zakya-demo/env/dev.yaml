@@ -1,5 +1,8 @@
 # The simulators on this machine. The credentials are obviously fake files in secrets/, read against the
 # project directory.
+# The simulator makes about 8 calls a minute, which would spend Zoho's 1400 a day in three hours: a dev day gets more.
+budgets:
+  zoho-api: {limits: ["90/minute", "20000/day"]}
 connections:
   zakya:
     base_url: http://127.0.0.1:29100
