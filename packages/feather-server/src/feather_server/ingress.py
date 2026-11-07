@@ -12,6 +12,7 @@ of the error is logged.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -166,16 +167,38 @@ def _verified(
     return None
 
 
+def _replay_id(source: PushSource, request: InboundRequest) -> str | None:
+    """An id for a signed request that has no event id: a hash of its signature and timestamp headers and its body
+    (S10). A sender that resends the same signed request, having lost the 202, sends the same signature and timestamp,
+    so the inbox keeps it once; a new event, or the same one signed anew, gets another id. An unsigned request has
+    nothing to tell a replay by."""
+    if is_unsigned(source):
+        return None
+    signing = sorted(
+        (name, value)
+        for name, value in request.headers.items()
+        if "signature" in name or "timestamp" in name or name == "webhook-id"
+    )
+    if not signing:
+        return None
+    digest = hashlib.sha256()
+    for name, value in signing:
+        digest.update(f"{name}:{value}\n".encode())
+    digest.update(request.body)
+    return "replay:" + digest.hexdigest()
+
+
 def _event_id(dataset: Dataset, source: PushSource, request: InboundRequest) -> str | None:
-    """The event's id, if it can be kept. Without one it may be stored twice, which beats not at all."""
+    """The event's id, if it can be kept, or else the signed request's own (S10). Without either it may be stored
+    twice, which beats not at all."""
     try:
         found = event_id_of(source, request)
     except Exception as error:  # noqa: BLE001 - the message of a connector's error may quote the body
         log.warning("ingress %s: no event id: %s", dataset.name, type(error).__name__)
-        return None
+        found = None
     if isinstance(found, str) and found and "\x00" not in found and len(found) <= _MAX_EVENT_ID:  # pyright: ignore[reportUnnecessaryIsInstance]
         return found
-    return None
+    return _replay_id(source, request)
 
 
 class _SampledLog:

@@ -218,8 +218,28 @@ def test_an_event_id_that_cannot_be_kept_counts_as_none(h: Harness, event_id: An
     )
     body = ('{"id": 1, "event_id": ' + raw + "}").encode()
     assert h.post(body).status_code == 202
+    h.clock.advance(timedelta(seconds=1))  # signed anew: not a replay of the same request (S10)
     assert h.post(body).status_code == 202
     assert len(h.stored()) == 2
+
+
+def test_a_replay_with_no_event_id_is_stored_once(h: Harness):  # S10
+    body = b'{"id": 1}'
+    headers = h.signed(body)
+    assert h.client.post(URL, content=body, headers=headers).status_code == 202
+    assert (
+        h.client.post(URL, content=body, headers=headers).status_code == 202
+    )  # the same signed request again
+    assert len(h.stored()) == 1
+    h.clock.advance(timedelta(seconds=1))
+    assert h.post(body).status_code == 202  # the same body, sent again and signed again: a new event
+    assert len(h.stored()) == 2
+
+
+def test_an_unsigned_source_without_event_ids_keeps_every_request(h: Harness):  # S10
+    for _ in range(2):
+        assert h.client.post("/ingress/default/open", content=b'{"id": 1}').status_code == 202
+    assert len(h.stored("open")) == 2
 
 
 @pytest.mark.parametrize("body", [b"", b"not json", b'{"id": ', b"\xff\xfe\x00", b"[" * 100_000])
@@ -257,7 +277,7 @@ def test_a_disabled_flow_takes_no_events(h: Harness):
 
 def test_rate_limit_returns_429_with_retry_after(clock: FrozenClock):
     h = Harness(clock, rate=2.0)
-    assert [h.post().status_code for _ in range(3)] == [202, 202, 429]
+    assert [h.post(f'{{"id": {n}}}'.encode()).status_code for n in range(3)] == [202, 202, 429]
     r = h.post()
     assert r.status_code == 429 and r.headers["Retry-After"] == "1"
     assert r.json() == {"title": "Too Many Requests", "status": 429}
