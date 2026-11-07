@@ -279,3 +279,17 @@ def test_readme_example_runs(target, target_url, tmp_path: Path, monkeypatch):
     flow = names["flow"]
     (route,) = flow.routes
     assert isinstance(route.sink, postgres.Table) and isinstance(flow.datasets[0].source, postgres.Query)
+
+
+def test_staged_chunks_survive_a_server_crash(target, make_ctx):  # Review C2
+    # An unlogged table is emptied by crash recovery, while its chunks are marked applied: it must be a logged one.
+    target.execute("create table daily (id text primary key, day text, v int)")
+    sink = postgres.Table("wh", table="daily", key_columns=["id"])
+    sink.apply(
+        make_ctx(),
+        batch([up("c", id="c", day="d1", v=2)], mode="replace_partition", partition="day=d1", last=False),
+    )
+    persistence = target.execute(
+        r"select relpersistence from pg_class where relname like '\_feather\_stage\_%'"
+    ).fetchall()
+    assert persistence == [("p",)]

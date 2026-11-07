@@ -211,7 +211,7 @@ class Table(_Postgres, connector.Sink):
     """A sink that writes `table`, in the connection's schema, by `key_columns`.
 
     `upsert` inserts or updates by key (`insert ... on conflict do update`), and a delete removes the key. `append`
-    inserts every record. `replace_partition` loads each chunk into an unlogged staging table of the version and, on
+    inserts every record. `replace_partition` loads each chunk into a staging table of the version and, on
     the last chunk, swaps the slice in one transaction: the rows whose `_fc_partition` is the batch's are deleted, and
     so are the rows of keys that moved from another partition, then the staged rows go in (B6). A slice that became
     empty arrives as one batch with no records, and empties the partition. `partition_columns` is for the index on
@@ -419,7 +419,7 @@ class Table(_Postgres, connector.Sink):
         stage = self._name(schema, self._stage_name(batch))
         conn.execute(
             sql.SQL(
-                "create unlogged table if not exists {} (like {} including defaults, "
+                "create table if not exists {} (like {} including defaults, "
                 "_fc_chunk int not null, _fc_moved_from text)"
             ).format(stage, target)
         )
