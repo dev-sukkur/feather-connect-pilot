@@ -329,24 +329,68 @@ def _drop_own_chunks(version_ids: Iterable[str], writer: str, deps: Any) -> None
             continue
 
 
+_STATE_TARGET = "sealer"
+_STATE_KEY = "state_updated_to"  # the seal_seq up to which the dataset's record state is known to be written
+_STATE_LOOKBACK = 50  # sealed versions looked at for state a crash left unwritten
+
+
+def _state_marker(dataset: Dataset) -> str:
+    return f"{_STATE_TARGET}:{dataset.name}"
+
+
+def _catch_up_state(dataset: Dataset, deps: Any) -> None:
+    """Write the record state of sealed versions whose state a crash between sealing and `update_state` left unwritten
+    (S11), before a new batch works out its moves from that state. `update_state` keeps the newest state of each key,
+    so writing a version's state again changes nothing."""
+    if not dataset.keep_state:
+        return
+    done = deps.store.overrides.get(_state_marker(dataset), _STATE_KEY)
+    behind = sorted(
+        (
+            v
+            for v in deps.store.versions.list_versions(dataset.name, limit=_STATE_LOOKBACK)
+            if v.status == "sealed" and v.seal_seq is not None and (done is None or v.seal_seq > int(done))
+        ),
+        key=lambda v: v.seal_seq,
+    )
+    for version in behind:
+        update_state(dataset, version, deps)
+    if behind:
+        _mark_state(dataset, behind, deps)
+
+
+def _mark_state(dataset: Dataset, versions: Sequence[Version], deps: Any) -> None:
+    newest = max(v.seal_seq or 0 for v in versions)
+    done = deps.store.overrides.get(_state_marker(dataset), _STATE_KEY)
+    if done is None or newest > int(done):
+        deps.store.overrides.set(_state_marker(dataset), _STATE_KEY, newest, actor="sealer")
+
+
 def _after_seal(
     runtime: Runtime, dataset: Dataset, sealed: Sequence[Version], routes: Sequence[str], batch: _Batch
 ) -> None:
     """Do what follows a seal. The versions are safe by now, so nothing failing here may look like a failed seal: a
-    delivery that isn't submitted is the sweeper's, and state that isn't updated catches up with the key's next event."""
+    delivery that isn't submitted is the sweeper's, and state that isn't updated is written by the next batch (S11)."""
     deps = runtime.deps
+    stated = True
     for version in sealed:
         try:
             deps.store.runs.set_run_status(version.run_id, "running")
             if dataset.keep_state:
                 update_state(dataset, version, deps)
         except Exception as error:  # noqa: BLE001 - see above
+            stated = False
             _log_failure(dataset.name, error)
         for route in routes:
             try:
                 runtime.submit_apply(route, version.version_id)
             except Exception as error:  # noqa: BLE001 - see above
                 _log_failure(dataset.name, error)
+    if dataset.keep_state and stated and sealed:
+        try:
+            _mark_state(dataset, sealed, deps)
+        except Exception as error:  # noqa: BLE001 - the next batch writes the state again, which is harmless
+            _log_failure(dataset.name, error)
     try:
         deps.store.quarantine.close_extraction(dataset.name, batch.settled)
     except Exception as error:  # noqa: BLE001 - see above
@@ -373,6 +417,7 @@ def _seal_batch(
         _hold(batch, deps)
         return []
     batch.drop_what_arrow_refuses()
+    _catch_up_state(dataset, deps)
     _with_moves(dataset, batch.parts, deps)
     routes = list(dict.fromkeys(route.name for flow in flows for route in flow.routes))
     run_id = runtime.stream_run(flows[0].name, now) if batch.parts else ""
