@@ -50,6 +50,16 @@ class RetentionTests:
         assert r.dropped_days == [T0.date()] and r.kept_days == {}
         assert spool.list_chunks("v1") == [] and spool.days() == []
 
+    def test_retention_forgets_expired_overrides_and_stopped_workers(
+        self, store: Store, spool: Spool, clock: FrozenClock
+    ):  # Stage 2 M6
+        store.overrides.set("preview:x", "token", 1, actor="a", expires_at=clock.now() + timedelta(minutes=5))
+        store.workers.heartbeat("w-old", {}, "sha", 1)
+        store.workers.mark("w-old", "draining")
+        clock.advance(timedelta(days=2))
+        report = retention_once(store, spool, now=clock.now())
+        assert (report.deleted_overrides, report.forgotten_workers) == (1, 1)
+
     def test_retention_keeps_recent_days(self, store: Store, spool: Spool, clock: FrozenClock):
         stage_and_seal(store, spool, "v1", ["a"])
         apply(store, "v1")

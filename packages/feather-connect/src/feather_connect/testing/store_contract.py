@@ -1027,6 +1027,28 @@ class StoreContract(SpoolContract, ResponseStoreContract):
         assert [w.worker_id for w in store.workers.stale(timedelta(seconds=30))] == ["old"]
         assert store.workers.stale(timedelta(seconds=41)) == []
 
+    def test_forget_stopped_workers_removes_dead_and_draining_ones_seen_long_ago(
+        self, store: Store, clock: FrozenClock
+    ):  # Stage 2 M6
+        for worker in ("alive", "dead", "draining", "recent"):
+            store.workers.heartbeat(worker, {}, "sha", 4)
+        store.workers.mark("dead", "dead")
+        store.workers.mark("draining", "draining")
+        clock.advance(timedelta(days=2))
+        store.workers.heartbeat("recent", {}, "sha", 4)
+        store.workers.mark("recent", "dead")
+        assert store.workers.forget_stopped(clock.now() - timedelta(days=1)) == 2
+        assert [w.worker_id for w in store.workers.list_workers()] == ["alive", "recent"]
+
+    def test_delete_expired_overrides(self, store: Store, clock: FrozenClock):  # Stage 2 M6
+        store.overrides.set("t", "old", 1, actor="a", expires_at=clock.now() + timedelta(minutes=1))
+        store.overrides.set("t", "later", 2, actor="a", expires_at=clock.now() + timedelta(days=1))
+        store.overrides.set("t", "for-ever", 3, actor="a")
+        clock.advance(timedelta(hours=1))
+        assert store.overrides.delete_expired() == 1
+        assert store.overrides.delete_expired() == 0
+        assert (store.overrides.get("t", "later"), store.overrides.get("t", "for-ever")) == (2, 3)
+
     def test_a_draining_worker_stays_draining_and_a_dead_one_comes_back(self, store: Store):
         store.workers.heartbeat("w", {}, "s", 1)
         store.workers.mark("w", "draining")

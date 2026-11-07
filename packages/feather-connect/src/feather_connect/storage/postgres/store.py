@@ -1509,6 +1509,15 @@ class _Workers(WorkerRegistry):
             ).fetchall()
         return [_worker(r) for r in rows]
 
+    def forget_stopped(self, before: datetime) -> int:
+        with self._db.tx() as conn:
+            done = conn.execute(
+                """delete from feather.worker
+                   where tenant_id = %s and state in ('dead', 'draining') and last_seen < %s""",
+                (self._db.tenant, before),
+            )
+        return done.rowcount
+
     def mark(self, worker_id: str, state: WorkerState) -> None:
         with self._db.tx() as conn:
             done = conn.execute(
@@ -1573,6 +1582,14 @@ class _Overrides(OverrideStore):
                 (self._db.tenant, target, key, self._db.clock.now()),
             ).fetchone()
         return None if row is None else _unjson(row["value"])
+
+    def delete_expired(self) -> int:
+        with self._db.tx() as conn:
+            done = conn.execute(
+                "delete from feather.override where tenant_id = %s and expires_at <= %s",
+                (self._db.tenant, self._db.clock.now()),
+            )
+        return done.rowcount
 
     def claim(
         self,

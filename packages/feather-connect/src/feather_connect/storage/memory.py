@@ -921,6 +921,15 @@ class _Workers(WorkerRegistry):
                 raise KeyError(f"no worker {worker_id!r}")
             self._d.workers[worker_id] = replace(self._d.workers[worker_id], state=state)
 
+    def forget_stopped(self, before: datetime) -> int:
+        with self._d.lock:
+            gone = [
+                w for w, row in self._d.workers.items() if row.state != "alive" and row.last_seen < before
+            ]
+            for worker_id in gone:
+                del self._d.workers[worker_id]
+            return len(gone)
+
 
 class _Schedules(ScheduleStore):
     def __init__(self, data: _Data) -> None:
@@ -958,6 +967,13 @@ class _Overrides(OverrideStore):
         with self._d.lock:
             found = self._d.overrides.get((target, key))
             return None if found is None or self._expired(found) else copy.deepcopy(found.value)
+
+    def delete_expired(self) -> int:
+        with self._d.lock:
+            gone = [k for k, found in self._d.overrides.items() if self._expired(found)]
+            for k in gone:
+                del self._d.overrides[k]
+            return len(gone)
 
     def claim(
         self,

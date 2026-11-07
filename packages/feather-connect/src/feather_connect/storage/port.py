@@ -813,6 +813,10 @@ class WorkerRegistry(Protocol):
         """Set the worker's state. Raises `KeyError` for a worker that never sent a heartbeat."""
         ...
 
+    def forget_stopped(self, before: datetime) -> int:
+        """Delete the dead and draining workers last seen before `before`, and return how many."""
+        ...
+
 
 @dataclass(frozen=True)
 class Override:
@@ -846,6 +850,10 @@ class OverrideStore(Protocol):
 
     def get(self, target: str, key: str) -> Any | None:
         """The value, or None when there is none or it has expired."""
+        ...
+
+    def delete_expired(self) -> int:
+        """Delete the overrides that have expired, such as used previews and old idempotent answers; return how many."""
         ...
 
     def claim(

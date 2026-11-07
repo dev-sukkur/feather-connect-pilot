@@ -130,7 +130,9 @@ def test_tasks_bind_their_ids(out: io.StringIO) -> None:
 
 def test_a_process_saves_each_task_line_once_however_many_install_the_handler(out: io.StringIO) -> None:  # M5
     store = MemoryStore(FrozenClock(datetime(2026, 10, 18, tzinfo=UTC)))
-    remove_worker = logs.install_task_logs(store)  # a worker and a server in one process, as feather dev runs them
+    remove_worker = logs.install_task_logs(
+        store
+    )  # a worker and a server in one process, as feather dev runs them
     remove_server = logs.install_task_logs(store)
     try:
         with bind(task="t1"):
