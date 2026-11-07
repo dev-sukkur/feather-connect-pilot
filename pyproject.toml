@@ -7,9 +7,9 @@
 package = false
 
 [tool.uv.workspace]
-members = ["packages/*", "packages/connectors/*"]
-# packages/connectors holds packages but is not one.
-exclude = ["packages/connectors"]
+members = ["packages/*", "packages/connectors/*", "packages/templates/*"]
+# packages/connectors and packages/templates hold packages but are not ones.
+exclude = ["packages/connectors", "packages/templates"]
 
 [dependency-groups]
 dev = [

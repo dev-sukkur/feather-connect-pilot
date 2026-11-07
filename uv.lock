@@ -12,6 +12,7 @@ members = [
     "feather-connect",
     "feather-engine-dbos",
     "feather-http",
+    "feather-retail",
     "feather-server",
 ]
 
@@ -489,6 +490,21 @@ dependencies = [
 requires-dist = [
     { name = "feather-connect", editable = "packages/feather-connect" },
     { name = "httpx" },
+]
+
+[[package]]
+name = "feather-retail"
+version = "0.1.0"
+source = { editable = "packages/templates/feather-retail" }
+dependencies = [
+    { name = "feather-connect" },
+    { name = "feather-http" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "feather-connect", editable = "packages/feather-connect" },
+    { name = "feather-http", editable = "packages/connectors/feather-http" },
 ]
 
 [[package]]
