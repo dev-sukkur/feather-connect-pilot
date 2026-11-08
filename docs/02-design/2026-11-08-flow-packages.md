@@ -4,7 +4,7 @@
 - **Date:** 2026-11-08
 - **Decision record:** [ADR-0011](../adr/0011-flow-packages-hot-install.md)
 - **Milestone:** brought forward: the first work after M1, ahead of the rest of M2. The two roles it needs are pulled forward from M2's RBAC (§11)
-- **Sponsor's answers (8 Nov 2026):** brought forward; a package registry from the start; running runs finish on deactivate; names always carry the package prefix. Question 5 (keep the M1 project mode) is open
+- **Sponsor's answers (8 Nov 2026):** brought forward; a package registry from the start; running runs finish on deactivate; names always carry the package prefix; packages are the only way to deploy flows, and the M1 project mode is retired
 
 ## 1. The problem
 
@@ -240,11 +240,16 @@ Installing a package runs its code on the workers. So:
 - A package can't bring its own **webhook source connector**, because ingress runs in the server, which doesn't load package code. Its own polling sources and sinks are fine. Lifting this needs ingress to hand parsing to a host; that is left for later.
 - The **dashboard can't show a package's transforms** as code. It shows the spec, as today.
 - **Old Python versions:** every package runs on the worker image's Python (3.13 today).
-- `feather dev` doesn't change: it still runs one project folder and reloads on save. `feather dev --packages` to rehearse an install locally could follow.
+- `feather dev` still runs one project folder from source and reloads on save (§13). `feather dev --packages` to rehearse an install locally could follow.
 
 ## 13. Compatibility with M1
 
-The **project mode** of M1 stays. A deployment that mounts `/project` or bakes it into an image works as before, and it suits a team with a few flows that ships them together. The **package mode** is switched on per environment. An existing project becomes a package with `feather package build` once `feather.yaml` has a `version:`. A migration installs the running project as its first package, active, so nothing stops when an environment changes mode.
+Packages are the **only** way to deploy flows. The M1 project mode, where a deployment mounts `/project` or bakes it into a flow image, is retired, so there is one way to release, one code path in the server and workers, and nothing to choose per environment.
+
+- **Deployments.** `deploy/compose.yaml` drops the `/project` mount and `FEATHER_PROJECT_DIR`. The server and workers start with no flows and run what is installed and active.
+- **Existing projects.** A project becomes a package with `feather package build` once `feather.yaml` has a `version:`, and it gets a package name.
+- **Upgrading a running environment.** The upgrade builds the mounted project into a package, installs it and activates the flows that were running, before the mount is removed. Names gain the package prefix, and the migration renames the existing datasets, routes and watermarks to match, so no history, watermark or delivery is lost.
+- **Local work.** `feather dev` still runs a project folder from source and reloads on save. It is an authoring tool, not a deployment mode, and it applies the package prefix the same way, so names match what an install gives.
 
 ## 14. Plan
 
@@ -256,13 +261,14 @@ The **project mode** of M1 stays. A deployment that mounts `/project` or bakes i
 | 3 | Migration for §9's tables; store and read wheels | Round trip; refusing a version installed before |
 | 4 | Install pipeline (§5) with the load check in a child process; the CLI and API | Each check's failure is named; nothing runs after install |
 | 5a | Environment-level config (§8); the package prefix on every name, applied at load | Two packages with the same short flow name run side by side; a shared budget limits both together |
-| 5 | Server from specs: scheduler, ingress and dashboard read the catalogue, refresh on NOTIFY; no `load_project` in package mode | A flow activated while the server runs fires on time, with no restart |
+| 5 | Server from specs: scheduler, ingress and dashboard read the catalogue, refresh on NOTIFY; the server and workers no longer call `load_project` | A flow activated while the server runs fires on time, with no restart |
 | 6 | Worker supervisor and package hosts; labels per package version; drain on deactivate | Activate in ≤ 30 s, deactivate stops triggers in ≤ 5 s |
 | 7 | Version switch and rollback | Chaos test: `kill -9` of a host during a switch loses and duplicates nothing |
 | 8 | Dependency environments with `uv`, cached by lock hash | Two packages needing different versions of one library run side by side |
 | 9 | Dashboard Packages pages, Activate and Deactivate on the flow page; accessibility checks | axe at 0 violations, light and dark |
 | 10 | Promotion qa → prod by sha256; uninstall | The wheel in prod is byte for byte the one tested in qa |
 | 11 | Optional signing; Operating Guide section | An unsigned package is refused where signing is required |
+| 12 | Retire the project mode: the upgrade that turns a mounted project into its first package and renames to prefixed names; drop the `/project` mount from Compose | An M1 environment upgrades with its history, watermarks and deliveries intact, and no flow misses a run |
 
 **Exit criteria.** In a running Compose environment, with no container restarted:
 
@@ -270,7 +276,7 @@ The **project mode** of M1 stays. A deployment that mounts `/project` or bakes i
 - they upgrade it to a new version, roll it back, and deactivate it;
 - another package keeps running throughout, with no run lost or doubled.
 
-## 15. Decisions and open question
+## 15. Decisions
 
 | # | Question | Decision (8 Nov 2026) |
 |---|---|---|
@@ -278,4 +284,4 @@ The **project mode** of M1 stays. A deployment that mounts `/project` or bakes i
 | 2 | Package source | A package registry from the start: any Python package index, or the built-in one (§4.3) |
 | 3 | Running runs on deactivate | They finish (§6) |
 | 4 | Names | Always prefixed with the package name (§8) |
-| 5 | Keep the M1 project mode for small deployments, or move every environment to packages | **Open** |
+| 5 | Keep the M1 project mode for small deployments, or move every environment to packages | Packages only. The project mode is retired, and running environments upgrade in place (§13) |
