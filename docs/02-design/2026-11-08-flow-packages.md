@@ -4,7 +4,7 @@
 - **Date:** 2026-11-08
 - **Decision record:** [ADR-0011](../adr/0011-flow-packages-hot-install.md)
 - **Milestone:** brought forward: the first work after M1, ahead of the rest of M2. The two roles it needs are pulled forward from M2's RBAC (§11)
-- **Sponsor's answers (8 Nov 2026):** brought forward; a package registry from the start; running runs finish on deactivate; names always carry the package prefix; packages are the only way to deploy flows, and the M1 project mode is retired
+- **Sponsor's answers (8 Nov 2026):** brought forward; a package registry from the start, built into `feather-server`; running runs finish on deactivate; names always carry the package prefix; packages are the only way to deploy flows, and the M1 project mode is retired
 
 ## 1. The problem
 
@@ -26,8 +26,8 @@ The customer's code is already separate from Feather Connect's source: Feather C
 
 | Need | How it works |
 |---|---|
-| Keep flows apart from Feather Connect | A flow package is a Python wheel built from the customer's own repository with `feather package build` and published to their registry. Feather Connect upgrades on its own schedule. A manifest states which Feather Connect versions a package works with |
-| Install a flow without a restart | `feather package install acme-invoices==1.4.0 --env prod` from the customer's registry, or **Packages → Install** on the dashboard. Nothing restarts |
+| Keep flows apart from Feather Connect | A flow package is a Python wheel built from the customer's own repository with `feather package build` and published to Feather's built-in registry. Feather Connect upgrades on its own schedule. A manifest states which Feather Connect versions a package works with |
+| Install a flow without a restart | `feather package install acme-invoices==1.4.0 --env prod` from the built-in registry, or **Packages → Install** on the dashboard. Nothing restarts |
 | Choose what runs | Installed flows start **inactive**. Each flow has **Activate** and **Deactivate** on the dashboard, the CLI and the API |
 | Upgrade one flow | Install version 1.5.0 and activate it. Version 1.4.0 finishes its running tasks and stops. Other packages aren't touched |
 | Roll back | Activate 1.4.0 again. Old versions stay installed until removed |
@@ -67,7 +67,7 @@ A package is a standard **Python wheel** with a Feather manifest inside, so ever
 uv run feather test
 uv run feather validate --env prod
 uv run feather package build                       # → dist/acme_invoices-1.4.0-py3-none-any.whl
-uv run feather package publish --registry acme     # uploads to the customer's registry
+uv run feather package publish --url https://feather-qa.acme.com   # uploads to the built-in registry
 ```
 
 ### 4.2 What is inside
@@ -83,25 +83,32 @@ uv run feather package publish --registry acme     # uploads to the customer's r
 
 The name and version come from `pyproject.toml`. A version installed once can't be replaced: a change needs a new version number, so a version number always means the same code.
 
-### 4.3 Package registries
+### 4.3 The built-in registry
 
-Packages are installed **from a registry**. Any registry that speaks the Python package index protocol works:
+Packages are installed **from a registry**, and Feather Connect has its own. `feather-server` serves it, so there is nothing extra to run, host or pay for:
 
-| Registry | Typical use |
-|---|---|
-| GitLab Package Registry, Azure Artifacts, AWS CodeArtifact, Google Artifact Registry, JFrog Artifactory, Sonatype Nexus | A customer's existing private registry |
-| `devpi` or `pypiserver` | A small self-hosted registry |
-| A registry served by `feather-server` itself (`/registry/simple/`, stored in Postgres) | A customer with no registry; turned on with `FEATHER_REGISTRY=1` |
+- **Where.** `https://<feather-server>/registry/simple/`, a standard Python package index (the "simple" index of PEP 503 and the upload API that `uv publish` and `twine` use). Any Python tool can read from it or publish to it.
+- **Storage.** Wheels are stored in Feather's Postgres, in the spool's chunk storage, or in object storage when one is configured (ADR-0005). Backups of the database cover the registry too.
+- **On by default.** Every environment has the registry `feather`, trusted from the start. `FEATHER_REGISTRY=0` turns it off for a site that uses only its own company registry.
+- **Who can publish.** An API token with the `publish` scope, created by an admin, typically one per customer CI pipeline. It can upload new versions and nothing else: it can't install, activate or overwrite a version. A version once published is never replaced, only yanked.
+- **Who can read.** Feather itself, and anyone with an API token, for example a developer running `uv pip download` to inspect a release.
+- **Across environments.** A customer publishes to qa's registry. `feather package promote` (§6) copies the tested wheel, matched by sha256, into prod's registry and installs it there, so prod never needs a token for qa or a network path to it.
 
-An environment lists the registries it trusts. Credentials are secret references, never values:
+From the customer's CI and an admin's terminal:
+
+```bash
+uv run feather package publish --url https://feather-qa.acme.com --token "$FEATHER_PUBLISH_TOKEN"
+feather package search invoices --env qa
+feather package install acme-invoices==1.4.0 --env qa
+```
+
+The dashboard's **Packages → Install** page lists the packages in the environment's registries and each one's versions, so an operator picks one instead of uploading a file. Installing a wheel from a file is still allowed, for an air-gapped site, behind the same checks.
+
+**Other registries, optional.** A customer that already runs a company registry can add it alongside the built-in one. Any registry that speaks the Python package index protocol works: GitLab Package Registry, Azure Artifacts, AWS CodeArtifact, Google Artifact Registry, JFrog Artifactory, Sonatype Nexus, `devpi` or `pypiserver`. Credentials are secret references, never values:
 
 ```bash
 feather registry add acme https://pkgs.example.com/simple/ --token '${secret:env:ACME_REGISTRY_TOKEN}' --env prod
-feather package search invoices --env prod
-feather package install acme-invoices==1.4.0 --env prod
 ```
-
-The dashboard's **Packages → Install** page searches the environment's registries and lists each package's versions, so an operator picks one instead of uploading a file. Installing a wheel from a file is still allowed, for an air-gapped site, behind the same checks.
 
 ## 5. Installing
 
@@ -213,7 +220,7 @@ The catalogue tables from M1 (`project`, `flow`, `dataset`, `route`) gain a `pac
 
 ```bash
 feather package build
-feather package publish --registry acme
+feather package publish --url https://feather-qa.acme.com --token "$FEATHER_PUBLISH_TOKEN"
 feather registry add acme https://pkgs.example.com/simple/ --token '${secret:env:ACME_REGISTRY_TOKEN}' --env prod
 feather package search invoices --env prod
 feather package install acme-invoices==1.4.0 --env prod
@@ -257,7 +264,7 @@ Packages are the **only** way to deploy flows. The M1 project mode, where a depl
 |---|---|---|
 | 0 | Roles `admin` and `operator` on users and tokens, pulled forward from M2 | An operator can't install; existing users are admins |
 | 1 | Manifest schema, the wheel layout and entry point, `feather package build` with locked dependencies, reproducible wheels | Building twice gives the same sha256 |
-| 2 | Registries: `feather registry add`, search, fetch; `feather package publish`; the built-in registry behind `FEATHER_REGISTRY=1` | Install from a private index and from the built-in one, with a token from a secret reference |
+| 2 | The built-in registry: the simple index and upload API at `/registry/simple/`, wheels in Postgres, `publish`-scoped tokens, yanking; `feather package publish`, search, fetch; then `feather registry add` for other indexes | `uv publish` and `feather package publish` upload to it, `uv pip install` reads from it, a version can't be overwritten, and an install from a company index works with a token from a secret reference |
 | 3 | Migration for §9's tables; store and read wheels | Round trip; refusing a version installed before |
 | 4 | Install pipeline (§5) with the load check in a child process; the CLI and API | Each check's failure is named; nothing runs after install |
 | 5a | Environment-level config (§8); the package prefix on every name, applied at load | Two packages with the same short flow name run side by side; a shared budget limits both together |
@@ -281,7 +288,7 @@ Packages are the **only** way to deploy flows. The M1 project mode, where a depl
 | # | Question | Decision (8 Nov 2026) |
 |---|---|---|
 | 1 | Milestone | Brought forward, ahead of the rest of M2. Two roles come forward with it (§11) |
-| 2 | Package source | A package registry from the start: any Python package index, or the built-in one (§4.3) |
+| 2 | Package source | The registry built into `feather-server`, on by default. Company registries can be added beside it (§4.3) |
 | 3 | Running runs on deactivate | They finish (§6) |
 | 4 | Names | Always prefixed with the package name (§8) |
 | 5 | Keep the M1 project mode for small deployments, or move every environment to packages | Packages only. The project mode is retired, and running environments upgrade in place (§13) |

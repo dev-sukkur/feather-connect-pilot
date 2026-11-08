@@ -1,6 +1,6 @@
 # ADR-0011: Flows ship as packages, installed and activated in a running environment
 
-- **Status:** Proposed. The sponsor answered all five questions on 2026-11-08: bring it forward, use a registry, let runs finish, use the package prefix, and deploy with packages only
+- **Status:** Proposed. The sponsor answered all five questions on 2026-11-08: bring it forward, use the built-in registry, let runs finish, use the package prefix, and deploy with packages only
 - **Date:** 2026-11-08
 - **Deciders:** Abdul Sukkur (sponsor)
 
@@ -11,7 +11,7 @@ In M1 an environment runs one project, which the server and every worker load wh
 ## Decision
 
 - **A flow package** is the unit of release: a Python wheel holding the M1 project layout, a manifest and locked dependencies, built by `feather package build` in the customer's own repository.
-- **Packages come from registries.** Any Python package index the environment trusts works, or a registry built into `feather-server`.
+- **Packages come from a registry built into `feather-server`**, a standard Python package index stored in Postgres and on by default. Customers' CI publishes to it with a publish-only token. A company's own Python package index can be added beside it.
 - **Install** stores the package in Postgres after checks (integrity, compatibility, and a load check in a throwaway process). Installed flows start inactive. Every flow, dataset and route name carries the package prefix (`acme-invoices/invoices`).
 - **Each flow is activated and deactivated per environment**, from the dashboard, CLI or API, with an audit row. Activating another version switches it, and the old version drains. Deactivating lets running runs finish.
 - **Workers become supervisors.** They run one child process, a package host, per active package version, in that package's own virtual environment. Hosts start and stop on activation changes, so no container restarts.
@@ -33,7 +33,8 @@ Details: [the flow packages design](../02-design/2026-11-08-flow-packages.md).
 **Costs:**
 
 - About 60–90 MB of memory per active package version on each worker replica.
-- More moving parts: the supervisor, environment builds, registries, and six new tables.
+- More moving parts: the supervisor, environment builds, the built-in registry, and six new tables.
+- Feather now hosts customers' release files, so its database grows with every published version (about 50 KB to a few MB each), and a yank and retention policy is needed.
 - Every M1 deployment must upgrade: names gain the package prefix, and the `/project` mount goes away.
 - Package code runs unsandboxed in the worker container, so installing needs the admin role. Two roles, admin and operator, are pulled forward from M2's RBAC.
 - A package can't bring its own webhook source connector at first.
