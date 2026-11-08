@@ -1,4 +1,4 @@
-"""S4: Postgres spool benchmark (ADR-0005, NFR-02, design D5). Throwaway.
+"""SP4: Postgres spool benchmark (ADR-0005, NFR-02, design D5). Throwaway.
 
 Measures, on the spike Postgres:
 1. write throughput of zstd Parquet chunks into a day-partitioned bytea table (1 and 4 writers);

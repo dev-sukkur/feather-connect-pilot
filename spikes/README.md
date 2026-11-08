@@ -7,4 +7,4 @@ Code in this folder exists only to answer phase 3 questions ([docs/03-spikes](..
 
 | Folder | Spike |
 |---|---|
-| [`engine/`](engine/README.md) | S1: engine conformance tests for DBOS (Hatchet is on the branch `side/hatchet-engine`); S2: core-model prototype; S4: Postgres spool benchmark |
+| [`engine/`](engine/README.md) | SP1: engine conformance tests for DBOS (Hatchet is on the branch `side/hatchet-engine`); SP2: core-model prototype; SP4: Postgres spool benchmark |

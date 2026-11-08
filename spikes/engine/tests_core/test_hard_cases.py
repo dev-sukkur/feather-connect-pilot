@@ -1,4 +1,4 @@
-"""S2: hard cases from design §16 against the core-model prototype."""
+"""SP2: hard cases from design §16 against the core-model prototype."""
 
 import json
 from pathlib import Path

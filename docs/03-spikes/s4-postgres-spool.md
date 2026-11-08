@@ -1,4 +1,4 @@
-# S4 — Postgres as the spool, and `feather dev` (30 Oct 2026)
+# SP4 — Postgres as the spool, and `feather dev` (30 Oct 2026)
 
 **Question:** can Postgres alone hold the spool (ADR-0005) at the target throughput, and what does that cost in size, diff time and retention?
 

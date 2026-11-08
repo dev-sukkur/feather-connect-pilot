@@ -1,4 +1,4 @@
-# S1 — Engine spike: DBOS vs Hatchet
+# SP1 — Engine spike: DBOS vs Hatchet
 
 **Question:** which durable engine should sit behind the `Engine` port (design §6.8, ADR-0003)?
 
