@@ -2,7 +2,7 @@
 
 - **Status:** Proposed (adopted from the reference evaluation; to be confirmed at design review)
 - **Date:** 2026-10-30
-- **Deciders:** Abdul Sukkur (sponsor)
+- **Deciders:** OSS Dev1 (sponsor)
 
 ## Context
 

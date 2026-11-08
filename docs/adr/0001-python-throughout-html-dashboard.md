@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-30
-- **Deciders:** Abdul Sukkur (sponsor)
+- **Deciders:** OSS Dev1 (sponsor)
 
 ## Context
 
