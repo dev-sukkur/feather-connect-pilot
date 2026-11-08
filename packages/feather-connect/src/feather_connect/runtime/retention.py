@@ -17,6 +17,7 @@ _LOGS = timedelta(days=30)
 _JOURNAL = timedelta(days=180)  # runs, tasks, deliveries and their attempts
 _MANIFESTS = timedelta(days=400)
 _INBOX = timedelta(days=7)
+_STOPPED_WORKERS = timedelta(days=1)  # dead and draining workers: `feather dev` leaves one at each reload
 _BATCH = 500
 
 
@@ -33,6 +34,8 @@ class RetentionReport:
     deleted_versions: int = 0
     dropped_inbox_days: list[date] = field(default_factory=list[date])
     kept_inbox_days: Mapping[date, str] = field(default_factory=dict[date, str])
+    deleted_overrides: int = 0  # expired: used previews, old idempotent answers
+    forgotten_workers: int = 0
 
 
 def _batches(items: Sequence[str]) -> Iterator[Sequence[str]]:
@@ -163,15 +166,29 @@ def retention_once(store: Store, spool: Spool, *, now: datetime, keep_days: int 
     Chunk days older than `keep_days` are dropped, unless a version on the day has a delivery that isn't closed or isn't
     sealed. Older snapshots are deleted, keeping the latest per (dataset, partition). Runs, tasks and deliveries go after
     180 days, task logs after 30 and version manifests after 400. Inbox days go seven days after sealing, and never
-    while they hold an event not yet sealed. Doing it again changes nothing.
+    while they hold an event not yet sealed. Expired overrides go, and so do workers stopped for a day. Doing it again
+    changes nothing.
     """
     dropped, kept = _drop_old_days(store, spool, (now - timedelta(days=keep_days)).date())
+    dropped = sorted({*dropped, *spool.drop_empty_days((now - timedelta(days=keep_days)).date())})
     snapshots = _drop_old_snapshots(store, spool, now - timedelta(days=keep_days))
     logs = store.runs.delete_logs_before(now - _LOGS)
     deliveries = store.ledger.delete_closed_before(now - _JOURNAL)
     runs = store.runs.delete_runs_before(now - _JOURNAL)
     versions = _drop_old_manifests(store, spool, now - _MANIFESTS)
     inbox_dropped, inbox_kept = _drop_old_inbox_days(store, now)
+    overrides = store.overrides.delete_expired()
+    workers = store.workers.forget_stopped(now - _STOPPED_WORKERS)
     return RetentionReport(
-        dropped, kept, runs, logs, deliveries, snapshots, versions, inbox_dropped, inbox_kept
+        dropped,
+        kept,
+        runs,
+        logs,
+        deliveries,
+        snapshots,
+        versions,
+        inbox_dropped,
+        inbox_kept,
+        overrides,
+        workers,
     )

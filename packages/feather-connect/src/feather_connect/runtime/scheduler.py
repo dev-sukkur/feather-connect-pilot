@@ -99,12 +99,13 @@ def _tick_trigger(
     schedules = runtime.store.schedules
     last = schedules.last_tick(flow.name, tid)
     if last is None:
-        schedules.set_last_tick(flow.name, tid, now)
+        schedules.advance_tick(flow.name, tid, None, now)
         return []
     due, left_out = _due(trigger, last, now)
     if not due:
         return []
-    schedules.set_last_tick(flow.name, tid, due[-1])
+    if not schedules.advance_tick(flow.name, tid, last, due[-1]):
+        return []  # another scheduler took these ticks between the read and now (Stage 2 M9)
     stream = is_stream(trigger)
     # All the missed ticks of a poller read from one watermark, and overlap would skip all but the first anyway.
     wanted = due[-1:] if stream or flow.catch_up == "latest" else due[-MAX_CATCH_UP:]

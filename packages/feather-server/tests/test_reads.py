@@ -51,6 +51,18 @@ def test_a_dataset_never_read_is_stale_too(world: World) -> None:
     assert stale.dataset == "orders" and stale.last_sealed_at is None
 
 
+def test_a_staged_version_does_not_hide_the_sealed_ones(world: World) -> None:  # Stage 2 M8
+    from feather_connect.storage.port import VersionDraft
+
+    world.run()
+    run = world.store.runs.create_run("orders", "manual", "op", {})
+    world.store.versions.stage(
+        VersionDraft("v-staged", "orders", day(18), run, False, 1, 0, "h", None, None, "sha")
+    )
+    assert world.reads.flows()[0].last_sealed_at is not None
+    assert world.reads.overview().stale_datasets == ()
+
+
 def test_overview_counts_runs(world: World) -> None:
     fail(world, "warehouse", "no such table")
     world.state.runtime.start_run("orders")  # queued, never run
@@ -86,7 +98,7 @@ def test_flow_detail_has_effective_config_with_layers_and_no_secret(world: World
     assert by_path["connections.warehouse.auth.token"].value == "***"
     assert SECRET not in repr(detail)
     assert detail.summary.name == "orders" and detail.summary.owner == "ops"
-    assert detail.summary.triggers == ("every 0:15:00",)
+    assert detail.summary.triggers == ("every 15 min",)
     assert [r.name for r in detail.summary.routes] == ["warehouse", "gofrugal"]
     assert [r.status for r in detail.recent_runs] == ["succeeded"]
     with pytest.raises(KeyError):

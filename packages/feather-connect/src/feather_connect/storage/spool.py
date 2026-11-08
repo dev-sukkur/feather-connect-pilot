@@ -122,6 +122,11 @@ class Spool(Protocol):
         """Make room for writes from today to `days_ahead` days on, for a backend that needs it."""
         ...
 
+    def drop_empty_days(self, before: date) -> list[date]:
+        """Drop the room made for days before `before` that no version wrote to, and return those days. `days()`
+        doesn't list them, as they hold no chunks, so retention would never reach them (Stage 2 M6)."""
+        ...
+
 
 @runtime_checkable
 class WriteGuard(Protocol):
@@ -216,6 +221,9 @@ class MemorySpool:
     def snapshot_versions(self) -> list[str]:
         with self._lock:
             return sorted({v for v, kind, _ in self._chunks if kind == "snapshot"})
+
+    def drop_empty_days(self, before: date) -> list[date]:
+        return []  # nothing is made ahead in memory
 
     def drop_day(self, day: date) -> None:
         with self._lock:

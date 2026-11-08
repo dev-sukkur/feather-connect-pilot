@@ -5,7 +5,7 @@ decides anything the service layer does not.
 import json
 import re
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote, urlencode
@@ -28,6 +28,7 @@ from feather_server.services import actions as action_limits
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.previews import Preview, PreviewError, PreviewExpired, PreviewInvalid
 from feather_server.services.reads import FlowSummary, Reads
+from feather_server.services.text import span
 from feather_server.web.charts import meter, sparkline
 from feather_server.web.flow_graph import flow_graph
 
@@ -56,15 +57,6 @@ def ago(moment: datetime | None, now: datetime) -> str:
         if seconds >= size:
             return f"{seconds // size} {unit} ago"
     return "just now"
-
-
-def span(duration: timedelta | int) -> str:
-    """A length of time (or a number of seconds) in words: `15 min`."""
-    seconds = int(duration.total_seconds() if isinstance(duration, timedelta) else duration)
-    for size, unit in ((86400, "d"), (3600, "h"), (60, "min")):
-        if seconds >= size and seconds % size == 0:
-            return f"{seconds // size} {unit}"
-    return f"{seconds} s" if seconds < 60 else f"{seconds // 60} min {seconds % 60} s"
 
 
 def stamp(moment: datetime) -> str:
@@ -202,6 +194,25 @@ def _state_of(flow: FlowSummary) -> str:
     if flow.paused:
         return "paused"
     return flow.last_run.status if flow.last_run else "never"
+
+
+def _good_failure_cursor(cursor: str) -> bool:
+    try:
+        found = json.loads(cursor)
+    except ValueError:
+        return False
+    return isinstance(found, list) and len(found) == 3  # pyright: ignore[reportUnknownArgumentType]
+
+
+def _good_delivery_cursor(cursor: str) -> bool:
+    seq, _, route = cursor.partition(":")
+    return seq.isascii() and seq.isdigit() and bool(route)
+
+
+def _bad_cursor(request: Request) -> HTMLResponse:
+    """A cursor that no page of ours made, which a store would choke on (M3)."""
+    message = "The link's cursor is not one this page made: start again from the first page."
+    return render(request, "error.html", status=422, title="Not a cursor", message=message)
 
 
 def _not_found(request: Request, what: str) -> HTMLResponse:
@@ -745,7 +756,10 @@ def _failures_page(
 ) -> HTMLResponse:
     route = request.query_params.get("route") or None
     limit = _page_size(request, _FAILURES_PAGE, 100)
-    views = reads(request).failure_views(route, request.query_params.get("cursor") or None, limit)
+    cursor = request.query_params.get("cursor") or None
+    if cursor is not None and not _good_failure_cursor(cursor):
+        return _bad_cursor(request)
+    views = reads(request).failure_views(route, cursor, limit)
     return render(
         request,
         "failures.html",
@@ -791,12 +805,11 @@ def _deliveries_page(
         )
     limit = _page_size(request, _DELIVERIES_PAGE, 500)
     partition = request.query_params.get("partition") or None
+    cursor = request.query_params.get("cursor") or None
+    if cursor is not None and not _good_delivery_cursor(cursor):
+        return _bad_cursor(request)
     found = reads(request).deliveries(
-        route,
-        next((s for s in _DELIVERY_STATUSES if s == chosen), None),
-        partition,
-        limit,
-        request.query_params.get("cursor") or None,
+        route, next((s for s in _DELIVERY_STATUSES if s == chosen), None), partition, limit, cursor
     )
     return render(
         request,
@@ -918,7 +931,12 @@ def _quarantine_page(
     request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
 ) -> HTMLResponse:
     route = request.query_params.get("route") or None
-    entries = reads(request).quarantine_entries(route)
+    raw_offset = request.query_params.get("offset", "0")
+    offset = int(raw_offset) if raw_offset.isascii() and raw_offset.isdigit() else 0
+    entries = reads(request).quarantine_entries(route, limit=_QUARANTINE_SHOWN, offset=offset)
+    total = reads(request).quarantine_count(route)  # a page at a time, and a count (Stage 2 M7)
+    after = offset + len(entries)
+    query = {"route": route} if route else {}
     if notice is None and request.query_params.get("dismissed"):
         notice = ("ok", "The entry is dismissed.")
     return render(
@@ -927,8 +945,16 @@ def _quarantine_page(
         status=status,
         title="Quarantine",
         actor=actor,
-        entries=entries[:_QUARANTINE_SHOWN],
-        total=len(entries),
+        entries=entries,
+        total=total,
+        first=offset + 1,
+        last=after,
+        next_href=f"/quarantine?{urlencode({**query, 'offset': after})}" if after < total else None,
+        previous_href=(
+            f"/quarantine?{urlencode({**query, 'offset': max(0, offset - _QUARANTINE_SHOWN)})}"
+            if offset
+            else None
+        ),
         route=route or "",
         notice=notice,
     )

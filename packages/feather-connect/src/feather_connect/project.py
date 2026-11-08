@@ -159,8 +159,12 @@ def _check_provider(provider: str) -> None:
         raise ProjectError(f"the secret provider {provider!r} arrives in M3: use env or file for now")
 
 
-def load_project(root: Path, env: str) -> Project:
-    """Load the project in `root` for the environment `env`. Raises `ProjectError` with the file and key at fault."""
+def load_project(root: Path, env: str, *, simulate: bool = False) -> Project:
+    """Load the project in `root` for the environment `env`. Raises `ProjectError` with the file and key at fault.
+
+    `simulate` runs every connection on simulation stand-ins, as if each one's `connector:` named a simulation
+    connector: what `feather run --sim` does. Sources then read `fixtures/<dataset>.json[l]`, and no secret is needed.
+    """
     if not _ENV_NAME.match(env):
         raise ProjectError(f"{env!r} is not an environment name: use letters, digits, - and _")
     layer_files = [(_PROJECT_FILE, root / _PROJECT_FILE), (f"env/{env}.yaml", root / "env" / f"{env}.yaml")]
@@ -176,6 +180,8 @@ def load_project(root: Path, env: str) -> Project:
     dev_processes = _dev_processes(config, layers)
     settings: Mapping[str, Any] = config.get("settings", {})
     flows = _apply_overlay(_import_flows(root, config, layers), config, layers, str(settings["timezone"]))
+    if simulate:
+        connections = _all_simulated(flows, connections)
     flows = _simulated(flows, connections, root)
     _check_push_sources(flows, connections, env)
     return Project(
@@ -533,6 +539,22 @@ def _simulated(
         changed.triggers = tuple(_retargeted(t, datasets) for t in flow.triggers)
         result.append(changed)
     return tuple(result)
+
+
+def _all_simulated(
+    flows: Sequence[Flow], connections: Mapping[str, ConnectionConfig]
+) -> dict[str, ConnectionConfig]:
+    """The connections as simulation ones, with no secrets: those the flows read from as `simulation.source`, the
+    others as `simulation.sink`."""
+    sources = {d.source.connection for f in flows for d in f.datasets}
+    return {
+        name: replace(
+            config,
+            connector="simulation.source" if name in sources else "simulation.sink",
+            secret_refs={},
+        )
+        for name, config in connections.items()
+    }
 
 
 def _retargeted(trigger: Trigger, datasets: Mapping[str, Any]) -> Trigger:

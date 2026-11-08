@@ -12,7 +12,7 @@ from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.partitions import none
 from feather_connect.core.records import Record
-from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Trigger
+from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Trigger, is_stream
 from feather_connect.storage.port import Priority
 
 Overlap = Literal["queue", "skip", "cancel_previous"]
@@ -100,6 +100,16 @@ def _dataset_problems(dataset: Dataset, path: str) -> list[Problem]:
                 f"{path}.planner",
                 "pass planner=, a function from the run time to the partition keys to read, "
                 "such as ['store_id=1509/date=2026-10-18']",
+            )
+        )
+    if not is_read and dataset.on_record_error == "fail":  # S17: the sealer has no run to fail
+        problems.append(
+            Problem(
+                "error",
+                "push_cannot_fail",
+                f"dataset {dataset.name!r} takes events, so a bad record can't fail a run: there is none to fail",
+                f"{path}.on_record_error",
+                'use on_record_error="quarantine" (the default) or "skip"',
             )
         )
     if strategy.complete and not dataset.keep_state and dataset.partition != none():
@@ -227,6 +237,32 @@ class Flow:
             "triggers": [_trigger_dict(t) for t in self.triggers],
         }
 
+    def _poller_problems(self) -> list[Problem]:
+        """A high-frequency poller (an `every` under 5 minutes) reads one tick at a time, so a dataset it reads as a
+        whole must be one slice: otherwise every tick would fail (S18)."""
+        if not any(is_stream(t) for t in self.triggers):
+            return []
+        problems: list[Problem] = []
+        for i, dataset in enumerate(self.datasets):
+            recent = dataset.partition.recent(_ANY_TIME)
+            if (
+                dataset.strategy.complete
+                and dataset.planner is None
+                and recent is not None
+                and len(recent) > 1
+            ):
+                problems.append(
+                    Problem(
+                        "error",
+                        "poller_needs_one_slice",
+                        f"dataset {dataset.name!r} reads {len(recent)} slices as a whole, which a trigger more often "
+                        "than every 5 minutes can't do",
+                        f"reads[{i}].partition",
+                        "use the by_stamp strategy, no partition, or a trigger of every 5 minutes or more",
+                    )
+                )
+        return problems
+
     def validate(self) -> list[Problem]:
         """Return every mistake in the flow that shows without running it. A sound flow has none.
 
@@ -250,6 +286,7 @@ class Flow:
                     )
                 )
             names.add(route.name)
+        problems += self._poller_problems()
         for i, trigger in enumerate(self.triggers):
             if isinstance(trigger, OnEvent) and trigger.dataset.strategy.name != "push":
                 problems.append(

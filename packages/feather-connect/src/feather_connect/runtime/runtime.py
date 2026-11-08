@@ -62,6 +62,7 @@ _SKIP = "skip"  # the kind of the row of a tick that didn't go ahead
 _RUNS_LOOKED_AT = (
     20  # rows of tasks still reading that one tick looks at: there are few, as ticks don't overlap
 )
+_STREAM_RUNS_LOOKED_AT = 200  # running runs a sweep looks through for earlier days' stream runs
 _LOST_AFTER = timedelta(minutes=1)  # how long a tick's plan may stay unstarted before it is submitted again
 _READS_IN_VAIN = (
     5  # reads that spend budget and still come up short, each after the longest wait, before giving up
@@ -461,6 +462,28 @@ class Runtime:
                 self._engine.submit(self._tick_plan_call(runs.get_run(run_id).flow, run_id, tick))
         return going
 
+    def sweep_stream_runs(self) -> list[str]:
+        """Look after what stream ticks leave behind, and return the ids of the staged versions discarded (S12).
+
+        An earlier day's stream run that still says running gets no more ticks, so nothing else looks at it: its rows
+        are checked as a tick would, and it settles once none runs. A staged version of a tick, while no task of its
+        run reads, is one that a tick left when it ended without discarding it, and nothing would seal it.
+        """
+        runs = self._deps.store.runs
+        today = self._clock.now().astimezone(ZoneInfo(self._timezone)).date().isoformat()
+        for run in runs.list_runs(status="running", limit=_STREAM_RUNS_LOOKED_AT):
+            if run.trigger != STREAM_TRIGGER or str(run.params.get("day", today)) >= today:
+                continue
+            self.tick_in_flight(run.run_id)
+            self._settle_run(run.run_id)
+        discarded: list[str] = []
+        for version in self._deps.store.versions.stream_leftovers():
+            if runs.list_tasks(version.run_id, status="running", kinds=_READING, limit=1):
+                continue
+            discard_abandoned(version.version_id, self._deps)
+            discarded.append(version.version_id)
+        return discarded
+
     def _tick_plan_call(self, flow: str, run_id: str, tick: str) -> TaskCall:
         return TaskCall(
             "feather.plan",
@@ -625,7 +648,8 @@ class Runtime:
             if row.status == "failed":
                 deps.store.runs.finish_task(row.task_id, "cancelled", row.error)
         if to == "pending":
-            deps.store.runs.set_run_status(run_id, "running")
+            if deps.store.runs.get_run(run_id).status != "cancelled":  # a cancel stands (Stage 2 M11)
+                deps.store.runs.set_run_status(run_id, "running")
             self.submit_apply(route, version_id)
         else:
             self._submit_next(delivery)
@@ -751,11 +775,13 @@ class Runtime:
         """Run a read as a step, sleeping off each budget deferral, or end it when waiting can't help (design 6.6).
 
         A deferral is a wait, not a failure: the sleep is durable, and uses up no attempt. But a read has no checkpoint,
-        so it starts afresh after one and has to get every call it needs in one go. So each wait is twice the last, up
-        to the budget's longest window, for the tokens to build up. A read that took all a window holds and wanted more
+        so it starts afresh after one and has to get every call it needs in one go. So each wait is twice the last, for
+        the tokens to build up. A read that took all a window holds and wanted more
         can never finish, and neither can one that keeps failing after waiting that long (a read of low priority sees
         less than the window holds). Those end as a permanent failure that says why, instead of spending the budget for
-        good. A read that was deferred having taken nothing has spent nothing: it just keeps waiting its turn.
+        good. A read that was deferred having taken nothing has spent nothing: it just keeps waiting its turn. Waits stop
+        doubling at the shortest window that holds what the read took (S23), so a read that fits it is never held for
+        the longest window, nor given up on.
         """
         last = timedelta(0)
         deferrals = in_vain = 0
@@ -767,8 +793,13 @@ class Runtime:
                 windows = self._windows_step(ctx, deferrals, deferred.budget)
                 holds = min((w.units for w in windows if w.seconds / w.units >= 60), default=None)
                 longest = timedelta(seconds=max((w.seconds for w in windows), default=0))
+                # S23: the waits double up to the shortest window that holds what the read took, not the longest: a
+                # read that fits a minute's window has nothing to gain from waiting a day. Only a read that fits no
+                # shorter window waits that long, and only waits at the longest count towards giving up.
+                fits = [w.seconds for w in windows if w.units > deferred.taken]
+                cap = timedelta(seconds=min(fits)) if fits else longest
                 too_big = holds is not None and deferred.taken >= holds
-                in_vain += deferred.taken > 0 and bool(windows) and last >= longest
+                in_vain += deferred.taken > 0 and bool(windows) and cap >= longest and last >= longest
                 if too_big or in_vain >= _READS_IN_VAIN:
                     size = (
                         f"holds {holds}" if too_big else f"gave too little after waiting {longest} each time"
@@ -778,7 +809,7 @@ class Runtime:
                         f"{deferred.budget!r} {size}. A read starts again after a deferral, so it needs all its calls "
                         "in one go: raise the budget's limit, or read less at a time"
                     ) from deferred
-                wait = max(deferred.wait, min(last * 2, longest))
+                wait = max(deferred.wait, min(last * 2, cap))
                 log.warning(
                     "dataset %s: budget %s is used up after %d calls, and the read starts again in %s",
                     dataset.name,

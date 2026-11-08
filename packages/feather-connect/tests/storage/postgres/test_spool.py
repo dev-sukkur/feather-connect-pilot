@@ -87,3 +87,12 @@ def test_ensure_partitions_creates_a_week_ahead(spool: PostgresSpool, pg: psycop
            where i.inhparent = 'feather.spool_chunk'::regclass"""
     ).fetchone()
     assert row is not None and row["n"] >= 8
+
+
+def test_an_empty_day_partition_is_dropped_once_old(spool: PostgresSpool, clock: FrozenClock):  # Stage 2 M6
+    spool.ensure_partitions(days_ahead=1)
+    today = clock.now().date()
+    spool.put_chunk("v-today", 0, "data", TABLE)
+    dropped = spool.drop_empty_days(today + timedelta(days=2))
+    assert today + timedelta(days=1) in dropped and today not in dropped  # today holds a version
+    spool.put_chunk("v-again", 0, "data", TABLE)  # and the day it kept still takes writes

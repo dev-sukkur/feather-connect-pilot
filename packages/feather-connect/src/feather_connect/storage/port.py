@@ -346,7 +346,16 @@ class VersionStore(Protocol):
         ...
 
     def since_watermark(self, dataset: str, partition: str, since: Any) -> list[Version]:
-        """Sealed versions whose stored watermark is `>= since`, newest first. A None watermark never matches."""
+        """Sealed versions whose stored watermark is `>= since`, newest first, up to the first one below `since`. A
+        None watermark never matches.
+
+        Stopping there keeps a tick's read to the lookback rather than the dataset's history. It loses nothing while
+        the lookback stays the same: a read from `since` stamps its version with at least `since`, and `since` only
+        grows, so a version below it is older than the lookback, and so is any version before it."""
+        ...
+
+    def last_sealed_at(self, dataset: str) -> datetime | None:
+        """When the dataset's newest sealed version, by staging, was sealed, in any partition; None if none is."""
         ...
 
     def latest_watermark(self, dataset: str) -> Any | None:
@@ -395,6 +404,11 @@ class VersionStore(Protocol):
 
     def abandoned(self, limit: int = 1000) -> list[Version]:
         """Staged versions of runs that failed or were cancelled, which nothing will seal, oldest staged first."""
+        ...
+
+    def stream_leftovers(self, limit: int = 1000) -> list[Version]:
+        """Staged versions of stream runs' ticks, oldest staged first. A tick seals its own, so one that is staged while
+        no task of its run reads is a leftover of a tick that ended without discarding it (S12)."""
         ...
 
     def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:
@@ -521,7 +535,15 @@ class QuarantineStore(Protocol):
         """
         ...
 
-    def list_open(self, route: str | None = None) -> list[QuarantineRow]: ...
+    def list_open(
+        self, route: str | None = None, *, limit: int | None = None, offset: int = 0
+    ) -> list[QuarantineRow]:
+        """The open entries, oldest first: `limit` of them from `offset` on, or all."""
+        ...
+
+    def count_open(self, route: str | None = None) -> int:
+        """How many entries are open, without reading them."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -602,8 +624,11 @@ class InboxStore(Protocol):
         """Store (dataset, request, event id) in that order, all or none, and say of each what `put` would have."""
         ...
 
-    def take(self, dataset: str, limit: int) -> list[InboxEvent]:
-        """The dataset's oldest events neither sealed nor held, in arrival order. They stay there until `seal_batch`."""
+    def take(self, dataset: str, limit: int, max_bytes: int | None = None) -> list[InboxEvent]:
+        """The dataset's oldest events neither sealed nor held, in arrival order. They stay there until `seal_batch`.
+
+        With `max_bytes`, the events stop at the first whose body takes their bodies past it, that one included: the
+        first event always comes, however large (S20)."""
         ...
 
     def oldest_age(self, dataset: str, now: datetime) -> timedelta | None:
@@ -805,6 +830,10 @@ class WorkerRegistry(Protocol):
         """Set the worker's state. Raises `KeyError` for a worker that never sent a heartbeat."""
         ...
 
+    def forget_stopped(self, before: datetime) -> int:
+        """Delete the dead and draining workers last seen before `before`, and return how many."""
+        ...
+
 
 @dataclass(frozen=True)
 class Override:
@@ -838,6 +867,10 @@ class OverrideStore(Protocol):
 
     def get(self, target: str, key: str) -> Any | None:
         """The value, or None when there is none or it has expired."""
+        ...
+
+    def delete_expired(self) -> int:
+        """Delete the overrides that have expired, such as used previews and old idempotent answers; return how many."""
         ...
 
     def claim(
@@ -876,6 +909,11 @@ class ScheduleStore(Protocol):
         ...
 
     def set_last_tick(self, flow: str, trigger_id: str, at: datetime) -> None: ...
+
+    def advance_tick(self, flow: str, trigger_id: str, seen: datetime | None, at: datetime) -> bool:
+        """Set the last tick to `at` only if it is still `seen` (None: never set), and say whether it was. Of two
+        schedulers that read the same tick, one wins and fires it (Stage 2 M9)."""
+        ...
 
 
 @dataclass(frozen=True)

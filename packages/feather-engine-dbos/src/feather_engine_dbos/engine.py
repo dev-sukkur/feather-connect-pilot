@@ -14,9 +14,10 @@ mapping follows design §6.8:
 import json
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from dbos import DBOS, DBOSClient, EnqueueOptions
+from psycopg.conninfo import conninfo_to_dict
 
 from feather_connect.engine.port import Engine, RetryPolicy, TaskCall
 from feather_connect.storage.postgres.support import connection_timeouts
@@ -50,9 +51,29 @@ def system_database_url(database_url: str) -> str:
     The URL is the one setting the client, `DBOS.migrate` and the worker all take. A statement timeout is not among
     these: DBOS decides how long its own statements may take.
     """
+    if "://" not in database_url:  # a keyword DSN, such as "host=db dbname=feather"
+        database_url = _as_url(database_url)
     parts = urlsplit(database_url)
-    query = {**dict(parse_qsl(parts.query)), **connection_timeouts()}
+    timeouts = connection_timeouts()
+    kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k not in timeouts]
+    query = [*kept, *((k, str(v)) for k, v in timeouts.items())]
     return parts._replace(query=urlencode(query)).geturl()
+
+
+def _as_url(dsn: str) -> str:
+    """The keyword DSN as a `postgresql://` URL, with the settings that aren't part of a URL's address as its query."""
+    found = conninfo_to_dict(dsn)
+    user, password = found.pop("user", None), found.pop("password", None)
+    host, port, dbname = found.pop("host", None), found.pop("port", None), found.pop("dbname", None)
+    auth = ""
+    if user is not None:
+        auth = quote(str(user), safe="")
+        if password is not None:
+            auth += ":" + quote(str(password), safe="")
+        auth += "@"
+    netloc = auth + (str(host) if host else "") + (f":{port}" if port else "")
+    path = "/" + quote(str(dbname), safe="") if dbname else ""
+    return urlunsplit(("postgresql", netloc, path, urlencode([(k, str(v)) for k, v in found.items()]), ""))
 
 
 class DbosEngine(Engine):

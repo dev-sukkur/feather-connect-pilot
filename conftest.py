@@ -13,6 +13,16 @@ from psycopg_pool import ConnectionPool
 from real_stack import scratch_database, server_url, stop_gracefully
 
 
+@pytest.fixture(autouse=True)
+def _no_shared_tokens() -> Iterator[None]:
+    """OAuth2 tokens are shared in a process (runtime/http.py); a test must not get one an earlier test fetched."""
+    from feather_connect.runtime.http import forget_tokens
+
+    forget_tokens()
+    yield
+    forget_tokens()
+
+
 @pytest.fixture(scope="session")
 def pg_url() -> Iterator[str]:
     """A fresh, empty database on the test server, dropped when the session ends."""

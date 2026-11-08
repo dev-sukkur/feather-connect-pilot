@@ -13,6 +13,7 @@ and any other 4xx raise `HttpStatusError`, a `PermanentError` with the status an
 
 import base64
 import email.utils
+import hashlib
 import logging
 import random
 import re
@@ -168,11 +169,35 @@ class Bearer:
 TokenPost = Callable[[str, Mapping[str, str]], httpx.Response]
 
 
+class _TokenCell:
+    """One access token and what goes with it, shared by every auth object of the process with the same grant."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.token: str | None = None
+        self.expires_at = 0.0
+        self.issued: list[str] = []
+        self.fetches = 0
+
+
+_CELLS: dict[tuple[str, ...], _TokenCell] = {}
+_CELLS_LOCK = threading.Lock()
+
+
+def forget_tokens() -> None:
+    """Drop every access token this process holds, so that the next request fetches a new one. For tests."""
+    with _CELLS_LOCK:
+        _CELLS.clear()
+
+
 class _OAuth2:
     """An access token fetched from `token_url`, kept until shortly before it expires, and fetched again once if the
     server turns it down. One lock covers the fetch, so threads that find it expired together fetch it once.
 
-    Each token fetched is masked in logs; once two newer ones replace it, it no longer is.
+    The token is shared in the process by every auth object with the same token URL, client and grant (the secrets
+    are hashed into the key), so that each connection, task and thread doesn't fetch its own: many token endpoints
+    limit how often a client may ask. Each token fetched is masked in logs; once two newer ones replace it, it no
+    longer is.
     """
 
     def __init__(self, token_url: str, client_id: str, client_secret: str, scheme: str) -> None:
@@ -180,14 +205,25 @@ class _OAuth2:
         self.client_id = client_id
         self._client_secret = client_secret
         self.scheme = scheme
-        self._lock = threading.Lock()
-        self._token: str | None = None
-        self._expires_at = 0.0
-        self._issued: list[str] = []
-        self.fetches = 0
+        self._shared: _TokenCell | None = None
 
     def _form(self) -> dict[str, str]:
         raise NotImplementedError
+
+    @property
+    def _cell(self) -> _TokenCell:
+        if self._shared is None:
+            grant = sorted(self._form().items())
+            secret = hashlib.sha256(repr((self._client_secret, grant)).encode()).hexdigest()
+            key = (type(self).__name__, self.token_url, self.client_id, self.scheme, secret)
+            with _CELLS_LOCK:
+                self._shared = _CELLS.setdefault(key, _TokenCell())
+        return self._shared
+
+    @property
+    def fetches(self) -> int:
+        """How many tokens have been fetched for this grant in the process."""
+        return self._cell.fetches
 
     def headers(self, client: httpx.Client) -> Mapping[str, str]:
         return self.headers_using(lambda url, form: _post_once(client, url, form))
@@ -195,22 +231,24 @@ class _OAuth2:
     def headers_using(self, post: TokenPost) -> Mapping[str, str]:
         """The `Authorization` header, with a token fetched by `post` when none is in hand (`FeatherHttp` passes one
         that retries and meters)."""
-        with self._lock:
-            if self._token is None or time.monotonic() >= self._expires_at - _EARLY_REFRESH_S:
-                self._fetch(post)
-            assert self._token is not None
-            return {"Authorization": f"{self.scheme} {self._token}"}
+        cell = self._cell
+        with cell.lock:
+            if cell.token is None or time.monotonic() >= cell.expires_at - _EARLY_REFRESH_S:
+                self._fetch(cell, post)
+            assert cell.token is not None
+            return {"Authorization": f"{self.scheme} {cell.token}"}
 
     def expire(self, token_sent: str | None) -> None:
         """Forget the token that a 401 came back for, unless another thread has fetched a new one already."""
-        with self._lock:
-            if token_sent is None or f"{self.scheme} {self._token}" == token_sent:
-                self._token = None
+        cell = self._cell
+        with cell.lock:
+            if token_sent is None or f"{self.scheme} {cell.token}" == token_sent:
+                cell.token = None
 
-    def _fetch(self, post: TokenPost) -> None:
+    def _fetch(self, cell: _TokenCell, post: TokenPost) -> None:
         form = {"client_id": self.client_id, "client_secret": self._client_secret, **self._form()}
         response = post(self.token_url, form)
-        self.fetches += 1
+        cell.fetches += 1
         found = _json_or_none(response)
         body = cast(dict[str, Any], found) if isinstance(found, dict) else {}
         token = body.get("access_token")
@@ -222,17 +260,18 @@ class _OAuth2:
                 f"the token endpoint {self.token_url} gave no access token (HTTP {response.status_code}): {excerpt}"
             )
         register_secrets(token)
-        self._issued.append(token)
-        if len(self._issued) > _TOKENS_KEPT:
-            unregister_secrets(*self._issued[:-_TOKENS_KEPT])
-            del self._issued[:-_TOKENS_KEPT]
+        cell.issued.append(token)
+        if len(cell.issued) > _TOKENS_KEPT:
+            unregister_secrets(*cell.issued[:-_TOKENS_KEPT])
+            del cell.issued[:-_TOKENS_KEPT]
         expires_in = body.get("expires_in")
         lifetime = float(expires_in) if isinstance(expires_in, int | float) else 3600.0
-        self._token = token
-        self._expires_at = time.monotonic() + lifetime
+        cell.token = token
+        cell.expires_at = time.monotonic() + lifetime
 
     def secrets(self) -> Sequence[str]:
-        return tuple(s for s in (self._client_secret, self._token) if s)
+        token = self._shared.token if self._shared is not None else None
+        return tuple(s for s in (self._client_secret, token) if s)
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(token_url={self.token_url!r}, client_id={self.client_id!r}, secrets='***')"

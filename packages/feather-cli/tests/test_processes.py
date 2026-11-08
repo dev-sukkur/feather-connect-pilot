@@ -276,3 +276,15 @@ def test_a_command_that_fails_closes_its_store_too(cli, migrated, monkeypatch):
     monkeypatch.setattr(processes, "connect", recording)
     assert cli("server", "create-user", "nobody", input="\n").exit_code == 1  # an empty password
     assert [store.runs._db.pool.closed for store in opened] == [True]
+
+
+def test_the_server_warns_when_it_listens_beyond_this_machine():  # Stage 2 M12
+    from feather_cli.commands.processes import bind_warnings
+
+    assert bind_warnings("127.0.0.1", {"FEATHER_SECRET_KEY": "k"}) == []
+    warned = bind_warnings("0.0.0.0", {"FEATHER_BASE_URL": "http://localhost:8080"})
+    assert any("Secure" in w for w in warned) and any("FEATHER_SECRET_KEY" in w for w in warned)
+    assert (
+        bind_warnings("0.0.0.0", {"FEATHER_BASE_URL": "https://feather.example", "FEATHER_SECRET_KEY": "k"})
+        == []
+    )

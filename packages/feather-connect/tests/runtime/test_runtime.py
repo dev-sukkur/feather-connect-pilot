@@ -412,6 +412,18 @@ def test_retry_and_skip_unblock_a_failed_version() -> None:
     assert (h.status(run1), h.status(run2)) == ("succeeded", "succeeded")
 
 
+def test_retrying_a_delivery_of_a_cancelled_run_keeps_it_cancelled() -> None:  # Stage 2 M11
+    h = Harness()
+    h.a.fail_next(PermanentError("no such table"))
+    run = h.run()
+    v1 = h.version_of(run)
+    h.store.runs.set_run_status(run, "cancelled", "cancelled by op")  # cancelled after its version sealed
+    h.rt.retry("a", v1, actor="op")
+    h.engine.run_until_idle()
+    assert h.delivery("a", v1) == "applied"
+    assert h.status(run) == "cancelled"
+
+
 def test_a_retry_that_fails_again_can_be_retried_again() -> None:
     h = Harness()
     h.a.fail_next(PermanentError("one"))

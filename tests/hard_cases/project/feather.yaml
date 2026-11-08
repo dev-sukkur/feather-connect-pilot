@@ -1,0 +1,15 @@
+# The hard cases' project: one flow per case of design §16, each reading a fixture the test writes and delivering to
+# tables in the `hard` schema of the stack's own database. H6's second route calls an HTTP stand-in that can go down.
+name: hard-cases
+modules: [flows.cases]
+settings: {timezone: UTC}
+connections:
+  shop: {connector: simulation.source}
+  warehouse:
+    connector: postgres.table
+    schema: hard
+    auth: {dsn: "${secret:env:FEATHER_STACK_DATABASE_URL}"}
+  erp:
+    connector: http.call
+    base_url: http://127.0.0.1:9  # the test points it at its stand-in, in env/dev.yaml
+    retry_attempts: 1

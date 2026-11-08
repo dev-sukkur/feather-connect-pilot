@@ -20,6 +20,7 @@ from feather_connect.core.errors import PermanentError
 from feather_connect.core.flow import Flow
 from feather_connect.logs import redact, register_secrets
 from feather_connect.project import ProjectError
+from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.extract import VerifyResult
 from feather_connect.storage.port import Delivery, DeliveryStatus, InvalidTransition, split_error
 from feather_server.auth import Actor
@@ -495,6 +496,11 @@ class Actions:
             ),
         )
 
+    @staticmethod
+    def tokens_action(token: str) -> str:
+        """The action a confirmation token says it confirms, before it is checked."""
+        return PreviewTokens.action_of(token)
+
     def apply_deliveries(self, actor: Actor, token: str, *, reason: str | None = None) -> list[str]:
         """Do the previewed retry, skip or replay. Returns `route:version` for each delivery it moved.
 
@@ -692,11 +698,17 @@ class Actions:
         try:
             config = connection.resolve()
             register_secrets(*(config[key] for key in connection.secret_refs))
+            budget = None
+            if (
+                connection.budget is not None
+            ):  # an operator is waiting, so the check takes from the high reserve
+                budget = BudgetHandle(self._store.budgets, connection.budget, "high")
             ctx = Context(
                 config,
                 logging.getLogger(name),
                 self._state.clock.now(),
                 str(self._state.project.settings["timezone"]),
+                budget=budget,
             )
             check = getattr(connector, "check", None)
             if check is None:  # a push source has nothing to call

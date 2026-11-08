@@ -108,4 +108,8 @@ def sweep_once(
             log.exception("could not discard version %s of run %s", version.version_id, version.run_id)
         else:
             discarded.append(version.version_id)
+    try:  # after the seals: a seal it just submitted reads, so its versions are not leftovers
+        discarded += runtime.sweep_stream_runs()
+    except Exception:
+        log.exception("could not look after the stream runs")
     return SweepReport(dead, recovered, deliveries, seals, runs, stranded, discarded)

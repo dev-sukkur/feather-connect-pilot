@@ -375,10 +375,36 @@ def test_a_sweep_does_not_discard_the_staged_versions_of_a_failed_stream_run():
     w.source.fail = False
     assert w.store.runs.get_run(result.run_id).status == "failed"
     version = "v-in-flight"
+    w.store.runs.start_task(result.run_id, "extract", "tick:in-flight:extract")  # its tick still reads
     w.store.versions.claim(version, "writer", result.run_id, "d", "_")
     w.store.versions.stage(fc_draft(version, result.run_id), "writer")
     report = sweep_once(w.store, w.rt, w.engine, now=w.clock.now())
     assert version not in report.discarded_versions
+
+
+def test_a_sweep_discards_what_a_tick_left_staged_once_nothing_of_its_run_reads():  # S12
+    w = World()
+    w.tick()
+    [result] = w.step()
+    version = "v-left"
+    w.store.versions.claim(version, "writer", result.run_id, "d", "_")
+    w.store.versions.stage(fc_draft(version, result.run_id), "writer")
+    report = sweep_once(w.store, w.rt, w.engine, now=w.clock.now())
+    assert version in report.discarded_versions
+    assert w.store.versions.staged_for_run(result.run_id, "d") == []
+
+
+def test_a_sweep_settles_an_earlier_days_stream_run_left_running():  # S12
+    w = World()
+    w.tick()
+    [yesterday] = w.step()
+    w.store.runs.start_task(yesterday.run_id, "extract", "tick:stuck:extract")
+    w.store.runs.set_run_status(yesterday.run_id, "running")
+    w.clock.advance(timedelta(days=1))
+    w.engine.has_ended = lambda ref: True  # type: ignore[method-assign]  # its task is gone
+    sweep_once(w.store, w.rt, w.engine, now=w.clock.now())
+    assert w.store.runs.get_run(yesterday.run_id).status != "running"
+    assert w.store.runs.list_tasks(yesterday.run_id, status="running") == []
 
 
 def fc_draft(version_id: str, run_id: str) -> VersionDraft:

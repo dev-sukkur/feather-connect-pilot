@@ -385,12 +385,20 @@ class _Versions(VersionStore):
         return next(iter(found), None)
 
     def since_watermark(self, dataset: str, partition: str, since: Any) -> list[Version]:
+        found: list[Version] = []
         with self._d.lock:
-            return [
-                v
-                for v in self._sealed(dataset, partition)
-                if v.watermark is not None and v.watermark >= since
-            ]
+            for version in self._sealed(dataset, partition):
+                if version.watermark is None:
+                    continue
+                if version.watermark < since:
+                    break  # see the port
+                found.append(version)
+        return found
+
+    def last_sealed_at(self, dataset: str) -> datetime | None:
+        with self._d.lock:
+            sealed = [v.sealed_at for v in self._d.versions.values() if v.dataset == dataset and v.sealed_at]
+            return sealed[-1] if sealed else None  # by staging, as the versions are kept in that order
 
     def latest_watermark(self, dataset: str) -> Any | None:
         with self._d.lock:
@@ -478,6 +486,16 @@ class _Versions(VersionStore):
                 if v.status == "staged"
                 and self._ended_badly(v.run_id)
                 and self._d.runs[v.run_id].trigger != STREAM_TRIGGER
+            ][:limit]
+
+    def stream_leftovers(self, limit: int = 1000) -> list[Version]:
+        with self._d.lock:
+            return [
+                v
+                for v in self._d.versions.values()
+                if v.status == "staged"
+                and v.tick is not None
+                and self._d.runs[v.run_id].trigger == STREAM_TRIGGER
             ][:limit]
 
     def sealed_before(self, cutoff: datetime, limit: int = 1000) -> list[Version]:
@@ -725,13 +743,19 @@ class _Quarantine(QuarantineStore):
                     closed += 1
             return closed
 
-    def list_open(self, route: str | None = None) -> list[QuarantineRow]:
+    def list_open(
+        self, route: str | None = None, *, limit: int | None = None, offset: int = 0
+    ) -> list[QuarantineRow]:
         with self._d.lock:
-            return [
+            found = [
                 r
                 for r in self._d.quarantine.values()
                 if r.status == "open" and (route is None or r.route == route)
             ]
+        return found[offset:] if limit is None else found[offset : offset + limit]
+
+    def count_open(self, route: str | None = None) -> int:
+        return len(self.list_open(route))
 
 
 class _Responses(ResponseStore):
@@ -911,6 +935,15 @@ class _Workers(WorkerRegistry):
                 raise KeyError(f"no worker {worker_id!r}")
             self._d.workers[worker_id] = replace(self._d.workers[worker_id], state=state)
 
+    def forget_stopped(self, before: datetime) -> int:
+        with self._d.lock:
+            gone = [
+                w for w, row in self._d.workers.items() if row.state != "alive" and row.last_seen < before
+            ]
+            for worker_id in gone:
+                del self._d.workers[worker_id]
+            return len(gone)
+
 
 class _Schedules(ScheduleStore):
     def __init__(self, data: _Data) -> None:
@@ -923,6 +956,13 @@ class _Schedules(ScheduleStore):
     def set_last_tick(self, flow: str, trigger_id: str, at: datetime) -> None:
         with self._d.lock:
             self._d.ticks[(flow, trigger_id)] = at
+
+    def advance_tick(self, flow: str, trigger_id: str, seen: datetime | None, at: datetime) -> bool:
+        with self._d.lock:
+            if self._d.ticks.get((flow, trigger_id)) != seen:
+                return False
+            self._d.ticks[(flow, trigger_id)] = at
+            return True
 
 
 class _Overrides(OverrideStore):
@@ -948,6 +988,13 @@ class _Overrides(OverrideStore):
         with self._d.lock:
             found = self._d.overrides.get((target, key))
             return None if found is None or self._expired(found) else copy.deepcopy(found.value)
+
+    def delete_expired(self) -> int:
+        with self._d.lock:
+            gone = [k for k, found in self._d.overrides.items() if self._expired(found)]
+            for k in gone:
+                del self._d.overrides[k]
+            return len(gone)
 
     def claim(
         self,
@@ -1222,9 +1269,19 @@ class _Inbox(InboxStore):
             row.sealed_at = self._d.clock.now()
             return True
 
-    def take(self, dataset: str, limit: int) -> list[InboxEvent]:
+    def take(self, dataset: str, limit: int, max_bytes: int | None = None) -> list[InboxEvent]:
         with self._d.lock:
-            return self._open(dataset)[:limit]
+            found = self._open(dataset)[:limit]
+        if max_bytes is None:
+            return found
+        kept: list[InboxEvent] = []
+        size = 0
+        for event in found:
+            if size >= max_bytes:
+                break
+            kept.append(event)
+            size += len(event.request.body)
+        return kept
 
     def oldest_age(self, dataset: str, now: datetime) -> timedelta | None:
         with self._d.lock:

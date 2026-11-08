@@ -193,12 +193,13 @@ def fan_out_demo(
 ) -> fc.Flow:
     """A flow that reads a JSON simulation of a shop's orders (`fixture`, with `faults` if any) and delivers each to
     three destinations: the `orders` table in Postgres, `bronze_orders` in DuckDB, and `PUT /orders/{order_id}` on an
-    HTTP API. `map` shapes the record for each of them."""
+    HTTP API. Each run diffs the fixture against what was read before, so only the orders that changed go out. `map`
+    shapes the record for each of them."""
     orders = fc.Dataset(
         "orders",
         source=simulation.Source(source, fixture=fixture, faults=faults),
         key="order_id",
-        strategy=fc.strategy.replace(),
+        strategy=fc.strategy.snapshot_diff(),  # each run sends only the orders that changed
     )
     routes = [
         fc.to(postgres.Table(warehouse, table="orders", key_columns=["order_id"]), map=map),

@@ -294,3 +294,65 @@ def test_staged_chunks_survive_a_server_crash(target, make_ctx):  # Review C2
         r"select relpersistence from pg_class where relname like '\_feather\_stage\_%'"
     ).fetchall()
     assert persistence == [("p",)]
+
+
+@pytest.mark.postgres
+def test_a_replace_stages_a_chunk_in_a_few_statements(target, make_ctx, monkeypatch):  # Stage 4 M6
+    target.execute("create table daily (id text primary key, day text, v int)")
+    sink = postgres.Table("wh", table="daily", key_columns=["id"])
+    sent: list[str] = []
+    real = psycopg.Cursor.execute
+
+    def counting(self: Any, query: Any, *args: Any, **kwargs: Any) -> Any:
+        sent.append(query.as_string(self) if hasattr(query, "as_string") else str(query))
+        return real(self, query, *args, **kwargs)
+
+    monkeypatch.setattr(psycopg.Cursor, "execute", counting)
+    records = [up(f"k{i}", id=f"k{i}", day="d1", v=i) for i in range(500)]
+    sink.apply(make_ctx(), batch(records, mode="replace_partition", partition="day=d1"))
+    assert len(rows(target, "daily")) == 500
+    assert sum(s.lstrip().lower().startswith("insert into") for s in sent) <= 4
+
+
+@pytest.mark.postgres
+def test_append_adds_the_columns_the_runtime_stamps_an_append_record_with(target, make_ctx):  # hard case H4
+    target.execute("create table log (id text, v int)")
+    sink = postgres.Table("wh", table="log", key_columns=["id"])
+    stamped = {"_fc_version": "v1", "_fc_run": "r1", "_fc_extracted_at": datetime(2026, 11, 1, tzinfo=UTC)}
+    sink.apply(make_ctx(), batch([up("a", id="a", v=1, **stamped)], mode="append"))
+    found = target.execute(
+        "select id, v, _fc_version, _fc_run, _fc_extracted_at is not null from log"
+    ).fetchall()
+    assert found == [("a", 1, "v1", "r1", True)]
+
+
+@pytest.mark.postgres
+def test_first_applies_at_the_same_time_to_a_new_schema_all_succeed(target, make_ctx):  # hard case H1
+    import threading
+
+    errors: list[BaseException] = []
+    for attempt in range(5):  # each round a schema of its own, with no _feather_applied yet
+        schema = f"race{attempt}"
+        target.execute(sql.SQL("create schema {}").format(sql.Identifier(schema)))
+        for n in range(6):
+            target.execute(
+                sql.SQL("create table {}.{} (id text primary key)").format(
+                    sql.Identifier(schema), sql.Identifier(f"t{n}")
+                )
+            )
+        gate = threading.Barrier(6)
+
+        def apply(n: int, schema: str = schema, gate: threading.Barrier = gate) -> None:
+            sink = postgres.Table("wh", table=f"t{n}", key_columns=["id"])
+            gate.wait()
+            try:
+                sink.apply(make_ctx(schema=schema), batch([up("a", id="a")], version=f"v{n}"))
+            except BaseException as error:  # noqa: BLE001 - collected for the assertion
+                errors.append(error)
+
+        threads = [threading.Thread(target=apply, args=(n,)) for n in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+    assert errors == []

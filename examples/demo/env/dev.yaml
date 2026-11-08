@@ -1,0 +1,12 @@
+# dev delivers to real targets on this machine: the `demo` schema of feather dev's own Postgres, a DuckDB file under
+# .data/, and the HTTP API that sims/targets.py serves. The shop stays a simulation in every environment. The ERP's
+# token is an obviously fake file in secrets/, read against the project directory.
+connections:
+  warehouse:
+    schema: demo
+    auth: {dsn: "${secret:env:FEATHER_DATABASE_URL}"}
+  lake:
+    database: .data/lake.duckdb
+  erp:
+    base_url: http://127.0.0.1:29001
+    auth: {token: "${secret:file:secrets/erp-token.txt}"}

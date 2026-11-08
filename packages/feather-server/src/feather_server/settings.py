@@ -54,6 +54,13 @@ class Settings:
         engine = environ.get("FEATHER_ENGINE", "dbos")
         if engine not in get_args(Engine):
             raise SettingsError(f"FEATHER_ENGINE is {engine!r}: use one of {', '.join(get_args(Engine))}")
+        if (
+            engine == "local"
+        ):  # nothing in a server process runs its tasks, so runs would stay queued (Stage 2 M10)
+            raise SettingsError(
+                "FEATHER_ENGINE=local runs no tasks in the server: leave it unset (dbos) and start a worker, "
+                "or use feather dev or feather run --local"
+            )
         spool = environ.get("FEATHER_SPOOL", "postgres")
         if spool != "postgres":
             raise SettingsError(f"FEATHER_SPOOL is {spool!r}: only postgres is available until M2")

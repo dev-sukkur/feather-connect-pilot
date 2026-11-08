@@ -13,7 +13,7 @@ from fastapi import FastAPI, Response
 from feather_connect.clock import Clock, SystemClock
 from feather_connect.engine.local import LocalEngine
 from feather_connect.engine.port import Engine
-from feather_connect.logs import TaskLogHandler, configure_logging
+from feather_connect.logs import configure_logging, install_task_logs
 from feather_connect.project import Project, load_project
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.port import Store
@@ -21,7 +21,7 @@ from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import at_head, migrate
 from feather_connect.storage.spool import Spool
 from feather_connect.worker import config_of
-from feather_server import auth, ingress, web
+from feather_server import api, auth, ingress, web
 from feather_server.loops import LoopRunner, default_loops
 from feather_server.services.actions import Actions
 from feather_server.services.reads import Reads
@@ -63,9 +63,7 @@ def build_state(settings: Settings) -> AppState:
     clock = SystemClock()
     store, spool = connect(settings.database_url, clock=clock)
     configure_logging(os.environ.get("FEATHER_LOG_LEVEL", "INFO"), secrets=[settings.secret_key])
-    task_logs = TaskLogHandler(store)
-    logging.getLogger().addHandler(task_logs)
-    closers: list[Callable[[], None]] = [store.close, lambda: logging.getLogger().removeHandler(task_logs)]
+    closers: list[Callable[[], None]] = [store.close, install_task_logs(store)]
     for budget in project.budgets.values():  # the overview reads their use
         store.budgets.define(budget)
     local = LocalEngine() if settings.engine == "local" else None
@@ -132,7 +130,7 @@ def create_app(
                 runner.stop()
             state.close()
 
-    app = FastAPI(title="Feather Connect", lifespan=lifespan)
+    app = FastAPI(title="Feather Connect", version="1", lifespan=lifespan)
     app.state.feather = state
     if not state.settings.secret_key:
         raise ValueError(
@@ -142,6 +140,7 @@ def create_app(
     app.state.actions = Actions(state)
     ingress.install(app, state)  # first, as routes are tried in order, and this one takes bursts
     auth.install(app, state)
+    api.install(app)
     web.install(app, state)
 
     @app.get("/healthz")

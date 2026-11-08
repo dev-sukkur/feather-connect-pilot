@@ -1,9 +1,10 @@
 """`feather dev`: the whole stack on this machine (design 18.2).
 
 Postgres comes from `FEATHER_DATABASE_URL`, or else from a container named `feather-dev-postgres` with a named volume.
-The server and one worker then run in this process, on the demo project unless `--project` says another, and are
-started again whenever a file under `flows/` or `env/`, or `feather.yaml`, changes. The helper processes the project
-declares under `dev.processes` start first and keep running across reloads. Ctrl+C stops them all and the
+The server and one worker then run in this process, in the project directory, on the demo project unless `--project`
+says another, and are started again whenever a file under `flows/` or `env/`, or `feather.yaml`, changes. The helper
+processes the project declares under `dev.processes` start once Postgres is up and keep running across reloads. They,
+and the project's secrets, see its URL as `FEATHER_DATABASE_URL`, so that a project can deliver to its own schema there. Ctrl+C stops them all and the
 container; the data stays in the volume. The generated password of the `dev` user is printed to the console when the
 user is made, or again with `--reset-password`, and never goes to a log.
 """
@@ -30,13 +31,14 @@ import httpx
 import psycopg
 import typer
 import uvicorn
+from sqlalchemy.exc import SQLAlchemyError
 from watchfiles import PythonFilter, watch
 
 from feather_cli.commands.helpers import HelperError, Helpers, HelperStopped, busy_ports, clashing_ports
 from feather_cli.options import Env, Json
 from feather_cli.output import emit, fail
 from feather_connect.logs import TaskLogHandler
-from feather_connect.project import ProjectError, load_project
+from feather_connect.project import DevProcess, ProjectError, load_project
 from feather_connect.storage.port import Store
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import migrate
@@ -73,6 +75,10 @@ def _in_use(port: int) -> bool:
         if probe.connect_ex((HOST, port)) == 0:
             return True
     with socket.socket() as probe:
+        if os.name != "nt":
+            # As servers do (uvicorn among them): without it, a connection the last run closed, waiting out TIME_WAIT
+            # for a minute, makes a free port look taken on Linux. On Windows the option would let us share a bound port.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind((HOST, port))
         except OSError:
@@ -115,21 +121,25 @@ def _database_url(port: int) -> str:
     return f"postgresql://feather:feather@{HOST}:{port}/feather"
 
 
-def _start_postgres_container(json_mode: bool) -> str:
-    """Start the dev container (making it the first time) and return its URL once it accepts connections."""
+def _start_postgres_container(json_mode: bool, started: list[bool]) -> str:
+    """Start the dev container (making it the first time) and return its URL once it accepts connections. `started`
+    gets True when this call started it, so that only then does this run stop it: another `feather dev` may be using
+    it (M4)."""
     found = _docker("inspect", CONTAINER)
     if found.returncode == 0:
         info: dict[str, Any] = json.loads(found.stdout)[0]
         port = int(info["Config"]["Labels"][PORT_LABEL])
         if not info["State"]["Running"]:
-            started = _docker("start", CONTAINER)
-            if started.returncode != 0:
+            started.append(True)
+            begun = _docker("start", CONTAINER)
+            if begun.returncode != 0:
                 fail(
-                    f"could not start the container {CONTAINER}: {_first_line(started.stderr)}",
+                    f"could not start the container {CONTAINER}: {_first_line(begun.stderr)}",
                     hint=f"free port {port} on this machine, or remove the container with: docker rm {CONTAINER}",
                     json_mode=json_mode,
                 )
     else:
+        started.append(True)
         port = _free_port()  # chosen once, then kept in the container's labels
         typer.echo(f"creating the Postgres container {CONTAINER} (the first time pulls {IMAGE})...", err=True)
         made = _docker(
@@ -159,6 +169,18 @@ def _start_postgres_container(json_mode: bool) -> str:
                     json_mode=json_mode,
                 )
             time.sleep(0.5)
+
+
+def _check_reachable(url: str, json_mode: bool) -> None:
+    """Fail with a message, not a traceback, when the database of FEATHER_DATABASE_URL does not answer (M4)."""
+    try:
+        psycopg.connect(url, connect_timeout=5).close()
+    except psycopg.Error as error:
+        fail(
+            f"the database of FEATHER_DATABASE_URL does not answer: {_first_line(str(error))}",
+            hint="check the URL and that Postgres is running, or unset FEATHER_DATABASE_URL to use Docker",
+            json_mode=json_mode,
+        )
 
 
 def _stop_postgres_container() -> None:
@@ -301,6 +323,23 @@ def _watched(project: Path) -> list[Path]:
     return [p for p in (project / "flows", project / "env", project / "feather.yaml") if p.exists()]
 
 
+_RELOADED_BY = (".py", ".yaml", ".yml")
+
+
+def _fingerprint(project: Path) -> frozenset[tuple[str, int, int]]:
+    """The watched files' names, times and sizes: a change the file watcher did not report still shows here."""
+    found: set[tuple[str, int, int]] = set()
+    for top in _watched(project):
+        for path in [top] if top.is_file() else top.rglob("*"):
+            if path.suffix in _RELOADED_BY and "__pycache__" not in path.parts:
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                found.add((str(path), stat.st_mtime_ns, stat.st_size))
+    return frozenset(found)
+
+
 def dev(
     project: Annotated[
         Path | None, typer.Option("--project", envvar="FEATHER_PROJECT", help="Default: the demo project.")
@@ -317,9 +356,10 @@ def dev(
     json_mode: Json = False,
 ) -> None:
     """Run Postgres, the server and a worker here, on the demo project, and open the dashboard."""
-    root = project or _demo_project()
-    if root is None:
+    found = project or _demo_project()
+    if found is None:
         fail("the demo project is not here", hint="name a project with --project", json_mode=json_mode)
+    root = found.resolve()
     if not (root / "feather.yaml").is_file():
         fail(
             f"no feather.yaml in {root.resolve()}",
@@ -343,15 +383,18 @@ def dev(
             hint=f"pick another server port with --port, or give {clash.name} another port under dev.processes",
             json_mode=json_mode,
         )
+    # Docker or the database first: without them nothing runs, which matters more than a busy helper port.
+    own_database = os.environ.get("FEATHER_DATABASE_URL")
+    if own_database:
+        _check_reachable(own_database, json_mode)
+    else:
+        _check_docker(json_mode)
     for busy in busy_ports(processes, _in_use):
         fail(
             f"port {busy.port} of the helper process {busy.name!r} is already in use",
             hint=f"stop what is using it, or give {busy.name} another port under dev.processes in feather.yaml",
             json_mode=json_mode,
         )
-    own_database = os.environ.get("FEATHER_DATABASE_URL")
-    if not own_database:
-        _check_docker(json_mode)
 
     stop = threading.Event()
 
@@ -362,20 +405,32 @@ def dev(
         if (number := getattr(signal, name, None)) is not None:
             signal.signal(number, on_signal)
 
-    container = not own_database
+    started: list[bool] = []
     helpers = Helpers(root, lambda line: typer.echo(line, err=True))
     try:
-        helpers.start(processes, stop)
-        _run(root, env, port, own_database, no_browser, reset_password, json_mode, stop)
+        _run(
+            root,
+            env,
+            port,
+            own_database,
+            no_browser,
+            reset_password,
+            json_mode,
+            stop,
+            helpers,
+            processes,
+            started,
+        )
     except HelperStopped:
         pass  # Ctrl+C while the helpers started: stop what started, and nothing else to say
     except HelperError as error:
         fail(str(error), hint="its output above says more", json_mode=json_mode)
-    except (RuntimeError, psycopg.Error) as error:
-        fail(str(error), hint="the log above says more", json_mode=json_mode)
+    except (RuntimeError, OSError, subprocess.SubprocessError, psycopg.Error, SQLAlchemyError) as error:
+        log.debug("feather dev stopped", exc_info=True)
+        fail(_first_line(str(error)), hint="the log above says more", json_mode=json_mode)
     finally:
         helpers.stop()
-        if container:
+        if started:
             _stop_postgres_container()
 
 
@@ -388,9 +443,17 @@ def _run(
     reset_password: bool,
     json_mode: bool,
     stop: threading.Event,
+    helpers: Helpers,
+    processes: tuple[DevProcess, ...],
+    started: list[bool],
 ) -> None:
-    database_url = own_database or _start_postgres_container(json_mode)
+    database_url = own_database or _start_postgres_container(json_mode, started)
     migrate(database_url)
+    os.environ["FEATHER_DATABASE_URL"] = (
+        database_url  # for the helpers, and a `${secret:env:...}` of the project
+    )
+    os.chdir(root)  # a relative path in the project's settings, such as a DuckDB file, is the project's
+    helpers.start(processes, stop)
     store, _ = connect(database_url)
     try:
         password = _ensure_dev_user(store, reset_password)
@@ -405,7 +468,12 @@ def _run(
         project=root,
     )
     stack = Stack(settings)
-    stack.start(port)
+    try:
+        stack.start(port)
+    except BaseException:
+        if password:  # it is stored hashed, so this is the only chance to see it (M4)
+            typer.echo(f"the {DEV_USER} user was made, password: {password}", err=True)
+        raise
     try:
         _wait_ready(port)
         url = f"http://localhost:{port}"
@@ -450,6 +518,7 @@ def _watch(
     """Reload on changes until `stop` is set. `announce` is called once the files are being watched, so that an
     edit made after the announcement is never missed."""
     announced = False
+    seen = _fingerprint(root)
     for changes in watch(
         *_watched(root),
         watch_filter=PythonFilter(extra_extensions=(".yaml", ".yml")),
@@ -464,8 +533,12 @@ def _watch(
             announced = True
         if stop.is_set():
             return
-        if not changes:  # `watch` also yields when its timeout passes, so that a stop is noticed
+        # `watch` also yields when its timeout passes, so that a stop is noticed. Then the files are looked at too: on
+        # Linux, inotify has been seen to lose an edit made just after a reload that failed, and the fix never loaded.
+        now = _fingerprint(root)
+        if not changes and now == seen:
             continue
+        seen = now
         try:
             load_project(root, env)  # a file that does not load must not take the running stack down
         except ProjectError as error:
@@ -476,7 +549,7 @@ def _watch(
         try:
             stack.start(port)
             _wait_ready(port)
-        except RuntimeError as error:
+        except Exception as error:  # noqa: BLE001  (whatever it is, keep watching for the fix: M4)
             typer.echo(f"reload failed, nothing is running now; fix it and save again: {error}", err=True)
         else:
             typer.echo("reloaded", err=True)

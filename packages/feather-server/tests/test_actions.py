@@ -403,3 +403,20 @@ def test_a_check_that_raises_is_a_failed_check_without_the_secret(
     monkeypatch.setattr(sink, "check", check, raising=False)
     result = world.actions.check_connection(ANN, "warehouse")
     assert not result.ok and "could not log in" in result.message and SECRET not in result.message
+
+
+def test_a_check_is_metered_by_the_connections_budget(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:  # PR 7
+    seen: list[Any] = []
+
+    def check(ctx: Any) -> CheckResult:
+        seen.append(ctx.budget)
+        ctx.budget.acquire(1)
+        return CheckResult(True, "fine")
+
+    sink = world.sink("warehouse")
+    monkeypatch.setattr(sink, "spec", ConnectorSpec(name="warehouse.real"), raising=False)
+    monkeypatch.setattr(sink, "check", check, raising=False)
+    assert world.actions.check_connection(ANN, "warehouse").ok
+    assert seen[0] is not None and (seen[0].name, seen[0].priority) == ("api", "high")

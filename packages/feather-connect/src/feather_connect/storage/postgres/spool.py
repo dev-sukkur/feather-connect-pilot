@@ -68,6 +68,26 @@ class PostgresSpool(Spool):
             ).fetchall()
         return [r["version_id"] for r in rows]
 
+    def drop_empty_days(self, before: date) -> list[date]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """select to_date(substr(c.relname, 13), 'YYYYMMDD') as day from pg_inherits i
+                   join pg_class c on c.oid = i.inhrelid
+                   where i.inhparent = 'feather.spool_chunk'::regclass and c.relname ~ '^spool_chunk_[0-9]{8}$'
+                   order by day"""
+            ).fetchall()
+            empty: list[date] = []
+            for row in rows:
+                day: date = row["day"]
+                used = conn.execute(  # any tenant's version keeps it: the partition is shared
+                    "select 1 from feather.spool_version where day = %s limit 1", (day,)
+                ).fetchone()
+                if day < before and used is None:
+                    empty.append(day)
+        for day in empty:
+            self.drop_day(day)
+        return empty
+
     def drop_day(self, day: date) -> None:
         """Drop the day's partition with the chunks in it, for every tenant. Snapshots stay."""
         with self._pool.connection() as conn:

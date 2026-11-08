@@ -111,7 +111,8 @@ class Source(connector.Source):
     The rows come from `fixture` (a JSON or JSONL file) or else from `generator` (field names mapped to specs
     such as `seq()`), `rows_per_partition` of them, whatever the partition a read asks for. A read draws its
     faults from a generator seeded with `seed` and the number of the read, so the same source gives the same
-    reads every time. The first field of a row is its key, for `key_rewrite`.
+    reads every time. The first field of a row is its key, for `key_rewrite`. A fixture that changes on disk is read
+    again by the next read, so that editing it shows in a running stack; rows given to `load` stay.
 
     As a push source it verifies an HMAC signature against the `signature_secret` entry of its connection's `auth`, or
     takes anything when built with `unsigned=True`.
@@ -143,6 +144,8 @@ class Source(connector.Source):
         self.signature_secret = signature_secret
         self.unsigned = unsigned
         self.reads = 0
+        self._fixture = None if fixture is None else Path(fixture)
+        self._fixture_stamp = self._stamp()
         self._rows = self._make_rows(fixture, generator, rows_per_partition)
         self._late: list[dict[str, Any]] = []  # held back by `late`, served by the next read
         self._schema_changed = False
@@ -151,6 +154,23 @@ class Source(connector.Source):
         """Make `rows` all of the source's contents, in place of the fixture's or the generator's."""
         self._rows = [dict(row) for row in rows]
         self._late = []
+        self._fixture = None
+
+    def _stamp(self) -> tuple[int, int] | None:
+        if self._fixture is None:
+            return None
+        try:
+            found = self._fixture.stat()
+        except OSError:
+            return None
+        return (found.st_mtime_ns, found.st_size)
+
+    def _reload_if_changed(self) -> None:
+        stamp = self._stamp()
+        if self._fixture is not None and stamp is not None and stamp != self._fixture_stamp:
+            self._rows = _load_fixture(self._fixture)
+            self._fixture_stamp = stamp
+            self._late = []
 
     def _make_rows(
         self, fixture: str | Path | None, generator: Mapping[str, FieldSpec] | None, count: int
@@ -176,6 +196,7 @@ class Source(connector.Source):
     def read(self, ctx: Context, req: ReadRequest) -> Iterator[list[dict[str, Any]]]:
         """Yield the matching rows in batches of `memory.BATCH_ROWS`, with this read's faults, or nothing if none
         match."""
+        self._reload_if_changed()
         self.reads += 1
         rng = random.Random(f"{self.seed}:{self.reads}")
         self._raise_transient(rng)

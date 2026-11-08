@@ -245,3 +245,26 @@ def test_an_empty_slice_on_a_table_not_made_yet_applies_nothing(db: Path):  # Re
     result = sink.apply(context(str(db)), batch([], mode="replace_partition", partition="day=d1"))
     assert result.applied == 0
     assert sink.apply(context(str(db)), batch([], mode="replace_partition", partition="day=d1")).applied == 0
+
+
+class _Counting:
+    """A connection that counts the statements sent through it."""
+
+    def __init__(self, conn: duck.DuckDBPyConnection) -> None:
+        self.conn = conn
+        self.deletes = 0
+
+    def execute(self, statement: str, *args: Any) -> Any:
+        self.deletes += statement.lstrip().lower().startswith("delete")
+        return self.conn.execute(statement, *args)
+
+
+def test_deletes_go_in_one_statement_per_thousand_keys(db: Path):  # Stage 4 M6
+    with duck.connect(str(db)) as conn:
+        conn.execute("create table lines (order_id integer, line integer)")
+        conn.execute("insert into lines select i // 10, i % 10 from range(3000) t(i)")
+        sink = duckdb.Table("lake", table="lines", key_columns=["order_id", "line"])
+        counting = _Counting(conn)
+        sink._delete_keys(counting, '"lines"', [(i // 10, i % 10) for i in range(1500)])  # pyright: ignore[reportPrivateUsage]
+        assert counting.deletes == 2
+        assert conn.execute("select count(*), min(order_id) from lines").fetchone() == (1500, 150)

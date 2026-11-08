@@ -26,7 +26,7 @@ from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.spool import MemorySpool
 from feather_server.app import AppState, create_app
 from feather_server.auth import require_csrf
-from feather_server.ingress import _Arrival
+from feather_server.ingress import RateLimiter, _Arrival
 from feather_server.settings import Settings
 
 SECRET = "ingress-secret-value"
@@ -218,8 +218,28 @@ def test_an_event_id_that_cannot_be_kept_counts_as_none(h: Harness, event_id: An
     )
     body = ('{"id": 1, "event_id": ' + raw + "}").encode()
     assert h.post(body).status_code == 202
+    h.clock.advance(timedelta(seconds=1))  # signed anew: not a replay of the same request (S10)
     assert h.post(body).status_code == 202
     assert len(h.stored()) == 2
+
+
+def test_a_replay_with_no_event_id_is_stored_once(h: Harness):  # S10
+    body = b'{"id": 1}'
+    headers = h.signed(body)
+    assert h.client.post(URL, content=body, headers=headers).status_code == 202
+    assert (
+        h.client.post(URL, content=body, headers=headers).status_code == 202
+    )  # the same signed request again
+    assert len(h.stored()) == 1
+    h.clock.advance(timedelta(seconds=1))
+    assert h.post(body).status_code == 202  # the same body, sent again and signed again: a new event
+    assert len(h.stored()) == 2
+
+
+def test_an_unsigned_source_without_event_ids_keeps_every_request(h: Harness):  # S10
+    for _ in range(2):
+        assert h.client.post("/ingress/default/open", content=b'{"id": 1}').status_code == 202
+    assert len(h.stored("open")) == 2
 
 
 @pytest.mark.parametrize("body", [b"", b"not json", b'{"id": ', b"\xff\xfe\x00", b"[" * 100_000])
@@ -257,7 +277,7 @@ def test_a_disabled_flow_takes_no_events(h: Harness):
 
 def test_rate_limit_returns_429_with_retry_after(clock: FrozenClock):
     h = Harness(clock, rate=2.0)
-    assert [h.post().status_code for _ in range(3)] == [202, 202, 429]
+    assert [h.post(f'{{"id": {n}}}'.encode()).status_code for n in range(3)] == [202, 202, 429]
     r = h.post()
     assert r.status_code == 429 and r.headers["Retry-After"] == "1"
     assert r.json() == {"title": "Too Many Requests", "status": 429}
@@ -511,3 +531,32 @@ def test_verify_checks_the_timestamp_against_when_the_request_arrived(h: Harness
 def test_a_content_length_too_long_to_be_a_number_is_413(h: Harness):
     status, _ = _drive(h.app, [(b"content-length", b"9" * 5000)], [b"{}"])
     assert status == 413
+
+
+def test_unsigned_callers_cannot_use_up_a_sources_rate(clock: FrozenClock):  # S5
+    h = Harness(clock, rate=2.0)
+    attacker = TestClient(h.app, base_url="http://localhost:8000", client=("203.0.113.9", 4000))
+    sender = TestClient(h.app, base_url="http://localhost:8000", client=("198.51.100.7", 4000))
+    refused = [attacker.post(URL, content=b'{"id": 1}').status_code for _ in range(10)]
+    assert refused[:2] == [401, 401] and set(refused[2:]) == {429}  # its own address's bucket ran out
+    body = b'{"id": 2}'
+    assert sender.post(URL, content=body, headers=h.signed(body)).status_code == 202
+    assert len(h.stored()) == 1
+
+
+def test_the_sources_bucket_counts_only_verified_requests(clock: FrozenClock):  # S5
+    h = Harness(clock, rate=2.0)
+    senders = [
+        TestClient(h.app, base_url="http://localhost:8000", client=(f"198.51.100.{n}", 1)) for n in range(4)
+    ]
+    codes = [c.post(URL, content=b'{"id": 1}', headers=h.signed()).status_code for c in senders]
+    assert codes == [202, 202, 429, 429]  # two verified requests take the source's second
+
+
+def test_the_rate_limiter_forgets_callers_whose_bucket_has_refilled(clock: FrozenClock):  # stage 5 review
+    limiter = RateLimiter(5, clock)
+    for n in range(30_000):  # as many addresses as a scan, or IPv6 clients, would bring
+        limiter.wait_for(f"address:hooks:10.0.{n // 256}.{n % 256}")
+        clock.advance(timedelta(milliseconds=50))
+    assert len(limiter._buckets) <= 10_000  # pyright: ignore[reportPrivateUsage]
+    assert limiter.wait_for("address:hooks:10.0.0.1") == 0.0  # a forgotten caller starts with a full bucket

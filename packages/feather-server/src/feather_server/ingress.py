@@ -12,6 +12,7 @@ of the error is logged.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -74,8 +75,13 @@ def _problem(status: int, headers: Mapping[str, str] | None = None) -> Response:
     )
 
 
+_MAX_BUCKETS = 10_000  # callers a limiter remembers: one bucket per source and address
+
+
 class RateLimiter:
-    """A token bucket per source, holding a second's worth of requests.
+    """A token bucket per key, holding a second's worth of requests. Ingress keeps two: one per source and caller
+    address, taken before verifying, and one per source, taken only by requests that verified (S5). So a caller who
+    can't sign uses up its own bucket and never the source's.
 
     It lives in this process, as `LoginThrottle` does: with several replicas behind a load balancer each counts for
     itself, so a source can get up to the limit times the number of replicas. It protects a replica, and is not a promise
@@ -92,6 +98,8 @@ class RateLimiter:
         """Take a token and return 0, or return how many seconds until there is one."""
         now = self._clock.now().timestamp()
         with self._lock:
+            if source not in self._buckets and len(self._buckets) >= _MAX_BUCKETS:
+                self._forget_full(now)
             tokens, at = self._buckets.get(source, (self._rate, now))
             tokens = min(self._rate, tokens + (now - at) * self._rate)
             if tokens >= 1:
@@ -99,6 +107,18 @@ class RateLimiter:
                 return 0.0
             self._buckets[source] = (tokens, now)
             return (1 - tokens) / self._rate
+
+    def _forget_full(self, now: float) -> None:
+        """Drop the buckets that have refilled, which a caller would get back anyway; if that leaves too many, as a
+        flood of new addresses would, drop the oldest half. Called with the lock held."""
+        self._buckets = {
+            key: (tokens, at)
+            for key, (tokens, at) in self._buckets.items()
+            if tokens + (now - at) * self._rate < self._rate
+        }
+        if len(self._buckets) >= _MAX_BUCKETS:
+            newest = sorted(self._buckets.items(), key=lambda item: item[1][1])[_MAX_BUCKETS // 2 :]
+            self._buckets = dict(newest)
 
 
 def _push_dataset(state: "AppState", tenant: str, source: str) -> Dataset | None:
@@ -164,22 +184,79 @@ def _verified(
     return None
 
 
+def _replay_id(source: PushSource, request: InboundRequest) -> str | None:
+    """An id for a signed request that has no event id: a hash of its signature and timestamp headers and its body
+    (S10). A sender that resends the same signed request, having lost the 202, sends the same signature and timestamp,
+    so the inbox keeps it once; a new event, or the same one signed anew, gets another id. An unsigned request has
+    nothing to tell a replay by."""
+    if is_unsigned(source):
+        return None
+    signing = sorted(
+        (name, value)
+        for name, value in request.headers.items()
+        if "signature" in name or "timestamp" in name or name == "webhook-id"
+    )
+    if not signing:
+        return None
+    digest = hashlib.sha256()
+    for name, value in signing:
+        digest.update(f"{name}:{value}\n".encode())
+    digest.update(request.body)
+    return "replay:" + digest.hexdigest()
+
+
 def _event_id(dataset: Dataset, source: PushSource, request: InboundRequest) -> str | None:
-    """The event's id, if it can be kept. Without one it may be stored twice, which beats not at all."""
+    """The event's id, if it can be kept, or else the signed request's own (S10). Without either it may be stored
+    twice, which beats not at all."""
     try:
         found = event_id_of(source, request)
     except Exception as error:  # noqa: BLE001 - the message of a connector's error may quote the body
         log.warning("ingress %s: no event id: %s", dataset.name, type(error).__name__)
-        return None
+        found = None
     if isinstance(found, str) and found and "\x00" not in found and len(found) <= _MAX_EVENT_ID:  # pyright: ignore[reportUnnecessaryIsInstance]
         return found
-    return None
+    return _replay_id(source, request)
 
 
-def _refusal(state: "AppState", dataset: Dataset, request: InboundRequest) -> Response | None:
-    """Return why this request is refused, or None if it is to be stored."""
+class _SampledLog:
+    """Logs the first refusal of a kind, then one in `every`, so a flood of refusals can't flood the log too."""
+
+    def __init__(self, every: int = 100) -> None:
+        self._every = every
+        self._counts: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def warning(self, key: str, message: str, *args: object) -> None:
+        with self._lock:
+            n = self._counts.get(key, 0)
+            self._counts[key] = n + 1 if len(self._counts) < 10_000 else 1
+        if n % self._every == 0:
+            log.warning(message + (f" ({n + 1} so far)" if n else ""), *args)
+
+
+_REFUSALS = _SampledLog()
+
+
+def _over_rate(limiter: RateLimiter | None, key: str, name: str) -> Response | None:
+    if limiter is None:
+        return None
+    wait = limiter.wait_for(key)
+    if not wait:
+        return None
+    _REFUSALS.warning(f"rate:{name}", "ingress %s: refused: over the rate limit", name)
+    return _problem(429, {"Retry-After": str(max(1, math.ceil(wait)))})
+
+
+def _refusal(
+    state: "AppState", dataset: Dataset, request: InboundRequest, limiter: RateLimiter | None = None
+) -> Response | None:
+    """Return why this request is refused, or None if it is to be stored. The source's rate counts only requests that
+    verified."""
     source = cast(PushSource, dataset.source)
     refused = _verified(state, dataset, source, request)
+    if refused is not None:
+        return refused
+    refused = _over_rate(limiter, f"source:{dataset.name}", dataset.name)
     if refused is not None:
         return refused
     if not _is_json(request.body):
@@ -229,8 +306,9 @@ class IngressWorker:
     When the database is away, a batch is answered 503 whole, without trying each event against it.
     """
 
-    def __init__(self, state: "AppState") -> None:
+    def __init__(self, state: "AppState", limiter: RateLimiter | None = None) -> None:
         self._state = state
+        self._limiter = limiter
         self._queue: queue.Queue[_Arrival | None] = queue.Queue(state.settings.ingress_queue_max)
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -293,7 +371,7 @@ class IngressWorker:
         to_store: list[_Arrival] = []
         for arrival in batch:
             try:
-                refused = _refusal(self._state, arrival.dataset, arrival.request)
+                refused = _refusal(self._state, arrival.dataset, arrival.request, self._limiter)
             except Exception as error:  # noqa: BLE001 - the message may quote the body
                 log.error(
                     "ingress %s: could not check an event: %s", arrival.dataset.name, type(error).__name__
@@ -346,10 +424,10 @@ async def ingress(request: Request, tenant: str, source: str) -> Response:
     dataset = _push_dataset(state, tenant, source)
     if dataset is None:
         return _problem(404)
-    wait = cast(RateLimiter, request.app.state.ingress_rate).wait_for(source)
-    if wait:
-        log.warning("ingress %s: refused: over the rate limit", source)
-        return _problem(429, {"Retry-After": str(max(1, math.ceil(wait)))})
+    address = request.client.host if request.client else "unknown"
+    refused = _over_rate(request.app.state.ingress_rate, f"address:{source}:{address}", source)
+    if refused is not None:
+        return refused
     limit = state.settings.ingress_max_bytes
     declared = request.headers.get("content-length")
     if declared is not None:
@@ -394,7 +472,7 @@ _ACCESS_FILTER = _NoLineForAnAcceptedEvent()
 def install(app: FastAPI, state: "AppState") -> None:
     """Add the ingress route to `app`."""
     app.state.ingress_rate = RateLimiter(state.settings.ingress_rate_per_s, state.clock)
-    app.state.ingress_worker = IngressWorker(state)
+    app.state.ingress_worker = IngressWorker(state, app.state.ingress_rate)
     state.closers.append(app.state.ingress_worker.close)
     logging.getLogger("uvicorn.access").addFilter(_ACCESS_FILTER)
     app.include_router(router)

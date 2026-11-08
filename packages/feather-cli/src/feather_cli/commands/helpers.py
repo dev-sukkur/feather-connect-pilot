@@ -3,10 +3,12 @@
 `feather dev` starts them in the project directory before the stack, keeps them running while the flows reload, and
 stops them when it stops. Their output goes to this console, each line prefixed by the process's name. On Windows
 they are in a job object that ends them when feather ends, however it ends, so that a killed feather leaves no helper
-holding its port.
+holding its port. Elsewhere each is the leader of a session of its own, and stopping it stops the processes it
+started too; on Linux it is also sent SIGTERM when feather ends. A macOS helper outlives a feather killed with -9.
 """
 
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -98,6 +100,28 @@ def _join_job(job: int, pid: int) -> None:
         kernel32.CloseHandle(process)
 
 
+# On Linux the helper's command runs through this, which asks for SIGTERM when feather ends and then becomes the
+# command. It is not a `preexec_fn`, which is unsafe once feather has threads. The signal is tied to the thread that
+# started the helper, which is feather's main thread.
+_END_WITH_PARENT = """import ctypes, os, signal, sys
+ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM)  # 1 is PR_SET_PDEATHSIG
+if os.getppid() != int(sys.argv[1]):
+    sys.exit(1)  # feather ended before the line above
+os.execvp(sys.argv[2], sys.argv[2:])
+"""
+
+
+def _signal_group(child: subprocess.Popen[str], sig: int) -> None:
+    """Send `sig` to the child's session, outside Windows, so that what the helper started stops with it."""
+    if os.name == "nt":
+        child.kill()  # TerminateProcess, whatever the signal; the job object ends the rest when feather ends
+        return
+    try:
+        os.killpg(child.pid, sig)  # the child leads its own session, so its group id is its pid
+    except ProcessLookupError:
+        pass
+
+
 def _listening(port: int) -> bool:
     with socket.socket() as probe:
         probe.settimeout(0.5)
@@ -141,8 +165,11 @@ class Helpers:
         # In a group of its own, so that the console's Ctrl+C reaches feather only, which then stops it.
         windows = os.name == "nt"
         try:
+            command = _command(process)
+            if sys.platform == "linux":
+                command = [sys.executable, "-c", _END_WITH_PARENT, str(os.getpid()), *command]
             child = subprocess.Popen(
-                _command(process),
+                command,
                 cwd=self._root,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -190,12 +217,14 @@ class Helpers:
         """Stop every process, the last started first, killing one that does not end within `STOP_S`."""
         for process, child, relay in reversed(self._running):
             if child.poll() is None:
-                child.terminate()
+                _signal_group(child, signal.SIGTERM)
                 try:
                     child.wait(STOP_S)
                 except subprocess.TimeoutExpired:
-                    child.kill()
+                    _signal_group(child, getattr(signal, "SIGKILL", signal.SIGTERM))
                     child.wait(STOP_S)
+            elif os.name != "nt":  # the helper is gone, but what it started may not be
+                _signal_group(child, signal.SIGTERM)
             relay.join(STOP_S)  # the last of its output, before the line that says it stopped
             self._echo(f"[{process.name}] stopped")
         self._running = []

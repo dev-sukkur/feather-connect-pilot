@@ -50,6 +50,7 @@ __all__ = ["DuckDbConfig", "Query", "Table"]
 APPLIED_TABLE = "_feather_applied"
 DEFAULT_BATCH_ROWS = 100_000
 DEFAULT_WRITE_ROWS = 100_000
+_DELETE_BATCH = 1_000  # keys per delete statement
 _MASK = "***"
 
 
@@ -300,10 +301,20 @@ class Table(_DuckDb, connector.Sink):
         return tuple(found[0]) if found else ()
 
     def _delete_keys(self, conn: duck.DuckDBPyConnection, target: str, keys: list[Key]) -> None:
-        for key in keys:
-            values = list(key) if isinstance(key, tuple) else [key]
-            where = " and ".join(f"{quoted(c)} = ?" for c in self.key_columns)
-            conn.execute(f"delete from {target} where {where}", values)
+        """Delete the rows of `keys`, a statement per `_DELETE_BATCH` keys."""
+        names = [f"k{n}" for n in range(len(self.key_columns))]
+        match = " and ".join(
+            f"{target}.{quoted(c)} = _keys.{n}" for c, n in zip(self.key_columns, names, strict=True)
+        )
+        row = "(" + ", ".join("?" * len(names)) + ")"
+        for start in range(0, len(keys), _DELETE_BATCH):
+            part = keys[start : start + _DELETE_BATCH]
+            values = [v for key in part for v in (key if isinstance(key, tuple) else (key,))]
+            conn.execute(
+                f"delete from {target} using (values {', '.join([row] * len(part))}) _keys({', '.join(names)}) "
+                f"where {match}",
+                values,
+            )
 
     def _apply(self, conn: duck.DuckDBPyConnection, batch: ApplyBatch) -> ApplyResult:
         target = quoted(self.table)

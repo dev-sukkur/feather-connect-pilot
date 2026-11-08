@@ -56,6 +56,12 @@ FC_COLUMNS: dict[str, LiteralString] = {
     "_fc_op": "text",
     "_fc_applied_at": "timestamptz",
 }
+# What the runtime adds to each record of an `append` route, besides the key, op and partition: added when missing.
+APPEND_COLUMNS: dict[str, LiteralString] = {
+    "_fc_version": "text",
+    "_fc_run": "text",
+    "_fc_extracted_at": "timestamptz",
+}
 APPLIED_TABLE = "_feather_applied"
 DEFAULT_BATCH_ROWS = 10_000
 _CONNECT_TIMEOUT = 10
@@ -203,6 +209,10 @@ def _key_text(key: Key) -> str:
     return key if isinstance(key, str) else canonical_json(list(key)).decode("utf-8")
 
 
+class _Undo(Exception):
+    """Rolls back the savepoint it leaves."""
+
+
 def _value(value: Any) -> Any:
     return Jsonb(value) if isinstance(value, dict | list) else value
 
@@ -260,7 +270,7 @@ class Table(_Postgres, connector.Sink):
             raise PermanentError(f"{self.spec.name} can't apply in mode {batch.mode!r}")
         schema = self._schema(ctx)
         with self._connect(ctx) as conn:
-            columns = self._prepare(conn, schema)
+            columns = self._prepare(conn, schema, append=batch.mode == "append")
             with conn.transaction():
                 done = self._applied_before(conn, schema, batch.idempotency_key)
                 if done is not None:
@@ -272,9 +282,12 @@ class Table(_Postgres, connector.Sink):
                 self._remember(conn, schema, batch.idempotency_key, result)
             return result
 
-    def _prepare(self, conn: psycopg.Connection[Any], schema: str) -> dict[str, str]:
+    def _prepare(self, conn: psycopg.Connection[Any], schema: str, *, append: bool = False) -> dict[str, str]:
         """Make sure of `_feather_applied` and the table's `_fc_*` columns, and return the table's columns by name."""
         with conn.transaction():
+            # `create table if not exists` and `add column if not exists` race with themselves: two first applies at
+            # once both try, and one fails on pg_type's unique index. One at a time per schema, for this transaction.
+            conn.execute("select pg_advisory_xact_lock(hashtext(%s))", (f"feather.prepare:{schema}",))
             conn.execute(
                 sql.SQL(
                     "create table if not exists {} (idempotency_key text primary key, applied int not null, "
@@ -284,7 +297,7 @@ class Table(_Postgres, connector.Sink):
             columns = self._columns(conn, schema, self.table)
             if not columns:
                 raise PermanentError(f"{self.spec.name}: there is no table {schema}.{self.table}")
-            for name, kind in FC_COLUMNS.items():
+            for name, kind in (FC_COLUMNS | APPEND_COLUMNS if append else FC_COLUMNS).items():
                 if name not in columns:
                     conn.execute(
                         sql.SQL("alter table {} add column if not exists {} {}").format(
@@ -426,32 +439,69 @@ class Table(_Postgres, connector.Sink):
         conn.execute(sql.SQL("delete from {} where _fc_chunk = %s").format(stage), (batch.chunk_no,))
         now = datetime.now(UTC)
         upserts = [r for r in batch.records if r.op != "delete" and r.payload is not None]
-        for record in upserts:
-            row = {
-                **self._fields(record, columns),
-                **self._fc(batch, record, now),
-                "_fc_chunk": batch.chunk_no,
-                "_fc_moved_from": record.moved_from,
-            }
-            names = list(row)
-            try:
-                with conn.transaction():
-                    conn.execute(
+        staged = [
+            (
+                record,
+                {
+                    **self._fields(record, columns),
+                    **self._fc(batch, record, now),
+                    "_fc_chunk": batch.chunk_no,
+                    "_fc_moved_from": record.moved_from,
+                },
+            )
+            for record in upserts
+        ]
+        by_columns: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+        for _, row in staged:
+            by_columns.setdefault(tuple(row), []).append(row)
+        try:
+            with conn.transaction(), conn.cursor() as cursor:  # one statement per set of columns, not per row
+                for names, group in by_columns.items():
+                    cursor.executemany(
                         sql.SQL("insert into {} ({}) values ({})").format(
                             stage,
                             sql.SQL(", ").join(map(sql.Identifier, names)),
                             sql.SQL(", ").join(sql.Placeholder() * len(names)),
                         ),
-                        [_value(row[n]) for n in names],
+                        [[_value(row[n]) for n in names] for row in group],
                     )
-            except _ROW_ERRORS as error:  # a replace can't leave a record out
-                raise PermanentError(
-                    f"{self.spec.name}: record {_key_text(record.key)} can't be written, and replacing the slice "
-                    f"can't leave it out: {type(error).__name__}: {str(error).strip()}"
-                ) from None
+        except _ROW_ERRORS:
+            self._name_the_bad_row(conn, stage, staged)
+            raise
         if batch.is_last:
             self._swap(conn, schema, columns, batch, stage)
         return ApplyResult(len(upserts))
+
+    def _name_the_bad_row(
+        self,
+        conn: psycopg.Connection[Any],
+        stage: sql.Composable,
+        staged: list[tuple[ApplyRecord, dict[str, Any]]],
+    ) -> None:
+        """Insert the rows again one at a time, all undone at the end, to find the first that the stage turns down,
+        and raise `PermanentError` naming it: a replace can't leave a record out."""
+        try:
+            with conn.transaction():
+                for record, row in staged:
+                    names = list(row)
+                    try:
+                        with conn.transaction():
+                            conn.execute(
+                                sql.SQL("insert into {} ({}) values ({})").format(
+                                    stage,
+                                    sql.SQL(", ").join(map(sql.Identifier, names)),
+                                    sql.SQL(", ").join(sql.Placeholder() * len(names)),
+                                ),
+                                [_value(row[n]) for n in names],
+                            )
+                    except _ROW_ERRORS as error:
+                        raise PermanentError(
+                            f"{self.spec.name}: record {_key_text(record.key)} can't be written, and replacing the "
+                            f"slice can't leave it out: {type(error).__name__}: {str(error).strip()}"
+                        ) from None
+                raise _Undo
+        except _Undo:
+            pass
 
     def _swap(
         self,

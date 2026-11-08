@@ -3,6 +3,7 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from feather_connect.core.errors import PermanentError, TransientError
@@ -256,3 +257,20 @@ def test_a_delivery_shows_what_the_destination_answered_per_record(
     assert "422" in html and "<code>customer</code>: c-9" in html  # a rejected record keeps what it was sent
     assert "Attempts" in html and f'href="/runs/{run_id}"' in html
     assert client.get(f"/routes/{route}/deliveries/nothing").status_code == 404
+
+
+def test_a_run_page_says_how_many_versions_it_shows_and_lists_failed_deliveries_first(
+    client: TestClient, world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:  # S15
+    from feather_connect.core.errors import PermanentError
+    from feather_server.services import reads
+
+    monkeypatch.setattr(reads, "_VERSIONS_SHOWN", 2)
+    world.sink("warehouse").fail_next(PermanentError("table is locked"))
+    run_id = world.run([day(14), day(15), day(16), day(17)])
+    failed = world.store.ledger.list_deliveries(route="warehouse", status="failed")
+    assert [d.partition for d in failed] == [day(14)]  # the oldest, not among the newest 2
+    page = client.get(f"/runs/{run_id}").text
+    assert "newest 2 of 4 versions" in page
+    assert "table is locked" in page
+    assert page.index("table is locked") < page.index("Applied")

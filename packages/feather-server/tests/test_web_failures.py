@@ -355,3 +355,43 @@ def test_a_connector_error_never_shows_a_secret_on_the_pages(client: TestClient,
     assert not any(secret in (a.error or "") for a in attempts)
     assert not any(secret in (t.error or "") for t in world.store.runs.list_tasks(run))
     assert secret not in (world.store.runs.get_run(run).reason or "")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/failures?cursor=not-a-cursor",
+        "/routes/warehouse/deliveries?cursor=not-a-cursor",
+        "/routes/warehouse/deliveries?cursor=x:y",
+        "/api/v1/routes/warehouse/deliveries?cursor=bm90LWEtY3Vyc29y",
+        "/runs?cursor=not-a-cursor",
+        "/datasets/orders/partitions?cursor=not-a-cursor",
+        "/quarantine?cursor=not-a-cursor",
+    ],
+)
+def test_a_bad_cursor_is_not_a_500(client, path):  # M3: a refusal, or a page that ignores it
+    assert client.get(path).status_code < 500
+
+
+def test_a_non_ascii_confirmation_token_is_refused(client, csrf):  # M3
+    answer = client.post(
+        "/deliveries/confirm", data={"csrf_token": csrf(), "token": "abc.é", "action": "retry"}
+    )
+    assert answer.status_code != 500
+
+
+def test_quarantine_pages_through_every_entry(client: TestClient, world: World, monkeypatch) -> None:  # M7
+    from feather_server.web import routes
+
+    monkeypatch.setattr(routes, "_QUARANTINE_SHOWN", 2)
+    world.run([day(17)])
+    version = world.store.versions.latest_sealed("orders", day(17))
+    assert version
+    for key in ("k1", "k2", "k3"):
+        world.store.quarantine.add("warehouse", version.version_id, key, "bad")
+    first = client.get("/quarantine").text
+    assert "k1" in first and "k3" not in first and "1 to 2 of 3" in first
+    link = re.search(r'href="(/quarantine\?[^"]*offset=2[^"]*)"', first)
+    assert link, first
+    second = client.get(htmllib.unescape(link.group(1))).text
+    assert "k3" in second and "k1" not in second

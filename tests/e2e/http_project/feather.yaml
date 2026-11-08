@@ -1,0 +1,11 @@
+# The webhook-to-HTTP latency check on the real connectors: feather-http's Webhook in, its Call out, to an echo the
+# test starts (tests/support/http_echo.py). The test points `echo` at it in env/dev.yaml.
+name: http-latency
+modules: [flows.hooks]
+connections:
+  perf_hooks:
+    connector: http.webhook
+    auth: {signature_secret: "${secret:env:HOOK_SECRET}"}
+  echo:
+    connector: http.call
+    base_url: http://127.0.0.1:9

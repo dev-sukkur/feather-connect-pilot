@@ -367,6 +367,41 @@ def test_keep_state_tracks_moves_and_latest(clock: FrozenClock):
     assert world.store.state.get_many("hooks", ["1"])["1"].partition == second.partition
 
 
+def test_state_missed_by_a_crash_after_sealing_is_caught_up_by_the_next_batch(
+    clock: FrozenClock, monkeypatch: pytest.MonkeyPatch
+):  # S11
+    from feather_connect.runtime import extract, sealer
+
+    world = World(MemoryStore(clock), MemorySpool(clock), clock, keep_state=True, partition=by_fields("b"))
+    world.post({"id": 1, "b": "a"})
+    real = extract.update_state
+
+    def crash(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the process died here")
+
+    monkeypatch.setattr(sealer, "update_state", crash)
+    [first] = world.seal_due()
+    assert world.store.state.get_many("hooks", ["1"]) == {}  # sealed, but its state never written
+    monkeypatch.setattr(sealer, "update_state", real)
+    world.post({"id": 1, "b": "z"})
+    [second] = world.seal_due()
+    assert (
+        world.records_of(second)[0].moved_from == first.partition
+    )  # the move is seen, so no copy stays behind
+    assert world.store.state.get_many("hooks", ["1"])["1"].partition == second.partition
+
+
+def test_a_batch_is_bounded_by_its_bodies_size_too(clock: FrozenClock):  # S20
+    world = World(MemoryStore(clock), MemorySpool(clock), clock)
+    for n in range(6):
+        world.post({"id": n, "pad": "x" * 1000})
+    world.clock.advance(timedelta(seconds=2))
+    sealed = seal_once(world.runtime, now=world.clock.now(), max_bytes=2500)
+    assert (
+        len(sealed) == 2 and sum(v.upserts for v in sealed) == 6
+    )  # two batches of three: every event sealed
+
+
 # Two sealers, and a crash, on both stores.
 
 

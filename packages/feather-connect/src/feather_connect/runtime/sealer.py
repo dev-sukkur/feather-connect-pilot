@@ -329,24 +329,68 @@ def _drop_own_chunks(version_ids: Iterable[str], writer: str, deps: Any) -> None
             continue
 
 
+_STATE_TARGET = "sealer"
+_STATE_KEY = "state_updated_to"  # the seal_seq up to which the dataset's record state is known to be written
+_STATE_LOOKBACK = 50  # sealed versions looked at for state a crash left unwritten
+
+
+def _state_marker(dataset: Dataset) -> str:
+    return f"{_STATE_TARGET}:{dataset.name}"
+
+
+def _catch_up_state(dataset: Dataset, deps: Any) -> None:
+    """Write the record state of sealed versions whose state a crash between sealing and `update_state` left unwritten
+    (S11), before a new batch works out its moves from that state. `update_state` keeps the newest state of each key,
+    so writing a version's state again changes nothing."""
+    if not dataset.keep_state:
+        return
+    done = deps.store.overrides.get(_state_marker(dataset), _STATE_KEY)
+    behind = sorted(
+        (
+            v
+            for v in deps.store.versions.list_versions(dataset.name, limit=_STATE_LOOKBACK)
+            if v.status == "sealed" and v.seal_seq is not None and (done is None or v.seal_seq > int(done))
+        ),
+        key=lambda v: v.seal_seq,
+    )
+    for version in behind:
+        update_state(dataset, version, deps)
+    if behind:
+        _mark_state(dataset, behind, deps)
+
+
+def _mark_state(dataset: Dataset, versions: Sequence[Version], deps: Any) -> None:
+    newest = max(v.seal_seq or 0 for v in versions)
+    done = deps.store.overrides.get(_state_marker(dataset), _STATE_KEY)
+    if done is None or newest > int(done):
+        deps.store.overrides.set(_state_marker(dataset), _STATE_KEY, newest, actor="sealer")
+
+
 def _after_seal(
     runtime: Runtime, dataset: Dataset, sealed: Sequence[Version], routes: Sequence[str], batch: _Batch
 ) -> None:
     """Do what follows a seal. The versions are safe by now, so nothing failing here may look like a failed seal: a
-    delivery that isn't submitted is the sweeper's, and state that isn't updated catches up with the key's next event."""
+    delivery that isn't submitted is the sweeper's, and state that isn't updated is written by the next batch (S11)."""
     deps = runtime.deps
+    stated = True
     for version in sealed:
         try:
             deps.store.runs.set_run_status(version.run_id, "running")
             if dataset.keep_state:
                 update_state(dataset, version, deps)
         except Exception as error:  # noqa: BLE001 - see above
+            stated = False
             _log_failure(dataset.name, error)
         for route in routes:
             try:
                 runtime.submit_apply(route, version.version_id)
             except Exception as error:  # noqa: BLE001 - see above
                 _log_failure(dataset.name, error)
+    if dataset.keep_state and stated and sealed:
+        try:
+            _mark_state(dataset, sealed, deps)
+        except Exception as error:  # noqa: BLE001 - the next batch writes the state again, which is harmless
+            _log_failure(dataset.name, error)
     try:
         deps.store.quarantine.close_extraction(dataset.name, batch.settled)
     except Exception as error:  # noqa: BLE001 - see above
@@ -373,6 +417,7 @@ def _seal_batch(
         _hold(batch, deps)
         return []
     batch.drop_what_arrow_refuses()
+    _catch_up_state(dataset, deps)
     _with_moves(dataset, batch.parts, deps)
     routes = list(dict.fromkeys(route.name for flow in flows for route in flow.routes))
     run_id = runtime.stream_run(flows[0].name, now) if batch.parts else ""
@@ -456,8 +501,15 @@ def _quarantine_event(runtime: Runtime, dataset: Dataset, event: InboxEvent, err
     _hold(batch, runtime.deps)
 
 
-def _is_due(age: timedelta, count: int, max_events: int, max_age: timedelta) -> bool:
-    return count >= max_events or age >= max_age
+MAX_BATCH_BYTES = 64 * 1024 * 1024  # the bodies one batch holds in memory, at most (S20)
+
+
+def _is_full(events: Sequence[InboxEvent], max_events: int, max_bytes: int) -> bool:
+    return len(events) >= max_events or sum(len(e.request.body) for e in events) >= max_bytes
+
+
+def _is_due(age: timedelta, full: bool, max_age: timedelta) -> bool:
+    return full or age >= max_age
 
 
 def _seal_dataset(
@@ -468,6 +520,7 @@ def _seal_dataset(
     now: datetime,
     max_events: int,
     max_age: timedelta,
+    max_bytes: int = MAX_BATCH_BYTES,
 ) -> None:
     """Add to `sealed` as each batch seals, so that a later batch failing doesn't lose sight of the earlier ones."""
     flows = _flows_of(runtime, dataset)
@@ -479,8 +532,9 @@ def _seal_dataset(
         age = inbox.oldest_age(dataset.name, now)
         if age is None:
             break
-        events = inbox.take(dataset.name, max_events)
-        if not events or not _is_due(age, len(events), max_events, max_age):
+        events = inbox.take(dataset.name, max_events, max_bytes)
+        full = _is_full(events, max_events, max_bytes)
+        if not events or not _is_due(age, full, max_age):
             break
         if events[0].retry_at is not None and events[0].retry_at > now:
             break  # the first is to be read again later, and the others wait behind it
@@ -488,7 +542,7 @@ def _seal_dataset(
             ctx = runtime.make_context(cast(PushSource, dataset.source).connection)
         if _seal_split(runtime, dataset, flows, ctx, events, now, sealed):
             break
-        if len(events) < max_events:
+        if not full:
             break
 
 
@@ -498,7 +552,12 @@ def _push_datasets(runtime: Runtime) -> list[Dataset]:
 
 
 def seal_once(
-    runtime: Runtime, *, now: datetime, max_events: int = 500, max_age: timedelta = timedelta(seconds=1)
+    runtime: Runtime,
+    *,
+    now: datetime,
+    max_events: int = 500,
+    max_age: timedelta = timedelta(seconds=1),
+    max_bytes: int = MAX_BATCH_BYTES,
 ) -> list[Version]:
     """Seal what is due of each push dataset as of `now`, and return the new versions.
 
@@ -508,7 +567,9 @@ def seal_once(
     sealed: list[Version] = []
     for dataset in _push_datasets(runtime):
         try:
-            _seal_dataset(runtime, dataset, sealed, now=now, max_events=max_events, max_age=max_age)
+            _seal_dataset(
+                runtime, dataset, sealed, now=now, max_events=max_events, max_age=max_age, max_bytes=max_bytes
+            )
         except (StaleWriter, VersionSealed) as error:
             log.info("sealer: another sealer is at dataset %s: %s", dataset.name, type(error).__name__)
         except Exception as error:  # noqa: BLE001 - the next tick tries again, and the other datasets mustn't wait

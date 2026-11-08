@@ -102,6 +102,7 @@ def _unjson(value: Any) -> Any:
     return json.loads(json.dumps(value), object_hook=decode_json_value)
 
 
+_WATERMARK_PAGE = 16  # versions within a lookback are usually few
 _HIGHEST_CHARACTER = "\U0010ffff"  # sorts after any text that starts with a prefix, in the C collation
 
 
@@ -593,6 +594,8 @@ class _Versions(VersionStore):
             ).fetchone()
             assert sealed is not None
             found[version_id] = sealed
+            if sealed["watermark"] is not None:
+                self._raise_watermark(conn, sealed["dataset"], _unjson(sealed["watermark"]))
             for route in routes:
                 conn.execute(
                     """insert into feather.delivery (tenant_id, route, version_id, dataset, partition,
@@ -654,25 +657,77 @@ class _Versions(VersionStore):
         return None if row is None else _version(row)
 
     def since_watermark(self, dataset: str, partition: str, since: Any) -> list[Version]:
-        # Watermarks are compared in Python, as the in-memory store does: they may be numbers, text or datetimes.
+        # Watermarks are compared in Python, as the in-memory store does: they may be numbers, text or datetimes. So
+        # the versions are read newest first, a page at a time, up to the first one below `since` (see the port).
+        found: list[Version] = []
+        before: int | None = None
+        while True:
+            with self._db.tx() as conn:
+                rows = conn.execute(
+                    """select * from feather.version
+                       where tenant_id = %(tenant)s and dataset = %(dataset)s and partition = %(partition)s
+                         and status = 'sealed' and watermark is not null
+                         and (%(before)s::bigint is null or seal_seq < %(before)s)
+                       order by seal_seq desc limit %(page)s""",
+                    {
+                        "tenant": self._db.tenant,
+                        "dataset": dataset,
+                        "partition": partition,
+                        "before": before,
+                        "page": _WATERMARK_PAGE,
+                    },
+                ).fetchall()
+            for version in map(_version, rows):
+                if version.watermark < since:
+                    return found
+                found.append(version)
+            if len(rows) < _WATERMARK_PAGE:
+                return found
+            before = rows[-1]["seal_seq"]
+
+    def last_sealed_at(self, dataset: str) -> datetime | None:
         with self._db.tx() as conn:
-            rows = conn.execute(
-                """select * from feather.version
-                   where tenant_id = %s and dataset = %s and partition = %s and status = 'sealed'
-                     and watermark is not null
-                   order by seal_seq desc""",
-                (self._db.tenant, dataset, partition),
-            ).fetchall()
-        return [v for v in map(_version, rows) if v.watermark >= since]
+            row = conn.execute(
+                """select sealed_at as at from feather.version
+                   where tenant_id = %s and dataset = %s and status = 'sealed'
+                   order by stage_seq desc limit 1""",  # version_dataset_idx, past the few staged at its top
+                (self._db.tenant, dataset),
+            ).fetchone()
+        return None if row is None else row["at"]
 
     def latest_watermark(self, dataset: str) -> Any | None:
         with self._db.tx() as conn:
+            row = conn.execute(
+                "select watermark from feather.dataset_watermark where tenant_id = %s and dataset = %s",
+                (self._db.tenant, dataset),
+            ).fetchone()
+            if row is not None:
+                return _unjson(row["watermark"])
+            # Sealed before migration 0012, or not yet: work it out once, under the sealers' lock, and keep it.
+            conn.execute(SEAL_LOCK)
             rows = conn.execute(
                 """select watermark from feather.version
                    where tenant_id = %s and dataset = %s and status = 'sealed' and watermark is not null""",
                 (self._db.tenant, dataset),
             ).fetchall()
-        return max((_unjson(r["watermark"]) for r in rows), default=None)
+            found = max((_unjson(r["watermark"]) for r in rows), default=None)
+            if found is not None:
+                self._raise_watermark(conn, dataset, found)
+        return found
+
+    def _raise_watermark(self, conn: psycopg.Connection[DictRow], dataset: str, watermark: Any) -> None:
+        """Keep `watermark` as the dataset's if it is greater. The caller holds SEAL_LOCK."""
+        row = conn.execute(
+            "select watermark from feather.dataset_watermark where tenant_id = %s and dataset = %s",
+            (self._db.tenant, dataset),
+        ).fetchone()
+        if row is not None and not watermark > _unjson(row["watermark"]):
+            return
+        conn.execute(
+            """insert into feather.dataset_watermark (tenant_id, dataset, watermark) values (%s, %s, %s)
+               on conflict (tenant_id, dataset) do update set watermark = excluded.watermark""",
+            (self._db.tenant, dataset, _json(watermark)),
+        )
 
     def register_slices(self, run_id: str, dataset: str, partitions: Iterable[str]) -> None:
         with self._db.tx() as conn:
@@ -793,6 +848,17 @@ class _Versions(VersionStore):
                      on r.tenant_id = v.tenant_id and r.run_id = v.run_id
                    where v.tenant_id = %s and v.status = 'staged' and r.status in ('failed', 'cancelled')
                      and r.trigger <> %s
+                   order by v.stage_seq limit %s""",
+                (self._db.tenant, STREAM_TRIGGER, limit),
+            ).fetchall()
+        return [_version(r) for r in rows]
+
+    def stream_leftovers(self, limit: int = 1000) -> list[Version]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select v.* from feather.version v join feather.run r
+                     on r.tenant_id = v.tenant_id and r.run_id = v.run_id
+                   where v.tenant_id = %s and v.status = 'staged' and v.tick is not null and r.trigger = %s
                    order by v.stage_seq limit %s""",
                 (self._db.tenant, STREAM_TRIGGER, limit),
             ).fetchall()
@@ -1151,13 +1217,24 @@ class _Quarantine(QuarantineStore):
             )
         return closed.rowcount
 
-    def list_open(self, route: str | None = None) -> list[QuarantineRow]:
+    def count_open(self, route: str | None = None) -> int:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select count(*) as n from feather.quarantine
+                   where tenant_id = %s and status = 'open' and (%s::text is null or route = %s)""",
+                (self._db.tenant, route, route),
+            ).fetchone()
+        return 0 if row is None else int(row["n"])
+
+    def list_open(
+        self, route: str | None = None, *, limit: int | None = None, offset: int = 0
+    ) -> list[QuarantineRow]:
         with self._db.tx() as conn:
             rows = conn.execute(
                 """select * from feather.quarantine
                    where tenant_id = %s and status = 'open' and (%s::text is null or route = %s)
-                   order by quarantine_id""",
-                (self._db.tenant, route, route),
+                   order by quarantine_id limit %s offset %s""",
+                (self._db.tenant, route, route, limit, offset),
             ).fetchall()
         return [
             QuarantineRow(
@@ -1498,6 +1575,15 @@ class _Workers(WorkerRegistry):
             ).fetchall()
         return [_worker(r) for r in rows]
 
+    def forget_stopped(self, before: datetime) -> int:
+        with self._db.tx() as conn:
+            done = conn.execute(
+                """delete from feather.worker
+                   where tenant_id = %s and state in ('dead', 'draining') and last_seen < %s""",
+                (self._db.tenant, before),
+            )
+        return done.rowcount
+
     def mark(self, worker_id: str, state: WorkerState) -> None:
         with self._db.tx() as conn:
             done = conn.execute(
@@ -1527,6 +1613,22 @@ class _Schedules(ScheduleStore):
                    on conflict (tenant_id, flow, trigger_id) do update set last_tick = excluded.last_tick""",
                 (self._db.tenant, flow, trigger_id, at),
             )
+
+    def advance_tick(self, flow: str, trigger_id: str, seen: datetime | None, at: datetime) -> bool:
+        with self._db.tx() as conn:
+            if seen is None:
+                done = conn.execute(
+                    """insert into feather.schedule (tenant_id, flow, trigger_id, last_tick) values (%s, %s, %s, %s)
+                       on conflict (tenant_id, flow, trigger_id) do nothing""",
+                    (self._db.tenant, flow, trigger_id, at),
+                )
+            else:
+                done = conn.execute(
+                    """update feather.schedule set last_tick = %s
+                       where tenant_id = %s and flow = %s and trigger_id = %s and last_tick = %s""",
+                    (at, self._db.tenant, flow, trigger_id, seen),
+                )
+        return done.rowcount == 1
 
 
 class _Overrides(OverrideStore):
@@ -1562,6 +1664,14 @@ class _Overrides(OverrideStore):
                 (self._db.tenant, target, key, self._db.clock.now()),
             ).fetchone()
         return None if row is None else _unjson(row["value"])
+
+    def delete_expired(self) -> int:
+        with self._db.tx() as conn:
+            done = conn.execute(
+                "delete from feather.override where tenant_id = %s and expires_at <= %s",
+                (self._db.tenant, self._db.clock.now()),
+            )
+        return done.rowcount
 
     def claim(
         self,
@@ -1937,13 +2047,18 @@ class _Inbox(InboxStore):
                 )
         return stored
 
-    def take(self, dataset: str, limit: int) -> list[InboxEvent]:
+    def take(self, dataset: str, limit: int, max_bytes: int | None = None) -> list[InboxEvent]:
         with self._db.tx() as conn:
             rows = conn.execute(
-                """select * from feather.inbox
-                   where tenant_id = %s and dataset = %s and sealed_at is null and held_at is null
-                   order by event_seq limit %s""",
-                (self._db.tenant, dataset, limit),
+                """with firsts as (
+                       select * from feather.inbox
+                       where tenant_id = %s and dataset = %s and sealed_at is null and held_at is null
+                       order by event_seq limit %s),
+                   sized as (
+                       select *, sum(octet_length(body)) over (order by event_seq) - octet_length(body) as before
+                       from firsts)
+                   select * from sized where %s::bigint is null or before < %s::bigint order by event_seq""",
+                (self._db.tenant, dataset, limit, max_bytes, max_bytes),
             ).fetchall()
         return [
             InboxEvent(
@@ -2058,7 +2173,9 @@ class _Inbox(InboxStore):
                 "select to_regclass(%s) as found", (f"feather.{self._partition(day)}",)
             ).fetchone()
             if found is not None and found["found"] is not None:
-                # Nothing can write to the day between this look and the drop.
+                # Nothing can write to the day between this look and the drop. The parent first, as
+                # the drop takes it anyway: a `take` holding the parent can't then wait on us (S14).
+                conn.execute("lock table feather.inbox in access exclusive mode")
                 conn.execute(sql.SQL("lock table {} in access exclusive mode").format(partition))
                 waiting = conn.execute(
                     sql.SQL("select 1 from {} where sealed_at is null limit 1").format(partition)

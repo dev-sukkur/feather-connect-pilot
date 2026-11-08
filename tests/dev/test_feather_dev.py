@@ -22,9 +22,11 @@ from typing import Any
 import httpx
 import psycopg
 import pytest
+import yaml
 from psycopg import sql
 from typer.testing import CliRunner
 
+from feather_cli.commands.dev import _in_use
 from feather_cli.main import app
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -146,6 +148,7 @@ class Dev:
 @pytest.fixture
 def start_dev(tmp_path: Path) -> Iterator[Callable[..., Dev]]:
     started: list[Dev] = []
+    roots: list[Path] = []  # the project of each
 
     def start(*args: str, env: dict[str, str] | None = None, port: int | None = None) -> Dev:
         port = port or free_port()
@@ -162,13 +165,23 @@ def start_dev(tmp_path: Path) -> Iterator[Callable[..., Dev]]:
         )
         dev = Dev(proc, port, log, merged)
         started.append(dev)
+        roots.append(Path(args[args.index("--project") + 1]) if "--project" in args else DEMO)
         return dev
 
     yield start
-    for dev in started:
+    for dev, root in zip(started, roots, strict=True):
         if dev.proc.poll() is None:
-            dev.proc.kill()
+            try:
+                dev.interrupt()  # Ctrl+C stops the helpers before feather ends
+            except subprocess.TimeoutExpired:
+                dev.proc.kill()
         dev.proc.wait()
+        # A helper may still be ending (after a kill, Linux tells it so only once feather is gone): the next test that
+        # starts feather dev on this project would find its port taken.
+        config: dict[str, Any] = yaml.safe_load((root / "feather.yaml").read_text(encoding="utf-8")) or {}
+        declared: dict[str, Any] = config.get("dev") or {}
+        ports = [p["port"] for p in declared.get("processes") or [] if p.get("port")]
+        wait_until(lambda: not any(_in_use(p) for p in ports), 30, f"helper ports {ports} to be free")  # noqa: B023
 
 
 @pytest.fixture
@@ -185,7 +198,9 @@ def database(pg_url: str) -> Iterator[str]:
 
 
 @pytest.fixture
-def dev(start_dev: Callable[..., Dev], database: str) -> Dev:
+def dev(
+    database: str, start_dev: Callable[..., Dev]
+) -> Dev:  # database first, so feather dev stops before it is dropped
     """`feather dev` on the test Postgres through FEATHER_DATABASE_URL, so it needs no Docker."""
     running = start_dev(env={"FEATHER_DATABASE_URL": database})
     running.wait_ready()
@@ -217,31 +232,29 @@ def test_demo_runs_and_reaches_destinations(dev, database, pg_connect):
         done = store.ledger.list_deliveries(route=route, status="applied")
         return bool(done) and sum(d.rows_applied for d in done) > 0
 
-    def failed(route: str) -> bool:
-        return bool(store.ledger.list_deliveries(route=route, status="failed"))
-
-    # The archive route refuses a delivery now and then on purpose (examples/demo/flows/orders.py), so a failure on
-    # it, which the dashboard shows, is as good here as rows applied.
+    # dev delivers to real targets: the demo schema of this database, a DuckDB file and sims/targets.py.
     wait_until(
-        lambda: applied("warehouse") and (applied("archive") or failed("archive")),
+        lambda: all(applied(route) for route in ("warehouse", "lake", "erp")),
         90,
-        "rows applied on the warehouse route, and the archive route reached",
+        "rows applied on all three routes",
     )
+    with psycopg.connect(database) as conn:
+        assert conn.execute("select count(*) from demo.orders").fetchone() == (5,)
     page = client.get("/flows").text
     assert "orders" in page
 
 
 @needs_postgres
-def test_editing_a_flow_reloads_it(start_dev, database, tmp_path, pg_connect):
+def test_editing_a_flow_reloads_it(database, start_dev, tmp_path, pg_connect):
     project = tmp_path / "demo"
-    shutil.copytree(DEMO, project, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(DEMO, project, ignore=shutil.ignore_patterns("__pycache__", ".data"))
     running = start_dev("--project", str(project), env={"FEATHER_DATABASE_URL": database})
     running.wait_ready()
     store, _ = pg_connect(database)
     flow_file = project / "flows" / "orders.py"
     assert store.catalog.flow("orders").spec["owner"] == "demo"
 
-    flow_file.write_text(flow_file.read_text().replace('owner="demo"', 'owner="reloaded"'))
+    flow_file.write_text(flow_file.read_text().replace('owner = "demo"', 'owner = "reloaded"'))
     wait_until(lambda: store.catalog.flow("orders").spec["owner"] == "reloaded", 60, "the reloaded flow")
     # the worker registers the new code before the restarted server is back
     wait_until(
@@ -255,7 +268,7 @@ def test_editing_a_flow_reloads_it(start_dev, database, tmp_path, pg_connect):
     assert store.catalog.flow("orders").spec["owner"] == "reloaded"
 
     flow_file.write_text(
-        DEMO.joinpath("flows", "orders.py").read_text().replace('owner="demo"', 'owner="fixed"')
+        DEMO.joinpath("flows", "orders.py").read_text().replace('owner = "demo"', 'owner = "fixed"')
     )
     wait_until(lambda: store.catalog.flow("orders").spec["owner"] == "fixed", 60, "the repaired flow")
 
@@ -271,6 +284,39 @@ def test_docker_installed_but_not_answering_explains_what_to_do(fake_docker_daem
     r = CliRunner().invoke(app, ["dev", "--no-browser", "--port", str(free_port())])
     assert r.exit_code != 0
     assert "Docker" in r.stderr and "FEATHER_DATABASE_URL" in r.stderr
+
+
+def test_no_docker_is_reported_before_a_busy_helper_port(fake_no_docker, tmp_path):
+    """Without Docker nothing can run, so that is the first thing to say; a busy helper port can wait."""
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        port = taken.getsockname()[1]
+        project = tmp_path / "helpers"
+        (project / "env").mkdir(parents=True)
+        (project / "env" / "dev.yaml").write_text("{}\n")
+        helper = f"    - {{name: sim, command: [python, x.py], port: {port}}}\n"
+        (project / "feather.yaml").write_text("name: helpers\nmodules: []\ndev:\n  processes:\n" + helper)
+        r = CliRunner().invoke(
+            app, ["dev", "--no-browser", "--port", str(free_port()), "--project", str(project)]
+        )
+    assert r.exit_code != 0
+    assert "Docker" in r.stderr and "already in use" not in r.stderr
+
+
+def test_an_unreachable_database_url_is_explained_without_a_traceback(monkeypatch, tmp_path):  # M4
+    monkeypatch.setenv("FEATHER_DATABASE_URL", f"postgresql://nobody:x@127.0.0.1:{free_port()}/none")
+    project = tmp_path / "plain"
+    (project / "flows").mkdir(parents=True)
+    (project / "flows" / "__init__.py").write_text("")
+    (project / "feather.yaml").write_text("name: plain\nmodules: []\n")
+    (project / "env").mkdir()
+    (project / "env" / "dev.yaml").write_text("{}\n")
+    r = CliRunner().invoke(
+        app, ["dev", "--no-browser", "--port", str(free_port()), "--project", str(project)]
+    )
+    assert r.exit_code != 0
+    assert "FEATHER_DATABASE_URL" in r.stderr and "Traceback" not in r.stderr + r.stdout
 
 
 def test_port_taken_names_the_port_and_the_flag(monkeypatch):
@@ -375,7 +421,7 @@ def test_ctrl_c_then_restart_keeps_data_and_leaves_no_processes(dev_clean, start
 
 
 @needs_postgres
-def test_reset_password_gives_a_new_password_and_keeps_the_data(start_dev, database):
+def test_reset_password_gives_a_new_password_and_keeps_the_data(database, start_dev):
     env = {"FEATHER_DATABASE_URL": database}
     first = start_dev(env=env)
     first.wait_ready()

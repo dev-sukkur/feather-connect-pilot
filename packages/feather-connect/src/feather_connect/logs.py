@@ -8,7 +8,7 @@ the line is written or a task's log is saved. `TaskLogHandler` copies the record
 import json
 import logging
 import sys
-from collections.abc import Generator, Iterable, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -22,6 +22,7 @@ __all__ = [
     "bind",
     "bound_ids",
     "configure_logging",
+    "install_task_logs",
     "redact",
     "register_secrets",
     "unregister_secrets",
@@ -110,6 +111,9 @@ def configure_logging(
     root.setLevel(level.upper())
 
 
+TASKS_REMEMBERED = 10_000  # tasks whose saved bytes a handler keeps count of; an older one is counted again
+
+
 class TaskLogHandler(logging.Handler):
     """Copy the records logged while a task is bound into that task's log in the journal.
 
@@ -125,6 +129,8 @@ class TaskLogHandler(logging.Handler):
     def _spent(self, task_id: str) -> int:
         if task_id not in self._used:  # another attempt or process may have written some already
             self._used[task_id] = sum(len(line.encode()) for line in self._runs.task_logs(task_id))
+            while len(self._used) > TASKS_REMEMBERED:  # oldest first: a long-lived worker stays bounded (M5)
+                del self._used[next(iter(self._used))]
         return self._used[task_id]
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -144,3 +150,14 @@ class TaskLogHandler(logging.Handler):
             self._used[task_id] = used + len(message.encode())
         except Exception:  # noqa: BLE001 - a log handler must never raise into the code that logged
             self.handleError(record)
+
+
+def install_task_logs(store: Store) -> Callable[[], None]:
+    """Add a `TaskLogHandler` on `store` to the root logger, unless the process has one already, and return what
+    removes it. A worker and a server in one process, as `feather dev` runs them, so save each line once (M5)."""
+    root = logging.getLogger()
+    if any(isinstance(h, TaskLogHandler) for h in root.handlers):
+        return lambda: None
+    handler = TaskLogHandler(store)
+    root.addHandler(handler)
+    return lambda: root.removeHandler(handler)

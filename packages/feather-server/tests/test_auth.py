@@ -265,3 +265,44 @@ def test_the_login_page_sets_a_csp_and_no_inline_script(client: TestClient) -> N
     assert response.headers["content-security-policy"] == CSP
     assert "<script" not in response.text and "style=" not in response.text
     assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_a_copied_cookie_stops_working_after_logout(client: TestClient, app: FastAPI) -> None:  # M1
+    login(client)
+    copied = client.cookies.get("feather_session")
+    client.post("/logout", data={"csrf_token": csrf_of(client)})
+    other = TestClient(app, base_url="https://feather.test", follow_redirects=False)
+    other.cookies.set("feather_session", copied or "")
+    assert other.get("/_t/page").status_code == 303
+
+
+def test_a_password_change_ends_the_sessions_from_before(client: TestClient, state: AppState) -> None:  # M1
+    login(client)
+    assert client.get("/_t/page").status_code == 200
+    state.store.users.set_password_hash("op", hash_password("a new password"))
+    assert client.get("/_t/page").status_code == 303
+
+
+def test_parallel_and_many_user_guesses_are_limited_by_address(client: TestClient) -> None:  # M2
+    for n in range(20):
+        login(client, username=f"user{n}", password="wrong")
+    assert login(client).status_code == 429  # the right password, but this address has guessed too much
+
+
+def test_the_throttle_keeps_a_bounded_number_of_keys(state: AppState) -> None:  # M2
+    from feather_server import auth
+
+    throttle = auth.LoginThrottle(state.clock)
+    for n in range(auth._THROTTLE_KEYS + 50):  # pyright: ignore[reportPrivateUsage]
+        throttle.fail((f"user{n}", "10.0.0.1"))
+    assert len(throttle._failures) <= auth._THROTTLE_KEYS + 1  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_very_long_password_is_refused_without_hashing(client: TestClient) -> None:  # M2
+    assert login(client, password="x" * 5000).status_code == 401
+
+
+def test_a_non_ascii_csrf_token_is_a_403(client: TestClient) -> None:  # M3
+    login(client)
+    response = client.post("/_t/form", data={"csrf_token": "é" * 64})
+    assert response.status_code == 403

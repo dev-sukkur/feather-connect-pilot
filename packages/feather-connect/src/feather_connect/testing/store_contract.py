@@ -59,8 +59,8 @@ def seal(store: Store, vid: str, routes: list[str], **kw: Any) -> None:
     store.versions.seal([vid], routes)
 
 
-def inbound(body: bytes = b"{}", at: datetime = T0, **headers: str) -> InboundRequest:
-    return InboundRequest("POST", "/ingress/default/d", headers, body, at)
+def inbound(body: bytes = b"{}", headers: dict[str, str] | None = None, at: datetime = T0) -> InboundRequest:
+    return InboundRequest("POST", "/ingress/default/d", headers or {}, body, at)
 
 
 def upserts(*pairs: tuple[str, dict[str, Any]]) -> list[Record]:
@@ -720,6 +720,19 @@ class StoreContract(SpoolContract, ResponseStoreContract):
         assert got == ["v4", "v2"]
         assert store.versions.since_watermark("d", "p", 31) == []
 
+    def test_since_watermark_stops_at_the_first_version_below_it(self, store: Store):  # S6
+        seal(store, "v1", ["a"], wm=50)  # older than the lookback, whatever its mark
+        seal(store, "v2", ["a"], wm=10)
+        seal(store, "v3", ["a"], wm=30)
+        assert [v.version_id for v in store.versions.since_watermark("d", "p", 20)] == ["v3"]
+
+    def test_latest_watermark_follows_new_seals(self, store: Store):
+        seal(store, "v1", ["a"], wm=10)
+        assert store.versions.latest_watermark("d") == 10
+        seal(store, "v2", ["a"], wm=40)
+        seal(store, "v3", ["a"], wm=20)
+        assert store.versions.latest_watermark("d") == 40
+
     def test_finish_slice_reports_when_all_are_done(self, store: Store):
         store.versions.register_slices("r1", "d", ["p1", "p2"])
         assert store.versions.finish_slice("r1", "d", "p1") is False
@@ -940,6 +953,22 @@ class StoreContract(SpoolContract, ResponseStoreContract):
         store.quarantine.add(None, "v1", "k", "bad again", dataset="d", partition="p")  # reopened
         assert store.quarantine.open_extraction_keys("d", ["k"]) == {"k"}
 
+    def test_quarantine_pages_and_counts_the_open_entries(self, store: Store):  # Stage 2 M7
+        for n in range(5):
+            store.quarantine.add("a" if n % 2 else "b", "v1", f"k{n}", "bad")
+        assert store.quarantine.count_open() == 5 and store.quarantine.count_open("a") == 2
+        first = [q.key for q in store.quarantine.list_open(limit=2)]
+        rest = [q.key for q in store.quarantine.list_open(limit=10, offset=2)]
+        assert first == ["k0", "k1"] and rest == ["k2", "k3", "k4"]
+        assert [q.key for q in store.quarantine.list_open("b", limit=1, offset=1)] == ["k2"]
+
+    def test_the_last_sealed_time_of_a_dataset_ignores_a_staged_version(self, store: Store):  # Stage 2 M8
+        assert store.versions.last_sealed_at("d") is None
+        seal(store, "v1", ["a"], part="p")
+        sealed = store.versions.get("v1").sealed_at
+        store.versions.stage(draft("v2", part="q"))  # staged later, so the newest by stage order
+        assert sealed is not None and store.versions.last_sealed_at("d") == sealed
+
     def test_quarantine_lists_by_route_and_add_is_idempotent(self, store: Store):
         store.quarantine.add("a", "v1", "k", "first")
         store.quarantine.add("a", "v1", "k", "second")
@@ -1006,6 +1035,14 @@ class StoreContract(SpoolContract, ResponseStoreContract):
 
     # workers
 
+    def test_advance_tick_lets_one_of_two_leaders_fire(self, store: Store):  # Stage 2 M9
+        t1, t2 = T0 + timedelta(minutes=1), T0 + timedelta(minutes=2)
+        assert store.schedules.advance_tick("f", "t", None, T0) is True  # first seen
+        assert store.schedules.advance_tick("f", "t", None, T0) is False
+        assert store.schedules.advance_tick("f", "t", T0, t1) is True
+        assert store.schedules.advance_tick("f", "t", T0, t2) is False  # the other leader read T0 too
+        assert store.schedules.last_tick("f", "t") == t1
+
     def test_workers_heartbeat_and_list(self, store: Store, clock: FrozenClock):
         store.workers.heartbeat("w2", {"pool": "x"}, "sha2", 4)
         store.workers.heartbeat("w1", {}, "sha1", 8)
@@ -1026,6 +1063,28 @@ class StoreContract(SpoolContract, ResponseStoreContract):
         store.workers.heartbeat("new", {}, "s", 1)
         assert [w.worker_id for w in store.workers.stale(timedelta(seconds=30))] == ["old"]
         assert store.workers.stale(timedelta(seconds=41)) == []
+
+    def test_forget_stopped_workers_removes_dead_and_draining_ones_seen_long_ago(
+        self, store: Store, clock: FrozenClock
+    ):  # Stage 2 M6
+        for worker in ("alive", "dead", "draining", "recent"):
+            store.workers.heartbeat(worker, {}, "sha", 4)
+        store.workers.mark("dead", "dead")
+        store.workers.mark("draining", "draining")
+        clock.advance(timedelta(days=2))
+        store.workers.heartbeat("recent", {}, "sha", 4)
+        store.workers.mark("recent", "dead")
+        assert store.workers.forget_stopped(clock.now() - timedelta(days=1)) == 2
+        assert [w.worker_id for w in store.workers.list_workers()] == ["alive", "recent"]
+
+    def test_delete_expired_overrides(self, store: Store, clock: FrozenClock):  # Stage 2 M6
+        store.overrides.set("t", "old", 1, actor="a", expires_at=clock.now() + timedelta(minutes=1))
+        store.overrides.set("t", "later", 2, actor="a", expires_at=clock.now() + timedelta(days=1))
+        store.overrides.set("t", "for-ever", 3, actor="a")
+        clock.advance(timedelta(hours=1))
+        assert store.overrides.delete_expired() == 1
+        assert store.overrides.delete_expired() == 0
+        assert (store.overrides.get("t", "later"), store.overrides.get("t", "for-ever")) == (2, 3)
 
     def test_a_draining_worker_stays_draining_and_a_dead_one_comes_back(self, store: Store):
         store.workers.heartbeat("w", {}, "s", 1)
@@ -1300,6 +1359,18 @@ class StoreContract(SpoolContract, ResponseStoreContract):
         store.versions.seal(["v1"], ["a"])
         assert store.versions.abandoned() == []
 
+    def test_stream_leftovers_are_staged_tick_versions_of_stream_runs(self, store: Store):  # S12
+        stream = store.runs.stream_run("f", "2026-10-18")
+        manual = store.runs.create_run("f", "manual", "ann", {})
+        store.versions.stage(replace(draft("v1", run=stream), tick="t1"))
+        store.versions.stage(draft("v2", run=stream))  # a push version: the sealer's, with no tick
+        store.versions.stage(replace(draft("v3", run=manual), tick="t1"))
+        store.versions.stage(replace(draft("v4", run=stream), tick="t2"))
+        assert [v.version_id for v in store.versions.stream_leftovers()] == ["v1", "v4"]
+        assert [v.version_id for v in store.versions.stream_leftovers(limit=1)] == ["v1"]
+        store.versions.seal(["v1"], ["a"])
+        assert [v.version_id for v in store.versions.stream_leftovers()] == ["v4"]
+
     def test_open_versions_are_those_with_a_delivery_that_is_not_closed(self, store: Store):
         for vid, part in (("v1", "p"), ("v2", "q"), ("v3", "r")):
             seal(store, vid, ["a", "b"], part=part)
@@ -1390,16 +1461,6 @@ class StoreContract(SpoolContract, ResponseStoreContract):
         assert store.runs.delete_logs_before(T0 + timedelta(days=30)) == 1
         assert store.runs.task_logs(task) == ["info: new"]
 
-
-def flow_spec(name: str, routes: list[str], owner: str | None = None) -> dict[str, Any]:
-    return {
-        "name": name,
-        "owner": owner,
-        "datasets": [{"name": f"{name}_ds"}],
-        "routes": [{"name": route, "connection": route} for route in routes],
-        "triggers": [],
-    }
-
     # The inbox.
 
     def test_inbox_take_is_in_arrival_order(self, store: Store):
@@ -1411,16 +1472,25 @@ def flow_spec(name: str, routes: list[str], owner: str | None = None) -> dict[st
         assert events[0].event_seq < events[1].event_seq < events[2].event_seq
         assert [e.request.body for e in store.inbox.take("d", 2)] == [b"0", b"1"]
 
+    def test_inbox_take_stops_at_a_size(self, store: Store):  # S20
+        for body in (b"a" * 40, b"b" * 40, b"c" * 40, b"d"):
+            store.inbox.put("d", inbound(body))
+        assert [len(e.request.body) for e in store.inbox.take("d", 10, max_bytes=50)] == [40, 40]
+        assert [len(e.request.body) for e in store.inbox.take("d", 10, max_bytes=10)] == [
+            40
+        ]  # the first always
+        assert len(store.inbox.take("d", 10, max_bytes=None)) == 4
+
     def test_inbox_keeps_a_request_exactly(self, store: Store):
         body = b'\x00\xff{"not": "text"}'
-        store.inbox.put("d", inbound(body, **{"x-signature": "abc"}), "e1")
+        store.inbox.put("d", inbound(body, {"x-signature": "abc"}), "e1")
         [event] = store.inbox.take("d", 1)
         assert (event.dataset, event.event_id, event.received_at) == ("d", "e1", T0)
-        assert event.request == inbound(body, **{"x-signature": "abc"})
+        assert event.request == inbound(body, {"x-signature": "abc"})
 
     def test_inbox_put_many_stores_in_order_and_says_what_put_would(self, store: Store):
         store.inbox.put("d", inbound(b"old"), "seen")
-        request = inbound(b"\x00raw", **{"x-signature": "abc"})
+        request = inbound(b"\x00raw", {"x-signature": "abc"})
         stored = store.inbox.put_many(
             [
                 ("d", request, "e1"),
@@ -1576,3 +1646,13 @@ def flow_spec(name: str, routes: list[str], owner: str | None = None) -> dict[st
         store.inbox.ensure_partitions()
         assert store.inbox.drop_day(T0.date()) is True
         assert store.inbox.drop_day(T0.date()) is True
+
+
+def flow_spec(name: str, routes: list[str], owner: str | None = None) -> dict[str, Any]:
+    return {
+        "name": name,
+        "owner": owner,
+        "datasets": [{"name": f"{name}_ds"}],
+        "routes": [{"name": route, "connection": route} for route in routes],
+        "triggers": [],
+    }

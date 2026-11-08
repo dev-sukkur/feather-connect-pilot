@@ -1,0 +1,11 @@
+.git
+.venv
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.data
+**/*.duckdb
+.claude
+.superpowers
+spikes
+docs

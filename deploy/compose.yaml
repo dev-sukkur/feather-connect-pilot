@@ -1,0 +1,66 @@
+# Feather Connect on one machine: Postgres, a one-shot migration, the server and the workers (NFR-06: at most 4
+# containers, and Postgres is the only state, in one named volume: NFR-07).
+#
+#   cp deploy/.env.example deploy/.env      # then set FEATHER_SECRET_KEY and POSTGRES_PASSWORD in it
+#   docker compose -f deploy/compose.yaml up -d --build
+#   docker compose -f deploy/compose.yaml exec feather-server feather server create-user admin
+#
+# The dashboard is at http://127.0.0.1:${FEATHER_PORT:-8080}. Ports bind to 127.0.0.1 only: put a TLS proxy in front
+# to serve it further. The profiles `objects`, `sso` and `observability` are kept for M2 and M3 and add nothing yet.
+name: ${COMPOSE_PROJECT_NAME:-feather}
+
+x-feather: &feather
+  environment: &feather-env
+    FEATHER_DATABASE_URL: postgresql://feather:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}@postgres:5432/feather
+    FEATHER_SECRET_KEY: ${FEATHER_SECRET_KEY:?set FEATHER_SECRET_KEY in deploy/.env (see .env.example)}
+    FEATHER_ENV: ${FEATHER_ENV:-qa}
+    FEATHER_BASE_URL: ${FEATHER_BASE_URL:-http://127.0.0.1:8080}
+    FEATHER_LOG_LEVEL: ${FEATHER_LOG_LEVEL:-INFO}
+  volumes:
+    - ${FEATHER_PROJECT_DIR:-../examples/demo}:/project:ro
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: feather
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+      POSTGRES_DB: feather
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U feather -d feather"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  migrate:
+    <<: *feather
+    image: ghcr.io/${FEATHER_IMAGE_ORG:-feather-connect}/feather-server:${FEATHER_VERSION:-dev}
+    build: {context: .., dockerfile: deploy/Dockerfile.server}
+    command: ["server", "migrate"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+
+  feather-server:
+    <<: *feather
+    image: ghcr.io/${FEATHER_IMAGE_ORG:-feather-connect}/feather-server:${FEATHER_VERSION:-dev}
+    ports:
+      - "127.0.0.1:${FEATHER_PORT:-8080}:8080"
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  feather-worker:
+    <<: *feather
+    image: ghcr.io/${FEATHER_IMAGE_ORG:-feather-connect}/feather-worker:${FEATHER_VERSION:-dev}
+    build: {context: .., dockerfile: deploy/Dockerfile.worker}
+    deploy:
+      replicas: ${FEATHER_WORKERS:-1}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+volumes:
+  pgdata:
