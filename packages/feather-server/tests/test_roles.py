@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from feather_connect.clock import FrozenClock
 from feather_connect.storage.port import Role, Store
 from feather_server.app import create_app
-from feather_server.auth import Actor, _digest, hash_password, issue_token
+from feather_server.auth import Actor, hash_password, issue_token, token_digest
 from feather_server.services.access import NEEDS, Capability, Forbidden, can, lower, require
 from feather_server.services.accounts import CLI, Accounts
 from feather_server.services.actions import CAPABILITIES
@@ -148,7 +148,7 @@ def test_a_token_has_no_higher_a_role_than_its_user(world: World) -> None:
         "root-ci": accounts.create_token(ADMIN, "root-ci", None),  # takes root's
         "robot": accounts.create_token(CLI, "robot", None),  # no user: an operator
     }
-    found = {name: world.store.users.find_token(_digest(token)) for name, token in made.items()}
+    found = {name: world.store.users.find_token(token_digest(token)) for name, token in made.items()}
     assert {name: (t.role, t.created_by) for name, t in found.items() if t} == {
         "ann-ci": ("operator", "ann"),
         "root-ci": ("admin", "root"),

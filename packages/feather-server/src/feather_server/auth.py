@@ -104,7 +104,8 @@ def _decoy_hash() -> str:
 # Tokens.
 
 
-def _digest(token: str) -> str:
+def token_digest(token: str) -> str:
+    """What the store keeps of a token: its SHA-256, in hex."""
     return hashlib.sha256(token.encode()).hexdigest()
 
 
@@ -121,7 +122,7 @@ def issue_token(
     the store keeps its SHA-256. That `role` is no higher than `created_by`'s is the caller's to check."""
     token = TOKEN_PREFIX + secrets.token_urlsafe(32)
     now = (clock or SystemClock()).now()
-    store.users.create_token(name, _digest(token), None if ttl is None else now + ttl, role, created_by)
+    store.users.create_token(name, token_digest(token), None if ttl is None else now + ttl, role, created_by)
     return token
 
 
@@ -130,7 +131,7 @@ def _bearer_actor(request: Request, state: "AppState") -> Actor:
     token = token.strip()
     if scheme.lower() != "bearer" or not token:
         raise AuthError(401, "Unauthorized", "send the token as 'Authorization: Bearer <token>'")
-    row = state.store.users.find_token(_digest(token))
+    row = state.store.users.find_token(token_digest(token))
     now = state.clock.now()
     if row is None or row.revoked_at is not None or (row.expires_at is not None and row.expires_at <= now):
         raise AuthError(401, "Unauthorized", "the token is not valid")
