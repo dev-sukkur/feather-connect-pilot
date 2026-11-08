@@ -1158,7 +1158,7 @@ There are two add-on grants:
 
 Bindings are scoped per tenant and per environment.
 
-Until RBAC lands in M2, every local user is an administrator. M1 builds are meant for trusted teams in dev and qa.
+M1.1 brings the first two roles, admin and operator, ahead of the rest of RBAC in M2 ([flow packages](2026-11-08-flow-packages.md) §11): an operator does the operator's column above, and an admin also manages users, tokens and roles and installs packages. Users and tokens from before M1.1 are admins. M1 builds are meant for trusted teams in dev and qa.
 
 ### 13.3 Secrets
 
