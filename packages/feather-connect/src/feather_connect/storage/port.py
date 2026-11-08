@@ -283,6 +283,10 @@ class RunJournal(Protocol):
         """
         ...
 
+    def get_task(self, task_id: str) -> TaskRow:
+        """Raises `KeyError` when there is no such task."""
+        ...
+
     def task_by_ref(self, run_id: str, ref: str) -> TaskRow | None: ...
     def tasks_by_ref(self, run_id: str, prefix: str) -> list[TaskRow]:
         """The run's tasks whose `ref` starts with `prefix`, in the order they were added."""
@@ -377,6 +381,26 @@ class VersionStore(Protocol):
     def key_history(self, dataset: str, key: str, limit: int = 100) -> list[KeySighting]:
         """The sealed versions that held `key`, oldest first: the newest `limit` of them. Read from the key index, which
         sealing writes in its own transaction; a version sealed before the index came in is not in it."""
+        ...
+
+    def keys_page(
+        self,
+        dataset: str,
+        version_ids: Sequence[str],
+        *,
+        after: tuple[str, str] | None = None,
+        prefix: str | None = None,
+        limit: int = 50,
+    ) -> list[KeySighting]:
+        """A page of the keys that `version_ids` hold, in the key index, by key and then version in code point order:
+        the first `limit` after (`key`, `version_id`) `after`, of those starting with `prefix` if given. Each version's
+        keys are read from where the page starts, never all of them."""
+        ...
+
+    def earlier_sightings(
+        self, dataset: str, keys: Sequence[str], before_seal_seq: int
+    ) -> dict[str, KeySighting]:
+        """For each of `keys` held by a version sealed before `before_seal_seq`, the newest such sighting."""
         ...
 
     def last_sealed_at(self, dataset: str) -> datetime | None:
@@ -570,6 +594,17 @@ class QuarantineStore(Protocol):
         """How many entries are open, without reading them."""
         ...
 
+    def of_versions(
+        self,
+        version_ids: Sequence[str],
+        route: str | None,
+        keys: Sequence[str] | None = None,
+        limit: int = 100,
+    ) -> list[QuarantineRow]:
+        """The entries, open or closed, oldest first, from `version_ids`: those `route` made, or with `route` None those
+        extraction made. With `keys`, only theirs. The first `limit` of them."""
+        ...
+
     def of_key(self, dataset: str, key: str, version_ids: Sequence[str]) -> list[QuarantineRow]:
         """The entries of `key`, open or closed, oldest first: those a route made from one of `version_ids`, and those
         extraction made in `dataset`."""
@@ -611,6 +646,10 @@ class ResponseStore(Protocol):
 
     def of_delivery(self, route: str, version_id: str, limit: int = 1000) -> list[ResponseRow]:
         """The rows of one delivery, by chunk and then key, at most `limit` of them."""
+        ...
+
+    def for_keys(self, route: str, version_id: str, keys: Sequence[str]) -> dict[str, ResponseRow]:
+        """The latest row of each of `keys` in a delivery that has one, as `find` gives it."""
         ...
 
     def find(self, route: str, version_id: str, key: str) -> ResponseRow | None:

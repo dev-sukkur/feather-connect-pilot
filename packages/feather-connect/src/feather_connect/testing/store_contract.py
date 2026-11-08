@@ -417,7 +417,102 @@ class TraceContract:
         assert store.audit.for_target("route:z") == []
 
 
-class StoreContract(SpoolContract, ResponseStoreContract, KeyIndexContract, TraceContract):
+class TaskRecordsContract:
+    """The reads behind a task's Records panel: a page of a version's keys at a time, never the whole version."""
+
+    def _sealed(self, store: Store, spool: Spool, vid: str, keys: list[str], part: str = "p") -> None:
+        spool.bind(store.versions)
+        spool.put_chunk(vid, 0, "data", records_to_table(upserts(*((k, {"k": k}) for k in keys))))
+        seal(store, vid, ["a"], part=part)
+
+    def test_a_task_is_found_by_its_id(self, store: Store):
+        run_id = store.runs.create_run("f", "manual", "ann", {})
+        task_id = store.runs.start_task(run_id, "extract", "extract:x", "d", "p")
+        found = store.runs.get_task(task_id)
+        assert (found.task_id, found.run_id, found.kind, found.dataset) == (task_id, run_id, "extract", "d")
+        with pytest.raises(KeyError):
+            store.runs.get_task("no-such-task")
+
+    def test_keys_come_a_page_at_a_time_in_key_order(self, store: Store, spool: Spool):
+        self._sealed(store, spool, "v1", ["b", "a", "d", "c", "\u00e9"])
+        self._sealed(store, spool, "v2", ["a", "z"], part="q")
+        first = store.versions.keys_page("d", ["v1", "v2"], limit=3)
+        assert [(s.key, s.version_id) for s in first] == [("a", "v1"), ("a", "v2"), ("b", "v1")]
+        assert first[0].seal_seq is not None and first[0].run_id == "r1" and first[1].partition == "q"
+        after = (first[-1].key, first[-1].version_id)
+        rest = store.versions.keys_page("d", ["v1", "v2"], after=after, limit=10)
+        assert [s.key for s in rest] == ["c", "d", "z", "\u00e9"]  # code point order
+        assert [s.key for s in store.versions.keys_page("d", ["v1"], limit=10)] == [
+            "a",
+            "b",
+            "c",
+            "d",
+            "\u00e9",
+        ]
+        assert store.versions.keys_page("d", [], limit=10) == []
+        assert store.versions.keys_page("other", ["v1"], limit=10) == []
+
+    def test_keys_can_be_searched_by_their_start(self, store: Store, spool: Spool):
+        self._sealed(store, spool, "v1", ["INV-1", "INV-10", "INV-2", "ORD-1", "inv-3", "INV%", "INV_1"])
+        found = store.versions.keys_page("d", ["v1"], prefix="INV-1", limit=10)
+        assert [s.key for s in found] == ["INV-1", "INV-10"]
+        assert [s.key for s in store.versions.keys_page("d", ["v1"], prefix="INV%", limit=10)] == ["INV%"]
+        assert [s.key for s in store.versions.keys_page("d", ["v1"], prefix="INV_", limit=10)] == ["INV_1"]
+        page = store.versions.keys_page("d", ["v1"], prefix="INV", after=("INV-10", "v1"), limit=10)
+        assert [s.key for s in page] == ["INV-2", "INV_1"]
+
+    def test_the_earlier_sightings_of_keys(self, store: Store, spool: Spool):
+        self._sealed(store, spool, "v1", ["a", "b"])
+        spool.put_chunk("v2", 0, "data", records_to_table([Record("b", "delete", {}, 0)]))
+        seal(store, "v2", ["a"])
+        self._sealed(store, spool, "v3", ["a", "b", "c"])
+        v3 = store.versions.get("v3")
+        assert v3.seal_seq is not None
+        earlier = store.versions.earlier_sightings("d", ["a", "b", "c"], v3.seal_seq)
+        assert {k: (s.version_id, s.op) for k, s in earlier.items()} == {
+            "a": ("v1", "upsert"),
+            "b": ("v2", "delete"),
+        }
+        assert store.versions.earlier_sightings("d", [], v3.seal_seq) == {}
+
+    def test_the_answers_of_some_records_of_a_delivery(self, store: Store):
+        store.responses.record(
+            [
+                ResponseRow("a", "v1", 0, "k1", 201, {"erp_id": "e-1"}),
+                ResponseRow("a", "v1", 1, "k1", 200, {"erp_id": "e-1b"}),
+                ResponseRow("a", "v1", 0, "k2", 422, {}, sent={"x": 1}),
+                ResponseRow("a", "v1", 0, "k3", 201, {}),
+                ResponseRow("b", "v1", 0, "k1", 500, {}),
+            ]
+        )
+        found = store.responses.for_keys("a", "v1", ["k1", "k2", "nope"])
+        assert {k: (r.status, dict(r.fields)) for k, r in found.items()} == {
+            "k1": (200, {"erp_id": "e-1b"}),  # the highest chunk's answer
+            "k2": (422, {}),
+        }
+        assert found["k2"].sent == {"x": 1}
+        assert store.responses.for_keys("a", "v1", []) == {}
+
+    def test_the_quarantine_entries_of_versions(self, store: Store):
+        store.quarantine.add(None, "v1", "k1", "unreadable", "d", "p", raw="{oops")
+        store.quarantine.add(None, "v2", "k2", "no key", "d", "q")
+        store.quarantine.add("a", "v1", "k1", "rejected by a")
+        store.quarantine.add("b", "v1", "k3", "rejected by b")
+        store.quarantine.add(None, "v9", "k9", "of another version", "d", "p")
+        read = store.quarantine.of_versions(["v1", "v2"], None)
+        assert [(q.version_id, q.key, q.error) for q in read] == [
+            ("v1", "k1", "unreadable"),
+            ("v2", "k2", "no key"),
+        ]
+        assert [q.error for q in store.quarantine.of_versions(["v1"], "a")] == ["rejected by a"]
+        assert [q.key for q in store.quarantine.of_versions(["v1"], "b", keys=["k3", "k1"])] == ["k3"]
+        assert store.quarantine.of_versions(["v1"], "b", keys=[]) == []
+        assert len(store.quarantine.of_versions(["v1", "v2"], None, limit=1)) == 1
+
+
+class StoreContract(
+    SpoolContract, ResponseStoreContract, KeyIndexContract, TraceContract, TaskRecordsContract
+):
     def _table(self) -> pa.Table:
         return records_to_table(upserts(("k", {"x": 1})))
 

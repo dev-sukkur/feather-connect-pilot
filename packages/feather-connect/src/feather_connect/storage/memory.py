@@ -240,6 +240,10 @@ class _Runs(RunJournal):
         ]
         return rows if limit is None else rows[:limit]
 
+    def get_task(self, task_id: str) -> TaskRow:
+        with self._d.lock:
+            return self._d.tasks[task_id]
+
     def task_by_ref(self, run_id: str, ref: str) -> TaskRow | None:
         return next((t for t in self.list_tasks(run_id) if t.ref == ref), None)
 
@@ -317,6 +321,58 @@ class _Versions(VersionStore):
                 self._d.keys.setdefault((version.dataset, key), []).append(
                     (version.version_id, version.partition, op, row_hash, ref.chunk_no)
                 )
+
+    def _sightings_of(self, dataset: str, key: str) -> list[KeySighting]:
+        found: list[KeySighting] = []
+        for version_id, partition, op, row_hash, chunk_no in self._d.keys.get((dataset, key), []):
+            version = self._d.versions[version_id]
+            assert version.seal_seq is not None and version.sealed_at is not None
+            found.append(
+                KeySighting(
+                    version_id,
+                    dataset,
+                    partition,
+                    key,
+                    op,
+                    row_hash,
+                    chunk_no,
+                    version.run_id,
+                    version.seal_seq,
+                    version.sealed_at,
+                )
+            )
+        return found
+
+    def keys_page(
+        self,
+        dataset: str,
+        version_ids: Sequence[str],
+        *,
+        after: tuple[str, str] | None = None,
+        prefix: str | None = None,
+        limit: int = 50,
+    ) -> list[KeySighting]:
+        wanted = set(version_ids)
+        with self._d.lock:
+            found = [
+                s
+                for (ds, key) in self._d.keys
+                if ds == dataset and (not prefix or key.startswith(prefix))
+                for s in self._sightings_of(ds, key)
+                if s.version_id in wanted and (after is None or (s.key, s.version_id) > after)
+            ]
+        return sorted(found, key=lambda s: (s.key, s.version_id))[:limit]
+
+    def earlier_sightings(
+        self, dataset: str, keys: Sequence[str], before_seal_seq: int
+    ) -> dict[str, KeySighting]:
+        with self._d.lock:
+            found: dict[str, KeySighting] = {}
+            for key in keys:
+                earlier = [s for s in self._sightings_of(dataset, key) if s.seal_seq < before_seal_seq]
+                if earlier:
+                    found[key] = max(earlier, key=lambda s: s.seal_seq)
+            return found
 
     def key_history(self, dataset: str, key: str, limit: int = 100) -> list[KeySighting]:
         with self._d.lock:
@@ -806,6 +862,22 @@ class _Quarantine(QuarantineStore):
     def count_open(self, route: str | None = None) -> int:
         return len(self.list_open(route))
 
+    def of_versions(
+        self,
+        version_ids: Sequence[str],
+        route: str | None,
+        keys: Sequence[str] | None = None,
+        limit: int = 100,
+    ) -> list[QuarantineRow]:
+        wanted, named = set(version_ids), None if keys is None else set(keys)
+        with self._d.lock:
+            found = [
+                r
+                for r in self._d.quarantine.values()
+                if r.version_id in wanted and r.route == route and (named is None or r.key in named)
+            ]
+        return found[:limit]
+
     def of_key(self, dataset: str, key: str, version_ids: Sequence[str]) -> list[QuarantineRow]:
         wanted = set(version_ids)
         with self._d.lock:
@@ -846,6 +918,10 @@ class _Responses(ResponseStore):
         with self._d.lock:
             found = self._d.responses.get((route, version_id), {})
             return [copy.deepcopy(found[k]) for k in sorted(found)[:limit]]
+
+    def for_keys(self, route: str, version_id: str, keys: Sequence[str]) -> dict[str, ResponseRow]:
+        found = {key: self.find(route, version_id, key) for key in keys}
+        return {key: row for key, row in found.items() if row is not None}
 
     def find(self, route: str, version_id: str, key: str) -> ResponseRow | None:
         with self._d.lock:
