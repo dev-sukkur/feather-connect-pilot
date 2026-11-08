@@ -4,6 +4,7 @@ of an API token: `all`, or `publish`, which may only upload to the built-in regi
 A wheel is kept in `registry_file` with its bytes: it is opaque, never changes and never expires, unlike spool chunks,
 which hold Arrow tables of a dataset version and which retention drops. A row per file keeps the index one query, and
 a database backup covers the registry. One file per version: a version is never replaced, only yanked.
+`version_key` is the version with trailing zeros dropped (PEP 440), so that 1.0 can't be published after 1.0.0.
 
 Revision ID: 0016
 Revises: 0015
@@ -26,6 +27,7 @@ def upgrade() -> None:
             tenant_id text not null,
             project text not null,
             version text not null,
+            version_key text not null,
             filename text not null,
             sha256 text not null,
             size bigint not null,
@@ -36,7 +38,7 @@ def upgrade() -> None:
             yanked_at timestamptz,
             yanked_reason text,
             primary key (tenant_id, filename),
-            unique (tenant_id, project, version)
+            unique (tenant_id, project, version_key)
         )"""
     )
     op.execute(

@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from packaging.utils import canonicalize_version
+
 if TYPE_CHECKING:  # only as a type: the connector module reaches this one through the context's budget handle
     from feather_connect.core.connector import InboundRequest
 
@@ -1167,6 +1169,11 @@ class RegistryRow:
     added_at: datetime
 
 
+def version_key(version: str) -> str:
+    """The version as PEP 440 compares it, trailing zeros dropped: `1` for 1.0 and 1.0.0, so they are one version."""
+    return canonicalize_version(version, strip_trailing_zero=True)
+
+
 class DuplicateFile(Exception):
     """The registry has that version, or a file of that name, already: a published version is never replaced."""
 
@@ -1179,7 +1186,8 @@ class RegistryStore(Protocol):
     """The built-in registry's wheels, and the other registries the environment trusts, for one tenant."""
 
     def put_file(self, file: RegistryFile, content: bytes) -> None:
-        """Keep the wheel. Raises `DuplicateFile` when the project has the version, or the filename is taken."""
+        """Keep the wheel. Raises `DuplicateFile` when the project has the version, by `version_key`, or the filename
+        is taken."""
         ...
 
     def projects(self) -> list[str]:

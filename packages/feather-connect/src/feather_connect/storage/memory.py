@@ -73,6 +73,7 @@ from feather_connect.storage.port import (
     WorkerState,
     check_transition,
     split_error,
+    version_key,
 )
 
 
@@ -1240,7 +1241,8 @@ class _Registry(RegistryStore):
     def put_file(self, file: RegistryFile, content: bytes) -> None:
         with self._d.lock:
             taken = any(
-                f.filename == file.filename or (f.project, f.version) == (file.project, file.version)
+                f.filename == file.filename
+                or (f.project, version_key(f.version)) == (file.project, version_key(file.version))
                 for f, _ in self._d.registry_files.values()
             )
             if taken:

@@ -1437,6 +1437,10 @@ class StoreContract(
             store.registry.put_file(replace(first, filename="acme_invoices-1.0.0-py3-none-other.whl"), b"x")
         with pytest.raises(DuplicateFile):
             store.registry.put_file(first, b"changed")
+        with pytest.raises(DuplicateFile):  # 1.0 is 1.0.0 to every installer
+            store.registry.put_file(
+                replace(first, version="1.0", filename="acme_invoices-1.0-py3-none-any.whl"), b"x"
+            )
         assert store.registry.content(first.filename) == b"one"
 
     def test_a_version_is_yanked_once(self, store: Store, clock: FrozenClock):

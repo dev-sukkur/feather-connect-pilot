@@ -326,3 +326,26 @@ def test_a_row_hash_above_the_signed_range_comes_back_whole(store: PostgresStore
     spool.put_chunk("v1", 0, "data", records_to_table([Record("k", "upsert", {"x": 1}, big)]))
     seal(store, "v1", ["a"])
     assert store.versions.key_history("d", "k")[0].row_hash == big
+
+
+def test_registry_files_and_registries_belong_to_their_tenant(
+    pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any
+):  # ADR-0013 rule 6
+    from feather_connect.storage.port import RegistryFile
+
+    first, _ = pg_connect(pg_url, clock=clock, tenant="default")
+    second, _ = pg_connect(pg_url, clock=clock, tenant="t2")
+    wheel = RegistryFile("acme", "1.0.0", "acme-1.0.0-py3-none-any.whl", "sha", 3, {}, "ci", T0)
+    first.registry.put_file(wheel, b"one")
+    first.registry.add_registry("company", "https://pkgs.example.com/simple/", None, "root")
+    assert second.registry.projects() == [] and second.registry.file(wheel.filename) is None
+    assert second.registry.content(wheel.filename) is None and second.registry.registries() == []
+    assert second.registry.yank("acme", "1.0.0", "theirs") is False
+    second.registry.put_file(wheel, b"two")  # the same name and version is another tenant's to have
+    second.registry.add_registry("company", "https://other.example.com/simple/", None, "boss")
+    assert (
+        first.registry.content(wheel.filename) == b"one" and second.registry.content(wheel.filename) == b"two"
+    )
+    assert first.registry.files("acme")[0].yanked_at is None
+    assert [r.index_url for r in first.registry.registries()] == ["https://pkgs.example.com/simple/"]
+    assert second.registry.remove_registry("company") and first.registry.get_registry("company") is not None

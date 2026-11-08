@@ -81,6 +81,7 @@ from feather_connect.storage.port import (
     WorkerState,
     check_transition,
     split_error,
+    version_key,
 )
 from feather_connect.storage.postgres.spool import from_signed, index_keys
 from feather_connect.storage.postgres.support import Pool, ensure_partition, guard_version
@@ -2022,13 +2023,14 @@ class _Registry(RegistryStore):
         try:
             with self._db.tx() as conn:
                 conn.execute(
-                    """insert into feather.registry_file (tenant_id, project, version, filename, sha256, size,
-                           manifest, content, uploaded_by, uploaded_at)
-                       values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    """insert into feather.registry_file (tenant_id, project, version, version_key, filename,
+                           sha256, size, manifest, content, uploaded_by, uploaded_at)
+                       values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         self._db.tenant,
                         file.project,
                         file.version,
+                        version_key(file.version),
                         file.filename,
                         file.sha256,
                         file.size,

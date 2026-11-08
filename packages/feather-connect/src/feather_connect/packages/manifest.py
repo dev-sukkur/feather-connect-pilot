@@ -51,7 +51,7 @@ def check_name(name: object) -> str:
 
 
 def check_version(version: object) -> str:
-    """A PEP 440 version in its normal form, such as `1.4.0`."""
+    """A PEP 440 version in its normal form, such as `1.4.0`, with no local part such as `+build`."""
     try:
         parsed = Version(str(version)) if isinstance(version, str | int | float) else None
     except InvalidVersion:
@@ -59,6 +59,10 @@ def check_version(version: object) -> str:
     if parsed is None or str(parsed) != str(version):
         raise ManifestError(
             f"{version!r} is not a version: write one such as 1.4.0 (PEP 440, in its normal form)"
+        )
+    if parsed.local is not None:  # 1.0.0+build sorts as 1.0.0 and would stand in for it
+        raise ManifestError(
+            f"{version!r} has a local part (+{parsed.local}): a package version can't have one"
         )
     return str(parsed)
 
