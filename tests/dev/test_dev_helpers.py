@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from feather_cli.commands import dev as dev_command
 from feather_cli.commands.helpers import HelperError, Helpers, HelperStopped
 from feather_cli.main import app
 from feather_connect.project import DevProcess, ProjectError, load_project
@@ -91,7 +92,13 @@ def test_a_helper_that_ends_before_it_listens_is_an_error(tmp_path: Path):
         helpers.start([DevProcess("bad", ("python", "-c", "raise SystemExit(3)"), free_port())])
 
 
-def test_feather_dev_refuses_a_busy_helper_port_before_starting_anything(tmp_path: Path):
+def test_feather_dev_refuses_a_busy_helper_port_before_starting_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("FEATHER_DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        dev_command, "_check_docker", lambda json_mode: None
+    )  # Docker is checked first; say it is there
     with socket.socket() as taken:
         taken.bind(("127.0.0.1", 0))
         taken.listen()

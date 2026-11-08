@@ -323,6 +323,23 @@ def _watched(project: Path) -> list[Path]:
     return [p for p in (project / "flows", project / "env", project / "feather.yaml") if p.exists()]
 
 
+_RELOADED_BY = (".py", ".yaml", ".yml")
+
+
+def _fingerprint(project: Path) -> frozenset[tuple[str, int, int]]:
+    """The watched files' names, times and sizes: a change the file watcher did not report still shows here."""
+    found: set[tuple[str, int, int]] = set()
+    for top in _watched(project):
+        for path in [top] if top.is_file() else top.rglob("*"):
+            if path.suffix in _RELOADED_BY and "__pycache__" not in path.parts:
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                found.add((str(path), stat.st_mtime_ns, stat.st_size))
+    return frozenset(found)
+
+
 def dev(
     project: Annotated[
         Path | None, typer.Option("--project", envvar="FEATHER_PROJECT", help="Default: the demo project.")
@@ -366,17 +383,18 @@ def dev(
             hint=f"pick another server port with --port, or give {clash.name} another port under dev.processes",
             json_mode=json_mode,
         )
+    # Docker or the database first: without them nothing runs, which matters more than a busy helper port.
+    own_database = os.environ.get("FEATHER_DATABASE_URL")
+    if own_database:
+        _check_reachable(own_database, json_mode)
+    else:
+        _check_docker(json_mode)
     for busy in busy_ports(processes, _in_use):
         fail(
             f"port {busy.port} of the helper process {busy.name!r} is already in use",
             hint=f"stop what is using it, or give {busy.name} another port under dev.processes in feather.yaml",
             json_mode=json_mode,
         )
-    own_database = os.environ.get("FEATHER_DATABASE_URL")
-    if own_database:
-        _check_reachable(own_database, json_mode)
-    else:
-        _check_docker(json_mode)
 
     stop = threading.Event()
 
@@ -500,6 +518,7 @@ def _watch(
     """Reload on changes until `stop` is set. `announce` is called once the files are being watched, so that an
     edit made after the announcement is never missed."""
     announced = False
+    seen = _fingerprint(root)
     for changes in watch(
         *_watched(root),
         watch_filter=PythonFilter(extra_extensions=(".yaml", ".yml")),
@@ -514,8 +533,12 @@ def _watch(
             announced = True
         if stop.is_set():
             return
-        if not changes:  # `watch` also yields when its timeout passes, so that a stop is noticed
+        # `watch` also yields when its timeout passes, so that a stop is noticed. Then the files are looked at too: on
+        # Linux, inotify has been seen to lose an edit made just after a reload that failed, and the fix never loaded.
+        now = _fingerprint(root)
+        if not changes and now == seen:
             continue
+        seen = now
         try:
             load_project(root, env)  # a file that does not load must not take the running stack down
         except ProjectError as error:
