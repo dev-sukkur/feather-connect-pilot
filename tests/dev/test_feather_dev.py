@@ -219,7 +219,12 @@ def test_works_with_an_existing_database_url(dev, database):
     out = dev.output()
     assert "FEATHER_DATABASE_URL" in out and "http://localhost" in out
     assert dev.password()
-    assert dev.sign_in().get("/api/v1/me").json() == {"kind": "human", "name": "dev"}
+    assert dev.sign_in().get("/api/v1/me").json() == {
+        "kind": "human",
+        "name": "dev",
+        "role": "admin",
+        "user": "dev",
+    }  # the dev user is an admin
 
 
 @needs_postgres

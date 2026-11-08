@@ -23,6 +23,7 @@ from feather_connect.storage.spool import Spool
 from feather_connect.worker import config_of
 from feather_server import api, auth, ingress, web
 from feather_server.loops import LoopRunner, default_loops
+from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions
 from feather_server.services.reads import Reads
 from feather_server.settings import Settings
@@ -138,6 +139,7 @@ def create_app(
         )
     app.state.reads = Reads(state)
     app.state.actions = Actions(state)
+    app.state.accounts = Accounts(state.store, state.clock)
     ingress.install(app, state)  # first, as routes are tried in order, and this one takes bursts
     auth.install(app, state)
     api.install(app)

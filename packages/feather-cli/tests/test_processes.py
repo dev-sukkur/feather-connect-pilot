@@ -172,7 +172,7 @@ def test_create_user_reads_the_password_from_stdin_and_the_user_can_log_in(
         assert csrf
         form = {"username": name, "password": password, "csrf_token": csrf.group(1)}
         assert browser.post("/login", data=form).status_code == 303
-        assert browser.get("/api/v1/me").json() == {"kind": "human", "name": name}
+        assert browser.get("/api/v1/me").json()["name"] == name
 
 
 def test_create_user_refuses_a_name_that_is_taken_and_an_empty_password(cli, migrated):
@@ -205,6 +205,56 @@ def test_create_token_prints_once_and_stores_only_the_hash(cli, migrated, open_s
 def test_create_token_with_a_ttl_that_is_not_a_duration_explains(cli, migrated):
     r = cli("server", "create-token", "ci", "--ttl", "soon")
     assert r.exit_code == 1 and "soon" in r.stderr and "90d" in r.stderr
+
+
+def test_the_first_user_is_an_admin_the_next_an_operator_and_a_role_can_change(
+    cli, database, open_store, monkeypatch
+):
+    monkeypatch.setenv("FEATHER_DATABASE_URL", database)
+    assert cli("server", "migrate").exit_code == 0
+    first = cli("server", "create-user", "root", "--json", input="pw-one\n")
+    assert first.exit_code == 0 and json.loads(first.stdout) == {"user": "root", "role": "admin"}
+    second = cli("server", "create-user", "ann", input="pw-two\n")
+    assert second.exit_code == 0 and "ann, operator" in second.stdout
+    chosen = cli("server", "create-user", "bob", "--role", "admin", "--json", input="pw-3\n")
+    assert json.loads(chosen.stdout)["role"] == "admin"
+    bad = cli("server", "create-user", "cy", "--role", "viewer", input="pw-4\n")
+    assert bad.exit_code == 1 and "not a role" in bad.stderr
+
+    assert cli("server", "set-role", "ann", "admin", "--reason", "on call").exit_code == 0
+    assert cli("server", "set-role", "root", "operator").exit_code == 0
+    assert cli("server", "set-role", "bob", "operator").exit_code == 0
+    last = cli("server", "set-role", "ann", "operator")
+    assert last.exit_code == 1 and "only admin" in last.stderr
+    unknown = cli("server", "set-role", "nobody", "admin")
+    assert unknown.exit_code == 1 and "nobody" in unknown.stderr
+    store = open_store(database)
+    assert [(u.username, u.role) for u in store.users.list_users()] == [
+        ("ann", "admin"),
+        ("bob", "operator"),
+        ("root", "operator"),
+    ]
+    changes = [a for a in store.audit.list_audit() if a.action == "set_role" and a.result == "ok"]
+    assert len(changes) == 3 and changes[-1].actor == "cli" and changes[-1].request["reason"] == "on call"
+
+
+def test_a_token_is_an_operator_unless_told_and_never_above_its_user(cli, database, open_store, monkeypatch):
+    monkeypatch.setenv("FEATHER_DATABASE_URL", database)
+    assert cli("server", "migrate").exit_code == 0
+    cli("server", "create-user", "root", input="pw-one\n")
+    cli("server", "create-user", "ann", input="pw-two\n")
+    robot = json.loads(cli("server", "create-token", "robot", "--json").stdout)
+    assert robot["role"] == "operator"
+    ops = json.loads(cli("server", "create-token", "ops", "--role", "admin", "--json").stdout)
+    assert ops["role"] == "admin"
+    mine = json.loads(cli("server", "create-token", "root-ci", "--user", "root", "--json").stdout)
+    assert mine["role"] == "admin"
+    above = cli("server", "create-token", "ann-ci", "--user", "ann", "--role", "admin")
+    assert above.exit_code == 1 and "higher role than its user ann" in above.stderr
+    nobody = cli("server", "create-token", "x", "--user", "nobody")
+    assert nobody.exit_code == 1 and "nobody" in nobody.stderr
+    row = open_store(database).users.find_token(hashlib.sha256(mine["token"].encode()).hexdigest())
+    assert row is not None and (row.role, row.created_by) == ("admin", "root")
 
 
 def test_worker_starts_and_appears_on_the_server(spawn, migrated, project, open_store):

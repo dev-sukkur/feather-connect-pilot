@@ -19,6 +19,8 @@ VersionStatus = Literal["staged", "sealed"]
 DeliveryStatus = Literal["pending", "running", "applied", "failed", "held", "skipped", "compensated"]
 QuarantineStatus = Literal["open", "superseded"]
 WorkerState = Literal["alive", "draining", "dead"]
+Role = Literal["admin", "operator"]
+ROLES: tuple[Role, ...] = ("admin", "operator")  # highest first
 
 
 class VersionSealed(Exception):
@@ -1064,10 +1066,13 @@ class ReadStore(Protocol):
 
 @dataclass(frozen=True)
 class UserRow:
+    """A local user, with their role in this tenant (ADR-0013: roles are stored per tenant and user)."""
+
     user_id: str
     username: str
     password_hash: str
     created_at: datetime
+    role: Role
 
 
 @dataclass(frozen=True)
@@ -1080,6 +1085,8 @@ class TokenRow:
     created_at: datetime
     expires_at: datetime | None
     revoked_at: datetime | None
+    role: Role
+    created_by: str | None  # the user whose token it is; None for one the server's CLI made for automation
 
 
 class DuplicateUser(Exception):
@@ -1089,17 +1096,28 @@ class DuplicateUser(Exception):
 class UserStore(Protocol):
     """Local users and the API tokens they and automation use."""
 
-    def create_user(self, username: str, password_hash: str) -> str:
+    def create_user(self, username: str, password_hash: str, role: Role) -> str:
         """Add the user and return the id. Raises `DuplicateUser` when the name is taken."""
         ...
 
     def get_user(self, username: str) -> UserRow | None: ...
+    def list_users(self) -> list[UserRow]:
+        """Every user of the tenant, by name in code point order."""
+        ...
+
+    def set_role(self, username: str, role: Role) -> None:
+        """Give the user another role. Raises `KeyError` when there is no such user."""
+        ...
+
     def set_password_hash(self, username: str, password_hash: str) -> None:
         """Give the user a new password hash. Raises `KeyError` when there is no such user."""
         ...
 
-    def create_token(self, name: str, token_hash: str, expires_at: datetime | None) -> str:
-        """Add the token, known by the SHA-256 of its secret, and return its id."""
+    def create_token(
+        self, name: str, token_hash: str, expires_at: datetime | None, role: Role, created_by: str | None
+    ) -> str:
+        """Add the token, known by the SHA-256 of its secret, and return its id. That its role is no higher than its
+        user's is for the caller to check."""
         ...
 
     def find_token(self, token_hash: str) -> TokenRow | None:

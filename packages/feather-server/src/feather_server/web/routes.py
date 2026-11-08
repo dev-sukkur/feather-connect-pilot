@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 from feather_connect.core.errors import PermanentError
 from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.storage.port import (
+    ROLES,
     STREAM_TRIGGER,
     DeliveryStatus,
     Run,
@@ -25,8 +26,10 @@ from feather_connect.storage.port import (
 )
 from feather_server.api.errors import ApiProblem
 from feather_server.api.paging import decode, encode
-from feather_server.auth import Actor, CurrentActor, csrf_token, require_csrf
+from feather_server.auth import Actor, CurrentActor, csrf_token, current_actor, require_csrf
 from feather_server.services import actions as action_limits
+from feather_server.services.access import Forbidden
+from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.previews import Preview, PreviewError, PreviewExpired, PreviewInvalid
 from feather_server.services.reads import FlowSummary, Reads
@@ -1142,3 +1145,53 @@ def check_connection(request: Request, actor: CurrentActor, name: str) -> Respon
     except KeyError:
         return _not_found(request, f"No connection named {name!r}.")
     return RedirectResponse(f"/connections#connection-{quote(name, safe='')}", status_code=303)
+
+
+# Users and roles: admin only. The service refuses an operator; the page says so (see `install`).
+
+
+def _users_page(
+    request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
+) -> HTMLResponse:
+    accounts: Accounts = request.app.state.accounts
+    return render(
+        request,
+        "users.html",
+        status=status,
+        title="Users",
+        actor=actor,
+        users=accounts.users(actor),
+        roles=ROLES,
+        notice=notice,
+    )
+
+
+@router.get("/users", response_class=HTMLResponse)
+def users(request: Request, actor: CurrentActor) -> HTMLResponse:
+    return _users_page(request, actor)
+
+
+@router.post("/users/{username}/role", dependencies=[Depends(require_csrf)])
+def set_role(request: Request, actor: CurrentActor, username: str, role: Annotated[str, Form()]) -> Response:
+    accounts: Accounts = request.app.state.accounts
+    try:
+        accounts.set_role(actor, username, role)
+    except KeyError:
+        return _not_found(request, f"No user named {username!r}.")
+    except ValueError as error:
+        return _users_page(request, actor, status=422, notice=("bad", str(error)))
+    return _users_page(request, actor, notice=("ok", f"{username} is now an {role}."))
+
+
+def refused(request: Request, error: Forbidden) -> HTMLResponse:
+    """The page for an action the signed-in role may not do. The server's check is what counts: the dashboard only
+    hides what an operator can't use."""
+    actor = current_actor(request)
+    return render(
+        request,
+        "error.html",
+        status=403,
+        title="Not allowed",
+        actor=actor,
+        message=f"This needs the {error.needed} role, and you have the {actor.role} role. Ask an admin.",
+    )

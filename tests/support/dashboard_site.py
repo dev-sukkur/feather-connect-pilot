@@ -76,8 +76,8 @@ def open_site(root: Path) -> Iterator[Site]:
     write_rows(fixture, dict.fromkeys(DAYS, 2))
     with open_stack(PROJECT, root, env=env) as stack:
         site = Site(stack, fixture, capture)
-        stack.store.users.create_user(USER, hash_password(PASSWORD))
-        token = issue_token(stack.store, "dashboard-tests", timedelta(hours=1))
+        stack.store.users.create_user(USER, hash_password(PASSWORD), "admin")
+        token = issue_token(stack.store, "dashboard-tests", timedelta(hours=1), role="operator")
         answer = httpx.post(
             f"{stack.url}/api/v1/flows/demo:run",
             json={"partitions": [f"day={day}" for day in DAYS]},

@@ -88,7 +88,7 @@ def test_the_trace_tells_the_whole_story_in_order(client: TestClient, world: Wor
 
 def test_the_trace_api_answers_the_same_in_json(world: World) -> None:
     story = tell(world)
-    token = issue_token(world.store, "ci", timedelta(days=1), clock=world.clock)
+    token = issue_token(world.store, "ci", timedelta(days=1), role="operator", clock=world.clock)
     api = TestClient(
         create_app(state=world.state, loops=lambda s: []), headers={"Authorization": f"Bearer {token}"}
     )
@@ -121,7 +121,7 @@ def test_a_key_no_version_held(client: TestClient, world: World) -> None:
     world.run([day(18)])
     page = client.get("/trace?dataset=orders&key=no-such-key")
     assert page.status_code == 200 and "No sealed version holds" in page.text
-    token = issue_token(world.store, "ci", timedelta(days=1), clock=world.clock)
+    token = issue_token(world.store, "ci", timedelta(days=1), role="operator", clock=world.clock)
     api = TestClient(
         create_app(state=world.state, loops=lambda s: []), headers={"Authorization": f"Bearer {token}"}
     )
@@ -130,7 +130,7 @@ def test_a_key_no_version_held(client: TestClient, world: World) -> None:
 
 def test_an_unknown_dataset_is_not_found(client: TestClient, world: World) -> None:
     assert client.get("/trace?dataset=nope&key=1").status_code == 404
-    token = issue_token(world.store, "ci", timedelta(days=1), clock=world.clock)
+    token = issue_token(world.store, "ci", timedelta(days=1), role="operator", clock=world.clock)
     api = TestClient(
         create_app(state=world.state, loops=lambda s: []), headers={"Authorization": f"Bearer {token}"}
     )

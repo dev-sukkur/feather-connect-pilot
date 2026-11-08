@@ -1,8 +1,9 @@
 """Local users, API tokens, browser sessions and CSRF (design 14).
 
 A person signs in with a password and gets a signed session cookie. Automation sends `Authorization: Bearer fc_...`.
-Only the SHA-256 of a token is stored, so a copy of the database can't be used to call the API. Until RBAC lands in
-M2, every user is an administrator.
+Only the SHA-256 of a token is stored, so a copy of the database can't be used to call the API. A user and a token
+each have a role, `admin` or `operator` (see `services.access`); a token acts with the lower of its own role and its
+user's current one.
 
 A request that carries an `Authorization` header is judged by that header alone, never by a cookie it also has, and
 needs no CSRF token: a browser doesn't add that header on its own. A request authenticated by cookie needs the
@@ -31,7 +32,7 @@ from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from feather_connect.clock import Clock, SystemClock
-from feather_connect.storage.port import Store
+from feather_connect.storage.port import ROLES, Role, Store
 
 if TYPE_CHECKING:
     from feather_server.app import AppState
@@ -59,10 +60,13 @@ _templates = Jinja2Templates(directory=Path(__file__).parent / "web" / "template
 
 @dataclass(frozen=True)
 class Actor:
-    """Who is acting: a person (`human`), a token (`token`, by its name) or the server itself (`system`)."""
+    """Who is acting: a person (`human`), a token (`token`, by its name) or the server itself (`system`), with the role
+    it acts in. `user` is the person behind it: the user for `human`, the token's user for `token`, if it has one."""
 
     kind: Literal["human", "system", "token"]
     name: str
+    role: Role = "operator"
+    user: str | None = None
 
 
 class AuthError(Exception):
@@ -100,16 +104,25 @@ def _decoy_hash() -> str:
 # Tokens.
 
 
-def _digest(token: str) -> str:
+def token_digest(token: str) -> str:
+    """What the store keeps of a token: its SHA-256, in hex."""
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def issue_token(store: Store, name: str, ttl: timedelta | None, *, clock: Clock | None = None) -> str:
+def issue_token(
+    store: Store,
+    name: str,
+    ttl: timedelta | None,
+    *,
+    role: Role,
+    created_by: str | None = None,
+    clock: Clock | None = None,
+) -> str:
     """Create an API token that lasts `ttl` (for ever when None) and return it. This is the only time it is seen:
-    the store keeps its SHA-256."""
+    the store keeps its SHA-256. That `role` is no higher than `created_by`'s is the caller's to check."""
     token = TOKEN_PREFIX + secrets.token_urlsafe(32)
     now = (clock or SystemClock()).now()
-    store.users.create_token(name, _digest(token), None if ttl is None else now + ttl)
+    store.users.create_token(name, token_digest(token), None if ttl is None else now + ttl, role, created_by)
     return token
 
 
@@ -118,11 +131,17 @@ def _bearer_actor(request: Request, state: "AppState") -> Actor:
     token = token.strip()
     if scheme.lower() != "bearer" or not token:
         raise AuthError(401, "Unauthorized", "send the token as 'Authorization: Bearer <token>'")
-    row = state.store.users.find_token(_digest(token))
+    row = state.store.users.find_token(token_digest(token))
     now = state.clock.now()
     if row is None or row.revoked_at is not None or (row.expires_at is not None and row.expires_at <= now):
         raise AuthError(401, "Unauthorized", "the token is not valid")
-    return Actor("token", row.name)
+    if row.created_by is None:
+        return Actor("token", row.name, row.role)
+    user = state.store.users.get_user(row.created_by)
+    if user is None:  # its user is gone, and with them what the token may do
+        raise AuthError(401, "Unauthorized", "the token is not valid")
+    role = row.role if ROLES.index(row.role) >= ROLES.index(user.role) else user.role  # the lower
+    return Actor("token", row.name, role, user.username)
 
 
 # Sessions. The cookie holds a random id and, once signed in, the user name; it is signed, not encrypted.
@@ -197,7 +216,7 @@ def current_actor(request: Request) -> Actor:
             and session.epoch is not None
             and _same(session.epoch, _epoch(state, user.username, user.password_hash))
         ):
-            return Actor("human", session.user)
+            return Actor("human", session.user, user.role, user.username)
     raise AuthError(401, "Unauthorized", "sign in, or send a bearer token")
 
 
@@ -302,8 +321,8 @@ def logout(request: Request, actor: CurrentActor) -> Response:
 
 
 @router.get("/api/v1/me")
-def me(actor: CurrentActor) -> dict[str, str]:
-    return {"kind": actor.kind, "name": actor.name}
+def me(actor: CurrentActor) -> dict[str, str | None]:
+    return {"kind": actor.kind, "name": actor.name, "role": actor.role, "user": actor.user}
 
 
 # Wiring.

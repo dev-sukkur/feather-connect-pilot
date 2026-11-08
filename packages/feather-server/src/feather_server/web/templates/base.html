@@ -27,12 +27,13 @@
       <nav aria-label="Main">
         <ul>
         {% for label, target in nav %}<li><a href="{{ target }}"{% if (target == "/" and path == "/") or (target != "/" and path.startswith(target)) %} aria-current="page"{% endif %}>{{ label }}</a></li>{% endfor %}
+        {% if actor and actor.role == "admin" %}<li><a href="/users"{% if path.startswith("/users") %} aria-current="page"{% endif %}>Users</a></li>{% endif %}
         </ul>
       </nav>
       {% if actor %}
       <form class="who" method="post" action="/logout">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <span class="who-name"><span class="muted">Signed in as</span> {{ actor.name }}</span>
+        <span class="who-name"><span class="muted">Signed in as</span> {{ actor.name }} <span class="muted">· {{ actor.role }}</span></span>
         <button type="submit" class="link">Sign out</button>
       </form>
       {% endif %}

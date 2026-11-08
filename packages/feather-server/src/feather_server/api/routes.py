@@ -21,6 +21,7 @@ from feather_server.api.errors import ApiProblem, translate
 from feather_server.api.paging import check_limit, decode, page
 from feather_server.auth import Actor, CurrentActor, require_csrf
 from feather_server.services import task_records as records
+from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.previews import Preview
 from feather_server.services.reads import Reads
@@ -46,7 +47,12 @@ def _reads(request: Request) -> Reads:
     return request.app.state.reads
 
 
+def _accounts(request: Request) -> Accounts:
+    return request.app.state.accounts
+
+
 Do = Annotated[Actions, Depends(_actions)]
+Manage = Annotated[Accounts, Depends(_accounts)]
 See = Annotated[Reads, Depends(_reads)]
 
 
@@ -596,6 +602,66 @@ def replay(
     body: Confirm | None = None,
 ) -> JSONResponse:
     return _apply("replay", request, actions, actor, key, body)
+
+
+# Users, roles and tokens: admin only.
+
+
+class NewUser(BaseModel):
+    username: str
+    password: str
+    role: str = "operator"
+
+
+class RoleBody(Reason):
+    role: str
+
+
+class NewToken(BaseModel):
+    name: str
+    role: str | None = None  # the caller's own when left out
+    ttl_days: int | None = Field(90, ge=1, le=3650)  # None: it never expires
+
+
+@router.get("/users")
+def users(accounts: Manage, actor: CurrentActor) -> JSONResponse:
+    return ok({"items": call(lambda: accounts.users(actor)), "next_cursor": None})
+
+
+@router.post("/users", status_code=201)
+def create_user(
+    request: Request, accounts: Manage, actor: CurrentActor, body: NewUser, key: IdempotencyKey = None
+) -> JSONResponse:
+    return _once(
+        request, actor, key, lambda: accounts.create_user(actor, body.username, body.password, body.role), 201
+    )
+
+
+@router.put("/users/{username}/role")
+def set_role(
+    username: str,
+    request: Request,
+    accounts: Manage,
+    actor: CurrentActor,
+    body: RoleBody,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    return _once(
+        request, actor, key, lambda: accounts.set_role(actor, username, body.role, reason=body.reason)
+    )
+
+
+@router.post("/tokens", status_code=201)
+def create_token(
+    request: Request, accounts: Manage, actor: CurrentActor, body: NewToken, key: IdempotencyKey = None
+) -> JSONResponse:
+    ttl = None if body.ttl_days is None else timedelta(days=body.ttl_days)
+
+    def create() -> dict[str, Any]:
+        token = accounts.create_token(actor, body.name, ttl, body.role)
+        return {"name": body.name, "token": token, "ttl_days": body.ttl_days}
+
+    return _once(request, actor, key, create, 201)
 
 
 # Budgets, connections and the summary.

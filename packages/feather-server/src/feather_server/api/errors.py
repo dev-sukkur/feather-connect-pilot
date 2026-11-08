@@ -11,7 +11,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from feather_connect.core.errors import PermanentError
 from feather_connect.logs import redact
 from feather_connect.runtime.runtime import FlowPaused
-from feather_connect.storage.port import InvalidTransition
+from feather_connect.storage.port import DuplicateUser, InvalidTransition
+from feather_server.services.access import Forbidden
 from feather_server.services.previews import PreviewError, PreviewInvalid
 
 PROBLEM_JSON = "application/problem+json"
@@ -47,6 +48,10 @@ def translate(error: Exception) -> ApiProblem | None:
     """The problem a service error stands for, or None for an error that is a bug (a 500)."""
     if isinstance(error, ApiProblem):
         return error
+    if isinstance(error, Forbidden):
+        return ApiProblem(403, "Forbidden", str(error), capability=error.capability, role=error.needed)
+    if isinstance(error, DuplicateUser):
+        return ApiProblem(409, "Conflict", f"the user {error.args[0]!r} exists already")
     if isinstance(error, PreviewInvalid):
         return ApiProblem(400, "Bad Request", _message(error))
     if isinstance(error, PreviewError):  # expired, used or stale: preview again

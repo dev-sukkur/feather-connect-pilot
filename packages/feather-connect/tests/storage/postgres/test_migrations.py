@@ -1,5 +1,6 @@
 import psycopg
 import pytest
+from real_stack import scratch_database, server_url
 
 from feather_connect.storage.postgres.migrate import migrate
 
@@ -90,3 +91,29 @@ def test_no_extensions_are_needed(pg_url: str):  # NFR-07
 def test_partial_index_on_open_deliveries_exists(pg_url: str):
     migrate(pg_url)
     assert "status <> 'applied'" in index_def(pg_url, "delivery_open_idx")
+
+
+def test_users_and_tokens_of_an_m1_database_become_admins(pg_url: str):  # flow packages §14 task 0
+    with scratch_database(server_url()) as url:
+        migrate(url, "0014")
+        with psycopg.connect(url, autocommit=True) as conn:
+            conn.execute(
+                """insert into feather.app_user (tenant_id, user_id, username, password_hash, created_at)
+                   values ('default', 'u1', 'ann', 'h', now()), ('t2', 'u2', 'bob', 'h', now())"""
+            )
+            conn.execute(
+                """insert into feather.api_token (tenant_id, token_id, name, token_hash, created_at)
+                   values ('default', 't1', 'ci', 'h1', now())"""
+            )
+        migrate(url)
+        with psycopg.connect(url, autocommit=True) as conn:
+            users = conn.execute("select username, role from feather.app_user order by username").fetchall()
+            tokens = conn.execute("select name, role, created_by from feather.api_token").fetchall()
+            assert users == [("ann", "admin"), ("bob", "admin")] and tokens == [("ci", "admin", None)]
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute("update feather.app_user set role = 'viewer' where username = 'ann'")
+            with pytest.raises(psycopg.errors.NotNullViolation):  # a new row must say its role
+                conn.execute(
+                    """insert into feather.app_user (tenant_id, user_id, username, password_hash, created_at)
+                       values ('default', 'u3', 'cy', 'h', now())"""
+                )

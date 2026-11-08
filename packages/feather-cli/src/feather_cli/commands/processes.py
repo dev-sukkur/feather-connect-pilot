@@ -16,6 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from feather_cli.options import DatabaseUrl, Env, Json, ProjectDir
 from feather_cli.output import emit, fail
+from feather_connect.clock import SystemClock
 from feather_connect.core.strategies import parse_duration
 from feather_connect.project import ProjectError
 from feather_connect.storage.port import DuplicateUser, Store
@@ -23,13 +24,14 @@ from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import at_head, migrate
 from feather_connect.worker import run_worker
 from feather_server.app import create_app
-from feather_server.auth import hash_password, issue_token
+from feather_server.auth import token_digest
+from feather_server.services.accounts import CLI, Accounts
 from feather_server.settings import Settings, SettingsError
 
 log = logging.getLogger(__name__)
 
 server_app = typer.Typer(
-    help="Run the server, or administer it: migrate, create-user, create-token.",
+    help="Run the server, or administer it: migrate, create-user, set-role, create-token.",
     invoke_without_command=True,
     no_args_is_help=False,
 )
@@ -156,9 +158,21 @@ def _read_password() -> str:
     return sys.stdin.readline().rstrip("\r\n")
 
 
+def _accounts(store: Store) -> Accounts:
+    return Accounts(store, SystemClock())
+
+
 @server_app.command()
 def create_user(
     username: str,
+    role: Annotated[
+        str | None,
+        typer.Option(
+            "--role",
+            help="admin or operator. Without it, the first user is an admin and the next ones operators.",
+            show_default=False,
+        ),
+    ] = None,
     env: Env = "dev",
     database_url: DatabaseUrl = None,
     json_mode: Json = False,
@@ -173,16 +187,58 @@ def create_user(
                 json_mode=json_mode,
             )
         try:
-            store.users.create_user(username, hash_password(password))
+            user = _accounts(store).create_user(CLI, username, password, role)
         except DuplicateUser:
             fail(f"the user {username!r} exists already", json_mode=json_mode)
-    emit({"user": username}, json_mode=json_mode, human=lambda _: typer.echo(f"created user {username}"))
+        except ValueError as error:
+            fail(str(error), json_mode=json_mode)
+    emit(
+        {"user": username, "role": user.role},
+        json_mode=json_mode,
+        human=lambda _: typer.echo(f"created user {username}, {user.role}"),
+    )
+
+
+@server_app.command()
+def set_role(
+    username: str,
+    role: Annotated[str, typer.Argument(help="admin or operator.")],
+    reason: Annotated[str | None, typer.Option(help="Why, for the audit log.")] = None,
+    env: Env = "dev",
+    database_url: DatabaseUrl = None,
+    json_mode: Json = False,
+) -> None:
+    """Give a user another role. Their tokens follow it at once: a token never acts above its user's role."""
+    with _store(database_url, json_mode) as store:
+        try:
+            _accounts(store).set_role(CLI, username, role, reason=reason)
+        except KeyError:
+            fail(f"there is no user {username!r}", json_mode=json_mode)
+        except ValueError as error:
+            fail(str(error), json_mode=json_mode)
+    emit(
+        {"user": username, "role": role},
+        json_mode=json_mode,
+        human=lambda _: typer.echo(f"{username} is now {role}"),
+    )
 
 
 @server_app.command()
 def create_token(
     name: str,
     ttl: Annotated[str, typer.Option(help="How long it lasts, such as 90d, 12h or 30m.")] = "90d",
+    role: Annotated[
+        str | None,
+        typer.Option(
+            "--role",
+            help="admin or operator, no higher than its user's. Without it, its user's role, or operator.",
+            show_default=False,
+        ),
+    ] = None,
+    user: Annotated[
+        str | None,
+        typer.Option(help="The user whose token it is: it never acts above their role. None for automation."),
+    ] = None,
     env: Env = "dev",
     database_url: DatabaseUrl = None,
     json_mode: Json = False,
@@ -193,13 +249,20 @@ def create_token(
     except ValueError as error:
         fail(str(error), hint="write the lifetime like 90d, 12h or 30m", json_mode=json_mode)
     with _store(database_url, json_mode) as store:
-        token = issue_token(store, name, lifetime)
+        try:
+            token = _accounts(store).create_token(CLI, name, lifetime, role, user=user)
+        except KeyError:
+            fail(f"there is no user {user!r}", json_mode=json_mode)
+        except ValueError as error:
+            fail(str(error), json_mode=json_mode)
+        row = store.users.find_token(token_digest(token))
+        given = row.role if row is not None else role
 
     def show(data: dict[str, str]) -> None:
         typer.echo(data["token"])
-        typer.echo("this token is not shown again: store it now", err=True)
+        typer.echo(f"a {given} token; it is not shown again: store it now", err=True)
 
-    emit({"name": name, "token": token, "ttl": ttl}, json_mode=json_mode, human=show)
+    emit({"name": name, "token": token, "ttl": ttl, "role": given}, json_mode=json_mode, human=show)
 
 
 def worker(

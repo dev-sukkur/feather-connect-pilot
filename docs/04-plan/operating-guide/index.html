@@ -349,8 +349,17 @@ uv run feather replay warehouse --version &lt;version_id&gt; --reason "table res
   <h3 id="trace">Trace a record</h3>
   <p class="prose">To answer “what happened to invoice INV-00005?”, open <b>Trace a record</b> in the sidebar, pick the dataset and type the record's key. A <b>Trace</b> link on each row of a version's records, of a delivery's answers and of Quarantine does the same. The page is one timeline, oldest first. Each version that held the key shows whether it inserted, updated or deleted the record, its partition, the run that read it with a link to that read's log, the record as it was read, and the fields that changed since the version before. Under each version, every route shows its delivery: the status, each attempt with its error, what the destination answered for the record (the HTTP status, fields such as <code>erp_id</code>, and the body that was sent when it was rejected), its quarantine entries, and each retry, skip or replay with who did it, the reason and its audit row. The same comes as JSON from <code>GET /api/v1/datasets/{dataset}/records/{key}/trace</code>.</p>
   <p class="prose">Versions are found through a key index that each seal writes in its own transaction, for scheduled reads and webhooks alike, so a trace reads no spool chunk to find them. Versions sealed before this release are not in the index and don't show. <code>http.Call</code> and <code>graphql.Mutation</code> send <code>X-Feather-Version: &lt;version_id&gt;</code> beside the <code>Idempotency-Key</code>, so a line in the destination's logs leads back to a version and from there to its trace.</p>
+  <h3 id="roles">Roles: admin and operator</h3>
+  <p class="prose">Each user and each API token has one of two roles. An <b>operator</b> does everything this section describes: run, re-run, backfill, retry, skip, replay, cancel, pause and resume, check connections and settle the quarantine. An <b>admin</b> can do all that, and also manage users, their roles and API tokens. With flow packages, installing, promoting and uninstalling a package and adding a registry will be an admin's too, while activating a flow stays an operator's. The rest of RBAC (viewer, developer, approvals) comes in M2.</p>
+  <div class="scroll"><table>
+    <tr><th>To</th><th>Do</th></tr>
+    <tr><td>Add a user</td><td><code>feather server create-user ann</code>. The first user is an admin and the next ones operators; <code>--role admin</code> or <code>--role operator</code> says which.</td></tr>
+    <tr><td>Change a role</td><td><code>feather server set-role ann admin --reason "on call"</code>, the <b>Users</b> page of the dashboard (admins only), or <code>PUT /api/v1/users/ann/role</code>. The only admin can't be made an operator: make another admin first.</td></tr>
+    <tr><td>Make a token</td><td><code>feather server create-token ci-bot --role operator</code> for automation, an operator unless <code>--role</code> says otherwise; <code>--user ann</code> makes it ann's. An admin can also call <code>POST /api/v1/tokens</code>, which makes a token of their own.</td></tr>
+  </table></div>
+  <p class="prose">A token never acts above its user: it acts with the lower of its own role and its user's current one, so demoting a user demotes their tokens at once. Users and tokens from before this release are admins, so nothing changes for them. The signed-in line in the sidebar shows your role. An operator who tries an admin action gets <code>403</code> with <code>needs the admin role</code> from the API, or a page saying so in the dashboard; the server's check is what counts, and the dashboard only hides what an operator can't use. Roles are held per tenant.</p>
   <h3>Audit</h3>
-  <p class="prose">Each action from the dashboard, the API or the CLI writes a row with who did it, what it touched, and the reason, in the <code>feather.audit</code> table. M1 has no audit page, so read it with SQL.</p>
+  <p class="prose">Each action from the dashboard, the API or the CLI writes a row with who did it, what it touched, and the reason, in the <code>feather.audit</code> table. So does every role change, and every admin action refused to an operator, with the result <code>refused: needs the admin role</code>. M1 has no audit page, so read it with SQL.</p>
   <h3>Workers, scaling and draining</h3>
   <p class="prose">A worker runs the tasks of the project's flows: <code>uv run feather worker --project my-shop --database-url postgresql://...</code>, with <code>--slots</code> (8 tasks at once by default) and <code>--labels site=hq</code>. Start more workers to scale out. With Compose, set <code>FEATHER_WORKERS</code>. On SIGTERM a worker marks itself <code>draining</code>, stops taking work, waits up to 30 seconds for its running tasks, and exits. If a worker is killed instead, the sweeper sees its heartbeats stop and hands its tasks on. The Overview lists each worker with its state, slots and code version, and <code>feather status</code> lists each worker's state.</p>
   <h3>Budgets</h3>
@@ -428,12 +437,13 @@ flow = fc.Flow(
 <section id="api">
   <h2><span class="n">8</span>The JSON API and remote commands</h2>
   <p class="prose">Everything the dashboard does is in the JSON API under <code>/api/v1</code>, with the same checks, previews and audit rows. Automation authenticates with an API token, created on the server's database and shown once:</p>
-  <pre><code>uv run feather server create-token ci-bot --ttl 90d --database-url postgresql://...
+  <pre><code>uv run feather server create-token ci-bot --ttl 90d --role operator --database-url postgresql://...
 curl -H "Authorization: Bearer fc_..." http://127.0.0.1:8080/api/v1/runs</code></pre>
   <div class="scroll"><table>
     <tr><th>Calls</th><th>Do</th></tr>
     <tr><td><code>GET /flows</code>, <code>/runs</code>, <code>/runs/{id}/tasks</code>, <code>/tasks/{id}/logs</code>, <code>/summary</code>, <code>/connections</code>, <code>/budgets</code></td><td>Read</td></tr>
     <tr><td><code>POST /flows/{flow}:run</code>, <code>/runs/{id}:cancel</code>, <code>/flows/{flow}:pause</code>, <code>:resume</code>, <code>/routes/{route}:pause</code>, <code>:resume</code></td><td>Act</td></tr>
+    <tr><td><code>GET /users</code>, <code>POST /users</code>, <code>PUT /users/{name}/role</code>, <code>POST /tokens</code></td><td>Manage users, roles and tokens: admin only (see <a href="#roles">Roles</a>)</td></tr>
     <tr><td><code>POST /flows/{flow}:backfill:preview</code>, then <code>/flows/{flow}:backfill</code>; likewise <code>/deliveries:retry</code>, <code>:skip</code>, <code>:replay</code> and <code>/datasets/{d}/partitions:rerun</code></td><td>Mass actions: the preview returns the impact and a <code>confirmation_token</code>, which the action takes</td></tr>
   </table></div>
   <p class="prose">A call that changes something takes a <code>reason</code> in its body and an <code>Idempotency-Key</code> header. If the same caller repeats a key within 24 hours, it gets the first answer again and nothing more happens.</p>
@@ -474,7 +484,7 @@ docker compose -f deploy/compose.yaml exec feather-server feather server create-
   <div class="scroll"><table>
     <tr><th>Missing</th><th>Arrives in</th></tr>
     <tr><td><code>fc.reconcile</code>, and hard case H5</td><td>M2</td></tr>
-    <tr><td>Readiness, side-effect routes and approvals, overrides beyond pause and resume, roles and permissions (every signed-in user is an administrator), MCP and alerts</td><td>M2</td></tr>
+    <tr><td>Readiness, side-effect routes and approvals, overrides beyond pause and resume, the rest of RBAC (M1.1 brings the admin and operator roles), MCP and alerts</td><td>M2</td></tr>
     <tr><td>A budget page on the dashboard. The Overview shows use, and the reserve logic ships in M1</td><td>M2</td></tr>
     <tr><td><code>sink.confirm</code>, with Magento</td><td>M2</td></tr>
     <tr><td>OAuth2 tokens shared across processes. M1 shares one per grant within a process</td><td>M2</td></tr>

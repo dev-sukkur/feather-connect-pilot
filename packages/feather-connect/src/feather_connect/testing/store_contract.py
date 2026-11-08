@@ -27,6 +27,7 @@ from feather_connect.storage.port import (
     InboxDay,
     InvalidTransition,
     ResponseRow,
+    Role,
     SliceFinished,
     StaleWriter,
     StateRow,
@@ -1336,20 +1337,21 @@ class StoreContract(
 
     def test_users_are_created_and_found_by_name(self, store: Store, clock: FrozenClock):
         assert store.users.get_user("op") is None
-        user_id = store.users.create_user("op", "hash-1")
+        user_id = store.users.create_user("op", "hash-1", "operator")
         found = store.users.get_user("op")
-        assert found is not None and (found.user_id, found.username, found.password_hash) == (
+        assert found is not None and (found.user_id, found.username, found.password_hash, found.role) == (
             user_id,
             "op",
             "hash-1",
+            "operator",
         )
         assert found.created_at == T0
         assert store.users.get_user("OP") is None and store.users.get_user("other") is None
         with pytest.raises(DuplicateUser):
-            store.users.create_user("op", "hash-2")
+            store.users.create_user("op", "hash-2", "admin")
 
     def test_a_users_password_hash_can_be_replaced(self, store: Store):
-        user_id = store.users.create_user("op", "hash-1")
+        user_id = store.users.create_user("op", "hash-1", "admin")
         store.users.set_password_hash("op", "hash-2")
         found = store.users.get_user("op")
         assert found is not None and (found.user_id, found.password_hash, found.created_at) == (
@@ -1363,10 +1365,10 @@ class StoreContract(
     def test_tokens_are_found_by_hash_and_revoked_once(self, store: Store, clock: FrozenClock):
         assert store.users.find_token("h1") is None
         expiry = T0 + timedelta(days=1)
-        token_id = store.users.create_token("ci", "h1", expiry)
-        other = store.users.create_token("forever", "h2", None)
+        token_id = store.users.create_token("ci", "h1", expiry, "operator", "ann")
+        other = store.users.create_token("forever", "h2", None, "admin", None)
         found = store.users.find_token("h1")
-        assert found == TokenRow(token_id, "ci", "h1", T0, expiry, None)
+        assert found == TokenRow(token_id, "ci", "h1", T0, expiry, None, "operator", "ann")
         clock.advance(timedelta(hours=1))
         store.users.revoke_token(token_id)
         clock.advance(timedelta(hours=1))
@@ -1376,6 +1378,27 @@ class StoreContract(
         assert revoked is not None and revoked.revoked_at == T0 + timedelta(hours=1)
         untouched = store.users.find_token("h2")
         assert untouched is not None and untouched.token_id == other and untouched.revoked_at is None
+
+    def test_a_users_role_can_be_changed(self, store: Store):
+        store.users.create_user("ann", "hash-1", "admin")
+        store.users.set_role("ann", "operator")
+        found = store.users.get_user("ann")
+        assert found is not None and (found.role, found.password_hash) == ("operator", "hash-1")
+        store.users.set_role("ann", "admin")
+        assert store.users.get_user("ann") == replace(found, role="admin")
+        with pytest.raises(KeyError):
+            store.users.set_role("nobody", "admin")
+
+    def test_users_are_listed_by_name_with_their_roles(self, store: Store):
+        assert store.users.list_users() == []
+        roles: list[tuple[str, Role]] = [("cy", "operator"), ("Bob", "operator"), ("ann", "admin")]
+        for name, role in roles:
+            store.users.create_user(name, f"hash-{name}", role)
+        assert [(u.username, u.role) for u in store.users.list_users()] == [
+            ("Bob", "operator"),
+            ("ann", "admin"),
+            ("cy", "operator"),
+        ]
 
     def test_audit_rows_list_newest_first_with_a_cursor(self, store: Store, clock: FrozenClock):
         ids: list[str] = []

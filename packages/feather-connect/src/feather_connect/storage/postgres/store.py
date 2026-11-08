@@ -51,6 +51,7 @@ from feather_connect.storage.port import (
     RecordStateStore,
     ResponseRow,
     ResponseStore,
+    Role,
     RouteRow,
     Run,
     RunJournal,
@@ -1880,18 +1881,22 @@ class _Users(UserStore):
     def __init__(self, db: _Db) -> None:
         self._db = db
 
-    def create_user(self, username: str, password_hash: str) -> str:
+    def create_user(self, username: str, password_hash: str, role: Role) -> str:
         user_id = new_id()
         try:
             with self._db.tx() as conn:
                 conn.execute(
-                    """insert into feather.app_user (tenant_id, user_id, username, password_hash, created_at)
-                       values (%s, %s, %s, %s, %s)""",
-                    (self._db.tenant, user_id, username, password_hash, self._db.clock.now()),
+                    """insert into feather.app_user (tenant_id, user_id, username, password_hash, created_at, role)
+                       values (%s, %s, %s, %s, %s, %s)""",
+                    (self._db.tenant, user_id, username, password_hash, self._db.clock.now(), role),
                 )
         except psycopg.errors.UniqueViolation:
             raise DuplicateUser(username) from None
         return user_id
+
+    @staticmethod
+    def _user(row: Mapping[str, Any]) -> UserRow:
+        return UserRow(row["user_id"], row["username"], row["password_hash"], row["created_at"], row["role"])
 
     def get_user(self, username: str) -> UserRow | None:
         with self._db.tx() as conn:
@@ -1899,9 +1904,15 @@ class _Users(UserStore):
                 "select * from feather.app_user where tenant_id = %s and username = %s",
                 (self._db.tenant, username),
             ).fetchone()
-        if row is None:
-            return None
-        return UserRow(row["user_id"], row["username"], row["password_hash"], row["created_at"])
+        return None if row is None else self._user(row)
+
+    def list_users(self) -> list[UserRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                'select * from feather.app_user where tenant_id = %s order by username collate "C"',
+                (self._db.tenant,),
+            ).fetchall()
+        return [self._user(row) for row in rows]
 
     def set_password_hash(self, username: str, password_hash: str) -> None:
         with self._db.tx() as conn:
@@ -1912,13 +1923,34 @@ class _Users(UserStore):
         if changed.rowcount == 0:
             raise KeyError(username)
 
-    def create_token(self, name: str, token_hash: str, expires_at: datetime | None) -> str:
+    def set_role(self, username: str, role: Role) -> None:
+        with self._db.tx() as conn:
+            changed = conn.execute(
+                "update feather.app_user set role = %s where tenant_id = %s and username = %s",
+                (role, self._db.tenant, username),
+            )
+        if changed.rowcount == 0:
+            raise KeyError(username)
+
+    def create_token(
+        self, name: str, token_hash: str, expires_at: datetime | None, role: Role, created_by: str | None
+    ) -> str:
         token_id = new_id()
         with self._db.tx() as conn:
             conn.execute(
-                """insert into feather.api_token (tenant_id, token_id, name, token_hash, created_at, expires_at)
-                   values (%s, %s, %s, %s, %s, %s)""",
-                (self._db.tenant, token_id, name, token_hash, self._db.clock.now(), expires_at),
+                """insert into feather.api_token
+                       (tenant_id, token_id, name, token_hash, created_at, expires_at, role, created_by)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    self._db.tenant,
+                    token_id,
+                    name,
+                    token_hash,
+                    self._db.clock.now(),
+                    expires_at,
+                    role,
+                    created_by,
+                ),
             )
         return token_id
 
@@ -1937,6 +1969,8 @@ class _Users(UserStore):
             row["created_at"],
             row["expires_at"],
             row["revoked_at"],
+            row["role"],
+            row["created_by"],
         )
 
     def revoke_token(self, token_id: str) -> None:
