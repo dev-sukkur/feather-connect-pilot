@@ -55,7 +55,10 @@ def client(project: Path, env: str, server: str | None, token: str | None, json_
             file_url, file_token = _from_env_file(project, env)
         except ProjectError as error:
             fail(str(error), hint="set the secret, or pass --token", json_mode=json_mode)
-        server, token = server or file_url, token or file_token
+        same_server = server is None or (file_url is not None and server.rstrip("/") == file_url.rstrip("/"))
+        if token is None and same_server:  # the file's token is for the file's server, and no other
+            token = file_token
+        server = server or file_url
     if not server:
         fail(
             "no server to call",

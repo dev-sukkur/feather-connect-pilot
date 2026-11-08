@@ -162,3 +162,20 @@ def test_no_server_configured_says_where_to_set_one(
     monkeypatch.delenv("FEATHER_SERVER", raising=False)
     r = cli("runs", "--json")
     assert r.exit_code != 0 and "FEATHER_SERVER" in json.loads(r.stdout)["hint"]
+
+
+def test_the_env_files_token_goes_only_to_the_env_files_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # stage 5 review
+    from feather_cli.commands.remote import client
+
+    (tmp_path / "env").mkdir()
+    (tmp_path / "env" / "qa.yaml").write_text(
+        'server: {url: "https://feather.qa.example", token: "fc_qa_token"}\n', encoding="utf-8"
+    )
+    with client(tmp_path, "qa", "https://somewhere.else.example", None, json_mode=True) as other:
+        assert "authorization" not in other._http.headers  # pyright: ignore[reportPrivateUsage]
+    with client(tmp_path, "qa", None, None, json_mode=True) as own:
+        assert own._http.headers["authorization"] == "Bearer fc_qa_token"  # pyright: ignore[reportPrivateUsage]
+    with client(tmp_path, "qa", "https://feather.qa.example/", None, json_mode=True) as same:
+        assert same._http.headers["authorization"] == "Bearer fc_qa_token"  # pyright: ignore[reportPrivateUsage]
