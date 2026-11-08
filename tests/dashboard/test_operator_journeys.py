@@ -181,7 +181,20 @@ def test_open_a_tasks_records_from_the_run_page(signed_in: Page, site: Site, wid
     expect(first.locator("pre")).to_contain_text('"id"')
     expect(first.get_by_role("link", name="Full trace")).to_be_visible()
     wide = page.evaluate("() => document.documentElement.scrollWidth")
-    assert wide <= width, f"the run page with its records is {wide} px wide"
+    assert wide <= width, f"the run page with its records is {wide} px wide: {_sticking_out(page, width)}"
+
+
+def _sticking_out(page: Page, width: int) -> list[str]:
+    """The innermost elements outside a table's scroll box whose right edge is past `width`, to say what to fix."""
+    return page.evaluate(
+        """(width) => [...document.querySelectorAll("body *")]
+            .filter(e => !e.closest(".table-wrap") && e.getBoundingClientRect().right > width + 0.5)
+            .filter(e => ![...e.children].some(c => c.getBoundingClientRect().right > width + 0.5))
+            .slice(0, 10)
+            .map(e => `${e.tagName.toLowerCase()}.${e.className} to ${Math.round(e.getBoundingClientRect().right)} px: `
+                + (e.textContent || "").trim().slice(0, 60))""",
+        width,
+    )
 
 
 def test_a_tasks_records_without_javascript(no_script_page: Page, site: Site):
