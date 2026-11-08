@@ -75,6 +75,9 @@ def _problem(status: int, headers: Mapping[str, str] | None = None) -> Response:
     )
 
 
+_MAX_BUCKETS = 10_000  # callers a limiter remembers: one bucket per source and address
+
+
 class RateLimiter:
     """A token bucket per key, holding a second's worth of requests. Ingress keeps two: one per source and caller
     address, taken before verifying, and one per source, taken only by requests that verified (S5). So a caller who
@@ -95,6 +98,8 @@ class RateLimiter:
         """Take a token and return 0, or return how many seconds until there is one."""
         now = self._clock.now().timestamp()
         with self._lock:
+            if source not in self._buckets and len(self._buckets) >= _MAX_BUCKETS:
+                self._forget_full(now)
             tokens, at = self._buckets.get(source, (self._rate, now))
             tokens = min(self._rate, tokens + (now - at) * self._rate)
             if tokens >= 1:
@@ -102,6 +107,18 @@ class RateLimiter:
                 return 0.0
             self._buckets[source] = (tokens, now)
             return (1 - tokens) / self._rate
+
+    def _forget_full(self, now: float) -> None:
+        """Drop the buckets that have refilled, which a caller would get back anyway; if that leaves too many, as a
+        flood of new addresses would, drop the oldest half. Called with the lock held."""
+        self._buckets = {
+            key: (tokens, at)
+            for key, (tokens, at) in self._buckets.items()
+            if tokens + (now - at) * self._rate < self._rate
+        }
+        if len(self._buckets) >= _MAX_BUCKETS:
+            newest = sorted(self._buckets.items(), key=lambda item: item[1][1])[_MAX_BUCKETS // 2 :]
+            self._buckets = dict(newest)
 
 
 def _push_dataset(state: "AppState", tenant: str, source: str) -> Dataset | None:

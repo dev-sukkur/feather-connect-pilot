@@ -26,7 +26,7 @@ from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.spool import MemorySpool
 from feather_server.app import AppState, create_app
 from feather_server.auth import require_csrf
-from feather_server.ingress import _Arrival
+from feather_server.ingress import RateLimiter, _Arrival
 from feather_server.settings import Settings
 
 SECRET = "ingress-secret-value"
@@ -551,3 +551,12 @@ def test_the_sources_bucket_counts_only_verified_requests(clock: FrozenClock):  
     ]
     codes = [c.post(URL, content=b'{"id": 1}', headers=h.signed()).status_code for c in senders]
     assert codes == [202, 202, 429, 429]  # two verified requests take the source's second
+
+
+def test_the_rate_limiter_forgets_callers_whose_bucket_has_refilled(clock: FrozenClock):  # stage 5 review
+    limiter = RateLimiter(5, clock)
+    for n in range(30_000):  # as many addresses as a scan, or IPv6 clients, would bring
+        limiter.wait_for(f"address:hooks:10.0.{n // 256}.{n % 256}")
+        clock.advance(timedelta(milliseconds=50))
+    assert len(limiter._buckets) <= 10_000  # pyright: ignore[reportPrivateUsage]
+    assert limiter.wait_for("address:hooks:10.0.0.1") == 0.0  # a forgotten caller starts with a full bucket
