@@ -3,11 +3,14 @@ environment trusts besides the built-in one: list projects, list a project's fil
 checked (flow packages §4.3).
 
 A token is sent as HTTP Basic credentials, `__token__` and the token, as PyPI-style indexes take it; a token of the
-form `user:password` is sent as those two, for indexes that want a user name (GitLab deploy tokens, Nexus).
+form `user:password` is sent as those two, for indexes that want a user name (GitLab deploy tokens, Nexus). As pip
+does, it goes only to the index's own origin (scheme, host and port): a file the index links on another host is
+fetched without it.
 """
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any, Self, cast
@@ -77,6 +80,22 @@ def credentials(token: str | None) -> tuple[str, str] | None:
     return (user, password) if sep and not token.startswith("fc_") else ("__token__", token)
 
 
+def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
+    """A URL's scheme, host and port, the port filled in when it is the scheme's own."""
+    return url.scheme, url.host, url.port or {"http": 80, "https": 443}.get(url.scheme)
+
+
+def _check(url: str, answer: httpx.Response) -> None:
+    if answer.status_code in (401, 403):
+        raise IndexReadError(
+            f"{url} refused the credentials ({answer.status_code}): check the registry's token"
+        )
+    if answer.status_code == 404:
+        raise IndexReadError(f"{url} has no such page (404)")
+    if not answer.is_success:
+        raise IndexReadError(f"{url} answered {answer.status_code}")
+
+
 class SimpleIndex:
     """The simple API of the index at `url`, such as `https://pkgs.example.com/simple/`."""
 
@@ -89,9 +108,11 @@ class SimpleIndex:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.url = url if url.endswith("/") else url + "/"
-        self._http = httpx.Client(
-            auth=credentials(token), timeout=timeout, transport=transport, follow_redirects=True
-        )
+        self._origin = _origin(httpx.URL(self.url))
+        found = credentials(token)
+        self._auth = None if found is None else httpx.BasicAuth(*found)
+        # Credentials go per request, to the index's origin only; httpx drops them on a redirect to another origin.
+        self._http = httpx.Client(timeout=timeout, transport=transport, follow_redirects=True)
 
     def close(self) -> None:
         self._http.close()
@@ -102,20 +123,26 @@ class SimpleIndex:
     def __exit__(self, *_: object) -> None:
         self.close()
 
+    def _auth_for(self, url: str) -> httpx.BasicAuth | None:
+        """The credentials for `url`: the token only when it is on the index's own origin."""
+        return self._auth if _origin(httpx.URL(url)) == self._origin else None
+
     def _get(self, url: str, accept: str = _ACCEPT) -> httpx.Response:
         try:
-            answer = self._http.get(url, headers={"Accept": accept})
+            answer = self._http.get(url, headers={"Accept": accept}, auth=self._auth_for(url))
         except httpx.HTTPError as error:
             raise IndexReadError(f"can't reach {url}: {type(error).__name__}") from None
-        if answer.status_code in (401, 403):
-            raise IndexReadError(
-                f"{url} refused the credentials ({answer.status_code}): check the registry's token"
-            )
-        if answer.status_code == 404:
-            raise IndexReadError(f"{url} has no such page (404)")
-        if not answer.is_success:
-            raise IndexReadError(f"{url} answered {answer.status_code}")
+        _check(url, answer)
         return answer
+
+    @contextmanager
+    def _stream(self, url: str) -> Generator[httpx.Response]:
+        try:
+            with self._http.stream("GET", url, headers={"Accept": "*/*"}, auth=self._auth_for(url)) as answer:
+                _check(url, answer)
+                yield answer
+        except httpx.HTTPError as error:
+            raise IndexReadError(f"can't reach {url}: {type(error).__name__}") from None
 
     def _page(self, url: str) -> tuple[list[tuple[str, dict[str, str | None]]], str]:
         """The page's links as (text, attributes), or its JSON as one link per entry, and the URL it came from."""
@@ -183,10 +210,18 @@ class SimpleIndex:
         else says the bytes are the ones published."""
         if file.sha256 is None:
             raise IndexReadError(f"{file.filename}: the index gives no sha256 for it, so it can't be checked")
-        answer = self._get(file.url, accept="*/*")
-        data = answer.content
-        if len(data) > max_bytes:
-            raise IndexReadError(f"{file.filename} has {len(data)} bytes, more than the {max_bytes} allowed")
+        too_big = IndexReadError(f"{file.filename} has more than the {max_bytes} bytes allowed")
+        chunks: list[bytes] = []
+        size = 0
+        with self._stream(file.url) as answer:
+            if int(answer.headers.get("content-length") or 0) > max_bytes:
+                raise too_big
+            for chunk in answer.iter_bytes():
+                size += len(chunk)
+                if size > max_bytes:  # counted as the bytes come, whatever the header said
+                    raise too_big
+                chunks.append(chunk)
+        data = b"".join(chunks)
         digest = hashlib.sha256(data).hexdigest()
         if digest != file.sha256.lower():
             raise IndexReadError(

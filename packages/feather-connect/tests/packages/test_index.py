@@ -91,7 +91,7 @@ def test_the_json_form_and_fetching_with_the_sha256_checked():
             index.fetch(two)
         with pytest.raises(IndexReadError, match="its sha256 is"):
             index.fetch(index.find("acme-invoices", "3.0.0"))
-        with pytest.raises(IndexReadError, match="more than the 3 allowed"):
+        with pytest.raises(IndexReadError, match="more than the 3 bytes allowed"):
             index.fetch(one, max_bytes=3)
         with pytest.raises(IndexReadError, match="no wheel of acme-invoices 9.0.0"):
             index.find("acme-invoices", "9.0.0")
@@ -112,3 +112,51 @@ def test_a_refusal_or_an_outage_says_so_without_the_token():
     assert "secret-token" not in str(e.value)
     with _index(down) as index, pytest.raises(IndexReadError, match="can't reach"):
         index.projects()
+
+
+def test_the_token_goes_only_to_the_index_origin():  # as pip does: a file on another host gets no credentials
+    seen: dict[str, str | None] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen[f"{request.url.scheme}://{request.url.netloc.decode()}"] = request.headers.get("authorization")
+        if request.url.path == "/simple/acme-invoices/":
+            files = [
+                {"filename": "acme_invoices-1.0.0-py3-none-any.whl", "url": "https://cdn.evil.test/a.whl"},
+                {
+                    "filename": "acme_invoices-2.0.0-py3-none-any.whl",
+                    "url": "https://pkgs.example.com:8443/b.whl",
+                },
+                {"filename": "acme_invoices-3.0.0-py3-none-any.whl", "url": "http://pkgs.example.com/c.whl"},
+                {
+                    "filename": "acme_invoices-4.0.0-py3-none-any.whl",
+                    "url": "https://pkgs.example.com:443/d.whl",
+                },
+            ]
+            files = [{**f, "hashes": {"sha256": SHA}} for f in files]
+            return httpx.Response(200, json={"files": files}, headers={"content-type": JSON})
+        return httpx.Response(200, content=WHEEL)
+
+    with _index(handler) as index:
+        for version in ("1.0.0", "2.0.0", "3.0.0", "4.0.0"):
+            assert index.fetch(index.find("acme-invoices", version)) == WHEEL
+    assert seen["https://pkgs.example.com"] is not None  # the index page and d.whl, on the default port
+    assert seen["https://cdn.evil.test"] is None
+    assert seen["https://pkgs.example.com:8443"] is None
+    assert seen["http://pkgs.example.com"] is None
+
+
+def test_a_fetch_stops_at_the_cap_whatever_the_length_header_says():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/simple/acme-invoices/":
+            files = [
+                {
+                    "filename": "acme_invoices-1.0.0-py3-none-any.whl",
+                    "url": "/f/a.whl",
+                    "hashes": {"sha256": SHA},
+                }
+            ]
+            return httpx.Response(200, json={"files": files}, headers={"content-type": JSON})
+        return httpx.Response(200, content=iter([b"x" * 4] * 1000))  # streamed, no Content-Length
+
+    with _index(handler) as index, pytest.raises(IndexReadError, match="more than the 10 bytes allowed"):
+        index.fetch(index.find("acme-invoices", "1.0.0"), max_bytes=10)
