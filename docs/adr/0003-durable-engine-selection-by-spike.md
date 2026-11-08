@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-30
-- **Deciders:** Abdul Sukkur (sponsor), after the spike report
+- **Deciders:** OSS Dev1 (sponsor), after the spike report
 
 ## Context
 

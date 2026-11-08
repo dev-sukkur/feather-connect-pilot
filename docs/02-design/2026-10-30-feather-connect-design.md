@@ -1,13 +1,13 @@
 # Feather Connect — Design Specification
 
 > SDLC phase 2 of 7 · Version 0.2 (draft for review) · 30 October 2026
-> Owner: Abdul Sukkur · Prepared with Claude Code
+> Owner: OSS Dev1 · Prepared with Claude Code
 > Implements: [Discovery v0.2](../01-discovery/2026-10-30-feather-connect-discovery.md) · Decisions: [ADRs](../adr/README.md)
 
 | Version | Date | Author | Change |
 |---|---|---|---|
-| 0.1 | 2026-10-30 | Abdul Sukkur, with Claude Code | First complete draft, including the sponsor's directions: HTML-only front end, Postgres as the database |
-| 0.2 | 2026-10-30 | Abdul Sukkur, with Claude Code | Phase 3 spike results applied: DBOS chosen (ADR-0003), the engine port reshaped to what the spike validated, DBOS operating rules (§6.12), invariant I10, confirm-later sinks, spool sizing, connector findings |
+| 0.1 | 2026-10-30 | OSS Dev1, with Claude Code | First complete draft, including the sponsor's directions: HTML-only front end, Postgres as the database |
+| 0.2 | 2026-10-30 | OSS Dev1, with Claude Code | Phase 3 spike results applied: DBOS chosen (ADR-0003), the engine port reshaped to what the spike validated, DBOS operating rules (§6.12), invariant I10, confirm-later sinks, spool sizing, connector findings |
 
 Review status: **awaiting sponsor review.** Requirement ids (FR-…, NFR-…) refer to the discovery document; §21 maps them to the sections below.
 

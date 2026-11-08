@@ -1,14 +1,14 @@
 # Feather Connect — Discovery Document
 
 > SDLC phase 1 of 7 · Version 0.3 (draft for review) · 30 October 2026
-> Owner: Abdul Sukkur · Prepared with Claude Code
+> Owner: OSS Dev1 · Prepared with Claude Code
 > Next: [Design specification](../02-design/2026-10-30-feather-connect-design.md) · [Decision records](../adr/README.md)
 
 | Version | Date | Author | Change |
 |---|---|---|---|
-| 0.1 | 2026-10-30 | Abdul Sukkur, with Claude Code | First draft from the discovery Q&A and the reference evaluation |
-| 0.2 | 2026-10-30 | Abdul Sukkur, with Claude Code | Sponsor direction: HTML-only front end; Postgres as the database (object storage optional) |
-| 0.3 | 2026-10-30 | Abdul Sukkur, with Claude Code | Phase 3 results: engine decided (DBOS); vendor facts re-verified; GoFrugal is now "M2 if docs arrive, otherwise M3"; open questions updated |
+| 0.1 | 2026-10-30 | OSS Dev1, with Claude Code | First draft from the discovery Q&A and the reference evaluation |
+| 0.2 | 2026-10-30 | OSS Dev1, with Claude Code | Sponsor direction: HTML-only front end; Postgres as the database (object storage optional) |
+| 0.3 | 2026-10-30 | OSS Dev1, with Claude Code | Phase 3 results: engine decided (DBOS); vendor facts re-verified; GoFrugal is now "M2 if docs arrive, otherwise M3"; open questions updated |
 
 Review status: **awaiting sponsor review.** Approving this document closes the discovery gate (§16).
 
@@ -86,7 +86,7 @@ The reference evaluation (Appendix B) inventoried the organisation's ERP, POS an
 | P5 Business owner | Owns a process (sales posting, pricing) | Freshness, readiness, approval requests, SLA breaches | Dashboard, alerts |
 | P6 OSS contributor | Builds connectors and templates | Connector SDK, conformance kit, contribution guide | SDK, repo |
 
-Stakeholders: the sponsor and product owner (Abdul Sukkur), the reference organisation's integration, data and ERP teams, and the future open-source community.
+Stakeholders: the sponsor and product owner (OSS Dev1), the reference organisation's integration, data and ERP teams, and the future open-source community.
 
 ## 5. Scope
 
