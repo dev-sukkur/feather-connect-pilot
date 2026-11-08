@@ -18,7 +18,7 @@ from feather_connect.packages.manifest import ManifestError
 from feather_connect.packages.wheel import MAX_ENTRY, MAX_WHEEL, read_wheel
 
 SAMPLE = Path(__file__).resolve().parents[4] / "examples" / "packages" / "acme-invoices"
-FEATHER_CONNECT = Path(__file__).resolve().parents[2]
+FIXTURE_LOCK = Path(__file__).parent / "fixtures" / "acme-invoices.uv.lock"
 
 
 @pytest.fixture
@@ -170,14 +170,9 @@ def test_pyproject_must_agree_and_dependencies_need_a_lock(sample: Path):
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
 def test_a_uv_lock_is_exported_into_the_wheel_without_feather_connect(sample: Path):
-    # The sample's own pyproject, dependencies = ["feather-connect"], with feather-connect from this checkout.
-    path = sample / "pyproject.toml"
-    here = FEATHER_CONNECT.as_posix()
-    path.write_text(
-        path.read_text(encoding="utf-8") + f'\n[tool.uv.sources]\nfeather-connect = {{ path = "{here}" }}\n',
-        encoding="utf-8",
-    )
-    subprocess.run(["uv", "lock", "--offline"], cwd=sample, check=True, capture_output=True, timeout=300)
+    # The sample's own pyproject, dependencies = ["feather-connect"], with a checked-in lock: `uv export --frozen` needs
+    # neither the network nor a cache.
+    shutil.copyfile(FIXTURE_LOCK, sample / "uv.lock")
     built = build_package(sample)
     lock = _entries(built.path)[f"acme_invoices-1.0.0.dist-info/{LOCK_FILE}"]
     assert built.manifest["lock_hash"] == hashlib.sha256(lock).hexdigest()
