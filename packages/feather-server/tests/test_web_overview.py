@@ -63,7 +63,10 @@ def test_every_page_sends_the_csp_header_and_has_no_inline_script(client: TestCl
     assert "frame-ancestors 'none'" in policy and "script-src 'self'" in policy
     html = response.text
     assert "<script>" not in html and " onclick=" not in html and "style=" not in html
-    assert re.findall(r"<script[^>]*>", html) == ['<script src="/static/htmx.min.js" defer>']
+    assert re.findall(r"<script[^>]*>", html) == [
+        '<script src="/static/htmx.min.js" defer>',
+        '<script src="/static/app.js" defer>',
+    ]
     assert "default-src 'self'" in client.get("/login").headers["content-security-policy"]
 
 

@@ -8,7 +8,8 @@
   <meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "allowScriptTags": false}'>
   <title>{% block title %}{{ title }}{% endblock %} · Feather Connect</title>
   <link rel="stylesheet" href="/static/app.css">
-  {% block scripts %}<script src="/static/htmx.min.js" defer></script>{% endblock %}
+  {% block scripts %}<script src="/static/htmx.min.js" defer></script>
+  <script src="/static/app.js" defer></script>{% endblock %}
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
   <a class="skip" href="#main">Skip to the content</a>

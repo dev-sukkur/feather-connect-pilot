@@ -11,7 +11,6 @@ from collections.abc import Callable
 from datetime import date, timedelta
 from typing import Annotated, Any
 
-import pyarrow as pa
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -435,32 +434,13 @@ def backfill(
 
 
 def _version_records(request: Request, version_id: str, limit: int, cursor: str | None) -> dict[str, Any]:
-    state = request.app.state.feather
-    version = state.store.versions.get(version_id)
-    chunk_no, offset = (0, 0)
-    if cursor is not None:
-        try:
-            first, _, second = cursor.partition(":")
-            chunk_no, offset = int(first), int(second)
-        except ValueError:
-            raise ApiProblem(
-                422, "Unprocessable Content", "this cursor is not one this server handed out"
-            ) from None
-    chunks = [c.chunk_no for c in state.spool.list_chunks(version_id)]
-    records: list[dict[str, Any]] = []
-    next_raw: str | None = None
-    for number in (n for n in chunks if n >= chunk_no):
-        table: pa.Table = state.spool.get_chunk(version_id, number)
-        start = offset if number == chunk_no else 0
-        rows = table.slice(start, limit - len(records)).to_pylist()
-        records.extend(rows)
-        if len(records) >= limit:
-            end = start + len(rows)
-            if end < table.num_rows:
-                next_raw = f"{number}:{end}"
-            elif number != chunks[-1]:
-                next_raw = f"{chunks[chunks.index(number) + 1]}:0"
-            break
+    reads: Reads = request.app.state.reads
+    try:
+        version, records, next_raw = reads.version_records(version_id, limit, cursor)
+    except ValueError:
+        raise ApiProblem(
+            422, "Unprocessable Content", "this cursor is not one this server handed out"
+        ) from None
     return {"version_id": version.version_id, "masked": False, **page(records, next_raw)}
 
 

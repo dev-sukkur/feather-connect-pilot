@@ -31,7 +31,7 @@
       <tbody>
       {% for v in detail.recent_versions %}
         <tr>
-          <th scope="row">{{ m.partition_label(v.dataset, v.partition) }}</th>
+          <th scope="row"><a href="/versions/{{ v.version_id | urlencode }}" title="What version {{ v.seal_seq }} of {{ v.dataset }} holds">{{ m.partition_label(v.dataset, v.partition) }}</a></th>
           <td>{{ v.dataset }}</td>
           <td>{{ m.status_badge(v.status) }}</td>
           <td class="num">{{ v.upserts }}</td>

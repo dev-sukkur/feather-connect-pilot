@@ -36,7 +36,7 @@
       <tr>
         <td><input type="checkbox" name="partition" value="{{ row.partition }}" id="p-{{ loop.index }}" aria-label="Select {{ row.label }}"></td>
         <th scope="row"><label for="p-{{ loop.index }}" class="plain">{{ m.partition_label(grid.dataset, row.partition) }}</label></th>
-        <td class="num">{{ row.records }}</td>
+        <td class="num"><a href="/versions/{{ row.version_id | urlencode }}" title="The records of the latest version of {{ row.label }}">{{ row.records }}</a></td>
         <td>{{ m.time_ago(row.sealed_at) }}</td>
         {% for cell in row.cells %}
         <td class="cell">

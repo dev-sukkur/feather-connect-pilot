@@ -208,3 +208,8 @@ caption { text-align: left; padding: 0.6rem 0.9rem; color: var(--muted); }
 
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .log { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.75rem 1rem; overflow-x: auto; font-family: var(--mono); font-size: 0.85em; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* The version page's records. */
+.record-json summary { cursor: pointer; color: var(--accent); white-space: nowrap; }
+.record-json pre { margin: 0.4rem 0 0; max-width: 40rem; max-height: 20rem; overflow: auto; }
+.cell-text { overflow-wrap: anywhere; }

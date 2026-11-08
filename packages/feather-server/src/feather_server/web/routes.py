@@ -23,6 +23,8 @@ from feather_connect.storage.port import (
     delivery_cursor,
     failure_cursor,
 )
+from feather_server.api.errors import ApiProblem
+from feather_server.api.paging import decode, encode
 from feather_server.auth import Actor, CurrentActor, csrf_token, require_csrf
 from feather_server.services import actions as action_limits
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
@@ -848,6 +850,84 @@ def delivery_detail(request: Request, actor: CurrentActor, route: str, version_i
         actor=actor,
         detail=detail,
         run=request.query_params.get("run", ""),
+    )
+
+
+# Versions.
+
+_RECORDS_SHOWN = 100
+_CELL_CHARS = 60
+_HIDDEN_COLUMNS = ("_fc_key", "_fc_op", "_fc_row_hash", "_fc_moved_from")
+
+
+@dataclass(frozen=True)
+class RecordRow:
+    """One record of a version, as the page shows it: its key, its change, its cells and its JSON."""
+
+    key: str
+    op: str
+    cells: tuple[tuple[str, str], ...]  # (text shown, whole text) per column
+    json: str
+
+
+def _cell(value: Any) -> tuple[str, str]:
+    whole = "" if value is None else value if isinstance(value, str) else json.dumps(value, default=str)
+    return (whole if len(whole) <= _CELL_CHARS else whole[: _CELL_CHARS - 1] + "…"), whole
+
+
+def _record_rows(records: list[dict[str, Any]], key: tuple[str, ...]) -> tuple[list[str], list[RecordRow]]:
+    """The columns, the dataset's key first and then each field in the order it first appears, and the rows."""
+    columns = [k for k in key if any(k in r for r in records)]
+    for record in records:
+        columns.extend(c for c in record if c not in columns and c not in _HIDDEN_COLUMNS)
+    rows = [
+        RecordRow(
+            str(r.get("_fc_key", "")),
+            str(r.get("_fc_op", "")),
+            tuple(_cell(r.get(c)) for c in columns),
+            json.dumps(
+                {k: v for k, v in r.items() if k not in _HIDDEN_COLUMNS},
+                indent=2,
+                default=str,
+                ensure_ascii=False,
+            ),
+        )
+        for r in records
+    ]
+    return columns, rows
+
+
+@router.get("/versions/{version_id}", response_class=HTMLResponse)
+def version_detail(
+    request: Request,
+    actor: CurrentActor,
+    version_id: str,
+    cursor: str = "",
+    limit: Annotated[int, Query(ge=1, le=_RECORDS_SHOWN)] = _RECORDS_SHOWN,
+) -> HTMLResponse:
+    """What a version holds: its facts, and its records a page at a time, as read from the spool."""
+    try:
+        raw = decode(cursor or None)
+        version, records, next_raw = reads(request).version_records(version_id, limit, raw)
+    except KeyError:
+        return _not_found(request, f"No version {version_id!r}.")
+    except (ApiProblem, ValueError):
+        return _bad_cursor(request)
+    try:
+        key = request.app.state.feather.runtime.dataset(version.dataset).key
+    except KeyError:
+        key = ()
+    columns, rows = _record_rows(records, (key,) if isinstance(key, str) else tuple(key))
+    return render(
+        request,
+        "version_detail.html",
+        title=f"Version of {version.dataset}",
+        actor=actor,
+        version=version,
+        columns=columns,
+        rows=rows,
+        next_cursor=encode(next_raw),
+        first_page=not cursor,
     )
 
 

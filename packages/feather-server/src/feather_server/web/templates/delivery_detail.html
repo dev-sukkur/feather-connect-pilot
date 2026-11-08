@@ -3,12 +3,12 @@
 {% set d = detail.delivery %}
 {% block content %}
 <h1>Delivery of {{ m.partition_label(d.dataset, d.partition) }} to {{ d.route }}</h1>
-<p>{% if run %}<a href="/runs/{{ run | urlencode }}">&larr; The run</a> &middot; {% endif %}<a href="/routes/{{ d.route | urlencode }}/deliveries?partition={{ d.partition | urlencode }}">All deliveries of the partition</a></p>
+<p>{% if run %}<a href="/runs/{{ run | urlencode }}">&larr; The run</a> &middot; {% endif %}<a href="/routes/{{ d.route | urlencode }}/deliveries?partition={{ d.partition | urlencode }}">All deliveries of the partition</a> &middot; <a href="/versions/{{ d.version_id | urlencode }}">What was read</a> &middot; <a href="#h-responses">What the destination answered</a></p>
 
 <section aria-labelledby="h-facts">
   <h2 id="h-facts">Delivery</h2>
   <dl class="facts">
-    <dt>Version</dt><dd><code>{{ d.version_id }}</code></dd>
+    <dt>Version</dt><dd><a href="/versions/{{ d.version_id | urlencode }}"><code>{{ d.version_id }}</code></a></dd>
     <dt>Status</dt><dd>{{ m.status_badge(d.status) }}</dd>
     <dt>Records</dt><dd>{{ d.rows_applied }} applied &middot; {{ d.rows_rejected }} rejected</dd>
     <dt>Attempts</dt><dd>{{ d.attempts }}</dd>
