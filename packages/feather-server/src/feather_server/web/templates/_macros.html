@@ -3,7 +3,7 @@
 {% macro status_badge(status) -%}
   {%- set known = {
     "succeeded": ("✓", "Succeeded", "ok"), "applied": ("✓", "Applied", "ok"), "alive": ("●", "Alive", "ok"),
-    "failed": ("✕", "Failed", "bad"), "dead": ("✕", "Dead", "bad"),
+    "failed": ("✕", "Failed", "bad"), "dead": ("✕", "Dead", "bad"), "rejected": ("✕", "Rejected", "bad"),
     "running": ("▶", "Running", "info"), "claimed": ("▶", "Applying", "info"), "draining": ("◐", "Draining", "warn"),
     "queued": ("…", "Queued", "idle"), "pending": ("…", "Pending", "idle"),
     "held": ("⏸", "Held", "warn"), "paused": ("⏸", "Paused", "warn"), "open": ("!", "Open", "warn"),

@@ -20,6 +20,7 @@ from feather_connect.storage.port import DeliveryStatus, delivery_cursor
 from feather_server.api.errors import ApiProblem, translate
 from feather_server.api.paging import check_limit, decode, page
 from feather_server.auth import Actor, CurrentActor, require_csrf
+from feather_server.services import task_records as records
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.previews import Preview
 from feather_server.services.reads import Reads
@@ -253,6 +254,37 @@ def run_tasks(
 ) -> JSONResponse:
     detail = call(lambda: reads.run_detail(run_id, decode(cursor), check_limit(limit)))
     return ok(page(detail.tasks, detail.next_task))
+
+
+@router.get("/runs/{run_id}/tasks/{task_id}/records")
+def task_records(
+    run_id: str,
+    task_id: str,
+    request: Request,
+    _: CurrentActor,
+    limit: Annotated[int, Query(description="Records on a page, from 1 to 500.")] = records.PAGE,
+    cursor: Cursor = None,
+    q: Annotated[str, Query(description="Only the keys that start with this.")] = "",
+) -> JSONResponse:
+    """The records of an extract task's versions, or of an apply task's version with what its route made of each, a
+    page at a time by key. `not_indexed` says the version was sealed before records were indexed."""
+    raw = decode(cursor)
+
+    def read() -> dict[str, Any]:
+        try:
+            found = records.TaskRecordReader(request.app.state.feather).read(
+                run_id, task_id, raw, q, check_limit(limit)
+            )
+        except ValueError:
+            raise ApiProblem(
+                422, "Unprocessable Content", "this cursor is not one this server handed out"
+            ) from None
+        return {
+            **records.as_json(found),
+            **page([records.item_json(r) for r in found.records], found.next_cursor),
+        }
+
+    return ok(call(read))
 
 
 @router.get("/tasks/{task_id}/logs")

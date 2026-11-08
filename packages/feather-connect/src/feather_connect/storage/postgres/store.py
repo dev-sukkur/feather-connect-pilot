@@ -389,6 +389,15 @@ class _Runs(RunJournal):
             ).fetchall()
         return [_task(r) for r in rows]
 
+    def get_task(self, task_id: str) -> TaskRow:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                "select * from feather.task where tenant_id = %s and task_id = %s", (self._db.tenant, task_id)
+            ).fetchone()
+        if row is None:
+            raise KeyError(task_id)
+        return _task(row)
+
     def task_by_ref(self, run_id: str, ref: str) -> TaskRow | None:
         with self._db.tx() as conn:
             row = conn.execute(
@@ -688,6 +697,67 @@ class _Versions(VersionStore):
                 return found
             before = rows[-1]["seal_seq"]
 
+    def keys_page(
+        self,
+        dataset: str,
+        version_ids: Sequence[str],
+        *,
+        after: tuple[str, str] | None = None,
+        prefix: str | None = None,
+        limit: int = 50,
+    ) -> list[KeySighting]:
+        if not version_ids:
+            return []
+        start_key, start_version = after or ("", "")
+        # Each version's keys from where the page starts, `limit` at most, by the (version, key) index: a page reads a
+        # bounded slice of a version however many keys it holds.
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select r.*, v.run_id, v.seal_seq, v.sealed_at
+                   from unnest(%(versions)s::text[]) as wanted(version_id)
+                   cross join lateral (
+                       select k.* from feather.record_key k
+                       where k.tenant_id = %(tenant)s and k.version_id = wanted.version_id
+                         and k.dataset = %(dataset)s
+                         and (k.key collate "C" > %(key)s
+                              or (k.key collate "C" = %(key)s and k.version_id collate "C" > %(version)s))
+                         and (%(prefix)s::text is null
+                              or (k.key collate "C" >= %(prefix)s and k.key collate "C" < %(upper)s))
+                       order by k.key collate "C"
+                       limit %(limit)s
+                   ) r
+                   join feather.version v on v.tenant_id = r.tenant_id and v.version_id = r.version_id
+                   order by r.key collate "C", r.version_id collate "C"
+                   limit %(limit)s""",
+                {
+                    "versions": list(version_ids),
+                    "tenant": self._db.tenant,
+                    "dataset": dataset,
+                    "key": start_key,
+                    "version": start_version,
+                    "prefix": prefix or None,
+                    "upper": (prefix or "") + "\U0010ffff",
+                    "limit": limit,
+                },
+            ).fetchall()
+        return [_sighting(r) for r in rows]
+
+    def earlier_sightings(
+        self, dataset: str, keys: Sequence[str], before_seal_seq: int
+    ) -> dict[str, KeySighting]:
+        if not keys:
+            return {}
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select distinct on (k.key) k.*, v.run_id, v.seal_seq, v.sealed_at
+                   from feather.record_key k
+                   join feather.version v on v.tenant_id = k.tenant_id and v.version_id = k.version_id
+                   where k.tenant_id = %s and k.dataset = %s and k.key = any(%s) and v.seal_seq < %s
+                   order by k.key, v.seal_seq desc""",
+                (self._db.tenant, dataset, list(keys), before_seal_seq),
+            ).fetchall()
+        return {r["key"]: _sighting(r) for r in rows}
+
     def key_history(self, dataset: str, key: str, limit: int = 100) -> list[KeySighting]:
         with self._db.tx() as conn:
             rows = conn.execute(
@@ -699,21 +769,7 @@ class _Versions(VersionStore):
                    ) newest order by seal_seq""",
                 (self._db.tenant, dataset, key, limit),
             ).fetchall()
-        return [
-            KeySighting(
-                r["version_id"],
-                r["dataset"],
-                r["partition"],
-                r["key"],
-                r["op"],
-                from_signed(r["row_hash"]),
-                r["chunk_no"],
-                r["run_id"],
-                r["seal_seq"],
-                r["sealed_at"],
-            )
-            for r in rows
-        ]
+        return [_sighting(r) for r in rows]
 
     def last_sealed_at(self, dataset: str) -> datetime | None:
         with self._db.tx() as conn:
@@ -1268,6 +1324,32 @@ class _Quarantine(QuarantineStore):
             ).fetchall()
         return [_quarantine_row(r) for r in rows]
 
+    def of_versions(
+        self,
+        version_ids: Sequence[str],
+        route: str | None,
+        keys: Sequence[str] | None = None,
+        limit: int = 100,
+    ) -> list[QuarantineRow]:
+        if not version_ids or (keys is not None and not keys):
+            return []
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.quarantine
+                   where tenant_id = %s and version_id = any(%s) and route is not distinct from %s
+                     and (%s::text[] is null or key = any(%s::text[]))
+                   order by quarantine_id limit %s""",
+                (
+                    self._db.tenant,
+                    list(version_ids),
+                    route,
+                    None if keys is None else list(keys),
+                    None if keys is None else list(keys),
+                    limit,
+                ),
+            ).fetchall()
+        return [_quarantine_row(r) for r in rows]
+
     def of_key(self, dataset: str, key: str, version_ids: Sequence[str]) -> list[QuarantineRow]:
         with self._db.tx() as conn:
             rows = conn.execute(
@@ -1278,6 +1360,21 @@ class _Quarantine(QuarantineStore):
                 (self._db.tenant, key, list(version_ids), dataset),
             ).fetchall()
         return [_quarantine_row(r) for r in rows]
+
+
+def _sighting(r: Row) -> KeySighting:
+    return KeySighting(
+        r["version_id"],
+        r["dataset"],
+        r["partition"],
+        r["key"],
+        r["op"],
+        from_signed(r["row_hash"]),
+        r["chunk_no"],
+        r["run_id"],
+        r["seal_seq"],
+        r["sealed_at"],
+    )
 
 
 def _quarantine_row(r: Row) -> QuarantineRow:
@@ -1366,6 +1463,18 @@ class _Responses(ResponseStore):
                 (self._db.tenant, route, version_id, limit),
             ).fetchall()
         return [_response(r) for r in rows]
+
+    def for_keys(self, route: str, version_id: str, keys: Sequence[str]) -> dict[str, ResponseRow]:
+        if not keys:
+            return {}
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select distinct on (key) * from feather.delivery_response
+                   where tenant_id = %s and route = %s and version_id = %s and key = any(%s)
+                   order by key, chunk_no desc""",
+                (self._db.tenant, route, version_id, list(keys)),
+            ).fetchall()
+        return {r["key"]: _response(r) for r in rows}
 
     def find(self, route: str, version_id: str, key: str) -> ResponseRow | None:
         with self._db.tx() as conn:

@@ -49,6 +49,16 @@ class Site:
             return []
         return [json.loads(line) for line in self.capture.read_text(encoding="utf-8").splitlines() if line]
 
+    def records_path(self, kind: str, route: str | None = None) -> str:
+        """The Records of the first day's extract task, or of its apply task to `route`, in the first run."""
+        version = self.stack.store.versions.get(self.deliveries("lake")[0].version_id)
+        task = next(
+            t
+            for t in self.stack.store.runs.list_tasks(version.run_id)
+            if t.kind == kind and t.partition == version.partition and (route is None or t.route == route)
+        )
+        return f"/runs/{version.run_id}/tasks/{task.task_id}/records"
+
     def write_rows(self, per_day: dict[str, int]) -> None:
         write_rows(self.fixture, per_day)
 
