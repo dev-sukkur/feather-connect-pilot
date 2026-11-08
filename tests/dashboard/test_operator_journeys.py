@@ -104,7 +104,9 @@ def test_keyboard_only_retry(signed_in_fresh: Page, fresh_site: Site):
 
 
 @pytest.mark.parametrize("path", READ_ONLY)
-def test_pages_fit_a_phone_without_scrolling_sideways(signed_in: Page, site: Site, path: str):  # Stage 2 minor
+def test_pages_fit_a_phone_without_scrolling_sideways(
+    signed_in: Page, site: Site, path: str
+):  # Stage 2 minor
     signed_in.set_viewport_size({"width": 360, "height": 740})
     signed_in.goto(f"{site.url}{path}")
     nav = signed_in.locator("nav").first

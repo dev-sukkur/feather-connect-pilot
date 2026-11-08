@@ -279,7 +279,9 @@ def test_an_unreachable_database_url_is_explained_without_a_traceback(monkeypatc
     (project / "feather.yaml").write_text("name: plain\nmodules: []\n")
     (project / "env").mkdir()
     (project / "env" / "dev.yaml").write_text("{}\n")
-    r = CliRunner().invoke(app, ["dev", "--no-browser", "--port", str(free_port()), "--project", str(project)])
+    r = CliRunner().invoke(
+        app, ["dev", "--no-browser", "--port", str(free_port()), "--project", str(project)]
+    )
     assert r.exit_code != 0
     assert "FEATHER_DATABASE_URL" in r.stderr and "Traceback" not in r.stderr + r.stdout
 

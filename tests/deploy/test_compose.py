@@ -107,12 +107,16 @@ def compose() -> Iterator[Stack]:
     try:  # a failed start must not leave the volume, with this run's password, to the next run
         stack.compose("up", "-d", "--wait", "postgres", check=False)
         started = stack.compose("up", "-d", check=False)
-        assert started.returncode == 0, started.stdout + started.stderr + stack.compose("logs", check=False).stdout
+        assert started.returncode == 0, (
+            started.stdout + started.stderr + stack.compose("logs", check=False).stdout
+        )
         stack.wait_ready()
         yield stack
     finally:
         stack.compose("down", "--volumes", "--remove-orphans", check=False)
-        if os.environ.get("FEATHER_COMPOSE_KEEP_IMAGES") != "1":  # the images are 700 MB each; this run built them
+        if (
+            os.environ.get("FEATHER_COMPOSE_KEEP_IMAGES") != "1"
+        ):  # the images are 700 MB each; this run built them
             subprocess.run(["docker", "image", "rm", *IMAGES], capture_output=True, check=False)
 
 
