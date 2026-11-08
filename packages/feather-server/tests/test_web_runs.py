@@ -274,3 +274,34 @@ def test_a_run_page_says_how_many_versions_it_shows_and_lists_failed_deliveries_
     assert "newest 2 of 4 versions" in page
     assert "table is locked" in page
     assert page.index("table is locked") < page.index("Applied")
+
+
+def test_a_run_that_read_nothing_new_says_why_it_delivered_nothing(client: TestClient, world: World) -> None:
+    first = world.run([day(18)])
+    assert "Nothing new or changed was read" not in client.get(f"/runs/{first}").text
+    runs = world.store.runs  # a run whose read found nothing new: it seals no version, so no apply follows
+    again = runs.create_run("orders", "every", "system", {}, status="running")
+    runs.finish_task(runs.start_task(again, "extract", f"extract:{again}"), "succeeded")
+    runs.set_run_status(again, "succeeded")
+    assert world.reads.run_detail(again).versions_total == 0
+    page = client.get(f"/runs/{again}").text
+    assert "Deliveries and attempts" in page
+    assert "Nothing new or changed was read, so no version was made and nothing was delivered." in page
+    assert 'href="/quarantine"' in page
+
+
+def test_a_skipped_or_unfinished_run_has_no_nothing_changed_note(client: TestClient, world: World) -> None:
+    skipped = world.store.runs.create_run("orders", "every", "system", {}, status="skipped", reason="paused")
+    queued = world.state.runtime.start_run("orders", partitions=[day(18)])  # not run yet
+    for run_id in (skipped, queued):
+        assert "Nothing new or changed" not in client.get(f"/runs/{run_id}").text
+
+
+def test_a_stream_run_whose_ticks_read_nothing_new_says_so(client: TestClient, world: World) -> None:
+    empty = _stream_run(world)
+    assert "No tick has read" not in client.get(f"/runs/{empty}").text  # no tick yet
+    run_id = _stream_run(world, 3)
+    assert (
+        "No tick has read a new or changed record yet, so nothing has been delivered."
+        in client.get(f"/runs/{run_id}").text
+    )
