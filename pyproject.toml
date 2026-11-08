@@ -24,6 +24,8 @@ dev = [
     "httpx",
     "respx",
     "moto[server]",
+    "pytest-playwright>=0.10.0",
+    "axe-playwright-python>=0.1.8",
 ]
 
 [tool.ruff]

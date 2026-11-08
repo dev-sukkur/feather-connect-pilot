@@ -124,7 +124,33 @@ jobs:
       - if: steps.changes.outputs.run == 'true'
         run: uv sync --all-extras
       - if: steps.changes.outputs.run == 'true'
-        run: uv run pytest tests/chaos tests/perf tests/e2e/test_webhook_latency.py -s
+        run: uv run pytest tests/chaos tests/perf tests/hard_cases tests/e2e/test_webhook_latency.py tests/e2e/test_webhook_to_http_latency.py -s
+
+  # The dashboard in Chromium: the operator journeys and axe's WCAG 2.1 AA checks, on the stack and the test Postgres.
+  dashboard:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: feather
+          POSTGRES_PASSWORD: feather
+          POSTGRES_DB: feather_test
+        ports:
+          - 25433:5432
+        options: >-
+          --health-cmd "pg_isready -U feather -d feather_test"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      FEATHER_TEST_DATABASE_URL: postgresql://feather:feather@127.0.0.1:25433/feather_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uv sync --all-extras
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run pytest tests/dashboard -q
 
   # The images and the Compose stack: built for linux/amd64 and checked by tests/deploy, every night and on a pull
   # request that touches deploy/ or the packages the images hold. Images are built here, never pushed.

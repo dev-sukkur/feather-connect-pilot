@@ -1,0 +1,9 @@
+# The dashboard tests' project: a day-partitioned simulation of items, delivered to a lake that keeps what it gets and
+# to a flaky route that turns down each version once, so that a failure can be retried.
+name: dashboard
+modules: [flows.demo]
+settings: {timezone: UTC}
+connections:
+  shop: {connector: simulation.source}
+  lake: {connector: simulation.sink}
+  flaky: {connector: simulation.sink}
