@@ -324,3 +324,35 @@ def test_append_adds_the_columns_the_runtime_stamps_an_append_record_with(target
         "select id, v, _fc_version, _fc_run, _fc_extracted_at is not null from log"
     ).fetchall()
     assert found == [("a", 1, "v1", "r1", True)]
+
+
+@pytest.mark.postgres
+def test_first_applies_at_the_same_time_to_a_new_schema_all_succeed(target, make_ctx):  # hard case H1
+    import threading
+
+    errors: list[BaseException] = []
+    for attempt in range(5):  # each round a schema of its own, with no _feather_applied yet
+        schema = f"race{attempt}"
+        target.execute(sql.SQL("create schema {}").format(sql.Identifier(schema)))
+        for n in range(6):
+            target.execute(
+                sql.SQL("create table {}.{} (id text primary key)").format(
+                    sql.Identifier(schema), sql.Identifier(f"t{n}")
+                )
+            )
+        gate = threading.Barrier(6)
+
+        def apply(n: int, schema: str = schema, gate: threading.Barrier = gate) -> None:
+            sink = postgres.Table("wh", table=f"t{n}", key_columns=["id"])
+            gate.wait()
+            try:
+                sink.apply(make_ctx(schema=schema), batch([up("a", id="a")], version=f"v{n}"))
+            except BaseException as error:  # noqa: BLE001 - collected for the assertion
+                errors.append(error)
+
+        threads = [threading.Thread(target=apply, args=(n,)) for n in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+    assert errors == []

@@ -285,6 +285,9 @@ class Table(_Postgres, connector.Sink):
     def _prepare(self, conn: psycopg.Connection[Any], schema: str, *, append: bool = False) -> dict[str, str]:
         """Make sure of `_feather_applied` and the table's `_fc_*` columns, and return the table's columns by name."""
         with conn.transaction():
+            # `create table if not exists` and `add column if not exists` race with themselves: two first applies at
+            # once both try, and one fails on pg_type's unique index. One at a time per schema, for this transaction.
+            conn.execute("select pg_advisory_xact_lock(hashtext(%s))", (f"feather.prepare:{schema}",))
             conn.execute(
                 sql.SQL(
                     "create table if not exists {} (idempotency_key text primary key, applied int not null, "
