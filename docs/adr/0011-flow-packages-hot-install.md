@@ -1,0 +1,45 @@
+# ADR-0011: Flows ship as packages, installed and activated in a running environment
+
+- **Status:** Proposed. The sponsor answered four of its five questions on 2026-11-08: bring it forward, use a registry, let runs finish, and use the package prefix
+- **Date:** 2026-11-08
+- **Deciders:** Abdul Sukkur (sponsor)
+
+## Context
+
+In M1 an environment runs one project, which the server and every worker load when they start. Adding, changing or removing a flow means restarting all of them, all flows ship together, and a flow can be paused but not taken out of service. Customers want to release flows from their own repositories, separately from Feather Connect, into a running environment, and switch each flow on and off.
+
+## Decision
+
+- **A flow package** is the unit of release: a Python wheel holding the M1 project layout, a manifest and locked dependencies, built by `feather package build` in the customer's own repository.
+- **Packages come from registries.** Any Python package index the environment trusts works, or a registry built into `feather-server`.
+- **Install** stores the package in Postgres after checks (integrity, compatibility, and a load check in a throwaway process). Installed flows start inactive. Every flow, dataset and route name carries the package prefix (`acme-invoices/invoices`).
+- **Each flow is activated and deactivated per environment**, from the dashboard, CLI or API, with an audit row. Activating another version switches it, and the old version drains. Deactivating lets running runs finish.
+- **Workers become supervisors.** They run one child process, a package host, per active package version, in that package's own virtual environment. Hosts start and stop on activation changes, so no container restarts.
+- **The server works from flow specs** in the catalogue and stops importing flow code.
+- Shared connections and budgets live at environment level. The M1 single-project mode stays available.
+
+Details: [the flow packages design](../02-design/2026-11-08-flow-packages.md).
+
+## Consequences
+
+**Benefits:**
+
+- New and changed flows go live with no restart.
+- Each package is versioned, released, rolled back and owned on its own.
+- Dependency conflicts and crashes stay inside one package.
+- Promotion from qa to prod uses the same tested wheel, matched by sha256.
+
+**Costs:**
+
+- About 60–90 MB of memory per active package version on each worker replica.
+- More moving parts: the supervisor, environment builds, registries, and six new tables.
+- Package code runs unsandboxed in the worker container, so installing needs the admin role. Two roles, admin and operator, are pulled forward from M2's RBAC.
+- A package can't bring its own webhook source connector at first.
+
+## Alternatives considered
+
+- **Restart on change (M1).** Simple, but every change restarts everything, and flows can't be released or switched off on their own.
+- **Reload modules inside one worker process.** Python can't reliably unload code, and two packages can need different versions of one library, so changes would leak and conflict.
+- **Pip-install flow packages into the worker image as entry points.** This keeps packages separate, but still needs a restart and puts every package in one dependency set.
+- **A container per package, through the Docker or Kubernetes API.** This gives strong isolation, but needs orchestrator access and much more setup. Package hosts can move to containers later without changing the package format.
+- **A custom archive format of our own.** It would need its own upload and storage, and couldn't use the registries and the dependency resolution that Python already has.
