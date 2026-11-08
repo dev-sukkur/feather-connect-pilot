@@ -23,7 +23,7 @@ If this page and one of those disagree, the source wins. Fix this page.
 | Milestone | Status | Scope in one line | Exit criteria |
 |---|---|---|---|
 | **M1: MVP, the core loop** | **Done**, 8 Nov 2026 (PR 8) | SDK, durable runtime on Postgres, JSON API and HTML dashboard, CLI and `feather dev`, generic connectors and templates, Compose | All met (§3.3) |
-| **M1.1: brought forward** | **Next.** Record trace done; readiness designed; flow packages design accepted | Everything brought forward from later milestones: record trace, readiness (`on_ready`), and flow packages installed and activated with no restart | §4 |
+| **M1.1: brought forward** | **Next.** Record trace done; flow packages next (design accepted), then readiness (designed) | Everything brought forward from later milestones: record trace, readiness (`on_ready`), and flow packages installed and activated with no restart | §4 |
 | **M2: business connectors and operations** | Not started | SAP, Zakya and Magento connectors with retail templates; on-prem agent; side effects and approvals; RBAC; MCP; alerts | §5 |
 | **M3: enterprise and v1.0** | Not started | Multi-tenancy, environment fleet view, SSO, vaults, Postgres CDC, hardening, the v1.0.0 release | §6 |
 | **After v1.0** | Not scheduled | Helm, Kafka, more connectors, marketplace, lineage, in-dashboard AI | §7 |
@@ -87,21 +87,9 @@ M1.1 holds everything brought forward from M2 or later, after M1 closed (sponsor
 | **Readiness** (`fc.ready`, `fc.on_ready`) | M2 (FR-B7, FR-D3) | Designed, awaiting review (ADR-0012 proposed) | [Readiness design](02-design/2026-11-08-readiness.md) |
 | **Flow packages**, with the `admin` and `operator` roles | M2 (promotion, part of RBAC) | Design accepted (ADR-0011) | [Flow packages design](02-design/2026-11-08-flow-packages.md) |
 
-Proposed order: readiness first, then flow packages (readiness design §12).
+Order (sponsor, 8 Nov 2026): **flow packages first, then readiness.**
 
-### 4.1 Readiness
-
-**Scope:**
-- Readiness marks written in the seal and apply transactions: how far each dataset partition is complete, and how far each route has applied it.
-- `fc.ready(datasets, delivered_to=…, by=…)` and the trigger `fc.on_ready(ready, each="run" | "hour" | "day", at_most_every=…, on_late=…)`.
-- Exactly one run per (flow, set, period, scope); late data reruns, warns or is ignored, per flow.
-- A Readiness page, lines on the flow and run pages, *Fire now* and *Close partition*, the CLI and the JSON API.
-
-**Plan:** tasks 1–10 in [design §10](02-design/2026-11-08-readiness.md#10-plan).
-
-**Exit criteria:** the Zakya chain runs with SAP and the warehouse starting only after an ingest run is in staging; a store-day posting waits for all three of its datasets, store by store; H13 passes, and new hard cases H16 (leader killed while firing) and H17 (late data reruns once) pass.
-
-### 4.2 Flow packages
+### 4.1 Flow packages
 
 **Scope:**
 - A flow package is a Python wheel built with `feather package build` in the customer's own repository.
@@ -116,6 +104,18 @@ Proposed order: readiness first, then flow packages (readiness design §12).
 **Plan:** tasks 0–12 in [design §14](02-design/2026-11-08-flow-packages.md#14-plan).
 
 **Exit criteria:** in a running Compose environment, with no container restarted, a customer installs a package built in another repository, activates a flow and sees it run; upgrades it, rolls it back and deactivates it; and another package keeps running throughout, with no run lost or doubled.
+
+### 4.2 Readiness
+
+**Scope:**
+- Readiness marks written in the seal and apply transactions: how far each dataset partition is complete, and how far each route has applied it.
+- `fc.ready(datasets, delivered_to=…, by=…)` and the trigger `fc.on_ready(ready, each="run" | "hour" | "day", at_most_every=…, on_late=…)`.
+- Exactly one run per (flow, set, period, scope); late data reruns, warns or is ignored, per flow.
+- A Readiness page, lines on the flow and run pages, *Fire now* and *Close partition*, the CLI and the JSON API.
+
+**Plan:** tasks 1–10 in [design §10](02-design/2026-11-08-readiness.md#10-plan).
+
+**Exit criteria:** the Zakya chain runs with SAP and the warehouse starting only after an ingest run is in staging; a store-day posting waits for all three of its datasets, store by store; H13 passes, and new hard cases H16 (leader killed while firing) and H17 (late data reruns once) pass.
 
 ## 5. M2: business connectors and operations (~8 weeks)
 

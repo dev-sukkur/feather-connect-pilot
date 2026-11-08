@@ -1,6 +1,6 @@
 # ADR-0012: Flows can start when the data they need is complete
 
-- **Status:** Proposed
+- **Status:** Proposed. The sponsor answered its three questions on 2026-11-08: flow packages first, `on_late="rerun"` by default, and a skipped version counts as delivered
 - **Date:** 2026-11-08
 - **Deciders:** OSS Dev1 (sponsor)
 

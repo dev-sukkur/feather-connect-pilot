@@ -1,6 +1,7 @@
 # Readiness: run a flow when the data it needs is complete
 
 - **Status:** Proposed, for the sponsor's review
+- **Sponsor's answers (8 Nov 2026):** flow packages come first in M1.1, then readiness; `on_late="rerun"` is the default; a skipped version counts as delivered
 - **Date:** 2026-11-08
 - **Decision record:** [ADR-0012](../adr/0012-readiness-triggers.md)
 - **Milestone:** M1.1, brought forward from M2 together with flow packages ([milestones](../milestones-and-scope.md))
@@ -149,7 +150,7 @@ All carry `tenant_id`, like every other table. The migration fills `readiness_ma
 
 ### 7.3 Flow packages
 
-Readiness names datasets and routes, so with flow packages (M1.1) it uses their package-prefixed names (`acme-invoices/invoices`). A package may wait for a dataset of another package. Activation checks that the upstream package is installed and active; if it is later deactivated, the waiting flow shows *upstream inactive* and doesn't fire.
+Flow packages are built first (§12), so readiness names datasets and routes by their package-prefixed names (`acme-invoices/invoices`). A package may wait for a dataset of another package. Activation checks that the upstream package is installed and active; if it is later deactivated, the waiting flow shows *upstream inactive* and doesn't fire.
 
 ## 8. Dashboard, CLI and API
 
@@ -189,10 +190,10 @@ Readiness names datasets and routes, so with flow packages (M1.1) it uses their 
 - **New hard case H16:** the leader is killed while firing; exactly one run per firing.
 - **New hard case H17:** a late version arrives for a fired period; with `on_late="rerun"` exactly one rerun starts, and it holds the late version.
 
-## 12. Questions for the sponsor
+## 12. Decisions
 
-| # | Question | Proposal |
+| # | Question | Decision (8 Nov 2026) |
 |---|---|---|
-| 1 | Which comes first in M1.1: readiness or flow packages? | **Readiness first.** It is smaller, it unblocks the Zakya → staging → SAP chain now, and it works the same before and after package names |
+| 1 | Which comes first in M1.1: readiness or flow packages? | **Flow packages first**, then readiness. Readiness is built on package-prefixed names from the start (§7.3) |
 | 2 | The default for `on_late` | `"rerun"`, so totals and postings stay right without anyone watching |
 | 3 | Does a route's skipped version count as delivered? | Yes, shown as skipped in the firing (§4.2) |
