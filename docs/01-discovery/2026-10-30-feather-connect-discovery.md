@@ -156,10 +156,10 @@ Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and op
 | ID | Requirement | Priority | Milestone |
 |---|---|---|---|
 | FR-C1 | Per-route record-level map and filter functions, and batch transforms over Arrow or Polars. | Must | M1 |
-| FR-C2 | SQL transforms over versions, using embedded DuckDB. | Should | M2 |
+| FR-C2 | SQL transforms over versions, using embedded DuckDB. | Should | M4 |
 | FR-C3 | Validation contracts (Pydantic or Arrow schema). Invalid records are quarantined with reasons while the rest of the version proceeds; this behaviour is configurable. | Must | M1 |
-| FR-C4 | Derived datasets whose source is a query over other datasets or the warehouse (for example, today's effective price), recomputed on a schedule. | Should | M2 |
-| FR-C5 | Cached reference lookups for enrichment. | Could | M2 |
+| FR-C4 | Derived datasets whose source is a query over other datasets or the warehouse (for example, today's effective price), recomputed on a schedule. | Should | M4 |
+| FR-C5 | Cached reference lookups for enrichment. | Could | M4 |
 
 ### D. Triggers and scheduling
 
@@ -169,7 +169,7 @@ Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and op
 | FR-D2 | Event triggers: webhook arrivals (M1) and database CDC (M4). | Must | M1 / M4 |
 | FR-D3 | Readiness triggers: run when a dataset group is complete through a period. | Should | M1.1 |
 | FR-D4 | Backfill plans over a partition range, with concurrency and budget limits, previewed before execution. | Must | M1 |
-| FR-D5 | Pause and resume per flow and per route. Connection availability windows (for example, ERP reads only 22:00–05:00). | Should | M1 pause/resume, M2 windows |
+| FR-D5 | Pause and resume per flow and per route. Connection availability windows (for example, ERP reads only 22:00–05:00). | Should | M1 pause/resume, M4 windows |
 
 ### E. Reliability
 
@@ -193,7 +193,7 @@ Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and op
 | FR-F4 | Runs and tasks: timeline, inputs, logs and attempts. | Must | M1 |
 | FR-F5 | Delivery ledger, and failures grouped by error. | Must | M1 |
 | FR-F6 | Record trace by business key across versions and routes; version diffs; masked samples. | Should | M1.1 trace; M2 diffs and masked samples |
-| FR-F7 | Freshness/SLA and volume-anomaly views. | Should | M2 |
+| FR-F7 | Freshness/SLA and volume-anomaly views. | Should | M4 |
 | FR-F8 | A fleet view across registered environments. | Should | M3 |
 | FR-F9 | Audit log view. | Must | M2 |
 
@@ -204,7 +204,7 @@ Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and op
 | FR-G1 | Run now, re-run partitions, backfill, cancel. | Must | M1 |
 | FR-G2 | Retry, skip, quarantine and replay deliveries, singly or in bulk, with an impact preview before execution. | Must | M1 |
 | FR-G3 | Approve or reject holds, with a reason. | Should | M2 |
-| FR-G4 | Runtime overrides of operational knobs (pause, budgets, concurrency, schedules, availability windows), each with a reason, an audit record and an optional expiry. Drift from git is shown. | Should | M2 |
+| FR-G4 | Runtime overrides of operational knobs (pause, budgets, concurrency, schedules, availability windows), each with a reason, an audit record and an optional expiry. Drift from git is shown. | Should | M4 |
 | FR-G5 | Test a connection. | Must | M1 |
 
 ### H. Environments
@@ -240,7 +240,7 @@ Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and op
 |---|---|---|---|
 | FR-K1 | Local users and API tokens (M1); OIDC single sign-on (M3). | Must | M1 / M3 |
 | FR-K2 | Role-based access (viewer, operator, developer, admin, plus approver and PII-reader grants), scoped by tenant and environment. | Must | M1.1 admin and operator; M2 the rest |
-| FR-K3 | Secrets are referenced, never stored. Environment variables and files are supported in M1; Vault and the AWS, Azure and GCP secret stores in M3. Secrets are never logged or displayed. | Must | M1 / M3 |
+| FR-K3 | Secrets are referenced, never stored. Environment variables and files are supported in M1; Vault and the AWS, Azure and GCP secret stores in M3. Secrets are never logged or displayed. | Must | M1 env and files; M4 vaults |
 | FR-K4 | An immutable audit record for every action by a human, an agent or the system. | Must | M2 |
 | FR-K5 | PII fields are tagged and masked in dashboard, CLI and MCP output. | Should | M2 |
 | FR-K6 | Webhook signature verification and replay protection. | Must | M1 |

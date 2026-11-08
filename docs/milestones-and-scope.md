@@ -25,8 +25,8 @@ If this page and one of those disagree, the source wins. Fix this page.
 | **M1: MVP, the core loop** | **Done**, 8 Nov 2026 (PR 8) | SDK, durable runtime on Postgres, JSON API and HTML dashboard, CLI and `feather dev`, generic connectors and templates, Compose | All met (§3.3) |
 | **M1.1: brought forward** | **In progress.** Record trace done; flow packages being built (task 0, roles); then readiness and the Zakya connector | Everything brought forward from later milestones: record trace, flow packages, readiness, and a full Zakya connector | §4 |
 | **M2: business connectors and operations** | Not started | SAP and Magento connectors with retail templates; on-prem agent; side effects and approvals; RBAC; alerts | §5 |
-| **M3: enterprise and v1.0** | Not started | Environment fleet view, SSO, vaults, hardening, the v1.0.0 release. Multi-tenancy stays light (ADR-0013) | §6 |
-| **M4: AI and integrations** | After v1.0 | MCP server and agent skills, Postgres CDC, Prometheus and OpenTelemetry export, the `objects` spool, `feather diff` | §7 |
+| **M3: enterprise and v1.0** | Not started | Environment fleet view, SSO, hardening, the v1.0.0 release. Multi-tenancy stays light (ADR-0013) | §6 |
+| **M4: AI and integrations** | After v1.0 | MCP server and agent skills, Postgres CDC, metrics export, the `objects` spool, `feather diff`, SQL transforms, overrides and windows, SLA views, vaults | §7 |
 | **M5: full multi-tenancy** | After M4 | Row-level security, per-tenant config and roles, quotas, worker pools; test environments as tenants | §8 |
 | **Later** | Not scheduled | Sandbox refresh, Helm, Kafka, more connectors, marketplace, lineage, in-dashboard AI | §9 |
 
@@ -132,8 +132,8 @@ Order (sponsor, 8 Nov 2026): **flow packages first, then readiness.** The Zakya 
 - **Connectors and templates:** SAP (OData, HANA read), Magento, and the retail templates. Zoho Zakya moved to M1.1. GoFrugal too if its API docs arrive in time, otherwise M3.
 - **On-prem:** the agent and its gateway.
 - **Side effects:** side-effect routes with compensate, approvals and holds.
-- **Data rules:** schema policy; derived datasets and SQL transforms; bootstrapping newly added routes from history.
-- **Operations:** budget priorities and a budgets page; overrides; RBAC (the two roles come earlier, in M1.1); audit; PII masking; version diff (record trace is in M1.1); SLAs and anomalies; alerts.
+- **Data rules:** schema policy; bootstrapping newly added routes from history. Derived datasets and SQL transforms moved to M4.
+- **Operations:** budget priorities and a budgets page; RBAC (the two roles come earlier, in M1.1); audit; PII masking; version diff (record trace is in M1.1); alerts. Overrides, availability windows and SLA and anomaly views moved to M4.
 - **Delivery:** promotion between environments comes with flow packages in M1.1 (`feather package promote`).
 
 **Exit criteria:**
@@ -145,7 +145,7 @@ Order (sponsor, 8 Nov 2026): **flow packages first, then readiness.** The Zakya 
 **Scope (design §19):**
 - **Tenancy:** light, by [ADR-0013](adr/0013-light-tenancy-and-non-prod-layout.md): the `tenant_id` foundation from M1 and the single `default` tenant. Full multi-tenancy is M5. Its eight rules apply to every change.
 - **Environments:** environment peers and the fleet view; protections for protected environments. A Compose layout for the test environments on one machine, a database each (ADR-0013, layout B).
-- **Integrations:** OIDC SSO; vault secret providers. Postgres CDC and Prometheus/OpenTelemetry export moved to M4.
+- **Integrations:** OIDC SSO. Vault secret providers, Postgres CDC and Prometheus/OpenTelemetry export moved to M4; v1 reads secrets from environment variables and files.
 - **Hardening:** chaos and performance suites with published results; a security review.
 - **Launch:** the docs site and the v1.0.0 release.
 
@@ -161,6 +161,8 @@ Moved out of v1 by the sponsor on 9 Nov 2026.
 - **Prometheus and OpenTelemetry export** (FR-M2). The dashboard keeps working without them.
 - **The `objects` spool backend** (S3-compatible, Azure Blob, GCS) for bulk extracts and long archives.
 - **`feather diff --from qa --to prod`.**
+- **Data rules:** derived datasets, SQL transforms on DuckDB and cached reference lookups (FR-C2, FR-C4, FR-C5).
+- **Operations:** runtime overrides and connection availability windows (FR-G4, FR-D5); freshness/SLA and volume-anomaly views (FR-F7); vault and cloud secret providers (FR-K3).
 
 **Exit criteria:** agent-driven recovery is shown in qa; a CDC dataset passes the hard cases that apply to push datasets; a 100-million-row extract runs on the `objects` spool.
 
