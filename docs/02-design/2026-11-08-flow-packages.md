@@ -89,7 +89,7 @@ Packages are installed **from a registry**. Any registry that speaks the Python 
 
 | Registry | Typical use |
 |---|---|
-| GitHub Packages, GitLab Package Registry, Azure Artifacts, AWS CodeArtifact, Google Artifact Registry, JFrog Artifactory, Sonatype Nexus | A customer's existing private registry |
+| GitLab Package Registry, Azure Artifacts, AWS CodeArtifact, Google Artifact Registry, JFrog Artifactory, Sonatype Nexus | A customer's existing private registry |
 | `devpi` or `pypiserver` | A small self-hosted registry |
 | A registry served by `feather-server` itself (`/registry/simple/`, stored in Postgres) | A customer with no registry; turned on with `FEATHER_REGISTRY=1` |
 
