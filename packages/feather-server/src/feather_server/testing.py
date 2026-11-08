@@ -7,6 +7,8 @@ reference that resolves to `SECRET` when the environment variable `WH_TOKEN` is 
 
 import re
 import sys
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
@@ -160,3 +162,113 @@ def sign_in(app: FastAPI, username: str = "op", role: Role = "operator") -> Test
     assert found
     browser.post("/login", data={"username": username, "password": PASSWORD, "csrf_token": found.group(1)})
     return browser
+
+
+# Package registries, for the tests of the built-in registry, `feather package` and `feather registry`.
+
+SAMPLE_PACKAGE = Path(__file__).resolve().parents[4] / "examples" / "packages" / "acme-invoices"
+
+
+def sample_wheel(out_dir: Path, version: str | None = None) -> Path:
+    """The sample flow package acme-invoices, built into `out_dir`, at `version` if given (from a copy of it)."""
+    from feather_connect.packages.build import build_package
+
+    root = SAMPLE_PACKAGE
+    if version is not None:
+        import shutil
+
+        root = out_dir / f"src-{version}"
+        shutil.copytree(SAMPLE_PACKAGE, root, ignore=shutil.ignore_patterns("dist", "__pycache__"))
+        for name in ("feather.yaml", "pyproject.toml"):
+            path = root / name
+            text = path.read_text(encoding="utf-8")
+            path.write_text(text.replace("1.0.0", version), encoding="utf-8")
+    return build_package(root, out_dir).path
+
+
+@contextmanager
+def serve(app: FastAPI) -> Iterator[str]:
+    """Run `app` under uvicorn on a free port of 127.0.0.1 in a thread, for tools that need a real server, such as
+    `uv publish`. Yields its base URL."""
+    import socket
+    import threading
+    import time
+
+    import uvicorn
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_config=None, lifespan="off"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 15
+    while not server.started:
+        if time.monotonic() > deadline:
+            raise RuntimeError("the test server did not start")
+        time.sleep(0.05)
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(10)
+
+
+@contextmanager
+def static_index(
+    files: Mapping[str, Mapping[str, bytes]], token: str, *, tamper: bool = False
+) -> Iterator[str]:
+    """A tiny PEP 503 index, as a company registry serves one, on a free port: `files` maps each project to its files'
+    names and bytes. Every request needs Basic credentials `__token__:<token>`. With `tamper`, each file's bytes differ
+    from the sha256 its page gives. Yields the index's URL, ending in /simple/."""
+    import base64
+    import hashlib
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    expected = "Basic " + base64.b64encode(f"__token__:{token}".encode()).decode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+        def _send(self, status: int, body: bytes, kind: str = "text/html") -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            if status == 401:
+                self.send_header("WWW-Authenticate", 'Basic realm="company"')
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            if self.headers.get("Authorization") != expected:
+                self._send(401, b"no")
+                return
+            parts = [p for p in self.path.split("/") if p]
+            if parts == ["simple"]:
+                links = "".join(f'<a href="{p}/">{p}</a>' for p in files)
+                self._send(200, f"<html><body>{links}</body></html>".encode())
+            elif len(parts) == 2 and parts[0] == "simple" and parts[1] in files:
+                links = "".join(
+                    f'<a href="/files/{name}#sha256={hashlib.sha256(data).hexdigest()}">{name}</a>'
+                    for name, data in files[parts[1]].items()
+                )
+                self._send(200, f"<html><body>{links}</body></html>".encode())
+            elif len(parts) == 2 and parts[0] == "files":
+                found = [d for f in files.values() for n, d in f.items() if n == parts[1]]
+                if not found:
+                    self._send(404, b"none")
+                else:
+                    self._send(200, found[0] + (b"x" if tamper else b""), "application/octet-stream")
+            else:
+                self._send(404, b"none")
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/simple/"
+    finally:
+        server.shutdown()
+        server.server_close()

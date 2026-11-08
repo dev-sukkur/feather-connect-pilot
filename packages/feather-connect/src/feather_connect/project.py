@@ -37,6 +37,7 @@ __all__ = [
     "Project",
     "ProjectError",
     "effective_config",
+    "is_secret_ref",
     "load_project",
     "resolve_secret",
     "validate_project",
@@ -123,6 +124,11 @@ class ConfigValue:
     path: str
     value: Any
     layer: str
+
+
+def is_secret_ref(value: object) -> bool:
+    """Whether `value` is written as a secret reference, `${secret:<provider>:<path>}`, rather than a value."""
+    return isinstance(value, str) and _SECRET.match(value) is not None
 
 
 def resolve_secret(ref: str, root: Path | None = None) -> str:

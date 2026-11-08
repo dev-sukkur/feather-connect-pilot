@@ -25,6 +25,7 @@ from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.previews import Preview
 from feather_server.services.reads import Reads
+from feather_server.services.registries import Registries
 from feather_server.services.trace import Tracer, as_json
 
 PREFIX = "/api/v1"
@@ -53,6 +54,13 @@ def _accounts(request: Request) -> Accounts:
 
 Do = Annotated[Actions, Depends(_actions)]
 Manage = Annotated[Accounts, Depends(_accounts)]
+
+
+def _registries(request: Request) -> Registries:
+    return request.app.state.registries
+
+
+Trusted = Annotated[Registries, Depends(_registries)]
 See = Annotated[Reads, Depends(_reads)]
 
 
@@ -620,6 +628,7 @@ class RoleBody(Reason):
 class NewToken(BaseModel):
     name: str
     role: str | None = None  # the caller's own when left out
+    scope: str = "all"  # or publish: it may only upload packages to the built-in registry
     ttl_days: int | None = Field(90, ge=1, le=3650)  # None: it never expires
 
 
@@ -658,10 +667,75 @@ def create_token(
     ttl = None if body.ttl_days is None else timedelta(days=body.ttl_days)
 
     def create() -> dict[str, Any]:
-        token = accounts.create_token(actor, body.name, ttl, body.role)
-        return {"name": body.name, "token": token, "ttl_days": body.ttl_days}
+        token = accounts.create_token(actor, body.name, ttl, body.role, scope=body.scope)
+        return {"name": body.name, "token": token, "ttl_days": body.ttl_days, "scope": body.scope}
 
     return _once(request, actor, key, create, 201)
+
+
+# Registries: the built-in one, `feather`, and the ones an admin adds (flow packages §4.3, §10).
+
+
+class NewRegistry(BaseModel):
+    name: str
+    index_url: str
+    token_ref: str | None = None  # a secret reference such as ${secret:env:ACME_REGISTRY_TOKEN}
+
+
+@router.get("/registries")
+def registries(trusted: Trusted, _: CurrentActor) -> JSONResponse:
+    return ok({"items": trusted.registries(), "next_cursor": None})
+
+
+@router.post("/registries", status_code=201)
+def add_registry(
+    request: Request, trusted: Trusted, actor: CurrentActor, body: NewRegistry, key: IdempotencyKey = None
+) -> JSONResponse:
+    return _once(
+        request, actor, key, lambda: trusted.add(actor, body.name, body.index_url, body.token_ref), 201
+    )
+
+
+@router.delete("/registries/{name}")
+def remove_registry(
+    name: str, request: Request, trusted: Trusted, actor: CurrentActor, key: IdempotencyKey = None
+) -> JSONResponse:
+    def remove() -> dict[str, Any]:
+        trusted.remove(actor, name)
+        return {"registry": name, "removed": True}
+
+    return _once(request, actor, key, remove)
+
+
+@router.post("/registries/{name}:test")
+def test_registry(name: str, trusted: Trusted, actor: CurrentActor) -> JSONResponse:
+    return ok(call(lambda: trusted.test(actor, name)))
+
+
+@router.get("/registries/{name}/packages")
+def search_packages(
+    name: str, trusted: Trusted, _: CurrentActor, q: Annotated[str, Query(max_length=200)] = ""
+) -> JSONResponse:
+    return ok({"items": call(lambda: trusted.search(name, q)), "next_cursor": None})
+
+
+@router.post("/registries/feather/packages/{package}/versions/{version}:yank")
+def yank_package(
+    package: str,
+    version: str,
+    request: Request,
+    trusted: Trusted,
+    actor: CurrentActor,
+    key: IdempotencyKey = None,
+    body: Reason | None = None,
+) -> JSONResponse:
+    reason = (body or Reason()).reason
+
+    def yank() -> dict[str, Any]:
+        trusted.yank(actor, package, version, reason=reason)
+        return {"package": package, "version": version, "yanked": True}
+
+    return _once(request, actor, key, yank)
 
 
 # Budgets, connections and the summary.

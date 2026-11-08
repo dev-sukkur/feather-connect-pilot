@@ -40,6 +40,8 @@ Capability = Literal[
     "packages.promote",
     "packages.uninstall",
     "registries.manage",
+    "packages.publish",  # upload to the built-in registry: an admin, or a token with the publish scope
+    "packages.yank",
 ]
 
 NEEDS: Mapping[Capability, Role] = {
@@ -65,14 +67,17 @@ NEEDS: Mapping[Capability, Role] = {
     "packages.promote": "admin",
     "packages.uninstall": "admin",
     "registries.manage": "admin",
+    "packages.publish": "admin",
+    "packages.yank": "admin",
 }
+PUBLISH_SCOPE: frozenset[Capability] = frozenset({"packages.publish"})  # all a publish-scoped token may do
 
 
 class Forbidden(PermissionError):
     """The actor's role doesn't allow the action. The API answers 403; a page says what role it needs."""
 
-    def __init__(self, capability: Capability, needed: Role) -> None:
-        super().__init__(f"{capability} needs the {needed} role")
+    def __init__(self, capability: Capability, needed: Role, why: str | None = None) -> None:
+        super().__init__(f"{capability}: {why}" if why else f"{capability} needs the {needed} role")
         self.capability, self.needed = capability, needed
 
 
@@ -87,16 +92,19 @@ def lower(one: Role, other: Role) -> Role:
 
 
 def can(actor: Actor, capability: Capability) -> bool:
+    if actor.scope == "publish":
+        return capability in PUBLISH_SCOPE
     return at_least(actor.role, NEEDS[capability])
 
 
 def require(actor: Actor, capability: Capability, audit: AuditStore, target: str | None = None) -> None:
     """Go on only if the actor may do `capability`; otherwise write an audit row of the refusal and raise
     `Forbidden`."""
-    needed = NEEDS[capability]
-    if at_least(actor.role, needed):
+    if can(actor, capability):
         return
-    audit.record(
-        actor.kind, actor.name, capability, target, {"role": actor.role}, f"refused: needs the {needed} role"
-    )
-    raise Forbidden(capability, needed)
+    needed = NEEDS[capability]
+    publish_only = actor.scope == "publish"
+    why = "a publish token may only publish packages" if publish_only else f"needs the {needed} role"
+    request = {"role": actor.role, **({"scope": actor.scope} if publish_only else {})}
+    audit.record(actor.kind, actor.name, capability, target, request, f"refused: {why}")
+    raise Forbidden(capability, needed, why if publish_only else None)

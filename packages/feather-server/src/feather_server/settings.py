@@ -35,6 +35,7 @@ class Settings:
     ingress_rate_per_s: float = 1000.0
     ingress_queue_max: int = 5000
     ingress_wait_s: float = 5.0
+    registry: bool = True  # the built-in package registry at /registry/; FEATHER_REGISTRY=0 turns it off
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
@@ -83,6 +84,9 @@ class Settings:
                 "FEATHER_INGRESS_MAX_BYTES, FEATHER_INGRESS_RATE_PER_S, FEATHER_INGRESS_QUEUE_MAX and "
                 "FEATHER_INGRESS_WAIT_S must be above zero"
             )
+        registry = environ.get("FEATHER_REGISTRY", "1").strip().lower()
+        if registry not in {"0", "1", "true", "false", "on", "off", "yes", "no"}:
+            raise SettingsError("FEATHER_REGISTRY is 1 to serve the built-in package registry, or 0 not to")
         return cls(
             env=environ.get("FEATHER_ENV", "dev"),
             database_url=need("FEATHER_DATABASE_URL"),
@@ -95,4 +99,5 @@ class Settings:
             ingress_rate_per_s=rate,
             ingress_queue_max=queue_max,
             ingress_wait_s=wait,
+            registry=registry in {"1", "true", "on", "yes"},
         )

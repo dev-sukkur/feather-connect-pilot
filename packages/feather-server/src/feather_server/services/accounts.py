@@ -12,7 +12,7 @@ from typing import Any
 
 from feather_connect.clock import Clock
 from feather_connect.logs import redact
-from feather_connect.storage.port import ROLES, Role, Store, UserRow
+from feather_connect.storage.port import ROLES, Role, Store, TokenScope, UserRow
 from feather_server.auth import MAX_PASSWORD, Actor, hash_password, issue_token
 from feather_server.services.access import Capability, at_least, require
 
@@ -38,6 +38,14 @@ def _role(value: str) -> Role:
         if value == role:
             return role
     raise ValueError(f"{value!r} is not a role: it is admin or operator")
+
+
+def _scope(value: str) -> TokenScope:
+    if value == "all":
+        return "all"
+    if value == "publish":
+        return "publish"
+    raise ValueError(f"{value!r} is not a token scope: it is all or publish")
 
 
 def _name(value: str, what: str) -> str:
@@ -131,11 +139,13 @@ class Accounts:
         role: str | None = None,
         *,
         user: str | None = None,
+        scope: str = "all",
     ) -> str:
         """Create a token and return it, shown this once. It belongs to `user`, or else to the person acting, and acts
         with no higher a role than theirs: without a `role`, it takes theirs. A token of the CLI's with no user is for
         automation, an operator unless told otherwise. Raises `KeyError` for an unknown user and `ValueError` for a
-        role higher than the user's."""
+        role higher than the user's. A token of the `publish` scope may only upload packages to the built-in registry,
+        typically one per customer CI pipeline."""
         owner = user if user is not None else actor.user
 
         def create() -> str:
@@ -148,13 +158,20 @@ class Accounts:
             if not at_least(ceiling, chosen):
                 whose = f"its user {owner}" if owner else "yours"
                 raise ValueError(f"a token can't have a higher role than {whose}, {ceiling}")
-            return issue_token(self._store, name, ttl, role=chosen, created_by=owner, clock=self._clock)
+            return issue_token(
+                self._store, name, ttl, role=chosen, created_by=owner, scope=_scope(scope), clock=self._clock
+            )
 
         return self._do(
             actor,
             "tokens.manage",
             "create_token",
             f"token:{name}",
-            {"role": role, "user": owner, "ttl_s": None if ttl is None else int(ttl.total_seconds())},
+            {
+                "role": role,
+                "user": owner,
+                "scope": scope,
+                "ttl_s": None if ttl is None else int(ttl.total_seconds()),
+            },
             create,
         )
