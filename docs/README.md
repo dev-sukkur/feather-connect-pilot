@@ -6,12 +6,14 @@ The project follows an SDLC flow. Each phase ends at a review gate, and the next
 |---|---|---|---|
 | 1. Discovery | [Discovery document](01-discovery/2026-10-30-feather-connect-discovery.md) | Draft v0.2, awaiting review | Sponsor approves goals, scope, requirements and decisions |
 | 2. Design | [Design specification](02-design/2026-10-30-feather-connect-design.md) | Draft v0.2, awaiting review | Sponsor approves the architecture |
-| — | [Architecture decision records](adr/README.md) | 9 accepted, 1 proposed | Each proposed ADR is accepted or replaced |
+| — | [Architecture decision records](adr/README.md) | 10 accepted, 1 proposed | Each proposed ADR is accepted or replaced |
 | 3. Spikes | [Spike results](03-spikes/README.md) | Engine chosen: DBOS (ADR-0003). Connector live probes still need access. | Engine chosen (ADR-0003); connector findings reviewed |
 | 4. Plan | [Implementation plan](04-plan/README.md) | Draft, awaiting review | Implementation plan approved |
-| 5. Build | Code: M1, M2, M3; [M1 exit report and review guide](06-release/m1-exit-report.md) | M1 built; exit gate to run | Milestone exit criteria (design §19) |
+| 5. Build | Code: M1, M2, M3; [M1 exit report and review guide](06-release/m1-exit-report.md) | M1 done (8 Nov 2026); flow packages next | Milestone exit criteria (design §19) |
 | 6. Test and release | `06-release/`: the M1 exit report so far | Started | Release checklist; go/no-go |
 | 7. Operate | `07-operate/` runbooks (to be written) | Not started | — |
+
+**Milestones, scope and IDs:** [milestones-and-scope.md](milestones-and-scope.md) says what each milestone includes, where its scope is defined, and what IDs such as S1, H4, F12 and FR-B2 mean.
 
 ## How to review
 
