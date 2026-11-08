@@ -1,4 +1,4 @@
-# S2 — Core model prototype on the hard cases (30 Oct 2026)
+# SP2 — Core model prototype on the hard cases (30 Oct 2026)
 
 **Question:** do dataset → record → partition → version → route ledger (ADR-0004) hold up on the hard cases, independent of the engine?
 
@@ -39,4 +39,4 @@ Update design §4.2 (a new invariant) and §4.3:
 - Concurrency between runs (the engine spike covers concurrency keys).
 - The side-effect `compensate` path, and approvals.
 - Schema evolution holds.
-- Large volumes (S4 measures those separately).
+- Large volumes (SP4 measures those separately).

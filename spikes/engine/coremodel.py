@@ -1,4 +1,4 @@
-"""S2: minimal prototype of the unified data model (ADR-0004) on Postgres. Throwaway.
+"""SP2: minimal prototype of the unified data model (ADR-0004) on Postgres. Throwaway.
 
 Engine-free on purpose: the question is whether dataset -> version -> route ledger survives
 the hard cases, independent of the engine.

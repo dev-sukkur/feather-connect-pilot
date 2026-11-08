@@ -17,7 +17,7 @@ Two of our earlier decisions change the weighting:
 - We build our own dashboard (ADR-0002), so DBOS's paid UI matters less.
 - Budgets and scheduling are ours (design §6.6, §6.7), so Hatchet's native rate limits matter less.
 
-The open questions were footprint, remote execution, durability under failure, and maturity. We implemented the `Engine` port and an adapter for each engine at spike quality, then ran one conformance suite against both ([S1 results](../03-spikes/s1-engine-results.md)).
+The open questions were footprint, remote execution, durability under failure, and maturity. We implemented the `Engine` port and an adapter for each engine at spike quality, then ran one conformance suite against both ([SP1 results](../03-spikes/s1-engine-results.md)).
 
 ## Decision
 

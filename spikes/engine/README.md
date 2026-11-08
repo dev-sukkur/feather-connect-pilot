@@ -43,8 +43,8 @@ The Hatchet adapter, its deployments and the stall probes are on the branch `sid
 | `spike/journal.py` | The `spike.exec_log` and `spike.effects` tables that every test asserts on |
 | `spike/worker.py` | The worker process entry point; tests start and kill it |
 | `tests/` | `test_t01_*.py` … `test_t13_*.py` |
-| `coremodel.py`, `tests_core/` | S2: the core-model prototype and its hard cases |
-| `spool_bench.py` | S4: the Postgres spool benchmark |
+| `coremodel.py`, `tests_core/` | SP2: the core-model prototype and its hard cases |
+| `spool_bench.py` | SP4: the Postgres spool benchmark |
 | `results/` | The raw facts behind the findings notes, for both engines. Worker logs stay out of git. |
 
 The Postgres credentials in `compose.yaml` are local-only throwaway values for this container.

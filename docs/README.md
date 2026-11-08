@@ -13,7 +13,7 @@ The project follows an SDLC flow. Each phase ends at a review gate, and the next
 | 6. Test and release | `06-release/`: the M1 exit report so far | Started | Release checklist; go/no-go |
 | 7. Operate | `07-operate/` runbooks (to be written) | Not started | — |
 
-**Milestones, scope and IDs:** [milestones-and-scope.md](milestones-and-scope.md) says what each milestone includes, where its scope is defined, and what IDs such as S1, H4, F12 and FR-B2 mean.
+**Milestones, scope and IDs:** [milestones-and-scope.md](milestones-and-scope.md) says what each milestone includes, where its scope is defined, and what IDs such as SP1, S5, H4, F12 and FR-B2 mean.
 
 ## How to review
 

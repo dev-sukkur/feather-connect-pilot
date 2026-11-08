@@ -1,6 +1,6 @@
 # Milestones, scope and IDs
 
-What each milestone includes, where its scope is defined, and what the short IDs in the docs, commits and reviews mean (S1, H4, F12, FR-B2 and so on).
+What each milestone includes, where its scope is defined, and what the short IDs in the docs, commits and reviews mean (SP1, S5, H4, F12, FR-B2 and so on).
 
 - **Date:** 2026-11-08
 - **Kept up to date:** when a milestone's scope or status changes, and at the end of each stage review.
@@ -132,8 +132,9 @@ From [discovery §5](01-discovery/2026-10-30-feather-connect-discovery.md#5-scop
 
 ## 8. What the IDs mean
 
-**Two prefixes mean two different things**, so read them with their context:
-- **S** is a *spike* (S1–S4) in design and spike docs, and a *Stage 3 review finding* (S1–S23) in commits, the plan README and the exit report.
+**Read these with their context:**
+- **SP** is a *spike* (SP1–SP4). Spikes were first numbered S1–S4 and were renamed on 8 Nov 2026, so an old commit, branch or note may still say "spike S2".
+- **S** is a *Stage 3 review finding* (S1–S23), in commits, the plan README and the exit report.
 - **M** is a *milestone* (M1–M3), and also a *Minor review finding* within one review ("Stage 2 M13", "Stage 4 M6"). The exit report writes Minor findings in lower case (m1–m4).
 
 | ID | Meaning | Defined in |
@@ -143,8 +144,8 @@ From [discovery §5](01-discovery/2026-10-30-feather-connect-discovery.md#5-scop
 | NFR-01 … NFR-15 | Non-functional requirements (performance, durability, footprint, security, accessibility and others) | Discovery §8 |
 | Q1–Q11 | Open questions for the sponsor | Discovery §15 |
 | D1–D8 | Open design questions | Design §20 |
-| H1–H15 | Hard cases: scenarios every milestone must pass (M1: H1–H4, H6, H14; M2: all) | Design §16; first run in spike S2 |
-| S1–S4 (spikes) | S1 engine (DBOS chosen), S2 core model, S3 connector research, S4 Postgres spool | [Spikes](03-spikes/README.md) |
+| H1–H15 | Hard cases: scenarios every milestone must pass (M1: H1–H4, H6, H14; M2: all) | Design §16; first run in spike SP2 |
+| SP1–SP4 | Spikes: SP1 engine (DBOS chosen), SP2 core model, SP3 connector research, SP4 Postgres spool | [Spikes](03-spikes/README.md) |
 | 1–6 (plans), `2.3` (tasks) | The six M1 plans; `2.3` is Plan 2, Task 3 | [Plan README](04-plan/README.md) |
 | Stage 1–5 | The order M1's tasks were built in | Plan README, *Build order* |
 | F1–F15 | Stage 2 review findings | §8.1 below |
@@ -232,4 +233,4 @@ The **rulings** are binding decisions for the build:
 
 ## 9. Numbering from now on
 
-To stop the clashes in §8, new review findings carry their review's name: `PKG-R1-I3` is the third Important finding of the first flow packages review. Milestones keep M1–M3, spikes keep S1–S4, and the IDs above stay as they are.
+To stop the clashes in §8, new review findings carry their review's name: `PKG-R1-I3` is the third Important finding of the first flow packages review. Milestones keep M1–M3, spikes use SP1, SP2 and so on, and the other IDs above stay as they are.

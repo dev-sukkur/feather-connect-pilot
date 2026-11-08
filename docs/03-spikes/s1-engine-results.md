@@ -1,4 +1,4 @@
-# S1 — Engine spike results: DBOS vs Hatchet (30 Oct 2026)
+# SP1 — Engine spike results: DBOS vs Hatchet (30 Oct 2026)
 
 Test spec: [s1-engine-spike.md](s1-engine-spike.md). Code and raw results: [`spikes/engine`](../../spikes/engine/README.md); facts are in `results/*.jsonl`. The Hatchet adapter, its deployments and the T14 probes are on the branch `side/hatchet-engine`.
 

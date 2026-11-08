@@ -1,4 +1,4 @@
-# S3 — Connector desk research (30 Oct 2026)
+# SP3 — Connector desk research (30 Oct 2026)
 
 **Scope:** public documentation only. Live probes need sandbox access (discovery Q2–Q4). Each finding links its source. Third-party claims are marked as such.
 

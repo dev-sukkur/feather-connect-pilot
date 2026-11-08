@@ -149,12 +149,12 @@ These hold for every flow. Tests in §16 check each one.
 - **No-op suppression.** Records whose `row_hash` matches the last known state are dropped from the version, so lookback re-reads don't churn destinations. The last known state comes from record state when `keep_state=True`, and otherwise from the row hashes of versions whose watermark falls within the lookback window.
 - **Empty-read guard.** A complete read that returns no rows would delete the whole slice, so it fails unless the dataset sets `allow_empty=True`. A transient empty API response must not wipe a destination.
 - **Reconcile.** Any incremental dataset can schedule a periodic `snapshot_diff` over recent partitions, for example `reconcile=fc.reconcile(every="7d", partitions="last 90 days")`. This catches hard deletes and back-dated rows that change stamps miss.
-- **Partition hash snapshots.** `snapshot_diff` keeps one compact snapshot per partition: each record's key and a 64-bit row hash, stored as a Parquet chunk in the spool. The key is needed to emit delete records. The diff is an anti-join between the new snapshot and the previous one inside the worker. A 100-million-row stampless table therefore costs 8 bytes of hash per row plus its compressed key, plus the changed rows. Spike S4 measured 16.5 bytes per row with a 64-bit key hash in place of the key, and 0.34 s to diff 1 million rows.
+- **Partition hash snapshots.** `snapshot_diff` keeps one compact snapshot per partition: each record's key and a 64-bit row hash, stored as a Parquet chunk in the spool. The key is needed to emit delete records. The diff is an anti-join between the new snapshot and the previous one inside the worker. A 100-million-row stampless table therefore costs 8 bytes of hash per row plus its compressed key, plus the changed rows. Spike SP4 measured 16.5 bytes per row with a 64-bit key hash in place of the key, and 0.34 s to diff 1 million rows.
 - **Run-level delete reconciliation (I10).** A run that reads one slice seals its version when the read finishes. When a run reads several slices in full:
   - Each `extract` task stages its version, along with its candidate deletes: keys in the previous snapshot and missing from the new one.
   - When the last slice finishes, a `seal_run` task compares the candidates with every new snapshot of the run. A candidate found in another slice is a move, so it is dropped as a delete and the upsert records `moved_from`.
   - `seal_run` then seals all of the run's versions in one transaction.
-  - Sealing slice by slice would delete and re-insert a record that moved between slices (spike S2, case H1b). That is harmless for a warehouse, but wrong for a side-effect route, where an ERP posting could be reversed and re-posted.
+  - Sealing slice by slice would delete and re-insert a record that moved between slices (spike SP2, case H1b). That is harmless for a warehouse, but wrong for a side-effect route, where an ERP posting could be reversed and re-posted.
   - The cost is that a multi-slice run delivers nothing until every slice has been read. A failed slice keeps the run open until it is retried or an operator abandons the run.
 
 ### 4.4 Partitions
@@ -573,7 +573,7 @@ A delivery to a confirm-later sink stays `running` until `sink.confirm` reports 
 - **Exhaustion is a wait, not a failure.**
   - A short wait (< 60 s) sleeps in-process.
   - A longer wait (a daily cap reached) becomes a durable sleep until the window refills. The task is shown as "Deferred: budget zoho-api (daily)", and an alert fires at 80% and 95% of any window.
-- **Two windows are the norm.** Zoho, for example, caps requests both per minute and per day, so its budget declares both (spike S3).
+- **Two windows are the norm.** Zoho, for example, caps requests both per minute and per day, so its budget declares both (spike SP3).
 - This design is engine-independent: budgets live in our Postgres tables. Spike T9 confirmed it on both engines.
 
 ### 6.7 Scheduler
@@ -787,8 +787,8 @@ All tables live in schema `feather`, and every table carries `tenant_id`. DBOS k
 - **Backend interface.** `put_chunk`, `get_chunk`, `delete_version`, and an optional `presign`. Two backends ship:
   - **`postgres` (the default).** Data goes to `spool_chunk` as zstd-compressed Parquet blobs of 1–8 MB each. The table is partitioned by day, so retention drops whole partitions instead of deleting rows.
   - **`objects` (optional).** The same chunks are stored as files at `{root}/{tenant}/{dataset}/{partition}/{version_id}/part-{n}.parquet` on S3-compatible storage, Azure Blob or GCS. It is chosen per environment or per dataset (`spool="objects"`), for example for 100-million-row bulk extracts or for archives that DuckDB reads directly.
-- **Chunk format.** Every chunk holds the payload columns (nested types allowed) plus `_fc_key`, `_fc_op` and `_fc_row_hash`. Partition hash snapshots (§4.3) are chunks of kind `snapshot`. Push micro-batches use the same format: spike S4 measured a 10-event Parquet chunk at 9.2 ms against 7.8 ms for JSONB rows (p50), so one format is enough.
-- **Throughput.** Spike S4 wrote 154,000 rows/s with one writer and 288,000–332,000 rows/s with four, and read back at 316,000–385,000 rows/s. These are laptop numbers, against a target of 20,000 rows/s per worker (NFR-02).
+- **Chunk format.** Every chunk holds the payload columns (nested types allowed) plus `_fc_key`, `_fc_op` and `_fc_row_hash`. Partition hash snapshots (§4.3) are chunks of kind `snapshot`. Push micro-batches use the same format: spike SP4 measured a 10-event Parquet chunk at 9.2 ms against 7.8 ms for JSONB rows (p50), so one format is enough.
+- **Throughput.** Spike SP4 wrote 154,000 rows/s with one writer and 288,000–332,000 rows/s with four, and read back at 316,000–385,000 rows/s. These are laptop numbers, against a target of 20,000 rows/s per worker (NFR-02).
 - **Sizing guide.** Compressed records took about 55 bytes each on synthetic 14-column invoice lines, so 5 million records a day is about 0.3 GB a day, or about 4 GB at 14-day retention. Wider real payloads will take more, so measure your own. Within the volumes the discovery assumes (A1), this fits ordinary managed Postgres plans; beyond that, use the `objects` backend for the heaviest datasets.
 
 ### 7.3 Retention
@@ -901,7 +901,7 @@ REST, GraphQL and HTTP support API-key, basic, bearer and OAuth2 (client credent
 ### 8.4 Notes on the business connectors
 
 **SAP.**
-- OData services first. The pricing API documents no delta token, and on-premise change stamps were reported as unreliable (spike S3). So `snapshot_diff` is the default for prices, and `by_stamp` on `LastChangeDateTime` is used only together with `reconcile`.
+- OData services first. The pricing API documents no delta token, and on-premise change stamps were reported as unreliable (spike SP3). So `snapshot_diff` is the default for prices, and `by_stamp` on `LastChangeDateTime` is used only together with `reconcile`.
 - HANA SQL reads cover bulk ETL. They respect availability windows, and a `hana-read` budget protects the ERP's read capacity.
 - Postings go through OData APIs where they exist. BAPI/RFC is an optional extra: the user supplies SAP's NetWeaver RFC SDK. SAP's own PyRFC is archived, so the docs name the third-party `pyrfcx` binding and flag its status.
 - The HANA client and RFC SDK aren't redistributable (constraint C2).
@@ -916,7 +916,7 @@ REST, GraphQL and HTTP support API-key, basic, bearer and OAuth2 (client credent
 - The reference evaluation found the standard list-plus-detail path simpler than a custom export endpoint, provided the daily call cap is high enough (Q4).
 
 **GoFrugal.**
-- Spike S3 found no public API documentation. Third-party descriptions of a local "WebReporter" API are unverified.
+- Spike SP3 found no public API documentation. Third-party descriptions of a local "WebReporter" API are unverified.
 - The connector can't be scoped until GoFrugal provides API documentation and sandbox access (discovery Q2).
 - Until then, the fallback template exchanges files through S3-compatible storage.
 
@@ -1458,10 +1458,10 @@ These are estimates, to be validated by the performance suite.
 | D2 | Should agents use our gateway even if the engine has native remote workers? | **Closed:** yes, so sites hold no database or engine credentials and tenants stay isolated (T11, §6.9). The security review still checks it in M3. |
 | D3 | Can `feather dev` run without Docker on an embedded Postgres? | **Deferred:** Docker stays the default; revisit after M1 |
 | D4 | Should transforms run per route at apply time (proposed), or be materialised as derived versions for heavy transforms? | Open: M1 performance tests |
-| D5 | Is one Parquet chunk per push micro-batch fast enough for the 5 s target, or should tiny versions be stored as JSONB rows? | **Closed:** one format, Parquet (S4, §7.2) |
+| D5 | Is one Parquet chunk per push micro-batch fast enough for the 5 s target, or should tiny versions be stored as JSONB rows? | **Closed:** one format, Parquet (SP4, §7.2) |
 | D6 | Which object-storage library: fsspec or obstore? | Open: M2 |
 | D7 | Excel and SFTP file connectors in v1? They are not in the v1 list today. | Open: sponsor |
-| D8 | Exact endpoints and limits for Zakya, GoFrugal, Magento and SAP | **Partly closed:** desk research done (S3, §8.4). Live probes need sandbox access, and GoFrugal needs vendor docs. |
+| D8 | Exact endpoints and limits for Zakya, GoFrugal, Magento and SAP | **Partly closed:** desk research done (SP3, §8.4). Live probes need sandbox access, and GoFrugal needs vendor docs. |
 
 ## 21. Requirement traceability
 
