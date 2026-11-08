@@ -162,6 +162,10 @@ def _bearer_actor(request: Request, state: "AppState") -> Actor:
     user = state.store.users.get_user(row.created_by)
     if user is None:  # its user is gone, and with them what the token may do
         raise AuthError(401, "Unauthorized", "the token is not valid")
+    if row.scope == "publish" and user.role != "admin":  # publishing is an admin's, checked at each use
+        raise AuthError(
+            403, "Forbidden", f"this publish token's user, {user.username}, is no longer an admin"
+        )
     role = row.role if ROLES.index(row.role) >= ROLES.index(user.role) else user.role  # the lower
     return Actor("token", row.name, role, user.username, row.scope)
 

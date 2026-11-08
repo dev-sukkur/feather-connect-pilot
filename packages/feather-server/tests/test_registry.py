@@ -287,3 +287,121 @@ def test_uv_publishes_to_the_registry_and_installs_from_it(state: AppState, whee
     assert (
         manifest["name"] == "acme-invoices" and (target / "acme_invoices" / "flows" / "invoices.py").is_file()
     )
+
+
+# What the review asked of an upload.
+
+
+def _relabel(wheel: Path, version: str) -> tuple[str, bytes]:
+    """The wheel, its name, METADATA and manifest saying `version`: what a hand-made upload could claim."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(out, "w") as target:
+        for name in source.namelist():
+            data = source.read(name)
+            if name.endswith(("METADATA", "feather-package.json")):
+                data = data.replace(b"1.0.0", version.encode())
+            target.writestr(name.replace("-1.0.0.dist-info", f"-{version}.dist-info"), data)
+    return f"acme_invoices-{version}-py3-none-any.whl", out.getvalue()
+
+
+def test_a_version_equal_to_one_published_or_with_a_local_part_is_refused(
+    state: AppState, wheel: Path, tmp_path: Path
+):
+    admin = _client(state, _token(state, "admin"))
+    assert _upload(admin, wheel).status_code == 200
+    short = sample_wheel(tmp_path / "short", "1.0")  # 1.0 is 1.0.0 to pip and uv
+    again = _upload(admin, short)
+    assert again.status_code == 409 and "never replaced" in again.json()["detail"]
+    name, data = _relabel(wheel, "1.0.0+evil")  # would sort as 1.0.0 and stand in for it
+    local = tmp_path / name
+    local.write_bytes(data)
+    refused = _upload(admin, local)
+    assert refused.status_code == 400 and "local part" in refused.json()["detail"]
+    assert [f.version for f in state.store.registry.files("acme-invoices")] == ["1.0.0"]
+
+
+def test_an_upload_too_big_is_refused_before_it_is_kept(
+    state: AppState, wheel: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from feather_server import registry
+
+    admin = _client(state, _token(state, "admin"))
+    big = _upload(admin, wheel, data=b"x" * (51 * 1024 * 1024))  # over 50 MiB, by its Content-Length
+    assert big.status_code == 413 and "at most" in big.json()["detail"]
+    monkeypatch.setattr(registry, "MAX_UPLOAD", 4096)  # and counted as it streams, with no Content-Length
+    boundary = "b0undary"
+
+    def chunks():
+        yield f'--{boundary}\r\nContent-Disposition: form-data; name="content"; filename="{WHEEL}"\r\n\r\n'.encode()
+        for _ in range(64):
+            yield b"x" * 1024
+        yield f"\r\n--{boundary}--\r\n".encode()
+
+    streamed = admin.post(
+        "/registry/", content=chunks(), headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    )
+    assert streamed.status_code == 413
+    operator = _client(state, _token(state))  # who can't publish is refused before the body is read
+    denied = operator.post(
+        "/registry/",
+        content=b"",
+        headers={"Content-Type": "multipart/form-data; boundary=x", "Content-Length": str(10**9)},
+    )
+    assert denied.status_code == 403
+    assert state.store.registry.projects() == []
+
+
+def test_a_publish_token_stops_when_its_user_is_no_longer_an_admin(
+    state: AppState, wheel: Path, tmp_path: Path
+):
+    from feather_server.auth import hash_password
+
+    state.store.users.create_user("boss", hash_password("pw-boss-1234"), "admin")
+    token = issue_token(
+        state.store, "ci", timedelta(days=1), role="admin", created_by="boss", scope="publish"
+    )
+    publisher = _client(state, token)
+    assert _upload(publisher, wheel).status_code == 200
+    state.store.users.set_role("boss", "operator")
+    refused = _upload(publisher, sample_wheel(tmp_path / "next", "1.1.0"))
+    assert refused.status_code == 403 and "no longer an admin" in refused.json()["detail"]
+
+
+def test_a_registry_is_https_with_an_env_or_file_token(state: AppState):
+    admin = _client(state, _token(state, "admin"))
+    body = {"name": "acme", "index_url": "https://pkgs.example.com/simple/"}
+    plain = admin.post(f"{API}/registries", json={**body, "index_url": "http://pkgs.example.com/simple/"})
+    assert plain.status_code == 422 and "https" in plain.json()["detail"]
+    vault = admin.post(f"{API}/registries", json={**body, "token_ref": "${secret:vault:kv/acme}"})
+    assert vault.status_code == 422 and "${secret:env:NAME}" in vault.json()["detail"]
+    literal = admin.post(f"{API}/registries", json={**body, "token_ref": "pypi-AgEIcHlwaS5vcmc"})
+    assert literal.status_code == 422
+    assert (
+        admin.post(f"{API}/registries", json={**body, "token_ref": "${secret:file:/run/acme}"}).status_code
+        == 201
+    )
+    local = {"name": "local", "index_url": "http://localhost:9999/simple/"}
+    assert admin.post(f"{API}/registries", json=local).status_code == 201
+    audited = json.dumps([a.request for a in state.store.audit.list_audit() if a.action == "add_registry"])
+    assert "pypi-AgEIcHlwaS5vcmc" not in audited and '"token_ref": "***"' in audited
+
+
+def test_a_sha256_in_upper_case_is_the_same_sha256(
+    state: AppState, wheel: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from dataclasses import replace
+
+    from feather_connect.packages.index import IndexFile, SimpleIndex
+
+    monkeypatch.setenv("ACME_REGISTRY_TOKEN", "company-secret")
+    find = SimpleIndex.find
+
+    def upper(self: SimpleIndex, project: str, version: str) -> IndexFile:
+        found = find(self, project, version)
+        return replace(found, sha256=(found.sha256 or "").upper())
+
+    monkeypatch.setattr(SimpleIndex, "find", upper)
+    registries = Registries(state.store, state.clock)
+    with static_index({"acme-invoices": {WHEEL: wheel.read_bytes()}}, "company-secret") as url:
+        registries.add(ADMIN, "acme", url, "${secret:env:ACME_REGISTRY_TOKEN}")
+        assert registries.fetch("acme", "acme-invoices", "1.0.0").filename == WHEEL

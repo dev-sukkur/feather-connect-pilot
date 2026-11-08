@@ -28,6 +28,9 @@ from feather_server.services.access import Capability, require
 BUILT_IN = "feather"
 _REGISTRY_NAME = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 _MAX_FOUND = 50  # packages a search returns with their versions
+# A registry's token is read from the environment or a file; the other secret providers arrive in M3.
+_TOKEN_REF = re.compile(r"^\$\{secret:(env|file):[^{}]+\}$")
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")  # where plain http is allowed, for a test index
 
 
 class RegistryProblem(ValueError):
@@ -92,6 +95,11 @@ class Registries:
     def _built_in(self) -> None:
         if not self.enabled:
             raise RegistryProblem("the built-in registry is off here (FEATHER_REGISTRY=0)")
+
+    def may_publish(self, actor: Actor) -> None:
+        """Refuse an upload before its body is read, when the actor can't publish. Raises `Forbidden`."""
+        self._built_in()
+        self._require(actor, "packages.publish", "package:upload")
 
     def publish(self, actor: Actor, filename: str, content: bytes, sha256: str | None = None) -> RegistryFile:
         """Keep an uploaded wheel. It must be a flow package whose manifest matches its name; `sha256`, when the
@@ -180,7 +188,9 @@ class Registries:
         never the token itself. Raises `ValueError` for a bad name, URL or token, and when the name is taken."""
         target = f"registry:{name}"
         self._require(actor, "registries.manage", target)
-        request = {"index_url": index_url, "token_ref": token_ref}
+        # Audited as given only when it is a reference: a token pasted in by mistake never reaches the audit.
+        shown = token_ref if token_ref is None or is_secret_ref(token_ref) else "***"
+        request = {"index_url": index_url, "token_ref": shown}
         try:
             if name == BUILT_IN or not _REGISTRY_NAME.match(name) or len(name) > 64:
                 raise ValueError(
@@ -194,9 +204,12 @@ class Registries:
                 or parsed.password
             ):
                 raise ValueError("the index URL is http(s)://host/path/, with no credentials in it")
-            if token_ref is not None and not is_secret_ref(token_ref):
+            if parsed.scheme == "http" and parsed.hostname not in _LOCAL_HOSTS:
+                raise ValueError("the index URL must be https://: plain http is only for localhost")
+            if token_ref is not None and not _TOKEN_REF.match(token_ref):
                 raise ValueError(
-                    "the token must be a secret reference such as ${secret:env:NAME}, never its value"
+                    "the token must be a secret reference, ${secret:env:NAME} or ${secret:file:PATH}, "
+                    "never its value"
                 )
             if self._store.registry.get_registry(name) is not None:
                 raise ValueError(f"a registry named {name!r} exists already")
@@ -300,7 +313,7 @@ class Registries:
             info = read_wheel(filename, data)
         except (IndexReadError, ManifestError) as error:
             raise RegistryProblem(f"{registry}: {error}") from None
-        if info.sha256 != expected:
+        if info.sha256 != expected.lower():
             raise RegistryProblem(
                 f"{registry}: {filename} has sha256 {info.sha256}, not the {expected} recorded"
             )

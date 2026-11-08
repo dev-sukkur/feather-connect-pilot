@@ -13,11 +13,14 @@ Every call needs a valid token, sent as `Authorization: Bearer` or as Basic cred
 
 import html
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from packaging.utils import canonicalize_name
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
+from starlette.types import Message
 
 from feather_connect.packages.manifest import ManifestError
 from feather_connect.packages.wheel import MAX_WHEEL
@@ -30,6 +33,7 @@ from feather_server.services.registries import Registries, VersionExists
 PREFIX = "/registry"
 SIMPLE_JSON = "application/vnd.pypi.simple.v1+json"
 _META = {"api-version": "1.1"}
+MAX_UPLOAD = MAX_WHEEL + 1024 * 1024  # bytes: the wheel and the form around it
 
 router = APIRouter(prefix=PREFIX, include_in_schema=False)
 
@@ -65,7 +69,7 @@ def projects(request: Request, _: CurrentActor) -> Response:
 
 
 def _file_url(file: RegistryFile) -> str:
-    return f"../../files/{file.filename}"
+    return f"../../files/{quote(file.filename)}"
 
 
 @router.get("/simple/{project}/")
@@ -122,18 +126,52 @@ def _token_only(request: Request) -> None:
         raise AuthError(401, "Unauthorized", "send a token: uv publish --token, or twine with __token__")
 
 
+class _TooBig(Exception):
+    pass
+
+
+def _counted(request: Request, limit: int) -> Request:
+    """The request, its body refused as it comes once it passes `limit` bytes, whatever Content-Length said."""
+    seen = 0
+    receive = request.receive
+
+    async def counting() -> Message:
+        nonlocal seen
+        message = await receive()
+        seen += len(message.get("body", b""))
+        if seen > limit:
+            raise _TooBig
+        return message
+
+    return Request(request.scope, counting)
+
+
 async def _upload(request: Request, actor: CurrentActor) -> Response:
-    form = await request.form(max_part_size=1024 * 1024)
+    registries = _registries(request)
+    try:
+        registries.may_publish(actor)  # before a byte of the body is read
+    except Forbidden as error:
+        return _problem(403, "Forbidden", str(error))
+    too_big = _problem(413, "Content Too Large", f"a package may have at most {MAX_WHEEL} bytes")
+    length = request.headers.get("content-length", "")
+    if length.isdigit() and int(length) > MAX_UPLOAD:
+        return too_big
+    try:
+        form = await _counted(request, MAX_UPLOAD).form(max_part_size=1024 * 1024)
+    except _TooBig:
+        return too_big
     if form.get(":action") not in (None, "file_upload"):
         return _problem(400, "Bad Request", "this registry only takes :action=file_upload")
     content = form.get("content")
     if not isinstance(content, UploadFile) or not content.filename:
         return _problem(400, "Bad Request", "send the wheel in the form's content field")
     data = await content.read(MAX_WHEEL + 1)
+    if len(data) > MAX_WHEEL:
+        return too_big
     digest = form.get("sha256_digest")
     try:
-        _registries(request).publish(
-            actor, content.filename, data, digest if isinstance(digest, str) else None
+        await run_in_threadpool(
+            registries.publish, actor, content.filename, data, digest if isinstance(digest, str) else None
         )
     except Forbidden as error:
         return _problem(403, "Forbidden", str(error))
