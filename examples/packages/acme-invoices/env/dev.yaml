@@ -1,0 +1,2 @@
+# dev runs on the simulations named in feather.yaml.
+settings: {timezone: UTC}

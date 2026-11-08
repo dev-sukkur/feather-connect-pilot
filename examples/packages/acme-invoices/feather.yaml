@@ -1,0 +1,9 @@
+# A small flow package, used by the flow package tests and as an example: Acme's invoices, read from a simulated
+# billing system and delivered to a simulated ERP. `feather package build` here writes dist/acme_invoices-1.0.0-...whl.
+name: acme-invoices
+version: 1.0.0
+modules: [flows.invoices]
+settings: {timezone: UTC}
+connections:
+  billing: {connector: simulation.source}
+  erp: {connector: simulation.sink}

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://feather-connect.dev/schemas/feather-package-1.json",
+  "title": "Feather Connect flow package manifest",
+  "description": "feather-package.json, inside a flow package's wheel next to the project it holds (flow packages design 4.2).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "name", "version", "module", "fc_versions", "flows", "datasets", "routes", "connections", "dependencies", "lock_hash", "built_at", "commit"],
+  "properties": {
+    "schema": {"const": 1, "description": "The version of this schema."},
+    "name": {"$ref": "#/$defs/package_name"},
+    "version": {"type": "string", "minLength": 1, "maxLength": 64, "description": "A PEP 440 version."},
+    "module": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "The import name the project sits under in the wheel."},
+    "fc_versions": {"type": "string", "minLength": 1, "description": "The Feather Connect versions it works with, as a PEP 440 specifier such as >=0.1,<1."},
+    "flows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "datasets", "routes"],
+        "properties": {
+          "name": {"$ref": "#/$defs/short_name"},
+          "datasets": {"type": "array", "items": {"$ref": "#/$defs/short_name"}},
+          "routes": {"type": "array", "items": {"$ref": "#/$defs/short_name"}}
+        }
+      }
+    },
+    "datasets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "flow", "connection", "connector", "push"],
+        "properties": {
+          "name": {"$ref": "#/$defs/short_name"},
+          "flow": {"$ref": "#/$defs/short_name"},
+          "connection": {"type": "string"},
+          "connector": {"type": "string"},
+          "push": {"type": "boolean", "description": "Whether webhooks fill it."}
+        }
+      }
+    },
+    "routes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "flow", "connection", "connector"],
+        "properties": {
+          "name": {"$ref": "#/$defs/short_name"},
+          "flow": {"$ref": "#/$defs/short_name"},
+          "connection": {"type": "string"},
+          "connector": {"type": "string"}
+        }
+      }
+    },
+    "connections": {
+      "type": "array",
+      "description": "The connections it needs, with the connector each one names in the package's feather.yaml.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "connector"],
+        "properties": {"name": {"type": "string", "minLength": 1}, "connector": {"type": "string", "minLength": 1}}
+      }
+    },
+    "dependencies": {"type": "array", "items": {"type": "string"}, "description": "Its own requirements, as in pyproject.toml, besides Feather Connect."},
+    "lock_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The sha256 of the locked requirements the wheel carries (feather-lock.txt)."},
+    "built_at": {"type": ["string", "null"], "format": "date-time", "description": "SOURCE_DATE_EPOCH or the commit's time, so that a build is reproducible; null when there is neither."},
+    "commit": {"type": ["string", "null"], "description": "The git commit it was built from."}
+  },
+  "$defs": {
+    "package_name": {"type": "string", "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$", "maxLength": 64},
+    "short_name": {"type": "string", "minLength": 1, "maxLength": 200}
+  }
+}

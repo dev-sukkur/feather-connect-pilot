@@ -1,0 +1,2 @@
+# prod would point erp at the real ERP; the example keeps the simulation.
+settings: {timezone: UTC}

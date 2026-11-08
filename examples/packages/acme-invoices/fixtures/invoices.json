@@ -1,0 +1,5 @@
+[
+  {"invoice_id": "INV-00001", "customer": "Asha Traders", "total": "1290.00", "issued_at": "2026-11-07T10:01:00Z"},
+  {"invoice_id": "INV-00002", "customer": "Ravi Stores", "total": "640.50", "issued_at": "2026-11-07T11:15:00Z"},
+  {"invoice_id": "INV-00003", "customer": "Meena Mart", "total": "88.20", "issued_at": "2026-11-07T12:40:00Z"}
+]

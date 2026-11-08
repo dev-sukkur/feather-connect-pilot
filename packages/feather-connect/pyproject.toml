@@ -7,6 +7,8 @@ license = "MIT"
 dependencies = [
     "cronsim",
     "httpx>=0.28.1",
+    "jsonschema>=4",
+    "packaging",
     "pyarrow",
     "pydantic>=2",
     "pyyaml",
