@@ -19,6 +19,8 @@ PATHS = [
     "/routes/lake/deliveries/{version}",
     "/trace",
     "/trace?dataset=demo.items&key=2026-11-01-0",  # a record's trace: a version, two routes, a failure
+    "{records:extract}",  # a task's Records: what a read sealed
+    "{records:apply:flaky}",  # and what a route answered, turned down
 ]
 WCAG_AA = {"runOnly": {"type": "tag", "values": ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]}}
 
@@ -29,6 +31,9 @@ def test_axe_finds_no_wcag_aa_violations(signed_in: Page, site: Site, path: str,
     signed_in.emulate_media(color_scheme=scheme)  # pyright: ignore[reportArgumentType]
     if "{version}" in path:
         path = path.format(version=site.deliveries("lake", "applied")[0].version_id)
+    if path.startswith("{records:"):
+        kind, _, route = path.strip("{}").removeprefix("records:").partition(":")
+        path = site.records_path(kind, route or None)
     signed_in.goto(f"{site.url}{path}")
     signed_in.wait_for_load_state("networkidle")
     results = Axe().run(signed_in, options=WCAG_AA)

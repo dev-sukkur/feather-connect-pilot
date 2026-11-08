@@ -162,3 +162,31 @@ def test_trace_a_record_from_a_failed_delivery(signed_in: Page, site: Site):
     expect(flaky.first).to_contain_text("simulated delivery failure to flaky")
     sent = flaky.first.locator("details", has_text="The body it was sent with")
     expect(sent.locator("pre")).to_contain_text(f'"id": "{key}"')
+
+
+@pytest.mark.parametrize("width", [1280, 360])
+def test_open_a_tasks_records_from_the_run_page(signed_in: Page, site: Site, width: int):
+    page = signed_in
+    page.set_viewport_size({"width": width, "height": 800})
+    path = site.records_path("apply", "flaky")
+    run_path = path.split("/tasks/")[0]
+    page.goto(f"{site.url}{run_path}")
+    page.locator(f'a[href="{path}"]').click()
+    panel = page.locator("#records-panel")
+    expect(panel.get_by_role("heading", name="Records sent to flaky")).to_be_visible()
+    expect(page).to_have_url(f"{site.url}{run_path}")  # opened in place, not as a page of its own
+    first = panel.locator("tbody tr").first
+    expect(first).to_contain_text("503")
+    first.get_by_text("Show").click()
+    expect(first.locator("pre")).to_contain_text('"id"')
+    expect(first.get_by_role("link", name="Full trace")).to_be_visible()
+    wide = page.evaluate("() => document.documentElement.scrollWidth")
+    assert wide <= width, f"the run page with its records is {wide} px wide"
+
+
+def test_a_tasks_records_without_javascript(no_script_page: Page, site: Site):
+    path = site.records_path("extract")
+    answer = no_script_page.goto(f"{site.url}{path}")
+    assert answer is not None and answer.status == 200
+    expect(no_script_page.locator("h1")).to_have_text("Records of an extract task")
+    expect(no_script_page.locator("#records-panel tbody tr")).to_have_count(2)
