@@ -109,6 +109,7 @@ def test_pages_fit_a_phone_without_scrolling_sideways(
 ):  # Stage 2 minor
     signed_in.set_viewport_size({"width": 360, "height": 740})
     signed_in.goto(f"{site.url}{path}")
+    signed_in.get_by_role("button", name="Menu").click()  # the sidebar folds behind its button on a phone
     nav = signed_in.locator("nav").first
     box = nav.bounding_box()
     assert box is not None and box["x"] + box["width"] <= 360 + 0.5, f"the navigation overflows on {path}"

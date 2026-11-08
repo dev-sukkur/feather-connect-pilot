@@ -13,23 +13,34 @@
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
   <a class="skip" href="#main">Skip to the content</a>
+  <div class="shell">
   {% block header %}
-  <header class="bar">
-    <a class="brand" href="/"><span aria-hidden="true">&#9670;</span> Feather Connect</a>
-    <nav aria-label="Main">
-      {% for label, target in nav %}<a href="{{ target }}"{% if (target == "/" and path == "/") or (target != "/" and path.startswith(target)) %} aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}
-    </nav>
-    {% if actor %}
-    <form class="who" method="post" action="/logout">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <span class="muted">{{ actor.name }}</span>
-      <button type="submit" class="link">Sign out</button>
-    </form>
-    {% endif %}
+  <header class="sidebar" id="sidebar">
+    <div class="sidebar-top">
+      <a class="brand" href="/"><span aria-hidden="true">&#9670;</span> Feather Connect</a>
+      <button type="button" class="menu-toggle" aria-controls="sidebar-menu" aria-expanded="true" hidden>
+        <span aria-hidden="true">&#9776;</span> Menu
+      </button>
+    </div>
+    <div class="sidebar-menu" id="sidebar-menu">
+      <nav aria-label="Main">
+        <ul>
+        {% for label, target in nav %}<li><a href="{{ target }}"{% if (target == "/" and path == "/") or (target != "/" and path.startswith(target)) %} aria-current="page"{% endif %}>{{ label }}</a></li>{% endfor %}
+        </ul>
+      </nav>
+      {% if actor %}
+      <form class="who" method="post" action="/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <span class="who-name"><span class="muted">Signed in as</span> {{ actor.name }}</span>
+        <button type="submit" class="link">Sign out</button>
+      </form>
+      {% endif %}
+    </div>
   </header>
   {% endblock %}
   <main id="main" tabindex="-1">
     {% block content %}{% endblock %}
   </main>
+  </div>
 </body>
 </html>

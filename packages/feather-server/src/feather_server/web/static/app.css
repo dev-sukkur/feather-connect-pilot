@@ -55,8 +55,9 @@ a { color: var(--accent); text-underline-offset: 2px; }
 a:hover { text-decoration-thickness: 2px; }
 :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; border-radius: 3px; }
 code { font-family: var(--mono); font-size: 0.92em; }
-h1 { font-size: 1.6rem; margin: 1.2rem 0 0.4rem; }
-h2 { font-size: 1.1rem; margin: 2rem 0 0.6rem; }
+h1 { font-size: 1.65rem; line-height: 1.25; letter-spacing: -0.01em; margin: 1.5rem 0 0.5rem; }
+h2 { font-size: 1.08rem; margin: 2.25rem 0 0.75rem; padding-bottom: 0.35rem; border-bottom: 1px solid var(--border); }
+.confirm h2 { border-bottom: 0; padding-bottom: 0; }
 h3 { font-size: 0.85rem; margin: 0; font-weight: 600; color: var(--muted); }
 p { margin: 0.5rem 0; }
 .muted { color: var(--muted); }
@@ -68,20 +69,53 @@ p { margin: 0.5rem 0; }
 .skip { position: absolute; left: -999px; top: 0; background: var(--accent); color: var(--accent-text); padding: 0.5rem 1rem; z-index: 10; }
 .skip:focus { left: 0; }
 
-.bar {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.5rem;
-  padding: 0.6rem 1.25rem;
-  background: var(--surface); border-bottom: 1px solid var(--border);
-}
-.brand { font-weight: 700; text-decoration: none; color: var(--text); letter-spacing: 0.01em; }
-.bar nav { display: flex; gap: 0.25rem; flex: 1; flex-wrap: wrap; }
-.bar nav a { padding: 0.3rem 0.75rem; border-radius: 6px; text-decoration: none; color: var(--text); }
-.bar nav a:hover { background: var(--hover); }
-.bar nav a[aria-current="page"] { background: var(--info-bg); color: var(--info-fg); font-weight: 600; }
-.who { display: flex; align-items: center; gap: 0.75rem; margin: 0; }
+/* The shell: a sidebar on the left, the page beside it. Under 900px the sidebar sits above the page, and with
+   JavaScript its menu folds behind the Menu button. */
 
-main { max-width: 1200px; margin: 0 auto; padding: 0 1.25rem 3rem; }
+.shell { display: flex; min-height: 100vh; }
+.sidebar {
+  position: sticky; top: 0; align-self: flex-start;
+  width: 14.5rem; flex: 0 0 14.5rem; height: 100vh; overflow-y: auto;
+  display: flex; flex-direction: column;
+  padding: 1rem 0.75rem;
+  background: var(--surface); border-right: 1px solid var(--border);
+}
+.sidebar-top { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0 0.5rem 1rem; }
+.brand { font-weight: 700; font-size: 1.05rem; text-decoration: none; color: var(--text); letter-spacing: 0.01em; }
+.brand span { color: var(--accent); }
+.sidebar-menu { display: flex; flex-direction: column; flex: 1; gap: 1rem; }
+.sidebar nav ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.15rem; }
+.sidebar nav a {
+  display: block; padding: 0.45rem 0.75rem; border-radius: 6px;
+  text-decoration: none; color: var(--text); border-left: 3px solid transparent;
+}
+.sidebar nav a:hover { background: var(--hover); }
+.sidebar nav a[aria-current="page"] { background: var(--info-bg); color: var(--info-fg); font-weight: 600; border-left-color: var(--info-fg); }
+.who {
+  margin: auto 0 0; padding: 0.75rem 0.5rem 0; border-top: 1px solid var(--border);
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.25rem 0.75rem;
+}
+.who-name { overflow-wrap: anywhere; }
+.menu-toggle { padding: 0.35rem 0.7rem; }
+
+main { flex: 1; min-width: 0; max-width: 1200px; padding: 0.5rem 2rem 3rem; }
 main:focus { outline: none; }
+
+@media (max-width: 900px) {
+  .shell { display: block; }
+  .sidebar {
+    position: static; width: auto; height: auto; overflow: visible;
+    padding: 0.6rem 0.75rem; border-right: 0; border-bottom: 1px solid var(--border);
+  }
+  .sidebar-top { padding: 0; }
+  .sidebar-menu { gap: 0.5rem; padding-top: 0.6rem; }
+  .sidebar.collapsed .sidebar-menu { display: none; }
+  .who { margin: 0; }
+  main { padding: 0 1rem 2.5rem; }
+}
+@media (min-width: 901px) {
+  .menu-toggle { display: none; }
+}
 
 /* Buttons and forms. */
 
@@ -113,17 +147,17 @@ legend { font-weight: 600; padding: 0 0.4rem; }
 /* Tiles. */
 
 .tiles { list-style: none; padding: 0; margin: 1rem 0; display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
-.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.8rem 1rem; border-left-width: 5px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.8rem 1rem; border-left-width: 5px; box-shadow: 0 1px 2px rgb(0 0 0 / 0.05); }
 .tile .n { margin: 0.1rem 0 0; font-size: 2rem; line-height: 1.1; font-weight: 700; font-variant-numeric: tabular-nums; }
 .tile-bad { border-left-color: var(--bad-fg); }
 .tile-warn { border-left-color: var(--warn-fg); }
 
 /* Tables. */
 
-.table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 1px 2px rgb(0 0 0 / 0.05); }
 .table-wrap.scroll { max-height: 70vh; overflow: auto; }
 table { width: 100%; border-collapse: collapse; }
-th, td { padding: 0.55rem 0.9rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); }
+th, td { padding: 0.6rem 0.9rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); }
 tbody tr:last-child > * { border-bottom: 0; }
 thead th {
   position: sticky; top: 0; z-index: 1;
@@ -139,7 +173,7 @@ caption { text-align: left; padding: 0.6rem 0.9rem; color: var(--muted); }
 
 /* Badges: an icon, a word and a colour. */
 
-.badge { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.05rem 0.6rem; border-radius: 999px; font-size: 0.82rem; font-weight: 600; white-space: nowrap; }
+.badge { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.1rem 0.65rem; border-radius: 999px; font-size: 0.8rem; font-weight: 600; line-height: 1.4; white-space: nowrap; border: 1px solid transparent; }
 .badge .icon { font-size: 0.8em; }
 .tone-ok { background: var(--ok-bg); color: var(--ok-fg); }
 .tone-bad { background: var(--bad-bg); color: var(--bad-fg); }
@@ -197,7 +231,6 @@ caption { text-align: left; padding: 0.6rem 0.9rem; color: var(--muted); }
 .htmx-request { opacity: 0.85; }
 
 @media (max-width: 40rem) {
-  .bar { padding: 0.5rem 0.75rem; }
   main { padding: 0 0.75rem 2rem; }
   th, td { padding: 0.45rem 0.6rem; }
 }
