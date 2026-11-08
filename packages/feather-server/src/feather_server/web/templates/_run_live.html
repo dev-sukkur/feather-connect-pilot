@@ -12,7 +12,7 @@
     {% if detail.tasks %}
     <div class="table-wrap"><table>
       <caption class="sr-only">The tasks of the run, {{ "newest first" if detail.ticks else "in the order they started" }}</caption>
-      <thead><tr><th scope="col">Task</th><th scope="col">For</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Started</th><th scope="col">Took</th><th scope="col">Worker</th><th scope="col">Code</th><th scope="col">Log</th></tr></thead>
+      <thead><tr><th scope="col">Task</th><th scope="col">For</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Started</th><th scope="col">Took</th><th scope="col">Worker</th><th scope="col">Code</th><th scope="col">Details</th></tr></thead>
       <tbody>
       {% for task in detail.tasks %}
         <tr>
@@ -24,7 +24,7 @@
           <td>{{ ((task.finished_at or now) - task.started_at) | span }}</td>
           <td>{% if task.worker %}{{ task.worker }}{% else %}<span class="muted">&ndash;</span>{% endif %}</td>
           <td>{% if task.code_sha %}<code>{{ task.code_sha[:8] }}</code>{% endif %}</td>
-          <td><a href="/tasks/{{ task.task_id | urlencode }}/logs?run={{ run.run_id | urlencode }}">Log</a></td>
+          <td class="task-links">{% if task.kind in ("extract", "apply") %}{% set records = "/runs/" ~ (run.run_id | urlencode) ~ "/tasks/" ~ (task.task_id | urlencode) ~ "/records" %}<a href="{{ records }}" hx-get="{{ records }}" hx-target="#records-panel" hx-swap="innerHTML show:#records-panel:top">Records<span class="sr-only"> of this {{ task.kind }}</span></a> &middot; {% endif %}<a href="/tasks/{{ task.task_id | urlencode }}/logs?run={{ run.run_id | urlencode }}">Log</a></td>
         </tr>
         {% if task.status == "skipped" %}<tr><td colspan="9"><span class="muted">Skipped: {{ task.error }}</span></td></tr>
         {% elif task.error %}<tr><td colspan="9"><span class="error-text">{% if task.attempt > 1 and task.status != "failed" %}Last error: {% endif %}{{ task.error }}</span></td></tr>{% endif %}

@@ -30,6 +30,7 @@ from feather_server.services import actions as action_limits
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.previews import Preview, PreviewError, PreviewExpired, PreviewInvalid
 from feather_server.services.reads import FlowSummary, Reads
+from feather_server.services.task_records import NoRecords, TaskRecordReader
 from feather_server.services.text import span
 from feather_server.services.trace import Tracer
 from feather_server.web.charts import meter, sparkline
@@ -637,6 +638,33 @@ def _run_page(
 @router.get("/runs/{run_id}", response_class=HTMLResponse)
 def run_detail(request: Request, actor: CurrentActor, run_id: str) -> HTMLResponse:
     return _run_page(request, actor, run_id)
+
+
+@router.get("/runs/{run_id}/tasks/{task_id}/records", response_class=HTMLResponse)
+def task_records(
+    request: Request, actor: CurrentActor, run_id: str, task_id: str, cursor: str = "", q: str = ""
+) -> HTMLResponse:
+    """The records of a task of a run, a page at a time: a page of its own, or the panel under the run's timeline when
+    HTMX asks."""
+    try:
+        found = TaskRecordReader(request.app.state.feather).read(run_id, task_id, decode(cursor or None), q)
+    except NoRecords as error:
+        return _not_found(request, f"Task {task_id!r} holds no records: {error}.")
+    except KeyError:
+        return _not_found(request, f"Run {run_id!r} has no task {task_id!r}.")
+    except (ApiProblem, ValueError):
+        return _bad_cursor(request)
+    return render(
+        request,
+        "task_records.html",
+        fragment="_task_records.html",
+        title=f"Records of an {found.task.kind} task",
+        actor=actor,
+        found=found,
+        run_id=run_id,
+        next_cursor=encode(found.next_cursor),
+        first_page=not cursor,
+    )
 
 
 @router.get("/tasks/{task_id}/logs", response_class=HTMLResponse)

@@ -58,4 +58,6 @@
 </section>
 
 {% include "_run_live.html" %}
+{# A task's Records open here, outside the part that refreshes itself, so that a live run doesn't close them. #}
+<div id="records-panel"></div>
 {% endblock %}

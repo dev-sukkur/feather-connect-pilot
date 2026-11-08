@@ -1,0 +1,74 @@
+{% import "_macros.html" as m with context %}
+{% set t = found.task %}
+{% set base = "/runs/" ~ (run_id | urlencode) ~ "/tasks/" ~ (t.task_id | urlencode) ~ "/records" %}
+<section class="records-panel" aria-labelledby="h-task-records">
+  <h2 id="h-task-records">Records {% if t.kind == "apply" %}sent to {{ found.route }}{% else %}read{% endif %}{% if t.partition and t.partition != "*" %} &middot; {{ m.partition_label(found.dataset, t.partition) }}{% else %} &middot; {{ found.dataset }}{% endif %}</h2>
+  <p class="muted">
+    {% for v in found.versions %}<a href="/versions/{{ v.version_id | urlencode }}">version {{ v.seal_seq }}</a>{% if not loop.last %}, {% endif %}{% else %}No version was sealed.{% endfor %}
+    {% if found.delivery %} &middot; delivery {{ m.status_badge(found.delivery.status) }} <a href="/routes/{{ found.route | urlencode }}/deliveries/{{ found.delivery.version_id | urlencode }}?run={{ run_id | urlencode }}">details</a>{% endif %}
+    &middot; <a href="/tasks/{{ t.task_id | urlencode }}/logs?run={{ run_id | urlencode }}">log</a>
+    &middot; shown as read: records are not masked in M1.
+  </p>
+  <form class="filters" method="get" action="{{ base }}" role="search" aria-label="Search the records" hx-get="{{ base }}" hx-target="#records-panel">
+    <p><label for="records-q">Key starts with</label><br>
+      <input type="search" id="records-q" name="q" value="{{ found.query }}" maxlength="500" autocomplete="off" spellcheck="false"></p>
+    <p><button type="submit">Search</button>{% if found.query %} <a href="{{ base }}" hx-get="{{ base }}" hx-target="#records-panel">Show all</a>{% endif %}</p>
+  </form>
+
+  {% if found.not_indexed %}
+  <p class="empty">Records of this version were not indexed (sealed before tracing was added).</p>
+  {% elif found.records %}
+  <div class="table-wrap"><table class="task-records">
+    <caption class="sr-only">The task's records by key{% if t.kind == "apply" %}, with what {{ found.route }} made of each{% endif %}</caption>
+    <thead><tr>
+      <th scope="col">Key</th>{% if found.versions | length > 1 %}<th scope="col">Partition</th>{% endif %}<th scope="col">Change</th>
+      {% if t.kind == "apply" %}<th scope="col">Result</th><th scope="col">Answer</th>{% endif %}
+      <th scope="col">Record</th>
+    </tr></thead>
+    <tbody>
+    {% for r in found.records %}
+      {% set s = r.sighting %}
+      <tr>
+        <th scope="row"><code>{{ s.key }}</code></th>
+        {% if found.versions | length > 1 %}<td>{{ m.partition_label(found.dataset, s.partition) }}</td>{% endif %}
+        <td>{% if r.op == "delete" %}<strong>delete</strong>{% else %}{{ r.op }}{% endif %}</td>
+        {% if t.kind == "apply" %}
+        <td>{% if r.result == "rejected" %}{{ m.status_badge("rejected") }} <span class="error-text">{{ r.error }}</span>{% elif r.result %}{{ m.status_badge(r.result) }}{% else %}<span class="muted">&ndash;</span>{% endif %}</td>
+        <td>{% if r.response %}<span{% if r.response.status >= 400 %} class="error-text"{% endif %}>{{ r.response.status }}</span>{% for name, value in r.response.fields | dictsort %}<br><code>{{ name }}</code> {{ value | show }}{% endfor %}{% else %}<span class="muted">&ndash;</span>{% endif %}</td>
+        {% endif %}
+        <td>
+          <details class="record-json"><summary>Show<span class="sr-only"> the record {{ s.key }}</span></summary>
+            {% if not r.in_spool %}<p class="muted">No longer in the spool: retention removed its chunk.</p>
+            {% elif r.payload is none %}<p class="muted">A delete carries no payload.</p>
+            {% else %}<pre class="log">{{ r.payload | pretty }}</pre>{% endif %}
+            <p><a href="/trace?dataset={{ found.dataset | urlencode }}&amp;key={{ s.key | urlencode }}">Full trace<span class="sr-only"> of {{ s.key }}</span></a></p>
+          </details>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% if next_cursor %}<nav class="pager" aria-label="Pages of records"><a rel="next" href="{{ url(cursor=next_cursor) }}" hx-get="{{ url(cursor=next_cursor) }}" hx-target="#records-panel">Next {{ found.records | length }} records &rarr;</a></nav>{% endif %}
+  {% if not first_page %}<p><a href="{{ url(cursor=None) }}" hx-get="{{ url(cursor=None) }}" hx-target="#records-panel">&larr; First page</a></p>{% endif %}
+  {% else %}
+  <p class="empty">{% if found.query %}No record's key starts with <code>{{ found.query }}</code>.{% elif found.versions %}No records{% if not first_page %} after this point{% endif %}.{% else %}This task sealed no version, so it holds no records.{% endif %}</p>
+  {% endif %}
+
+  {% if found.quarantine %}
+  <h3 id="h-task-turned-down">Turned down when read</h3>
+  <div class="table-wrap"><table>
+    <caption class="sr-only">Records of this read in quarantine, with their reasons</caption>
+    <thead><tr><th scope="col">Record</th><th scope="col">Partition</th><th scope="col">Status</th><th scope="col">Why</th></tr></thead>
+    <tbody>
+    {% for q in found.quarantine %}
+      <tr>
+        <th scope="row"><code>{{ q.key }}</code></th>
+        <td>{% if q.partition %}{{ m.partition_label(found.dataset, q.partition) }}{% else %}<span class="muted">&ndash;</span>{% endif %}</td>
+        <td>{{ m.status_badge(q.status) }}</td>
+        <td><span class="error-text">{{ q.error }}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
+</section>

@@ -269,3 +269,9 @@ caption { text-align: left; padding: 0.6rem 0.9rem; color: var(--muted); }
 .changes del { color: var(--muted); }
 .changes caption { text-align: left; padding: 0.5rem 0.9rem; color: var(--muted); }
 .trace-link { white-space: nowrap; }
+
+/* A task's records, opened under the run's timeline. */
+#records-panel:empty { display: none; }
+.records-panel { margin-top: 2rem; }
+.task-records .record-json pre { max-width: min(40rem, 80vw); }
+.task-links { white-space: nowrap; }

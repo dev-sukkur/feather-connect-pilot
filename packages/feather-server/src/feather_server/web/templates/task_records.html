@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Records of an {{ found.task.kind }} task</h1>
+<p><a href="/runs/{{ run_id | urlencode }}">&larr; Back to the run</a></p>
+<div id="records-panel">
+{% include "_task_records.html" %}
+</div>
+{% endblock %}
