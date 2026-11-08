@@ -79,7 +79,8 @@ def _failed(error: ApiError, json_mode: bool) -> NoReturn:
     fail(str(error), hint=hint, json_mode=json_mode)
 
 
-def _call[T](fn: Callable[[], T], json_mode: bool) -> T:
+def call[T](fn: Callable[[], T], json_mode: bool) -> T:
+    """Call the API, ending the command with the reason and a hint when it fails."""
     try:
         return fn()
     except ApiError as error:
@@ -122,7 +123,7 @@ def status(
 ) -> None:
     """What is failing, what is running, and the workers."""
     with client(project, env, server, token, json_mode) as api:
-        found = _call(api.summary, json_mode)
+        found = call(api.summary, json_mode)
 
     def human(doc: dict[str, Any]) -> None:
         counts = ", ".join(f"{n} {s}" for s, n in sorted(doc["deliveries"].items())) or "none"
@@ -151,7 +152,7 @@ def runs(
 ) -> None:
     """The newest runs, filtered by flow and status."""
     with client(project, env, server, token, json_mode) as api:
-        found = _call(lambda: api.runs(flow=flow, status=status_, limit=limit), json_mode)
+        found = call(lambda: api.runs(flow=flow, status=status_, limit=limit), json_mode)
 
     def human(doc: dict[str, Any]) -> None:
         for r in doc["items"]:
@@ -177,9 +178,9 @@ def logs(
     with client(project, env, server, token, json_mode) as api:
         cursor = None
         while True:
-            page = _call(lambda c=cursor: api.run_tasks(run_id, cursor=c), json_mode)
+            page = call(lambda c=cursor: api.run_tasks(run_id, cursor=c), json_mode)
             for task in page["items"]:
-                lines = _call(lambda t=task: api.task_logs(t["task_id"]), json_mode)
+                lines = call(lambda t=task: api.task_logs(t["task_id"]), json_mode)
                 tasks.append(
                     {"task_id": task["task_id"], "kind": task["kind"], "ref": task["ref"], "lines": lines}
                 )
@@ -211,7 +212,7 @@ def start_run(
 ) -> None:
     """Start a run of `flow` on the server: what `feather run` without `--local` does."""
     with client(project, env, server, token, json_mode) as api:
-        found = _call(lambda: api.start_run(flow, partitions=partitions), json_mode)
+        found = call(lambda: api.start_run(flow, partitions=partitions), json_mode)
     emit(
         {"run_id": found["run_id"], "flow": flow, "status": "queued"},
         json_mode=json_mode,
@@ -237,7 +238,7 @@ def backfill(
 ) -> None:
     """Read the days from --from to --to again. Shows the impact first."""
     with client(project, env, server, token, json_mode) as api:
-        preview = _call(
+        preview = call(
             lambda: api.preview_backfill(flow, start, end, max_concurrent=max_concurrent), json_mode
         )
         if not _confirm(preview, yes, dry_run, json_mode):
@@ -247,7 +248,7 @@ def backfill(
                 human=lambda _: typer.echo("nothing done"),
             )
             return
-        found = _call(lambda: api.backfill(flow, preview["confirmation_token"], reason=reason), json_mode)
+        found = call(lambda: api.backfill(flow, preview["confirmation_token"], reason=reason), json_mode)
     emit(
         {"done": True, "run_id": found["run_id"], "preview": preview},
         json_mode=json_mode,
@@ -285,7 +286,7 @@ def replay(
     else:
         selection["partition"] = partition
     with client(project, env, server, token, json_mode) as api:
-        preview = _call(lambda: api.preview_deliveries("replay", selection), json_mode)
+        preview = call(lambda: api.preview_deliveries("replay", selection), json_mode)
         if not _confirm(preview, yes, dry_run, json_mode):
             emit(
                 {"done": False, "preview": preview},
@@ -293,7 +294,7 @@ def replay(
                 human=lambda _: typer.echo("nothing done"),
             )
             return
-        found = _call(
+        found = call(
             lambda: api.apply_deliveries("replay", preview["confirmation_token"], reason=reason), json_mode
         )
     emit(

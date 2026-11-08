@@ -4,8 +4,11 @@ Every failure is an `ApiError` whose message names the URL and says why: the ser
 token, or answered with a problem (RFC 9457), whose detail it carries.
 """
 
+import hashlib
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Self
+from urllib.parse import quote
 
 import httpx
 
@@ -150,3 +153,49 @@ class ApiClient:
         return self._call(
             "POST", f"/deliveries:{action}", body={"confirmation_token": token, "reason": reason}
         )
+
+    # Registries.
+
+    def registries(self) -> list[dict[str, Any]]:
+        return self._call("GET", "/registries")["items"]
+
+    def add_registry(self, name: str, index_url: str, token_ref: str | None) -> dict[str, Any]:
+        return self._call(
+            "POST", "/registries", body={"name": name, "index_url": index_url, "token_ref": token_ref}
+        )
+
+    def remove_registry(self, name: str) -> dict[str, Any]:
+        return self._call("DELETE", f"/registries/{quote(name, safe='')}")
+
+    def test_registry(self, name: str) -> dict[str, Any]:
+        return self._call("POST", f"/registries/{quote(name, safe='')}:test")
+
+    def search_packages(self, registry: str, query: str = "") -> list[dict[str, Any]]:
+        return self._call("GET", f"/registries/{quote(registry, safe='')}/packages", params={"q": query})[
+            "items"
+        ]
+
+    def publish(self, path: Path) -> None:
+        """Upload a wheel to the built-in registry, as `uv publish` does: the legacy upload form at `/registry/`."""
+        url = f"{self.base_url}/registry/"
+        data = path.read_bytes()
+        form = {
+            ":action": "file_upload",
+            "protocol_version": "1",
+            "filetype": "bdist_wheel",
+            "pyversion": "py3",
+            "sha256_digest": hashlib.sha256(data).hexdigest(),
+        }
+        try:
+            answer = self._http.post(
+                url, data=form, files={"content": (path.name, data, "application/octet-stream")}
+            )
+        except httpx.HTTPError as error:
+            raise ApiError(f"can't reach the server at {url}: {error}") from None
+        if answer.is_success:
+            return
+        try:
+            detail = answer.json().get("detail") or answer.reason_phrase
+        except ValueError:
+            detail = answer.text[:200] or answer.reason_phrase
+        raise ApiError(f"POST {url} failed ({answer.status_code}): {detail}", status=answer.status_code)
