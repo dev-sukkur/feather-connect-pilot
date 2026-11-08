@@ -150,6 +150,9 @@ def _work(
                 signal.signal(number, on_signal)
 
     store.workers.heartbeat(worker_id, labels, code_sha, slots)
+    # A heartbeat keeps a draining worker draining, so that the drain shows to the end. This is a new process, though:
+    # a restarted container keeps its hostname, the default id, and its last process left the row draining.
+    store.workers.mark(worker_id, "alive")
     handle = DbosWorkerRuntime(database_url, poll_s=poll_s, drain_s=DRAIN_S).run(
         runtime.tasks(), worker_id, labels, slots
     )

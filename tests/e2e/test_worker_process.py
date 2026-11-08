@@ -130,6 +130,21 @@ def test_sigterm_drains_and_exits_zero(demo_project, pg_url, db, workers):
     assert mine.state == "draining"
 
 
+def test_a_worker_started_again_under_its_id_is_alive(demo_project, pg_url, db, workers):
+    """A restarted container keeps its hostname, the default id: the new process is alive, not its last one's drain."""
+    store, _ = db
+    wid = "w-again-" + uuid.uuid4().hex[:6]
+    proc = start_worker(demo_project, pg_url, wid)
+    workers.append(proc)
+    wait_until(lambda: wid in [w.worker_id for w in store.workers.list_workers()])
+    time.sleep(2)
+    stop_gracefully(proc)
+    assert proc.wait(timeout=60) == 0
+    workers.append(start_worker(demo_project, pg_url, wid))
+    state = lambda: next(w.state for w in store.workers.list_workers() if w.worker_id == wid)
+    wait_until(lambda: state() == "alive", 30)
+
+
 def test_workers_with_different_shas_are_visible(demo_project, pg_url, db, workers):
     store, _ = db
     a, b = "w-a-" + uuid.uuid4().hex[:6], "w-b-" + uuid.uuid4().hex[:6]
