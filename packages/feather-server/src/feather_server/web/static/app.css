@@ -273,5 +273,6 @@ caption { text-align: left; padding: 0.6rem 0.9rem; color: var(--muted); }
 /* A task's records, opened under the run's timeline. */
 #records-panel:empty { display: none; }
 .records-panel { margin-top: 2rem; }
-.task-records .record-json pre { max-width: min(40rem, 80vw); }
+.task-records .record-json pre { max-width: min(40rem, 80vw); min-width: 15rem; }
+.task-records th code { white-space: nowrap; }  /* on a phone the table scrolls rather than break keys apart */
 .task-links { white-space: nowrap; }
