@@ -1,6 +1,6 @@
 # ADR-0006: An environment is a deployment; a tenant is a namespace
 
-- **Status:** Accepted
+- **Status:** Accepted. Its tenant half is amended by [ADR-0013](0013-light-tenancy-and-non-prod-layout.md): v1 keeps one tenant, and full multi-tenancy comes after v1
 - **Date:** 2026-10-30
 - **Deciders:** OSS Dev1 (sponsor)
 

@@ -96,7 +96,7 @@ Stakeholders: the sponsor and product owner (OSS Dev1), the reference organisati
 | Durable engine behind a port (DBOS Transact, ADR-0003) | Kafka/Redpanda as optional transport | Hosted SaaS |
 | One-to-many delivery, ETL transforms, webhook events, Postgres CDC | Visual data-mapping assistant | API gateway / developer portal |
 | Partitions, versions, replay, backfill, readiness | In-dashboard AI assistant | Full BPM |
-| dev/qa/uat/prod deployments; multi-tenancy | More connectors (Salesforce, Dynamics, NetSuite, Snowflake, BigQuery, Kafka, SFTP, Excel) | |
+| dev/qa/uat/prod deployments; the tenant column, with one tenant (ADR-0013) | More connectors (Salesforce, Dynamics, NetSuite, Snowflake, BigQuery, Kafka, SFTP, Excel) | |
 | On-prem agent (outbound-only) | Marketplace for community connectors | |
 | Connectors and templates listed in FR-J2 and FR-A7 | Column-level lineage | |
 
@@ -221,9 +221,9 @@ Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and op
 | ID | Requirement | Priority | Milestone |
 |---|---|---|---|
 | FR-I1 | Every operational record carries a tenant. Single-tenant installs use an implicit default tenant. | Must | M1 |
-| FR-I2 | Per-tenant connections, secrets, budgets, quotas, alert channels, users and roles. | Should | M3 |
-| FR-I3 | Tenant isolation is enforced in the database (row-level security) as well as in the API. | Must | M3 |
-| FR-I4 | Optional dedicated worker pools or agents per tenant. | Could | M3 |
+| FR-I2 | Per-tenant connections, secrets, budgets, quotas, alert channels, users and roles. | Should | After v1 (ADR-0013) |
+| FR-I3 | Tenant isolation is enforced in the database (row-level security) as well as in the API. | Must, once there is more than one tenant | After v1 (ADR-0013) |
+| FR-I4 | Optional dedicated worker pools or agents per tenant. | Could | After v1 (ADR-0013) |
 
 ### J. Connectors
 
