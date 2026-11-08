@@ -20,6 +20,9 @@ def main(port: int, out: str) -> None:
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        # The head and the body go out in two writes. With Nagle's algorithm the second waits for the client to ACK
+        # the first, and on Linux the client delays that ACK by 40 ms: about 20 calls a second, whatever is offered.
+        disable_nagle_algorithm = True
 
         def do_PUT(self) -> None:
             arrived = time.time()
