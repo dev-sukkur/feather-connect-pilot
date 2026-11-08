@@ -1,20 +1,20 @@
 # M1 exit report and review guide
 
 This is where M1 stands against its exit criteria (design §19), how to run every check that proves them, a map of the
-code for a reviewer, and what is still open. Branch `stage-5-exit`; the numbers marked `<…>` are filled in from the
-runs below, on the reviewer's machine and in CI.
+code for a reviewer, and what is still open. Branch `stage-5-exit`; the measured numbers come from the full M1 gate
+run on 2026-11-08 (Windows 11, Docker Desktop), after the two fixes in §4.
 
 ## 1. Exit criteria
 
 | Exit criterion (design §19) | Proved by | Result | Measured |
 |---|---|---|---|
-| The demo fans JSON simulation data out to Postgres, DuckDB and HTTP | `tests/e2e/test_demo_fanout.py::test_demo_fans_out_to_postgres_duckdb_and_http` (real stack); `tests/demo/test_demo_project.py` (in process) | Passed on Stage 5 focused runs | `<all orders at all three: yes/no>` |
-| Webhook → HTTP p95 ≤ 5 s | `tests/e2e/test_webhook_to_http_latency.py` (feather-http `Webhook` and `Call`, from the generator's send to the echo's receipt); `tests/e2e/test_webhook_latency.py::test_webhook_to_sink_p95_within_5s` (test connectors, receipt to write) | See §4 | p95 `<…> s`, p50 `<…> s`, lost `<…>`, on the fsync-off test Postgres; p95 `<…> s` on a durable one (S19) |
+| The demo fans JSON simulation data out to Postgres, DuckDB and HTTP | `tests/e2e/test_demo_fanout.py::test_demo_fans_out_to_postgres_duckdb_and_http` (real stack); `tests/demo/test_demo_project.py` (in process) | Passed in the M1 gate (2026-11-08) | all orders at all three: yes (3 passed) |
+| Webhook → HTTP p95 ≤ 5 s | `tests/e2e/test_webhook_to_http_latency.py` (feather-http `Webhook` and `Call`, from the generator's send to the echo's receipt); `tests/e2e/test_webhook_latency.py::test_webhook_to_sink_p95_within_5s` (test connectors, receipt to write) | Passed in the M1 gate (2026-11-08) | 3,000 events at 50/s: p95 1.856 s, p50 1.263 s, lost 0, repeats 0 on the fsync-off test Postgres; p95 2.004 s (p50 1.342 s, lost 0) on a durable fsync-on one (S19). Receipt to write: p95 1.709 s |
 | Re-run and replay work from the dashboard | `tests/dashboard/test_operator_journeys.py::test_rerun_from_the_dashboard`, `::test_replay_from_the_dashboard` (Chromium) | Passed | — |
-| kill -9 mid-apply loses and duplicates nothing | `tests/chaos/test_kill_mid_apply.py::test_kill_9_mid_apply_loses_and_duplicates_nothing`, and the rest of `tests/chaos` | Passed in Stage 3; not rerun in Stage 5 | `<lost 0, duplicates 0>` |
-| `feather dev` ≤ 5 minutes | `tests/dev/test_feather_dev.py::test_dev_shows_the_demo_flow_within_five_minutes` | Passed in Stage 4; not rerun in Stage 5 | `<…> s` to the demo flow on the dashboard |
+| kill -9 mid-apply loses and duplicates nothing | `tests/chaos/test_kill_mid_apply.py::test_kill_9_mid_apply_loses_and_duplicates_nothing`, and the rest of `tests/chaos` | Passed in the M1 gate (2026-11-08) (12 chaos tests) | lost 0, duplicates 0 |
+| `feather dev` ≤ 5 minutes | `tests/dev/test_feather_dev.py::test_dev_shows_the_demo_flow_within_five_minutes` | Passed in the M1 gate (2026-11-08) | 67 s to the demo flow on the dashboard |
 | H1–H4 and H6 pass | `tests/hard_cases/test_hard_cases.py` (full stack, real Postgres and HTTP connectors); `packages/feather-connect/tests/runtime/test_extract.py` and `test_apply.py` (`LocalEngine`) | See §4 | — |
-| H14 passes | `tests/e2e/test_webhook_latency.py::test_burst_at_10x_loses_nothing_and_recovers` | Passed in Stage 3; not rerun in Stage 5 | recovered after `<…> s` |
+| H14 passes | `tests/e2e/test_webhook_latency.py::test_burst_at_10x_loses_nothing_and_recovers` | Passed in the M1 gate (2026-11-08) | 18,229 events, lost 0, duplicates 0; p95 never left the target, recovered after 0.0 s |
 | NFR-13 (WCAG 2.1 AA) | `tests/dashboard/test_accessibility.py` (axe-core on 7 pages, light and dark) | Passed | 0 violations |
 | NFR-06, 07, 15 (Compose) | `tests/deploy/test_compose.py` | 7 of 7 passed | — |
 
@@ -51,11 +51,11 @@ Run from the repository root, in this order. Each should end as the right-hand c
 | `uv run ruff format --check .` | no file would be reformatted |
 | `uv run pyright` | `0 errors` (the add-on packages' imports carry ignores, see §5) |
 | `uv run pytest packages --cov --cov-fail-under=70` | all pass; total coverage ≥ 70 % |
-| `uv run pytest packages/feather-connect/tests --cov=feather_connect --cov-report=term --cov-fail-under=85` | SDK core coverage ≥ 85 % (`<…> %`) |
+| `uv run pytest packages/feather-connect/tests --cov=feather_connect --cov-report=term --cov-fail-under=85` | SDK core coverage ≥ 85 % (85.06 %; all packages 96.32 %) |
 | `uv run pytest tests -q` | all pass, apart from the `perf` tests, which `tests/e2e` leaves out unless a file is named |
 
 `uv run pytest tests -q` covers chaos, dashboard, demo, deploy (Docker), dev (Docker), e2e, engine conformance,
-hard cases and templates. It takes `<…>` minutes. The exit numbers come from the runs named by file:
+hard cases and templates. It takes about 34 minutes. The exit numbers come from the runs named by file:
 
 ```text
 uv run pytest tests/e2e/test_webhook_latency.py -s                  # p95 receipt to write, H14 burst, schedules
@@ -111,7 +111,39 @@ Where each criterion is proved is the table in §1; the requirement-to-task map 
 
 ## 4. Stage 5 results
 
-Focused runs only; the full gate above has not been run on this branch.
+### The full M1 gate (2026-11-08)
+
+Every command in §2 was run on this branch. Two tests failed on the first pass; both are fixed (below) and the two
+tests pass again.
+
+| Step | Result |
+|---|---|
+| ruff, format check, pyright | clean; pyright 0 errors |
+| `pytest packages --cov` | 1,780 passed, 24 skipped, 3 xfailed, 1 failed (fixed: `1b48445`); coverage 96.32 % |
+| feather-connect coverage | 1,221 passed, 10 skipped, 2 xfailed; coverage 85.06 % |
+| `pytest tests -q` | 129 passed, 6 skipped, 1 failed (fixed: `ae50501`), 33.5 minutes |
+| `tests/e2e/test_webhook_latency.py -s` | 4 passed; p95 1.709 s receipt to write; H14 burst 18,229 events, lost 0 |
+| `tests/e2e/test_webhook_to_http_latency.py -s` | passed; p50 1.263 s, p95 1.856 s, max 2.204 s; 3,000 of 3,000, none repeated |
+| the same on a durable fsync-on Postgres (S19, port 25434) | passed; p50 1.342 s, p95 2.004 s, max 2.451 s; container and volume removed afterwards |
+| `tests/chaos -s` | 12 passed |
+| `tests/dev/test_feather_dev.py -k five_minutes` | passed; demo visible after 67 s |
+| `tests/e2e/test_demo_fanout.py` (rerun alone) | 3 passed |
+
+The two failures:
+
+- `test_run_local_sim_reports_per_route_counts` (`1b48445`, test bug): a manual run of a `by_day` dataset reads
+  yesterday and today, and the test's rows had fixed dates, so it began failing once those dates aged out. The rows
+  are now dated from the clock.
+- `test_two_workers_scale_with_replicas` (`ae50501`, product bug): the default worker id is the hostname, which a
+  restarted container keeps. After `compose restart` the row stayed `draining`, and the restarted worker's heartbeats
+  left it so. A starting worker now marks its row `alive`; new test
+  `test_a_worker_started_again_under_its_id_is_alive`. `tests/deploy/test_compose.py` 7 passed after it.
+
+Seen while rerunning: when `pytest-timeout` stops a run of `tests/e2e/test_worker_process.py`, the worker
+subprocesses it started outlive pytest and keep their database connections, so the next runs can time out connecting.
+Clean runs pass (7 of 7, three times).
+
+### Stage 5 focused runs
 
 | Check | Result |
 |---|---|
@@ -134,7 +166,7 @@ Focused runs only; the full gate above has not been run on this branch.
 | `feather new --template` | rewrites feather.yaml and env files with PyYAML, so their comments are lost | Plan 6, Task 2 |
 | Scheduler tick | a crash between the tick and the run loses that tick (documented) | Plan 3 |
 | Stage 2 M13 "reason column cut off" | not reproduced at 360 px | — |
-| The full gate | not run on this branch: the user runs it | — |
+| Worker test subprocesses | outlive a run that `pytest-timeout` stops (see §4) | Plan 3 |
 
 ## 6. End-of-stage review
 
