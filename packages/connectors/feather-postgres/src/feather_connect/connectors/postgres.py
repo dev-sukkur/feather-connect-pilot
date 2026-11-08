@@ -56,6 +56,12 @@ FC_COLUMNS: dict[str, LiteralString] = {
     "_fc_op": "text",
     "_fc_applied_at": "timestamptz",
 }
+# What the runtime adds to each record of an `append` route, besides the key, op and partition: added when missing.
+APPEND_COLUMNS: dict[str, LiteralString] = {
+    "_fc_version": "text",
+    "_fc_run": "text",
+    "_fc_extracted_at": "timestamptz",
+}
 APPLIED_TABLE = "_feather_applied"
 DEFAULT_BATCH_ROWS = 10_000
 _CONNECT_TIMEOUT = 10
@@ -264,7 +270,7 @@ class Table(_Postgres, connector.Sink):
             raise PermanentError(f"{self.spec.name} can't apply in mode {batch.mode!r}")
         schema = self._schema(ctx)
         with self._connect(ctx) as conn:
-            columns = self._prepare(conn, schema)
+            columns = self._prepare(conn, schema, append=batch.mode == "append")
             with conn.transaction():
                 done = self._applied_before(conn, schema, batch.idempotency_key)
                 if done is not None:
@@ -276,7 +282,7 @@ class Table(_Postgres, connector.Sink):
                 self._remember(conn, schema, batch.idempotency_key, result)
             return result
 
-    def _prepare(self, conn: psycopg.Connection[Any], schema: str) -> dict[str, str]:
+    def _prepare(self, conn: psycopg.Connection[Any], schema: str, *, append: bool = False) -> dict[str, str]:
         """Make sure of `_feather_applied` and the table's `_fc_*` columns, and return the table's columns by name."""
         with conn.transaction():
             conn.execute(
@@ -288,7 +294,7 @@ class Table(_Postgres, connector.Sink):
             columns = self._columns(conn, schema, self.table)
             if not columns:
                 raise PermanentError(f"{self.spec.name}: there is no table {schema}.{self.table}")
-            for name, kind in FC_COLUMNS.items():
+            for name, kind in (FC_COLUMNS | APPEND_COLUMNS if append else FC_COLUMNS).items():
                 if name not in columns:
                     conn.execute(
                         sql.SQL("alter table {} add column if not exists {} {}").format(

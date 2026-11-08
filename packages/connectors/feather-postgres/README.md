@@ -46,7 +46,8 @@ a `by_stamp` read's `since` down to the server as parameters. `sql="select ..."`
 `Table` supports `upsert` (insert or update by `key_columns`; a delete removes the key), `append` and
 `replace_partition`, which stages the chunks of a version in a table of its own and swaps the slice in one
 transaction on the last chunk. It writes five columns of its own, `_fc_key`, `_fc_partition`, `_fc_version_id`,
-`_fc_op` and `_fc_applied_at`, adding them to the table if they are missing, and keeps each chunk's result in
+`_fc_op` and `_fc_applied_at`, adding them to the table if they are missing (on an `append` route also `_fc_version`,
+`_fc_run` and `_fc_extracted_at`, which the runtime stamps each row with), and keeps each chunk's result in
 `_feather_applied`, so that a chunk sent again changes nothing.
 
 The table must exist. A record with a field the table has no column for fails the version with an error naming the

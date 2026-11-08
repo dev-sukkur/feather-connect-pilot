@@ -312,3 +312,15 @@ def test_a_replace_stages_a_chunk_in_a_few_statements(target, make_ctx, monkeypa
     sink.apply(make_ctx(), batch(records, mode="replace_partition", partition="day=d1"))
     assert len(rows(target, "daily")) == 500
     assert sum(s.lstrip().lower().startswith("insert into") for s in sent) <= 4
+
+
+@pytest.mark.postgres
+def test_append_adds_the_columns_the_runtime_stamps_an_append_record_with(target, make_ctx):  # hard case H4
+    target.execute("create table log (id text, v int)")
+    sink = postgres.Table("wh", table="log", key_columns=["id"])
+    stamped = {"_fc_version": "v1", "_fc_run": "r1", "_fc_extracted_at": datetime(2026, 11, 1, tzinfo=UTC)}
+    sink.apply(make_ctx(), batch([up("a", id="a", v=1, **stamped)], mode="append"))
+    found = target.execute(
+        "select id, v, _fc_version, _fc_run, _fc_extracted_at is not null from log"
+    ).fetchall()
+    assert found == [("a", 1, "v1", "r1", True)]
