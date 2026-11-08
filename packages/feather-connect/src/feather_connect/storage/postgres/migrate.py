@@ -27,13 +27,14 @@ def at_head(database_url: str) -> bool:
     return row is not None and row[0] == head
 
 
-def migrate(database_url: str) -> None:
-    """Bring the database up to the latest revision, creating schema `feather` first. Safe to repeat."""
+def migrate(database_url: str, revision: str = "head") -> None:
+    """Bring the database up to the latest revision (or to `revision`, which tests of an upgrade use), creating schema
+    `feather` first. Safe to repeat."""
     config = _config()
     engine = create_engine(make_url(database_url).set(drivername="postgresql+psycopg"))
     try:
         with engine.begin() as connection:
             config.attributes["connection"] = connection
-            command.upgrade(config, "head")
+            command.upgrade(config, revision)
     finally:
         engine.dispose()

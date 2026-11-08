@@ -44,6 +44,7 @@ from feather_connect.storage.port import (
     RecordStateStore,
     ResponseRow,
     ResponseStore,
+    Role,
     RouteRow,
     Run,
     RunJournal,
@@ -1169,29 +1170,39 @@ class _Users(UserStore):
     def __init__(self, data: _Data) -> None:
         self._d = data
 
-    def create_user(self, username: str, password_hash: str) -> str:
+    def create_user(self, username: str, password_hash: str, role: Role) -> str:
         with self._d.lock:
             if username in self._d.users:
                 raise DuplicateUser(username)
             user_id = new_id()
-            self._d.users[username] = UserRow(user_id, username, password_hash, self._d.clock.now())
+            self._d.users[username] = UserRow(user_id, username, password_hash, self._d.clock.now(), role)
             return user_id
 
     def get_user(self, username: str) -> UserRow | None:
         with self._d.lock:
             return self._d.users.get(username)
 
+    def list_users(self) -> list[UserRow]:
+        with self._d.lock:
+            return sorted(self._d.users.values(), key=lambda user: user.username)
+
     def set_password_hash(self, username: str, password_hash: str) -> None:
         with self._d.lock:
             self._d.users[username] = replace(self._d.users[username], password_hash=password_hash)
 
-    def create_token(self, name: str, token_hash: str, expires_at: datetime | None) -> str:
+    def set_role(self, username: str, role: Role) -> None:
+        with self._d.lock:
+            self._d.users[username] = replace(self._d.users[username], role=role)
+
+    def create_token(
+        self, name: str, token_hash: str, expires_at: datetime | None, role: Role, created_by: str | None
+    ) -> str:
         with self._d.lock:
             if any(t.token_hash == token_hash for t in self._d.tokens.values()):
                 raise ValueError("a token with that hash exists")
             token_id = new_id()
             self._d.tokens[token_id] = TokenRow(
-                token_id, name, token_hash, self._d.clock.now(), expires_at, None
+                token_id, name, token_hash, self._d.clock.now(), expires_at, None, role, created_by
             )
             return token_id
 
