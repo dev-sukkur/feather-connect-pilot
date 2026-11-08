@@ -23,7 +23,7 @@ from feather_connect.packages.manifest import ManifestError
 from feather_connect.packages.wheel import MAX_WHEEL
 from feather_connect.storage.port import RegistryFile
 from feather_server.api.errors import PROBLEM_JSON
-from feather_server.auth import AuthError, CurrentActor
+from feather_server.auth import AuthError, CurrentActor, require_csrf
 from feather_server.services.access import Forbidden
 from feather_server.services.registries import Registries, VersionExists
 
@@ -144,8 +144,12 @@ async def _upload(request: Request, actor: CurrentActor) -> Response:
     return Response("OK\n", media_type="text/plain")
 
 
-router.add_api_route("/", _upload, methods=["POST"], dependencies=[Depends(_token_only)])
-router.add_api_route("/legacy/", _upload, methods=["POST"], dependencies=[Depends(_token_only)])
+router.add_api_route(
+    "/", _upload, methods=["POST"], dependencies=[Depends(_token_only), Depends(require_csrf)]
+)
+router.add_api_route(
+    "/legacy/", _upload, methods=["POST"], dependencies=[Depends(_token_only), Depends(require_csrf)]
+)
 
 
 def install(app: FastAPI) -> None:
