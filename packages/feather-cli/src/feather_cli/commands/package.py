@@ -41,7 +41,10 @@ def build(
         "name": built.manifest["name"],
         "version": built.manifest["version"],
         "flows": [f["name"] for f in built.manifest["flows"]],
+        "warnings": list(built.warnings),
     }
+    for warning in built.warnings:
+        typer.echo(f"warning: {warning}", err=True)
     emit(
         document, json_mode=json_mode, human=lambda d: typer.echo(f"built {d['wheel']}\nsha256 {d['sha256']}")
     )

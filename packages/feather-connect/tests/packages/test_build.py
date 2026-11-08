@@ -15,9 +15,10 @@ from jsonschema import Draft202012Validator
 from feather_connect.packages import manifest as m
 from feather_connect.packages.build import LOCK_FILE, build_package, wheel_name
 from feather_connect.packages.manifest import ManifestError
-from feather_connect.packages.wheel import MAX_WHEEL, read_wheel
+from feather_connect.packages.wheel import MAX_ENTRY, MAX_WHEEL, read_wheel
 
 SAMPLE = Path(__file__).resolve().parents[4] / "examples" / "packages" / "acme-invoices"
+FEATHER_CONNECT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
@@ -133,6 +134,7 @@ def test_read_wheel_gives_back_what_was_built(sample: Path):
         (lambda t: t.replace("version: 1.0.0\n", ""), "version: is required"),
         (lambda t: t.replace("version: 1.0.0", "version: one"), "is not a version"),
         (lambda t: t.replace("version: 1.0.0", "version: v1.0.0"), "normal form"),
+        (lambda t: t.replace("version: 1.0.0", "version: 1.0.0+evil"), "has a local part"),
         (lambda t: t.replace("name: acme-invoices", "name: Acme_Invoices"), "is not a package name"),
         (
             lambda t: t.replace("version: 1.0.0", "version: 1.0.0\nfc_versions: '>=99'"),
@@ -167,13 +169,76 @@ def test_pyproject_must_agree_and_dependencies_need_a_lock(sample: Path):
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
-def test_a_uv_lock_is_exported_into_the_wheel(sample: Path):
+def test_a_uv_lock_is_exported_into_the_wheel_without_feather_connect(sample: Path):
+    # The sample's own pyproject, dependencies = ["feather-connect"], with feather-connect from this checkout.
     path = sample / "pyproject.toml"
-    path.write_text(path.read_text(encoding="utf-8").replace('["feather-connect"]', "[]"), encoding="utf-8")
-    subprocess.run(["uv", "lock", "--offline"], cwd=sample, check=True, capture_output=True, timeout=120)
+    here = FEATHER_CONNECT.as_posix()
+    path.write_text(
+        path.read_text(encoding="utf-8") + f'\n[tool.uv.sources]\nfeather-connect = {{ path = "{here}" }}\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["uv", "lock", "--offline"], cwd=sample, check=True, capture_output=True, timeout=300)
     built = build_package(sample)
     lock = _entries(built.path)[f"acme_invoices-1.0.0.dist-info/{LOCK_FILE}"]
     assert built.manifest["lock_hash"] == hashlib.sha256(lock).hexdigest()
+    lines = lock.decode().splitlines()
+    requirements = [line for line in lines if line and not line[0].isspace() and not line.startswith("#")]
+    assert requirements and not [r for r in requirements if r.startswith(("feather-", "-e", "."))]
+    assert sum("--hash=sha256:" in line for line in lines) >= len(requirements)
+    assert built.manifest["dependencies"] == []
+
+
+def test_a_lock_without_hashes_is_refused(sample: Path, monkeypatch: pytest.MonkeyPatch):
+    (sample / "uv.lock").write_text("", encoding="utf-8")
+    exported = (
+        b"pyyaml==6.0.2 \\\n    --hash=sha256:aa\n-e ./vendored/thing\nrequests==2.32.0\n    # via acme\n"
+    )
+
+    def export(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess([], 0, exported, b"")
+
+    monkeypatch.setattr(subprocess, "run", export)
+    with pytest.raises(ManifestError, match=r"without hashes \(-e, requests==2.32.0\)"):
+        build_package(sample)
+
+
+def test_symlinks_stay_out_of_the_wheel(sample: Path, tmp_path: Path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "stolen.txt").write_text("secret", encoding="utf-8")
+    try:
+        (sample / "flows" / "linked").symlink_to(outside, target_is_directory=True)
+        (sample / "fixtures" / "link.json").symlink_to(outside / "stolen.txt")
+    except OSError:
+        pytest.skip("this machine can't make symlinks")
+    names = _entries(build_package(sample).path)
+    assert not [n for n in names if "linked" in n or "link.json" in n]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_the_manifest_says_whether_the_tree_was_dirty(sample: Path):
+    assert build_package(sample).manifest["dirty"] is None  # not in git
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]
+    subprocess.run([*git, "init", "-q"], cwd=sample, check=True)
+    subprocess.run([*git, "add", "."], cwd=sample, check=True)
+    subprocess.run([*git, "commit", "-qm", "x"], cwd=sample, check=True)
+    clean = build_package(sample).manifest
+    assert clean["dirty"] is False and clean["commit"]
+    with (sample / "flows" / "invoices.py").open("a", encoding="utf-8") as file:
+        file.write("# uncommitted\n")
+    assert build_package(sample).manifest["dirty"] is True
+
+
+def test_a_secret_written_as_its_value_is_warned_about(sample: Path):
+    assert build_package(sample).warnings == ()
+    (sample / "env" / "prod.yaml").write_text(
+        "settings: {timezone: UTC}\nconnections:\n  erp:\n    config: {api_token: abc123, password: '${secret:env:ERP}'}\n",
+        encoding="utf-8",
+    )
+    warnings = build_package(sample).warnings
+    assert len(warnings) == 1 and warnings[0].startswith(
+        "env/prod.yaml.connections.erp.config.api_token looks"
+    )
 
 
 def _rezip(data: bytes, drop: str = "", replace: tuple[str, bytes] | None = None) -> bytes:
@@ -200,6 +265,14 @@ def test_read_wheel_refuses_what_isnt_a_flow_package(sample: Path):
         (name, _rezip(data, replace=(manifest_path, b'{"schema": 1}')), "is a required property"),
         (name, _rezip(data, replace=(manifest_path, other)), "not the wheel's"),
         (name, b"x" * (MAX_WHEEL + 1), "more than the"),
+        ("../acme_invoices-1.0.0-py3-none-any.whl", data, "use only letters"),
+        ("acme_invoices-1.0.0-py3-none-any%2F.whl", data, "use only letters"),
+        (name, _rezip(data, replace=(manifest_path, b" " * (MAX_ENTRY + 1))), "is more than 1048576 bytes"),
+        (
+            name,
+            _rezip(data, replace=("acme_invoices-1.0.0.dist-info/METADATA", b"A" * (MAX_ENTRY + 1))),
+            "METADATA is more",
+        ),
     ):
         with pytest.raises(ManifestError, match=message):
             read_wheel(filename, payload)

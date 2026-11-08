@@ -5,7 +5,7 @@
   "description": "feather-package.json, inside a flow package's wheel next to the project it holds (flow packages design 4.2).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "name", "version", "module", "fc_versions", "flows", "datasets", "routes", "connections", "dependencies", "lock_hash", "built_at", "commit"],
+  "required": ["schema", "name", "version", "module", "fc_versions", "flows", "datasets", "routes", "connections", "dependencies", "lock_hash", "built_at", "commit", "dirty"],
   "properties": {
     "schema": {"const": 1, "description": "The version of this schema."},
     "name": {"$ref": "#/$defs/package_name"},
@@ -67,7 +67,8 @@
     "dependencies": {"type": "array", "items": {"type": "string"}, "description": "Its own requirements, as in pyproject.toml, besides Feather Connect."},
     "lock_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The sha256 of the locked requirements the wheel carries (feather-lock.txt)."},
     "built_at": {"type": ["string", "null"], "format": "date-time", "description": "SOURCE_DATE_EPOCH or the commit's time, so that a build is reproducible; null when there is neither."},
-    "commit": {"type": ["string", "null"], "description": "The git commit it was built from."}
+    "commit": {"type": ["string", "null"], "description": "The git commit it was built from."},
+    "dirty": {"type": ["boolean", "null"], "description": "Whether the tree had changes its commit does not hold; null outside git."}
   },
   "$defs": {
     "package_name": {"type": "string", "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$", "maxLength": 64},

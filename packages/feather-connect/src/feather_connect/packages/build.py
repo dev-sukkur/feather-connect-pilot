@@ -9,6 +9,7 @@ same tree twice gives the same sha256.
 import base64
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,7 @@ import tomllib
 import zipfile
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -27,7 +28,7 @@ from packaging.utils import canonicalize_name
 
 from feather_connect.packages import manifest as m
 from feather_connect.packages.manifest import ManifestError
-from feather_connect.project import ProjectError, load_project, validate_project
+from feather_connect.project import ProjectError, is_secret_ref, load_project, validate_project
 
 PROJECT_DIRS = (
     "connectors",
@@ -44,6 +45,24 @@ _ZIP_TIME = (1980, 1, 1, 0, 0, 0)  # the earliest a zip can say
 _SKIPPED = ("__pycache__",)
 _SKIPPED_SUFFIXES = (".pyc", ".pyo")
 _TAG = "py3-none-any"
+# Feather Connect's own distributions: the installing environment has them, so a lock never pins them (the package's
+# `fc_versions` is the range it needs).
+PLATFORM_DISTRIBUTIONS = (
+    "feather-cli",
+    "feather-connect",
+    "feather-duckdb",
+    "feather-engine-dbos",
+    "feather-generic",
+    "feather-http",
+    "feather-postgres",
+    "feather-retail",
+    "feather-s3",
+    "feather-server",
+)
+# A setting whose name says it holds a secret; its value should be a `${secret:...}` reference.
+_SECRET_KEY = re.compile(
+    r"(password|passwd|secret|token|api[_-]?key|private[_-]?key|credential)", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +73,7 @@ class Built:
     sha256: str
     size: int
     manifest: Mapping[str, Any]
+    warnings: Sequence[str] = field(default_factory=tuple[str, ...])
 
 
 def wheel_name(name: str, version: str) -> str:
@@ -73,7 +93,7 @@ def build_package(root: Path, out_dir: Path | None = None, *, env: str = "dev") 
     dependencies = _dependencies(root, name, version)
     lock = _lock(root, dependencies)
     described = _validated(root, env)
-    built_at, commit = _provenance(root)
+    built_at, commit, dirty = _provenance(root)
     manifest = m.validate(
         {
             "schema": m.SCHEMA_VERSION,
@@ -86,6 +106,7 @@ def build_package(root: Path, out_dir: Path | None = None, *, env: str = "dev") 
             "lock_hash": hashlib.sha256(lock).hexdigest(),
             "built_at": built_at,
             "commit": commit,
+            "dirty": dirty,
         }
     )
     files = _project_files(root, config)
@@ -94,7 +115,7 @@ def build_package(root: Path, out_dir: Path | None = None, *, env: str = "dev") 
     path = target / wheel_name(name, version)
     _write_wheel(path, manifest, files, lock, dependencies)
     data = path.read_bytes()
-    return Built(path, hashlib.sha256(data).hexdigest(), len(data), manifest)
+    return Built(path, hashlib.sha256(data).hexdigest(), len(data), manifest, _secret_warnings(root))
 
 
 # What goes in.
@@ -159,6 +180,7 @@ def _lock(root: Path, dependencies: Sequence[str]) -> bytes:
             "--no-emit-project",
             "--no-dev",
             "--no-header",
+            *(f"--no-emit-package={name}" for name in PLATFORM_DISTRIBUTIONS),
         ],
         cwd=root,
         capture_output=True,
@@ -168,7 +190,30 @@ def _lock(root: Path, dependencies: Sequence[str]) -> bytes:
     if done.returncode != 0:
         reason = done.stderr.decode("utf-8", "replace").strip().splitlines()
         raise ManifestError(f"uv export failed: {reason[-1] if reason else done.returncode}")
-    return done.stdout.replace(b"\r\n", b"\n")
+    lock = done.stdout.replace(b"\r\n", b"\n")
+    _check_hashes(lock)
+    return lock
+
+
+def _check_hashes(lock: bytes) -> None:
+    """Every locked requirement must carry its hashes, so that an install takes those bytes and no others."""
+    unhashed: list[str] = []
+    current: str | None = None
+    hashed = False
+    for line in [*lock.decode("utf-8", "replace").splitlines(), ""]:
+        if line[:1].isspace():
+            hashed = hashed or "--hash=" in line
+            continue
+        if current is not None and not hashed:
+            unhashed.append(current)
+        text = line.strip()
+        current = None if not text or text.startswith("#") else text.split(" ")[0]
+        hashed = current is not None and "--hash=" in text
+    if unhashed:
+        raise ManifestError(
+            f"uv export gave requirements without hashes ({', '.join(unhashed[:3])}): "
+            "a package's dependencies come from an index, not from a path or a URL"
+        )
 
 
 @contextmanager
@@ -205,18 +250,50 @@ def _git(root: Path, *args: str) -> str | None:
     return done.stdout.strip() or None
 
 
-def _provenance(root: Path) -> tuple[str | None, str | None]:
-    """When and from what it was built, in a way that doesn't change from one build of the same tree to the next."""
+def _provenance(root: Path) -> tuple[str | None, str | None, bool | None]:
+    """When and from what it was built, in a way that doesn't change from one build of the same tree to the next, and
+    whether the tree had changes its commit doesn't hold (None outside git)."""
     epoch = os.environ.get("SOURCE_DATE_EPOCH") or _git(root, "log", "-1", "--format=%ct")
     built_at = None
     if epoch and epoch.isdigit():
         built_at = datetime.fromtimestamp(int(epoch), UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return built_at, _git(root, "rev-parse", "HEAD")
+    commit = _git(root, "rev-parse", "HEAD")
+    dirty = None if commit is None else _git(root, "status", "--porcelain", "--", ".") is not None
+    return built_at, commit, dirty
+
+
+def _secret_warnings(root: Path) -> tuple[str, ...]:
+    """Settings in feather.yaml and env/*.yaml whose name says secret but whose value is not a secret reference: the
+    wheel would carry the value. Only a warning, as a name can mislead."""
+    found: list[str] = []
+
+    def walk(value: Any, where: str) -> None:
+        if isinstance(value, dict):
+            for key, item in cast(dict[Any, Any], value).items():
+                path = f"{where}.{key}"
+                if (
+                    isinstance(item, str)
+                    and item
+                    and _SECRET_KEY.search(str(key))
+                    and not is_secret_ref(item)
+                ):
+                    found.append(f"{path} looks like a secret written as its value: use ${{secret:env:NAME}}")
+                walk(item, path)
+        elif isinstance(value, list):
+            for i, item in enumerate(cast(list[Any], value)):
+                walk(item, f"{where}[{i}]")
+
+    for path in [root / "feather.yaml", *sorted((root / "env").glob("*.yaml"))]:
+        try:
+            walk(yaml.safe_load(path.read_text(encoding="utf-8")), path.relative_to(root).as_posix())
+        except (OSError, yaml.YAMLError):
+            continue
+    return tuple(found)
 
 
 def _project_files(root: Path, config: Mapping[str, Any]) -> list[tuple[str, Path]]:
     """The project's files, by their path in the project: feather.yaml, the usual folders and the folders its
-    `modules:` live in. Hidden files, caches and anything else (secrets/, .data/, dist/) stay out."""
+    `modules:` live in. Hidden files, caches, symlinks and anything else (secrets/, .data/, dist/) stay out."""
     tops: set[str] = set(PROJECT_DIRS)
     for module in cast(list[Any], config.get("modules") or []):
         tops.add(str(module).split(".")[0])
@@ -225,10 +302,14 @@ def _project_files(root: Path, config: Mapping[str, Any]) -> list[tuple[str, Pat
         folder = root / top
         if not folder.is_dir():
             continue
+        if folder.is_symlink():
+            continue
         for path in folder.rglob("*"):
             rel = path.relative_to(root)
             if not path.is_file() or any(p.startswith(".") or p in _SKIPPED for p in rel.parts):
                 continue
+            if any((root / Path(*rel.parts[: i + 1])).is_symlink() for i in range(len(rel.parts))):
+                continue  # a link could bring in what lies outside the project
             if path.suffix in _SKIPPED_SUFFIXES:
                 continue
             found.append((rel.as_posix(), path))
