@@ -139,6 +139,15 @@ The two failures:
   left it so. A starting worker now marks its row `alive`; new test
   `test_a_worker_started_again_under_its_id_is_alive`. `tests/deploy/test_compose.py` 7 passed after it.
 
+CI on Linux showed two more, both fixed and checked in a Linux container:
+
+- `tests/dev` (`0e2cc2b`, product bug): `feather dev`'s port check bound without `SO_REUSEADDR`, so a helper's port
+  still holding TIME_WAIT connections from the last run looked taken for a minute. The check now sets it on POSIX, as
+  servers do; new test `packages/feather-cli/tests/test_dev_ports.py`.
+- `test_webhook_to_http_p95_within_5s` on the CI runner, p95 82 s (`348ddf5`, test bug): the test's echo server wrote
+  head and body separately with Nagle on, so each answer waited out Linux's 40 ms delayed ACK (about 20 calls a
+  second). With `TCP_NODELAY` the Linux p95 is 2.99 s; the 5 s target is unchanged.
+
 Seen while rerunning: when `pytest-timeout` stops a run of `tests/e2e/test_worker_process.py`, the worker
 subprocesses it started outlive pytest and keep their database connections, so the next runs can time out connecting.
 Clean runs pass (7 of 7, three times).
