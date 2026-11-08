@@ -6,7 +6,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from cronsim import CronSim
@@ -544,6 +544,38 @@ class Reads:
         return self._store.ledger.list_deliveries(
             route=route, status=status, partition=partition, limit=limit, cursor=cursor
         )
+
+    # Versions.
+
+    def version_records(
+        self, version_id: str, limit: int, cursor: str | None
+    ) -> tuple[Version, list[dict[str, Any]], str | None]:
+        """The version, a page of its records from the spool, and the cursor of the next page (`chunk:offset`), or
+        None on the last. Raises `KeyError` for an unknown version and `ValueError` for a cursor not of this form."""
+        version = self._store.versions.get(version_id)
+        chunk_no, offset = 0, 0
+        if cursor is not None:
+            first, _, second = cursor.partition(":")
+            chunk_no, offset = int(first), int(second)
+            if chunk_no < 0 or offset < 0:
+                raise ValueError("a cursor counts from zero")
+        spool = self._state.spool
+        chunks = [c.chunk_no for c in spool.list_chunks(version_id)]
+        records: list[dict[str, Any]] = []
+        next_raw: str | None = None
+        for number in (n for n in chunks if n >= chunk_no):
+            table = spool.get_chunk(version_id, number)
+            start = offset if number == chunk_no else 0
+            rows = table.slice(start, limit - len(records)).to_pylist()
+            records.extend(rows)
+            if len(records) >= limit:
+                end = start + len(rows)
+                if end < table.num_rows:
+                    next_raw = f"{number}:{end}"
+                elif number != chunks[-1]:
+                    next_raw = f"{chunks[chunks.index(number) + 1]}:0"
+                break
+        return version, records, next_raw
 
     def delivery_detail(self, route: str, version_id: str) -> DeliveryDetail:
         """Return a delivery with its attempts and the destination's answers. Raises `KeyError` for an unknown one."""

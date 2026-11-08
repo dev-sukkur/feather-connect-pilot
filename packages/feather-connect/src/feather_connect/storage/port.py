@@ -126,6 +126,26 @@ class Version(VersionDraft):
 
 
 @dataclass(frozen=True)
+class KeySighting:
+    """One sealed version that held a record, from the key index that sealing writes (ruling 11).
+
+    `op` is the spool's, upsert or delete; whether an upsert was an insert or an update is for the reader to say from
+    the sightings before it. `chunk_no` is the data chunk that holds the record, and `row_hash` the hash of its payload.
+    """
+
+    version_id: str
+    dataset: str
+    partition: str
+    key: str
+    op: str
+    row_hash: int
+    chunk_no: int
+    run_id: str
+    seal_seq: int
+    sealed_at: datetime
+
+
+@dataclass(frozen=True)
 class Delivery:
     """The ledger row of one (route, version). `attempts` counts the times it started running."""
 
@@ -354,6 +374,11 @@ class VersionStore(Protocol):
         grows, so a version below it is older than the lookback, and so is any version before it."""
         ...
 
+    def key_history(self, dataset: str, key: str, limit: int = 100) -> list[KeySighting]:
+        """The sealed versions that held `key`, oldest first: the newest `limit` of them. Read from the key index, which
+        sealing writes in its own transaction; a version sealed before the index came in is not in it."""
+        ...
+
     def last_sealed_at(self, dataset: str) -> datetime | None:
         """When the dataset's newest sealed version, by staging, was sealed, in any partition; None if none is."""
         ...
@@ -543,6 +568,11 @@ class QuarantineStore(Protocol):
 
     def count_open(self, route: str | None = None) -> int:
         """How many entries are open, without reading them."""
+        ...
+
+    def of_key(self, dataset: str, key: str, version_ids: Sequence[str]) -> list[QuarantineRow]:
+        """The entries of `key`, open or closed, oldest first: those a route made from one of `version_ids`, and those
+        extraction made in `dataset`."""
         ...
 
 
@@ -1071,6 +1101,10 @@ class AuditStore(Protocol):
 
     def list_audit(self, limit: int = 100, cursor: str | None = None) -> list[AuditRow]:
         """Newest first. `cursor` is the `audit_id` of the last row of the previous page."""
+        ...
+
+    def for_target(self, target: str, since: datetime | None = None, limit: int = 500) -> list[AuditRow]:
+        """The rows about `target`, such as `route:erp`, from `since` on, oldest first: the first `limit` of them."""
         ...
 
 

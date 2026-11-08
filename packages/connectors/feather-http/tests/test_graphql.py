@@ -237,6 +237,7 @@ def test_mutation_user_error_rejects_that_record(server: FakeGraphQL):
     assert set(server.held) == {"a"}
     keys = [s["headers"]["idempotency-key"] for s in server.sent]
     assert len(set(keys)) == 2  # one key per record, the same each time the chunk is sent
+    assert {s["headers"]["x-feather-version"] for s in server.sent} == {"v1"}  # traced back to the version
 
 
 def test_readme_example_runs(tmp_path: Path):

@@ -19,7 +19,7 @@
   {% for entry in entries %}
     {% set row = entry.row %}
     <tr>
-      <th scope="row"><code>{{ row.key }}</code></th>
+      <th scope="row"><code>{{ row.key }}</code>{% if entry.dataset %} {{ m.trace_link(entry.dataset, row.key) }}{% endif %}</th>
       <td>{% if row.route %}<a href="/routes/{{ row.route | urlencode }}/deliveries">{{ row.route }}</a>{% else %}<span class="muted">read from the source</span>{% endif %}</td>
       <td>{% if entry.dataset and entry.partition %}{{ m.partition_label(entry.dataset, entry.partition) }}{% else %}<span class="muted">&ndash;</span>{% endif %}</td>
       <td><span class="error-text">{{ row.error }}</span></td>

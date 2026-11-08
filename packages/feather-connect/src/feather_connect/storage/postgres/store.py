@@ -39,6 +39,7 @@ from feather_connect.storage.port import (
     InboxDay,
     InboxEvent,
     InboxStore,
+    KeySighting,
     Ledger,
     Override,
     OverrideStore,
@@ -74,6 +75,7 @@ from feather_connect.storage.port import (
     check_transition,
     split_error,
 )
+from feather_connect.storage.postgres.spool import from_signed, index_keys
 from feather_connect.storage.postgres.support import Pool, ensure_partition, guard_version
 from feather_connect.storage.spool import decode_json_value, encode_json_value
 
@@ -596,6 +598,7 @@ class _Versions(VersionStore):
             found[version_id] = sealed
             if sealed["watermark"] is not None:
                 self._raise_watermark(conn, sealed["dataset"], _unjson(sealed["watermark"]))
+            index_keys(conn, self._db.tenant, version_id, sealed["dataset"], sealed["partition"])
             for route in routes:
                 conn.execute(
                     """insert into feather.delivery (tenant_id, route, version_id, dataset, partition,
@@ -684,6 +687,33 @@ class _Versions(VersionStore):
             if len(rows) < _WATERMARK_PAGE:
                 return found
             before = rows[-1]["seal_seq"]
+
+    def key_history(self, dataset: str, key: str, limit: int = 100) -> list[KeySighting]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from (
+                       select k.*, v.run_id, v.seal_seq, v.sealed_at from feather.record_key k
+                       join feather.version v on v.tenant_id = k.tenant_id and v.version_id = k.version_id
+                       where k.tenant_id = %s and k.dataset = %s and k.key = %s
+                       order by v.seal_seq desc limit %s
+                   ) newest order by seal_seq""",
+                (self._db.tenant, dataset, key, limit),
+            ).fetchall()
+        return [
+            KeySighting(
+                r["version_id"],
+                r["dataset"],
+                r["partition"],
+                r["key"],
+                r["op"],
+                from_signed(r["row_hash"]),
+                r["chunk_no"],
+                r["run_id"],
+                r["seal_seq"],
+                r["sealed_at"],
+            )
+            for r in rows
+        ]
 
     def last_sealed_at(self, dataset: str) -> datetime | None:
         with self._db.tx() as conn:
@@ -1236,20 +1266,32 @@ class _Quarantine(QuarantineStore):
                    order by quarantine_id limit %s offset %s""",
                 (self._db.tenant, route, route, limit, offset),
             ).fetchall()
-        return [
-            QuarantineRow(
-                r["route"],
-                r["version_id"],
-                r["key"],
-                r["error"],
-                r["status"],
-                r["dataset"],
-                r["partition"],
-                None if r["payload"] is None else _unjson(r["payload"]),
-                r["raw"],
-            )
-            for r in rows
-        ]
+        return [_quarantine_row(r) for r in rows]
+
+    def of_key(self, dataset: str, key: str, version_ids: Sequence[str]) -> list[QuarantineRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.quarantine
+                   where tenant_id = %s and key = %s
+                     and (version_id = any(%s) or (route is null and dataset = %s))
+                   order by quarantine_id""",
+                (self._db.tenant, key, list(version_ids), dataset),
+            ).fetchall()
+        return [_quarantine_row(r) for r in rows]
+
+
+def _quarantine_row(r: Row) -> QuarantineRow:
+    return QuarantineRow(
+        r["route"],
+        r["version_id"],
+        r["key"],
+        r["error"],
+        r["status"],
+        r["dataset"],
+        r["partition"],
+        None if r["payload"] is None else _unjson(r["payload"]),
+        r["raw"],
+    )
 
 
 def _response(r: Row) -> ResponseRow:
@@ -1837,19 +1879,30 @@ class _Audit(AuditStore):
                    order by audit_id desc limit %s""",
                 (self._db.tenant, cursor, cursor, limit),
             ).fetchall()
-        return [
-            AuditRow(
-                r["audit_id"],
-                r["at"],
-                r["actor_type"],
-                r["actor"],
-                r["action"],
-                r["target"],
-                _unjson(r["request"]),
-                r["result"],
-            )
-            for r in rows
-        ]
+        return [_audit_row(r) for r in rows]
+
+    def for_target(self, target: str, since: datetime | None = None, limit: int = 500) -> list[AuditRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.audit
+                   where tenant_id = %s and target = %s and (%s::timestamptz is null or at >= %s)
+                   order by at, audit_id limit %s""",
+                (self._db.tenant, target, since, since, limit),
+            ).fetchall()
+        return [_audit_row(r) for r in rows]
+
+
+def _audit_row(r: Row) -> AuditRow:
+    return AuditRow(
+        r["audit_id"],
+        r["at"],
+        r["actor_type"],
+        r["actor"],
+        r["action"],
+        r["target"],
+        _unjson(r["request"]),
+        r["result"],
+    )
 
 
 class _Reads(ReadStore):

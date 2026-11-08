@@ -27,6 +27,11 @@
   <span class="partition" title="{{ dataset }} · {{ key }}">{{ label_of(dataset, key) }}</span>
 {%- endmacro %}
 
+{# The link to the trace of one record: every version that held it and what each route did with it. #}
+{% macro trace_link(dataset, key) -%}
+  <a class="trace-link" href="/trace?dataset={{ dataset | urlencode }}&amp;key={{ key | urlencode }}">Trace<span class="sr-only"> {{ key }}</span></a>
+{%- endmacro %}
+
 {# The link to the next page of a list. `cursor` is None on the last page. #}
 {% macro pagination(cursor) -%}
   {%- if cursor -%}

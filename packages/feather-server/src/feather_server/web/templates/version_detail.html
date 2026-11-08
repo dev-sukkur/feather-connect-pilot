@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% set v = version %}
+{% block content %}
+<h1>Version of {{ m.partition_label(v.dataset, v.partition) }}</h1>
+<p><a href="/datasets/{{ v.dataset | urlencode }}/partitions">&larr; The partitions of {{ v.dataset }}</a></p>
+
+<section aria-labelledby="h-facts">
+  <h2 id="h-facts">Version</h2>
+  <dl class="facts">
+    <dt>Id</dt><dd><code>{{ v.version_id }}</code></dd>
+    <dt>Dataset</dt><dd>{{ v.dataset }}</dd>
+    <dt>Partition</dt><dd>{{ m.partition_label(v.dataset, v.partition) }}{% if v.partition != "_" and label_of(v.dataset, v.partition) != v.partition %} <span class="muted"><code>{{ v.partition }}</code></span>{% endif %}</dd>
+    <dt>Number</dt><dd>{% if v.seal_seq is not none %}{{ v.seal_seq }}{% else %}<span class="muted">not sealed</span>{% endif %}</dd>
+    <dt>Status</dt><dd>{{ m.status_badge(v.status) }}</dd>
+    <dt>Sealed by</dt><dd><a href="/runs/{{ v.run_id | urlencode }}">run <code>{{ v.run_id[-8:] }}</code></a></dd>
+    <dt>Sealed</dt><dd>{{ m.time_ago(v.sealed_at) }}</dd>
+    <dt>Upserts</dt><dd>{{ v.upserts }}</dd>
+    <dt>Deletes</dt><dd>{{ v.deletes }}</dd>
+  </dl>
+  <p class="muted">A version counts upserts, which are inserts and updates together, and deletes.</p>
+</section>
+
+<section aria-labelledby="h-records">
+  <h2 id="h-records">Records</h2>
+  <p class="muted">Shown as they were read: records are not masked in M1.</p>
+  {% if rows %}
+  <p class="filters" role="search" id="record-filter-box" hidden>
+    <label for="record-filter">Filter the records on this page</label>
+    <input type="text" id="record-filter" data-filter="#records tbody tr" aria-controls="records" autocomplete="off">
+    <span class="muted" id="record-count" aria-live="polite">{{ rows | length }} record{{ "s" if rows | length != 1 }} on this page</span>
+  </p>
+  <div class="table-wrap"><table id="records">
+    <caption class="sr-only">The version's records, by key, with a column per field</caption>
+    <thead><tr>
+      {% for c in columns %}<th scope="col">{{ c }}</th>{% endfor %}
+      <th scope="col">Change</th><th scope="col">JSON</th><th scope="col">Trace</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        {% for shown, whole in r.cells %}
+        {% if loop.first %}<th scope="row">{% else %}<td>{% endif %}<span class="cell-text"{% if shown != whole %} title="{{ whole }}"{% endif %}>{{ shown }}</span>{% if loop.first %}</th>{% else %}</td>{% endif %}
+        {% endfor %}
+        <td>{% if r.op == "delete" %}<strong>delete</strong>{% else %}<span class="muted">{{ r.op }}</span>{% endif %}</td>
+        <td><details class="record-json"><summary>Show JSON<span class="sr-only"> of {{ r.key }}</span></summary><pre class="log">{{ r.json }}</pre></details></td>
+        <td>{{ m.trace_link(v.dataset, r.key) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {{ m.pagination(next_cursor) }}
+  {% if not first_page %}<p><a href="{{ url(cursor=None) }}">&larr; First page</a></p>{% endif %}
+  {% else %}
+  <p class="empty">This version holds no records{% if not first_page %} after this point{% endif %}.</p>
+  {% endif %}
+</section>
+{% endblock %}

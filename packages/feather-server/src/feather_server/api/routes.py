@@ -11,7 +11,6 @@ from collections.abc import Callable
 from datetime import date, timedelta
 from typing import Annotated, Any
 
-import pyarrow as pa
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -24,6 +23,7 @@ from feather_server.auth import Actor, CurrentActor, require_csrf
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.previews import Preview
 from feather_server.services.reads import Reads
+from feather_server.services.trace import Tracer, as_json
 
 PREFIX = "/api/v1"
 IDEMPOTENCY_TTL = timedelta(hours=24)
@@ -435,32 +435,13 @@ def backfill(
 
 
 def _version_records(request: Request, version_id: str, limit: int, cursor: str | None) -> dict[str, Any]:
-    state = request.app.state.feather
-    version = state.store.versions.get(version_id)
-    chunk_no, offset = (0, 0)
-    if cursor is not None:
-        try:
-            first, _, second = cursor.partition(":")
-            chunk_no, offset = int(first), int(second)
-        except ValueError:
-            raise ApiProblem(
-                422, "Unprocessable Content", "this cursor is not one this server handed out"
-            ) from None
-    chunks = [c.chunk_no for c in state.spool.list_chunks(version_id)]
-    records: list[dict[str, Any]] = []
-    next_raw: str | None = None
-    for number in (n for n in chunks if n >= chunk_no):
-        table: pa.Table = state.spool.get_chunk(version_id, number)
-        start = offset if number == chunk_no else 0
-        rows = table.slice(start, limit - len(records)).to_pylist()
-        records.extend(rows)
-        if len(records) >= limit:
-            end = start + len(rows)
-            if end < table.num_rows:
-                next_raw = f"{number}:{end}"
-            elif number != chunks[-1]:
-                next_raw = f"{chunks[chunks.index(number) + 1]}:0"
-            break
+    reads: Reads = request.app.state.reads
+    try:
+        version, records, next_raw = reads.version_records(version_id, limit, cursor)
+    except ValueError:
+        raise ApiProblem(
+            422, "Unprocessable Content", "this cursor is not one this server handed out"
+        ) from None
     return {"version_id": version.version_id, "masked": False, **page(records, next_raw)}
 
 
@@ -475,6 +456,16 @@ def version_records(
 ) -> JSONResponse:
     """The version's records, a page at a time. Masking comes in M2: until then `masked` is false."""
     return ok(call(lambda: _version_records(request, version_id, check_limit(limit), decode(cursor))))
+
+
+# Tracing a record.
+
+
+@router.get("/datasets/{dataset}/records/{key:path}/trace")
+def record_trace(dataset: str, key: str, request: Request, _: CurrentActor) -> JSONResponse:
+    """What happened to one record, by its dataset key: each version that held it, oldest first, with what each route
+    did with it. Only versions sealed since the key index came in are traced."""
+    return ok(call(lambda: as_json(Tracer(request.app.state.feather).trace(dataset, key))))
 
 
 # Deliveries.

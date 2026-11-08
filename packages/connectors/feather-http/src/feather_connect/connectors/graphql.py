@@ -22,6 +22,7 @@ from typing import Any, cast
 
 from feather_connect.connectors.http import (  # pyright: ignore[reportMissingImports]
     DEFAULT_MAX_PAGES,
+    VERSION_HEADER,
     HttpConfig,
     _HttpConnector,  # pyright: ignore[reportPrivateUsage]
     _in_partition,  # pyright: ignore[reportPrivateUsage]
@@ -268,7 +269,11 @@ class Mutation(_HttpConnector, connector.Sink):
                 "POST",
                 self.path,
                 content=canonical_json({"query": self.mutation, "variables": variables}),
-                headers={"Content-Type": "application/json", self.key_header: key},
+                headers={
+                    "Content-Type": "application/json",
+                    self.key_header: key,
+                    VERSION_HEADER: batch.version_id,
+                },
                 cost_key=self.cost_key,
                 budget=ctx.budget,
             )

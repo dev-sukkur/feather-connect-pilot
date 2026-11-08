@@ -89,6 +89,11 @@ every record would get the same; any other 4xx rejects the record and keeps the 
 or a timeout is retried. `response_map` keeps fields of each JSON answer by dotted path, a 409's too, which the
 delivery's page on the dashboard shows per record. Deletes are rejected unless `on_delete="skip"`.
 
+Beside the `Idempotency-Key`, each request of `http.Call` and `graphql.Mutation` carries `X-Feather-Version` with the
+id of the version the record comes from. A line in the destination's logs then leads back to that version, and from
+it to the record's trace on the dashboard (`/trace?dataset=...&key=...`) or in the API
+(`GET /api/v1/datasets/{dataset}/records/{key}/trace`). It names a version, never a record's content.
+
 Each list call and each detail call takes one unit from the connection's budget (`cost_key` and
 `detail_cost_key` name them in the spec's `cost`), retries included, and so does each OAuth2 token request. A wait of under a minute is slept off;
 a longer one defers the task durably.
