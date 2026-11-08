@@ -75,6 +75,10 @@ def _in_use(port: int) -> bool:
         if probe.connect_ex((HOST, port)) == 0:
             return True
     with socket.socket() as probe:
+        if os.name != "nt":
+            # As servers do (uvicorn among them): without it, a connection the last run closed, waiting out TIME_WAIT
+            # for a minute, makes a free port look taken on Linux. On Windows the option would let us share a bound port.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind((HOST, port))
         except OSError:
