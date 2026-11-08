@@ -1,6 +1,6 @@
 # Flow packages: install, activate and deactivate flows without a restart
 
-- **Status:** Proposed, for the sponsor's review
+- **Status:** Accepted on 2026-11-08 (ADR-0011)
 - **Date:** 2026-11-08
 - **Decision record:** [ADR-0011](../adr/0011-flow-packages-hot-install.md)
 - **Milestone:** brought forward: the first work after M1, ahead of the rest of M2. The two roles it needs are pulled forward from M2's RBAC (§11)

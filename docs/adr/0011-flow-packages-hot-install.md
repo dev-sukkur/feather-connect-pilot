@@ -1,6 +1,6 @@
 # ADR-0011: Flows ship as packages, installed and activated in a running environment
 
-- **Status:** Proposed. The sponsor answered all five questions on 2026-11-08: bring it forward, use the built-in registry, let runs finish, use the package prefix, and deploy with packages only
+- **Status:** Accepted on 2026-11-08. The sponsor answered all five questions on 2026-11-08: bring it forward, use the built-in registry, let runs finish, use the package prefix, and deploy with packages only
 - **Date:** 2026-11-08
 - **Deciders:** Abdul Sukkur (sponsor)
 
