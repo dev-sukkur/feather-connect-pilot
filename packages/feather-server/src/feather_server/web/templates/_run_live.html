@@ -58,5 +58,10 @@
       </tbody>
     </table></div>
   </section>
+  {% elif not detail.versions_total and (detail.ticks.total if detail.ticks else run.status == "succeeded") %}
+  <section aria-labelledby="h-attempts">
+    <h2 id="h-attempts">Deliveries and attempts</h2>
+    <p class="empty">{% if detail.ticks %}No tick has read a new or changed record yet, so nothing has been delivered.{% else %}Nothing new or changed was read, so no version was made and nothing was delivered.{% endif %} Records turned down by validation are in <a href="/quarantine">Quarantine</a>.</p>
+  </section>
   {% endif %}
 </div>
