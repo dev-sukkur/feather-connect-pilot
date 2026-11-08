@@ -9,8 +9,8 @@ The project follows an SDLC flow. Each phase ends at a review gate, and the next
 | — | [Architecture decision records](adr/README.md) | 9 accepted, 1 proposed | Each proposed ADR is accepted or replaced |
 | 3. Spikes | [Spike results](03-spikes/README.md) | Engine chosen: DBOS (ADR-0003). Connector live probes still need access. | Engine chosen (ADR-0003); connector findings reviewed |
 | 4. Plan | [Implementation plan](04-plan/README.md) | Draft, awaiting review | Implementation plan approved |
-| 5. Build | Code: M1, M2, M3 | Not started | Milestone exit criteria (design §19) |
-| 6. Test and release | `06-release/` (to be written) | Not started | Release checklist; go/no-go |
+| 5. Build | Code: M1, M2, M3; [M1 exit report and review guide](06-release/m1-exit-report.md) | M1 built; exit gate to run | Milestone exit criteria (design §19) |
+| 6. Test and release | `06-release/`: the M1 exit report so far | Started | Release checklist; go/no-go |
 | 7. Operate | `07-operate/` runbooks (to be written) | Not started | — |
 
 ## How to review
