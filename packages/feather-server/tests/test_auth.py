@@ -26,7 +26,7 @@ PASSWORD = "correct horse battery staple"
 def app(state: AppState) -> FastAPI:
     state.settings.secret_key = "test-secret-key"
     state.settings.base_url = "https://feather.test"
-    state.store.users.create_user("op", hash_password(PASSWORD))
+    state.store.users.create_user("op", hash_password(PASSWORD), "operator")
     app = create_app(state=state, loops=lambda s: [])
 
     # Stand-ins for the pages and API calls that later tasks add: one page, and one state-changing call.
@@ -76,7 +76,7 @@ def test_login_sets_a_secure_http_only_cookie(client: TestClient) -> None:
 def test_the_cookie_is_not_secure_on_localhost(state: AppState) -> None:
     state.settings.secret_key = "test-secret-key"
     state.settings.base_url = "http://localhost:8000"
-    state.store.users.create_user("op", hash_password(PASSWORD))
+    state.store.users.create_user("op", hash_password(PASSWORD), "operator")
     local = TestClient(
         create_app(state=state, loops=lambda s: []), base_url="http://localhost:8000", follow_redirects=False
     )
@@ -133,10 +133,15 @@ def test_login_without_csrf_is_403(client: TestClient) -> None:
 
 
 def test_token_works_and_only_its_hash_is_stored(client: TestClient, state: AppState) -> None:
-    token = issue_token(state.store, "ci", timedelta(days=1), clock=state.clock)
+    token = issue_token(state.store, "ci", timedelta(days=1), role="operator", clock=state.clock)
     assert token.startswith("fc_") and len(token) > 30
     me = client.get("/api/v1/me", headers={"Authorization": f"Bearer {token}"})
-    assert me.status_code == 200 and me.json() == {"kind": "token", "name": "ci"}
+    assert me.status_code == 200 and me.json() == {
+        "kind": "token",
+        "name": "ci",
+        "role": "operator",
+        "user": None,
+    }
     stored = state.store.users.find_token(hashlib.sha256(token.encode()).hexdigest())
     assert stored is not None and stored.name == "ci"
     assert token not in repr(stored) and token.removeprefix("fc_") not in repr(stored)
@@ -144,7 +149,7 @@ def test_token_works_and_only_its_hash_is_stored(client: TestClient, state: AppS
 
 
 def test_a_wrong_token_is_401(client: TestClient, state: AppState) -> None:
-    issue_token(state.store, "ci", timedelta(days=1), clock=state.clock)
+    issue_token(state.store, "ci", timedelta(days=1), role="operator", clock=state.clock)
     for header in ("Bearer fc_nope", "Bearer ", "Basic abc", "Bearer"):
         assert client.get("/api/v1/me", headers={"Authorization": header}).status_code == 401
 
@@ -152,8 +157,8 @@ def test_a_wrong_token_is_401(client: TestClient, state: AppState) -> None:
 def test_expired_and_revoked_tokens_are_401(
     client: TestClient, state: AppState, clock: FrozenClock
 ) -> None:  # Review Focus 3
-    short = issue_token(state.store, "short", timedelta(hours=1), clock=clock)
-    revoked = issue_token(state.store, "revoked", timedelta(days=1), clock=clock)
+    short = issue_token(state.store, "short", timedelta(hours=1), role="operator", clock=clock)
+    revoked = issue_token(state.store, "revoked", timedelta(days=1), role="operator", clock=clock)
 
     def status(token: str) -> int:
         return client.get("/api/v1/me", headers={"Authorization": f"Bearer {token}"}).status_code
@@ -194,7 +199,7 @@ def test_logout_ends_the_session(client: TestClient) -> None:
 
 
 def test_api_bearer_call_needs_no_csrf(client: TestClient, state: AppState) -> None:
-    token = issue_token(state.store, "ci", timedelta(days=1), clock=state.clock)
+    token = issue_token(state.store, "ci", timedelta(days=1), role="operator", clock=state.clock)
     call = client.post("/api/v1/echo", headers={"Authorization": f"Bearer {token}"})
     assert call.status_code == 200 and call.json() == {"kind": "token", "name": "ci"}
 
@@ -226,7 +231,12 @@ def test_session_actor_is_a_human_and_a_removed_user_loses_access(
     client: TestClient, state: AppState
 ) -> None:
     login(client)
-    assert client.get("/api/v1/me").json() == {"kind": "human", "name": "op"}
+    assert client.get("/api/v1/me").json() == {
+        "kind": "human",
+        "name": "op",
+        "role": "operator",
+        "user": "op",
+    }
     state.store.users._d.users.clear()  # type: ignore[attr-defined]  # the store has no delete
     assert client.get("/api/v1/me").status_code == 401
 
@@ -243,7 +253,7 @@ def test_passwords_and_tokens_never_reach_the_logs(
     client: TestClient, state: AppState, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    token = issue_token(state.store, "ci", timedelta(days=1), clock=state.clock)
+    token = issue_token(state.store, "ci", timedelta(days=1), role="operator", clock=state.clock)
     login(client, "op", "bad-password-1")
     login(client)
     client.get("/api/v1/me", headers={"Authorization": f"Bearer {token}"})

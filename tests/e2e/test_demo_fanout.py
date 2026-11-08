@@ -116,7 +116,7 @@ class Demo:
     def __init__(self, stack: Any, duckdb_file: Path) -> None:
         self.stack = stack
         self.duckdb_file = duckdb_file
-        token = issue_token(stack.store, "e2e", timedelta(hours=1))
+        token = issue_token(stack.store, "e2e", timedelta(hours=1), role="operator")
         self.api = httpx.Client(
             base_url=f"{stack.url}/api/v1", headers={"Authorization": f"Bearer {token}"}, timeout=30
         )

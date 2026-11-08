@@ -38,7 +38,7 @@ def _url(run_id: str, task: TaskRow) -> str:
 
 
 def _api(world: World) -> TestClient:
-    token = issue_token(world.store, "ci", timedelta(days=1), clock=world.clock)
+    token = issue_token(world.store, "ci", timedelta(days=1), role="operator", clock=world.clock)
     return TestClient(
         create_app(state=world.state, loops=lambda s: []), headers={"Authorization": f"Bearer {token}"}
     )

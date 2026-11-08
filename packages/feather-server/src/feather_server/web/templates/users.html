@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Users</h1>
+<p class="muted">Who can sign in, and with what role. An operator runs, re-runs, backfills, retries, skips, replays, cancels, pauses and settles the quarantine. An admin can do all that, and manage users, their roles and API tokens too. A token acts with no higher a role than its user's, so changing a role changes what their tokens can do at once.</p>
+{% if notice %}<p class="notice notice-{{ notice[0] }}" role="{{ 'alert' if notice[0] == 'bad' else 'status' }}">{{ notice[1] }}</p>{% endif %}
+<div class="table-wrap"><table>
+  <caption class="sr-only">Users and their roles</caption>
+  <thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Since</th><th scope="col">Change the role</th></tr></thead>
+  <tbody>
+  {% for u in users %}
+    <tr id="user-{{ u.username }}">
+      <th scope="row">{{ u.username }}{% if actor and u.username == actor.user %} <span class="muted">(you)</span>{% endif %}</th>
+      <td>{{ u.role }}</td>
+      <td>{{ u.created_at[:10] }}</td>
+      <td>
+        <form method="post" action="/users/{{ u.username | urlencode }}/role" class="inline-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label class="sr-only" for="role-{{ loop.index }}">Role of {{ u.username }}</label>
+          <select id="role-{{ loop.index }}" name="role">
+            {% for r in roles %}<option value="{{ r }}"{% if r == u.role %} selected{% endif %}>{{ r }}</option>{% endfor %}
+          </select>
+          <button type="submit">Save</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+<p class="muted">Add users and tokens with <code>feather server create-user</code> and <code>feather server create-token</code>, or through the API.</p>
+{% endblock %}

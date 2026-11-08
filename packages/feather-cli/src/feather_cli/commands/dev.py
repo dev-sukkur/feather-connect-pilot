@@ -303,7 +303,7 @@ def _ensure_dev_user(store: Store, reset: bool = False) -> str | None:
     if exists:
         store.users.set_password_hash(DEV_USER, hash_password(password))
     else:
-        store.users.create_user(DEV_USER, hash_password(password))
+        store.users.create_user(DEV_USER, hash_password(password), "admin")
     return password
 
 

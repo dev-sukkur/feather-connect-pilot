@@ -281,3 +281,6 @@ caption { text-align: left; padding: 0.6rem 0.9rem; color: var(--muted); }
 main h1, main h2, main p, main dd, .records-panel .filters p { overflow-wrap: anywhere; min-width: 0; }
 .records-panel .filters input { max-width: 100%; box-sizing: border-box; }
 .table-wrap p { overflow-wrap: normal; }
+
+/* A form that sits in a table cell: its control and button side by side. */
+.inline-form { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }

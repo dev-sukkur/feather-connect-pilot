@@ -2,7 +2,8 @@
 
 A mass action takes two steps: `preview_*` says what it would touch and hands out a confirmation token, and the action
 itself takes the token (see `previews`). Previews change nothing and are not audited. Every other call is audited,
-whether it worked or not, with the actor and the reason.
+whether it worked or not, with the actor and the reason. Before anything, each checks the actor's role may do it
+(`access.require`, by the capability `CAPABILITIES` names for the action).
 """
 
 import logging
@@ -24,6 +25,7 @@ from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.extract import VerifyResult
 from feather_connect.storage.port import Delivery, DeliveryStatus, InvalidTransition, split_error
 from feather_server.auth import Actor
+from feather_server.services.access import Capability, require
 from feather_server.services.previews import (
     Impact,
     Preview,
@@ -50,6 +52,24 @@ _STATUSES: dict[str, tuple[DeliveryStatus, ...]] = {
 }
 CHECK_TIMEOUT_S = 15  # how long a connection check may take before it is given up on
 _SIMULATED = ("simulation.", "memory.")  # connectors of tests and demos, which connect to nothing
+CAPABILITIES: dict[str, Capability] = {  # each action, as its audit rows name it, and the capability it needs
+    "run_flow": "runs.start",
+    "rerun": "runs.rerun",
+    "backfill": "runs.backfill",
+    "cancel_run": "runs.cancel",
+    "verify_partition": "partitions.verify",
+    "retry_deliveries": "deliveries.retry",
+    "skip_deliveries": "deliveries.skip",
+    "replay_deliveries": "deliveries.replay",
+    "dismiss_quarantine": "quarantine.dismiss",
+    "reprocess_event": "events.reprocess",
+    "release_event": "events.release",
+    "pause_flow": "flows.pause",
+    "resume_flow": "flows.pause",
+    "pause_route": "routes.pause",
+    "resume_route": "routes.pause",
+    "check_connection": "connections.check",
+}
 
 
 @dataclass(frozen=True)
@@ -168,6 +188,14 @@ class Actions:
     ) -> None:
         self._store.audit.record(actor.kind, actor.name, action, target, request, result)
 
+    def _require(self, actor: Actor, action: str, target: str | None = None) -> None:
+        require(actor, CAPABILITIES[action], self._store.audit, target)
+
+    def _issue(self, actor: Actor, action: str, selection: Mapping[str, Any], print_: str) -> str:
+        """A confirmation token for a preview, once the actor may do the action."""
+        self._require(actor, action)
+        return self._tokens.issue(action, actor.name, selection, print_)
+
     def _do[T](
         self,
         actor: Actor,
@@ -178,6 +206,7 @@ class Actions:
         note: Callable[[T], str] = lambda _: "ok",
     ) -> T:
         """Do the action and write its audit row: `ok` and what `note` says of the result, or `failed` and why."""
+        self._require(actor, action, target)
         try:
             result = fn()
         except Exception as error:
@@ -194,6 +223,7 @@ class Actions:
         reason: str | None,
         fingerprint_of: Callable[[Mapping[str, Any]], str],
     ) -> Mapping[str, Any]:
+        self._require(actor, action)  # before the token is spent
         try:
             return self._tokens.redeem(token, action, actor.name, fingerprint_of)
         except PreviewError as error:
@@ -284,7 +314,7 @@ class Actions:
         flow, found = self._dataset_flow(dataset)
         chosen = self._check_partitions(found, partitions)
         selection = {"dataset": dataset, "partitions": chosen}
-        token = self._tokens.issue("rerun", actor.name, selection, self._rerun_print(selection))
+        token = self._issue(actor, "rerun", selection, self._rerun_print(selection))
         return Preview(token, "rerun", self._impact(flow, chosen))
 
     @staticmethod
@@ -326,7 +356,7 @@ class Actions:
             "max_concurrent": max_concurrent,
             "partitions": keys,
         }
-        token = self._tokens.issue("backfill", actor.name, selection, self._backfill_print(selection))
+        token = self._issue(actor, "backfill", selection, self._backfill_print(selection))
         return Preview(token, "backfill", self._impact(found, keys))
 
     @staticmethod
@@ -467,8 +497,8 @@ class Actions:
                 refusal = self._rt.replay_refusal(d.route, d.version_id)
                 if refusal is not None:
                     raise ValueError(refusal)
-        token = self._tokens.issue(
-            f"{action}_deliveries", actor.name, selection.as_dict(), self._deliveries_print(action, found)
+        token = self._issue(
+            actor, f"{action}_deliveries", selection.as_dict(), self._deliveries_print(action, found)
         )
         return Preview(token, f"{action}_deliveries", self._delivery_impact(action, found))
 

@@ -16,7 +16,7 @@ API = "/api/v1"
 @pytest.fixture
 def api(world: World) -> TestClient:
     """A client calling the API with a bearer token of `ci`."""
-    token = issue_token(world.store, "ci", timedelta(days=1), clock=world.clock)
+    token = issue_token(world.store, "ci", timedelta(days=1), role="operator", clock=world.clock)
     return TestClient(
         create_app(state=world.state, loops=lambda s: []),
         base_url="http://localhost:8000",

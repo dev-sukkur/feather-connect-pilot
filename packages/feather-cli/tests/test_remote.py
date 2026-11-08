@@ -37,7 +37,7 @@ def _free_port() -> int:
 def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Served]:
     monkeypatch.setenv("WH_TOKEN", SECRET)
     world = build_world(tmp_path / "project", FrozenClock(datetime(2026, 10, 18, 10, tzinfo=UTC)))
-    token = issue_token(world.store, "cli", timedelta(days=1), clock=world.clock)
+    token = issue_token(world.store, "cli", timedelta(days=1), role="operator", clock=world.clock)
     port = _free_port()
     config = uvicorn.Config(
         create_app(state=world.state, loops=lambda s: []), host="127.0.0.1", port=port, log_level="warning"

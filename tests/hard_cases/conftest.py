@@ -156,7 +156,7 @@ def cases(tmp_path_factory: pytest.TempPathFactory, erp: Erp) -> Iterator[Cases]
     for case in CASES:
         (fixtures / f"{case}.json").write_text("[]", encoding="utf-8")
     with open_stack(project, root, env={"FEATHER_HARD_FIXTURES": str(fixtures)}, ddl=DDL) as stack:
-        token = issue_token(stack.store, "hard-cases", timedelta(hours=1))
+        token = issue_token(stack.store, "hard-cases", timedelta(hours=1), role="operator")
         api = httpx.Client(
             base_url=f"{stack.url}/api/v1", headers={"Authorization": f"Bearer {token}"}, timeout=30
         )
