@@ -147,3 +147,18 @@ def test_the_sidebar_opens_on_a_narrow_screen(signed_in: Page, site: Site):
     page.set_viewport_size({"width": 1200, "height": 800})
     expect(page.get_by_role("button", name="Menu")).to_be_hidden()
     expect(page.get_by_role("navigation", name="Main")).to_be_visible()
+
+
+def test_trace_a_record_from_a_failed_delivery(signed_in: Page, site: Site):
+    page = signed_in
+    version = site.deliveries("flaky", "failed")[0].version_id
+    page.goto(f"{site.url}/routes/flaky/deliveries/{version}")
+    answers = page.locator("#h-responses ~ .table-wrap tbody tr")
+    key = answers.first.locator("th code").inner_text().strip()
+    answers.first.get_by_role("link", name=f"Trace {key}").click()
+    expect(page.locator("h1")).to_contain_text(key)
+    flaky = page.locator(".delivery", has=page.get_by_role("heading", name="flaky"))
+    expect(flaky.first).to_contain_text("503")
+    expect(flaky.first).to_contain_text("simulated delivery failure to flaky")
+    sent = flaky.first.locator("details", has_text="The body it was sent with")
+    expect(sent.locator("pre")).to_contain_text(f'"id": "{key}"')

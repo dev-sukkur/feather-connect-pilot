@@ -301,3 +301,28 @@ def test_a_row_too_big_for_an_index_is_not_an_outage(store: Store):
     assert store.is_unavailable(psycopg.OperationalError("connection lost"))
     assert store.is_unavailable(PoolTimeout("no connection in 30 s"))
     assert not store.is_unavailable(psycopg.errors.UniqueViolation("duplicate key"))
+
+
+def test_the_key_index_is_written_in_the_seals_own_transaction(store: PostgresStore, spool: Spool):
+    """A seal that rolls back leaves no key behind, and one that commits leaves every key: the index is never out of
+    step with the versions."""
+    spool.bind(store.versions)
+    spool.put_chunk("v1", 0, "data", records_to_table([Record("k", "upsert", {"x": 1}, 1)]))
+    store.versions.stage(draft("v1"))
+    db = store.runs._db  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError), db.tx() as conn:
+        store.versions.seal_in(conn, ["v1"], ["a"], None)  # type: ignore[attr-defined]
+        assert conn.execute("select count(*) as n from feather.record_key").fetchone()["n"] == 1
+        raise RuntimeError("the caller's transaction fails after the seal")
+    assert store.versions.get("v1").status == "staged"
+    assert store.versions.key_history("d", "k") == []
+    store.versions.seal(["v1"], ["a"])
+    assert [s.version_id for s in store.versions.key_history("d", "k")] == ["v1"]
+
+
+def test_a_row_hash_above_the_signed_range_comes_back_whole(store: PostgresStore, spool: Spool):
+    spool.bind(store.versions)
+    big = 2**64 - 5
+    spool.put_chunk("v1", 0, "data", records_to_table([Record("k", "upsert", {"x": 1}, big)]))
+    seal(store, "v1", ["a"])
+    assert store.versions.key_history("d", "k")[0].row_hash == big

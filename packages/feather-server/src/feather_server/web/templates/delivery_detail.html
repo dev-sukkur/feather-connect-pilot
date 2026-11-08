@@ -26,7 +26,7 @@
     <tbody>
     {% for r in detail.responses %}
       <tr>
-        <th scope="row"><code>{{ r.key }}</code></th>
+        <th scope="row"><code>{{ r.key }}</code> {{ m.trace_link(d.dataset, r.key) }}</th>
         <td class="num">{{ r.chunk_no }}</td>
         <td class="num">{% if r.status >= 400 %}<span class="error-text">{{ r.status }}</span>{% else %}{{ r.status }}{% endif %}</td>
         <td>{% for name, value in r.fields | dictsort %}<code>{{ name }}</code>: {{ value }}{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">&ndash;</span>{% endfor %}</td>

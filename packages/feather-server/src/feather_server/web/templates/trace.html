@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+<h1>{% if trace %}Trace of <code>{{ trace.key }}</code> in {{ trace.dataset }}{% else %}Trace a record{% endif %}</h1>
+
+<form class="trace-search" method="get" action="/trace" role="search" aria-label="Trace a record">
+  <p>
+    <label for="trace-dataset">Dataset</label>
+    <select name="dataset" id="trace-dataset">
+      {% for name in datasets %}<option value="{{ name }}"{% if name == dataset %} selected{% endif %}>{{ name }}</option>{% endfor %}
+    </select>
+  </p>
+  <p>
+    <label for="trace-key">Key</label>
+    <input type="text" name="key" id="trace-key" value="{{ key }}" required autocomplete="off" spellcheck="false" placeholder="INV-00005">
+  </p>
+  <p><button type="submit">Trace</button></p>
+</form>
+<p class="muted">Each version that held the record, oldest first, and what each route did with it. Versions sealed before the key index came in are not traced. Records are shown as they were read: they are not masked in M1.</p>
+
+{% if trace %}
+{% if not trace.versions %}
+<p class="empty">No sealed version holds <code>{{ trace.key }}</code> in {{ trace.dataset }}.</p>
+{% else %}
+{% if trace.truncated %}<p class="muted" role="status">Only the newest {{ trace.versions | length }} versions are shown.</p>{% endif %}
+<ol class="timeline">
+{% for v in trace.versions %}
+  {% set s = v.sighting %}
+  <li class="event op-{{ v.op }}">
+    <section aria-labelledby="h-v{{ loop.index }}">
+      <h2 id="h-v{{ loop.index }}"><span class="op">{{ v.op }}</span> in version {{ s.seal_seq }} <span class="muted">of {{ m.partition_label(trace.dataset, s.partition) }}</span></h2>
+      <dl class="facts">
+        <dt>Version</dt><dd><a href="/versions/{{ s.version_id | urlencode }}"><code>{{ s.version_id }}</code></a></dd>
+        <dt>Read by</dt><dd><a href="/runs/{{ s.run_id | urlencode }}">run <code>{{ s.run_id[-8:] }}</code></a>{% if v.log_task %} &middot; <a href="/tasks/{{ v.log_task | urlencode }}/logs?run={{ s.run_id | urlencode }}">its log</a>{% endif %}</dd>
+        <dt>Sealed</dt><dd>{{ m.time_ago(s.sealed_at) }}</dd>
+      </dl>
+      {% if v.changes %}
+      <div class="table-wrap"><table class="changes">
+        <caption>What changed since the version before</caption>
+        <thead><tr><th scope="col">Field</th><th scope="col">Before</th><th scope="col">After</th></tr></thead>
+        <tbody>
+        {% for c in v.changes %}
+          <tr><th scope="row"><code>{{ c.field }}</code></th><td><del>{{ c.before | show }}</del></td><td><ins>{{ c.after | show }}</ins></td></tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+      {% endif %}
+      {% if v.record is not none %}
+      <details class="record-json"><summary>The record as read</summary><pre class="log">{{ v.record | pretty }}</pre></details>
+      {% elif v.op != "delete" %}
+      <p class="muted">The record is no longer in the spool: retention took its chunk.</p>
+      {% endif %}
+
+      {% for d in v.deliveries %}
+      {% set dl = d.delivery %}
+      <div class="delivery">
+        <h3>{{ dl.route }} {{ m.status_badge(dl.status) }} <a class="small" href="/routes/{{ dl.route | urlencode }}/deliveries/{{ dl.version_id | urlencode }}">The delivery<span class="sr-only"> of version {{ s.seal_seq }} to {{ dl.route }}</span></a>{% if d.log_task %} <a class="small" href="/tasks/{{ d.log_task | urlencode }}/logs?run={{ s.run_id | urlencode }}">Its log<span class="sr-only"> for version {{ s.seal_seq }} to {{ dl.route }}</span></a>{% endif %}</h3>
+        {% if d.response %}
+        <p>The destination answered <strong{% if d.response.status >= 400 %} class="error-text"{% endif %}>{{ d.response.status }}</strong>{% for name, value in d.response.fields | dictsort %}{% if loop.first %}:{% endif %} <code>{{ name }}</code> {{ value }}{% if not loop.last %},{% endif %}{% endfor %}.</p>
+        {% if d.response.sent is not none %}
+        <details class="record-json" open><summary>The body it was sent with</summary><pre class="log">{{ d.response.sent | pretty }}</pre></details>
+        {% endif %}
+        {% endif %}
+        {% for q in d.quarantine %}
+        <p>Quarantine {{ m.status_badge(q.status) }} <span class="error-text">{{ q.error }}</span></p>
+        {% endfor %}
+        {% if d.attempts %}
+        <ul class="steps">
+        {% for a in d.attempts %}
+          <li>{{ m.time_ago(a.at) }} {{ a.from_status }} &rarr; {{ m.status_badge(a.to_status) }} by {{ a.actor }}{% if a.reason %} <span class="muted">&ldquo;{{ a.reason }}&rdquo;</span>{% endif %}{% if a.error %} <span class="error-text">{{ a.error }}</span>{% endif %}</li>
+        {% endfor %}
+        </ul>
+        {% endif %}
+        {% for a in d.actions %}
+        <p class="action"><strong>{{ a.action | capitalize }}</strong> by {{ a.actor }}{% if a.reason %} &ldquo;{{ a.reason }}&rdquo;{% endif %} {{ m.time_ago(a.at) }}{% if a.audit_id %} <span class="muted">audit <code>{{ a.audit_id[-8:] }}</code>{% if a.result %}: {{ a.result }}{% endif %}</span>{% endif %}</p>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="empty">No route has a delivery of this version.</p>
+      {% endfor %}
+    </section>
+  </li>
+{% endfor %}
+</ol>
+{% endif %}
+{% if trace.extraction %}
+<section aria-labelledby="h-extraction">
+  <h2 id="h-extraction">Turned down when read</h2>
+  <ul>
+  {% for q in trace.extraction %}
+    <li>{{ m.status_badge(q.status) }} {% if q.partition %}{{ m.partition_label(trace.dataset, q.partition) }} {% endif %}<span class="error-text">{{ q.error }}</span></li>
+  {% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}

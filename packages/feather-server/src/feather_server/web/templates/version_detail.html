@@ -34,7 +34,7 @@
     <caption class="sr-only">The version's records, by key, with a column per field</caption>
     <thead><tr>
       {% for c in columns %}<th scope="col">{{ c }}</th>{% endfor %}
-      <th scope="col">Change</th><th scope="col">JSON</th>
+      <th scope="col">Change</th><th scope="col">JSON</th><th scope="col">Trace</th>
     </tr></thead>
     <tbody>
     {% for r in rows %}
@@ -44,6 +44,7 @@
         {% endfor %}
         <td>{% if r.op == "delete" %}<strong>delete</strong>{% else %}<span class="muted">{{ r.op }}</span>{% endif %}</td>
         <td><details class="record-json"><summary>Show JSON<span class="sr-only"> of {{ r.key }}</span></summary><pre class="log">{{ r.json }}</pre></details></td>
+        <td>{{ m.trace_link(v.dataset, r.key) }}</td>
       </tr>
     {% endfor %}
     </tbody>

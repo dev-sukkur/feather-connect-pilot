@@ -17,6 +17,8 @@ PATHS = [
     "/connections",
     "/versions/{version}",  # a version page, of the lake's first delivery
     "/routes/lake/deliveries/{version}",
+    "/trace",
+    "/trace?dataset=demo.items&key=2026-11-01-0",  # a record's trace: a version, two routes, a failure
 ]
 WCAG_AA = {"runOnly": {"type": "tag", "values": ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]}}
 

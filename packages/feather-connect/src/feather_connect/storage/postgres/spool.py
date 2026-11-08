@@ -25,6 +25,55 @@ def _partition(day: date) -> str:
     return f"spool_chunk_{day:%Y%m%d}"
 
 
+_SIGNED = 2**63
+
+
+def to_signed(row_hash: int) -> int:
+    """A uint64 row hash as Postgres's signed bigint holds it."""
+    return row_hash - 2 * _SIGNED if row_hash >= _SIGNED else row_hash
+
+
+def from_signed(value: int) -> int:
+    return value + 2 * _SIGNED if value < 0 else value
+
+
+def index_keys(
+    conn: psycopg.Connection[DictRow], tenant: str, version_id: str, dataset: str, partition: str
+) -> int:
+    """Write the key index of a version from its data chunks, in the caller's transaction: one insert for the version.
+
+    Reads only the key, op and hash columns of each chunk. Returns how many keys it wrote."""
+    keys: list[str] = []
+    ops: list[str] = []
+    hashes: list[int] = []
+    chunk_nos: list[int] = []
+    rows = conn.execute(
+        """select c.chunk_no, c.data from feather.spool_chunk c
+           join feather.spool_version s
+             on s.tenant_id = c.tenant_id and s.version_id = c.version_id and s.day = c.day
+           where c.tenant_id = %s and c.version_id = %s and c.kind = 'data' order by c.chunk_no""",
+        (tenant, version_id),
+    ).fetchall()
+    for row in rows:
+        table = pq.read_table(  # type: ignore[reportUnknownMemberType]
+            io.BytesIO(bytes(row["data"])), columns=["_fc_key", "_fc_op", "_fc_row_hash"]
+        )
+        keys += cast("list[str]", table.column("_fc_key").to_pylist())
+        ops += cast("list[str]", table.column("_fc_op").to_pylist())
+        hashes += [to_signed(h) for h in cast("list[int]", table.column("_fc_row_hash").to_pylist())]
+        chunk_nos += [row["chunk_no"]] * table.num_rows
+    if not keys:
+        return 0
+    conn.execute(
+        """insert into feather.record_key (tenant_id, dataset, key, version_id, partition, op, row_hash, chunk_no)
+           select %s, %s, u.k, %s, %s, u.o, u.h, u.c
+           from unnest(%s::text[], %s::text[], %s::bigint[], %s::int[]) as u(k, o, h, c)
+           on conflict do nothing""",
+        (tenant, dataset, version_id, partition, keys, ops, hashes, chunk_nos),
+    )
+    return len(keys)
+
+
 class PostgresSpool(Spool):
     """Chunks as `bytea`. A snapshot goes to the plain table `spool_snapshot`, so that it outlives the day
     partition of its version; every other kind goes to `spool_chunk`, in the partition of that day."""

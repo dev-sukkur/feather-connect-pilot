@@ -315,7 +315,109 @@ class ResponseStoreContract:
         assert len(store.responses.of_delivery("a", "v2")) == 1  # pending, so kept
 
 
-class StoreContract(SpoolContract, ResponseStoreContract):
+class KeyIndexContract:
+    """The key index: each key of a version, written when the version seals and in the same transaction, so that the
+    versions that held a record are found without reading the spool (ruling 11)."""
+
+    def _put(self, spool: Spool, vid: str, chunk_no: int, records: list[Record]) -> None:
+        spool.put_chunk(vid, chunk_no, "data", records_to_table(records))
+
+    def test_sealing_indexes_each_key_of_the_version(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        self._put(spool, "v1", 0, upserts(("k1", {"x": 1}), ("k2", {"x": 2})))
+        self._put(spool, "v1", 1, [Record("k3", "delete", {}, 0)])
+        seal(store, "v1", ["a"])
+        version = store.versions.get("v1")
+        [seen] = store.versions.key_history("d", "k1")
+        assert (seen.version_id, seen.dataset, seen.partition, seen.key, seen.op, seen.chunk_no) == (
+            "v1",
+            "d",
+            "p",
+            "k1",
+            "upsert",
+            0,
+        )
+        assert seen.row_hash == row_hash({"x": 1}) and seen.seal_seq == version.seal_seq
+        assert seen.sealed_at == version.sealed_at and seen.run_id == "r1"
+        [gone] = store.versions.key_history("d", "k3")
+        assert (gone.op, gone.chunk_no) == ("delete", 1)
+        assert store.versions.key_history("d", "nope") == []
+        assert store.versions.key_history("other", "k1") == []
+
+    def test_the_history_is_oldest_first_and_holds_sealed_versions_only(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        self._put(spool, "v1", 0, upserts(("k", {"x": 1})))
+        seal(store, "v1", ["a"])
+        self._put(spool, "v2", 0, upserts(("k", {"x": 2})))
+        store.versions.stage(draft("v2", part="q", run="r2"))
+        assert [s.version_id for s in store.versions.key_history("d", "k")] == ["v1"]
+        store.versions.seal(["v2"], ["a"])
+        store.versions.seal(["v2"], ["a"])  # sealing again indexes nothing more
+        found = store.versions.key_history("d", "k")
+        assert [(s.version_id, s.partition, s.run_id) for s in found] == [
+            ("v1", "p", "r1"),
+            ("v2", "q", "r2"),
+        ]
+        assert [s.version_id for s in store.versions.key_history("d", "k", limit=1)] == [
+            "v2"
+        ]  # the newest kept
+
+    def test_a_push_batch_is_indexed_as_it_seals(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        store.inbox.put("d", inbound())
+        seqs = [e.event_seq for e in store.inbox.take("d", 1)]
+        self._put(spool, "v1", 0, upserts(("INV-1", {"total": 5})))
+        store.inbox.seal_batch(seqs, [draft("v1", complete=False)], ["a"])
+        assert [s.version_id for s in store.versions.key_history("d", "INV-1")] == ["v1"]
+
+    def test_a_refused_seal_indexes_nothing(self, store: Store, spool: Spool):
+        spool.bind(store.versions)
+        store.versions.claim("v1", "first", "r1", "d", "p")
+        self._put(spool, "v1", 0, upserts(("k", {"x": 1})))
+        store.versions.stage(draft("v1"), "first")
+        store.versions.claim("v1", "second", "r1", "d", "p")
+        with pytest.raises(StaleWriter):
+            store.versions.seal(["v1"], ["a"], "first")
+        assert store.versions.key_history("d", "k") == []
+
+
+class TraceContract:
+    """What a trace of one record reads beside the key index: its quarantine entries and the audit rows of a route."""
+
+    def test_the_quarantine_entries_of_a_key(self, store: Store):
+        store.quarantine.add("a", "v1", "k", "bad", payload={"x": 1})
+        store.quarantine.add("a", "v2", "k", "worse")
+        store.quarantine.add("b", "v9", "k", "of a version not asked for")
+        store.quarantine.add("a", "v1", "j", "of another key")
+        store.quarantine.add(None, None, "k", "unreadable", "d", "p", raw="{oops")
+        store.quarantine.add(None, None, "k", "of another dataset", "e", "p")
+        store.quarantine.close_extraction("d", ["k"])
+        found = store.quarantine.of_key("d", "k", ["v1", "v2"])
+        assert [(q.route, q.version_id, q.error, q.status) for q in found] == [
+            ("a", "v1", "bad", "open"),
+            ("a", "v2", "worse", "open"),
+            (None, None, "unreadable", "superseded"),
+        ]
+        assert found[0].payload == {"x": 1} and found[2].raw == "{oops"
+        assert store.quarantine.of_key("d", "nope", ["v1"]) == []
+
+    def test_the_audit_rows_of_a_target(self, store: Store, clock: FrozenClock):
+        store.audit.record("human", "ann", "retry_deliveries", "route:a", {"reason": "first"}, "ok")
+        store.audit.record("human", "ann", "skip_deliveries", "route:b", {"reason": "other"}, "ok")
+        clock.advance(timedelta(minutes=1))
+        store.audit.record("human", "bob", "replay_deliveries", "route:a", {"reason": "second"}, "ok")
+        found = store.audit.for_target("route:a")
+        assert [(r.actor, r.action, r.request["reason"]) for r in found] == [
+            ("ann", "retry_deliveries", "first"),
+            ("bob", "replay_deliveries", "second"),
+        ]
+        assert [r.actor for r in store.audit.for_target("route:a", since=T0 + timedelta(seconds=30))] == [
+            "bob"
+        ]
+        assert store.audit.for_target("route:z") == []
+
+
+class StoreContract(SpoolContract, ResponseStoreContract, KeyIndexContract, TraceContract):
     def _table(self) -> pa.Table:
         return records_to_table(upserts(("k", {"x": 1})))
 

@@ -156,6 +156,9 @@ class MemorySpool:
         if isinstance(versions, WriteGuard):
             self._guard = versions
             self._lock = versions.lock
+        attach = getattr(versions, "attach_spool", None)
+        if attach is not None:  # the memory store reads the keys of a version it seals from here
+            attach(self)
 
     def _check(self, version_id: str, writer: str | None) -> None:
         if self._guard is not None:

@@ -23,6 +23,7 @@ from feather_server.auth import Actor, CurrentActor, require_csrf
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.previews import Preview
 from feather_server.services.reads import Reads
+from feather_server.services.trace import Tracer, as_json
 
 PREFIX = "/api/v1"
 IDEMPOTENCY_TTL = timedelta(hours=24)
@@ -455,6 +456,16 @@ def version_records(
 ) -> JSONResponse:
     """The version's records, a page at a time. Masking comes in M2: until then `masked` is false."""
     return ok(call(lambda: _version_records(request, version_id, check_limit(limit), decode(cursor))))
+
+
+# Tracing a record.
+
+
+@router.get("/datasets/{dataset}/records/{key:path}/trace")
+def record_trace(dataset: str, key: str, request: Request, _: CurrentActor) -> JSONResponse:
+    """What happened to one record, by its dataset key: each version that held it, oldest first, with what each route
+    did with it. Only versions sealed since the key index came in are traced."""
+    return ok(call(lambda: as_json(Tracer(request.app.state.feather).trace(dataset, key))))
 
 
 # Deliveries.

@@ -76,6 +76,14 @@ def test_call_sends_the_idempotency_key(make_ctx):
 
 
 @respx.mock
+def test_call_names_the_version_it_sends(make_ctx):
+    """`X-Feather-Version` goes beside the idempotency key, so that the destination's logs lead back to a trace."""
+    route = respx.post(f"{BASE}/orders").mock(return_value=httpx.Response(201))
+    http.Call("erp", method="POST", url="/orders").apply(make_ctx(), batch(upsert("1", n=1)))
+    assert route.calls.last.request.headers["x-feather-version"] == "v1"
+
+
+@respx.mock
 def test_call_classifies_responses(make_ctx):
     answers = {"ok": 201, "again": 409, "bad": 422, "gone": 400}
     respx.post(url__regex=rf"{BASE}/orders/\w+").mock(

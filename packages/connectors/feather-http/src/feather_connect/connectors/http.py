@@ -719,6 +719,9 @@ BodyTemplate = Mapping[str, Any] | Callable[[Mapping[str, Any]], Mapping[str, An
 _ALREADY_APPLIED = 409
 # Answers that say the call is set up wrong rather than the record is: they fail the chunk, and the delivery.
 DEFAULT_FAIL_STATUSES = frozenset({401, 403, 404, 405, 407})
+# Names the version a request comes from, beside the idempotency key, so that a destination's logs lead back to a
+# trace of the record.
+VERSION_HEADER = "X-Feather-Version"
 
 
 def _fill(template: Any, record: Mapping[str, Any]) -> Any:
@@ -752,7 +755,8 @@ class Call(_HttpConnector, connector.Sink):
     function that returns the body. Without `body` the record is sent as it is. `headers` go with every request.
 
     Each request carries `key_header` with a key made from the chunk's idempotency key and the record's key, the same
-    each time the record is sent again, so that the destination can tell a repeat. A 2xx applies the record, and so
+    each time the record is sent again, so that the destination can tell a repeat, and `X-Feather-Version` with the
+    version it comes from, so that the destination's logs lead back to a trace of the record. A 2xx applies the record, and so
     does a 409, which says it was applied already. Any other 4xx rejects the record, which keeps the body it was sent
     with. A 429, a 5xx or a timeout is tried again by the client, and then fails the chunk for the runtime to retry.
     A status in `fail_statuses` (by default 401, 403, 404, 405 and 407: a wrong token, path or right) and any 3xx
@@ -826,7 +830,12 @@ class Call(_HttpConnector, connector.Sink):
                     self.method,
                     url,
                     content=canonical_json(body),
-                    headers={**self.headers, "Content-Type": "application/json", self.key_header: key},
+                    headers={
+                        **self.headers,
+                        "Content-Type": "application/json",
+                        self.key_header: key,
+                        VERSION_HEADER: batch.version_id,
+                    },
                     budget=ctx.budget,
                 )
             except HttpStatusError as error:

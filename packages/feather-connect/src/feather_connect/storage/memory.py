@@ -32,6 +32,7 @@ from feather_connect.storage.port import (
     InboxDay,
     InboxEvent,
     InboxStore,
+    KeySighting,
     Ledger,
     Override,
     OverrideStore,
@@ -107,6 +108,11 @@ class _Data:
     users: dict[str, UserRow] = field(default_factory=dict[str, UserRow])  # by username
     tokens: dict[str, TokenRow] = field(default_factory=dict[str, TokenRow])  # by token id
     audit: list[AuditRow] = field(default_factory=list[AuditRow])
+    # The key index, by (dataset, key): (version, partition, op, row hash, chunk), in seal order.
+    keys: dict[tuple[str, str], list[tuple[str, str, str, int, int]]] = field(
+        default_factory=dict[tuple[str, str], list[tuple[str, str, str, int, int]]]
+    )
+    spool: Any = None  # the spool bound to this store, which sealing reads the keys from
 
 
 class _Runs(RunJournal):
@@ -292,6 +298,48 @@ class _Versions(VersionStore):
     def lock(self) -> threading.RLock:
         return self._d.lock
 
+    def attach_spool(self, spool: Any) -> None:
+        """Be told the spool that holds this store's versions, whose keys sealing indexes."""
+        self._d.spool = spool
+
+    def _index(self, version: Version) -> None:
+        spool = self._d.spool
+        if spool is None:
+            return
+        for ref in spool.list_chunks(version.version_id):
+            table = spool.get_chunk(version.version_id, ref.chunk_no)
+            for key, op, row_hash in zip(
+                table.column("_fc_key").to_pylist(),
+                table.column("_fc_op").to_pylist(),
+                table.column("_fc_row_hash").to_pylist(),
+                strict=True,
+            ):
+                self._d.keys.setdefault((version.dataset, key), []).append(
+                    (version.version_id, version.partition, op, row_hash, ref.chunk_no)
+                )
+
+    def key_history(self, dataset: str, key: str, limit: int = 100) -> list[KeySighting]:
+        with self._d.lock:
+            found: list[KeySighting] = []
+            for version_id, partition, op, row_hash, chunk_no in self._d.keys.get((dataset, key), []):
+                version = self._d.versions[version_id]
+                assert version.seal_seq is not None and version.sealed_at is not None
+                found.append(
+                    KeySighting(
+                        version_id,
+                        dataset,
+                        partition,
+                        key,
+                        op,
+                        row_hash,
+                        chunk_no,
+                        version.run_id,
+                        version.seal_seq,
+                        version.sealed_at,
+                    )
+                )
+        return found[-limit:]
+
     def check_writable(self, version_id: str, writer: str | None) -> None:
         with self._d.lock:
             existing = self._d.versions.get(version_id)
@@ -346,6 +394,7 @@ class _Versions(VersionStore):
                         version, status="sealed", seal_seq=self._d.seal_seq, sealed_at=self._d.clock.now()
                     )
                     self._d.versions[version_id] = version
+                    self._index(version)
                     for route in routes:
                         self._d.deliveries[(route, version_id)] = Delivery(
                             route, version_id, version.dataset, version.partition, self._d.seal_seq, "pending"
@@ -757,6 +806,19 @@ class _Quarantine(QuarantineStore):
     def count_open(self, route: str | None = None) -> int:
         return len(self.list_open(route))
 
+    def of_key(self, dataset: str, key: str, version_ids: Sequence[str]) -> list[QuarantineRow]:
+        wanted = set(version_ids)
+        with self._d.lock:
+            return [
+                r
+                for r in self._d.quarantine.values()
+                if r.key == key
+                and (
+                    (r.version_id is not None and r.version_id in wanted)
+                    or (r.route is None and r.dataset == dataset)
+                )
+            ]
+
 
 class _Responses(ResponseStore):
     def __init__(self, data: _Data) -> None:
@@ -1103,6 +1165,11 @@ class _Audit(AuditStore):
         if cursor is not None:
             rows = [r for r in rows if r.audit_id < cursor]
         return rows[:limit]
+
+    def for_target(self, target: str, since: datetime | None = None, limit: int = 500) -> list[AuditRow]:
+        with self._d.lock:
+            rows = [r for r in self._d.audit if r.target == target and (since is None or r.at >= since)]
+        return sorted(rows, key=lambda r: (r.at, r.audit_id))[:limit]
 
 
 class _Reads(ReadStore):

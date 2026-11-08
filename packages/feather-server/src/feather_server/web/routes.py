@@ -31,6 +31,7 @@ from feather_server.services.actions import Actions, DeliveryAction, DeliverySel
 from feather_server.services.previews import Preview, PreviewError, PreviewExpired, PreviewInvalid
 from feather_server.services.reads import FlowSummary, Reads
 from feather_server.services.text import span
+from feather_server.services.trace import Tracer
 from feather_server.web.charts import meter, sparkline
 from feather_server.web.flow_graph import flow_graph
 
@@ -42,6 +43,7 @@ NAV: list[tuple[str, str]] = [
     ("Failures", "/failures"),
     ("Quarantine", "/quarantine"),
     ("Connections", "/connections"),
+    ("Trace a record", "/trace"),
 ]  # (label, path): a page that exists adds itself here
 _RECENT_RUNS = 8
 _FAILURE_GROUPS = 10
@@ -70,7 +72,12 @@ def show(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, default=str)
 
 
-templates.env.filters.update({"ago": ago, "span": span, "stamp": stamp, "show": show})
+def pretty(value: Any) -> str:
+    """A value as indented JSON, for a record or a body on a page."""
+    return json.dumps(value, indent=2, sort_keys=True, default=str, ensure_ascii=False)
+
+
+templates.env.filters.update({"ago": ago, "span": span, "stamp": stamp, "show": show, "pretty": pretty})
 templates.env.globals.update({"meter": meter, "sparkline": sparkline, "flow_graph": flow_graph})
 
 
@@ -928,6 +935,29 @@ def version_detail(
         rows=rows,
         next_cursor=encode(next_raw),
         first_page=not cursor,
+    )
+
+
+@router.get("/trace", response_class=HTMLResponse)
+def record_trace(request: Request, actor: CurrentActor, dataset: str = "", key: str = "") -> HTMLResponse:
+    """What happened to one record, by its dataset key, as one timeline; or the form that asks for one."""
+    tracer = Tracer(request.app.state.feather)
+    datasets = tracer.datasets()
+    found = None
+    if dataset and key:
+        try:
+            found = tracer.trace(dataset, key)
+        except KeyError:
+            return _not_found(request, f"No dataset {dataset!r}.")
+    return render(
+        request,
+        "trace.html",
+        title=f"Trace of {key}" if found else "Trace a record",
+        actor=actor,
+        datasets=datasets,
+        dataset=dataset or (datasets[0] if datasets else ""),
+        key=key,
+        trace=found,
     )
 
 
