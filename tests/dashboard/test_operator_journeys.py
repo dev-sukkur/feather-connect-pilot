@@ -115,3 +115,35 @@ def test_pages_fit_a_phone_without_scrolling_sideways(
     assert box is not None and box["x"] + box["width"] <= 360 + 0.5, f"the navigation overflows on {path}"
     wide = signed_in.evaluate("() => document.documentElement.scrollWidth")
     assert wide <= 360, f"{path} is {wide} px wide"
+
+
+def test_from_a_delivery_to_what_was_read(signed_in: Page, site: Site):
+    page = signed_in
+    version = site.deliveries("lake", "applied")[0].version_id
+    page.goto(f"{site.url}/routes/lake/deliveries/{version}")
+    page.get_by_role("link", name="What was read").click()
+    expect(page).to_have_url(f"{site.url}/versions/{version}")
+    rows = page.locator("#records tbody tr")
+    expect(rows).to_have_count(2)
+    first_key = rows.first.locator("th").inner_text().strip()
+    page.get_by_label("Filter the records on this page").fill(first_key)
+    expect(page.locator("#records tbody tr:visible")).to_have_count(1)
+    rows.first.get_by_text("Show JSON").click()
+    expect(rows.first.locator("pre")).to_contain_text(first_key)
+
+
+def test_the_sidebar_opens_on_a_narrow_screen(signed_in: Page, site: Site):
+    page = signed_in
+    page.set_viewport_size({"width": 600, "height": 800})
+    page.goto(f"{site.url}/")
+    menu = page.get_by_role("button", name="Menu")
+    expect(menu).to_have_attribute("aria-expanded", "false")
+    expect(page.get_by_role("navigation", name="Main")).to_be_hidden()
+    menu.click()
+    expect(menu).to_have_attribute("aria-expanded", "true")
+    expect(page.get_by_role("navigation", name="Main")).to_be_visible()
+    page.get_by_role("navigation", name="Main").get_by_role("link", name="Runs").click()
+    expect(page.locator("h1")).to_contain_text("Runs")
+    page.set_viewport_size({"width": 1200, "height": 800})
+    expect(page.get_by_role("button", name="Menu")).to_be_hidden()
+    expect(page.get_by_role("navigation", name="Main")).to_be_visible()
