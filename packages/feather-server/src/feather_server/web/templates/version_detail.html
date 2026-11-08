@@ -10,7 +10,7 @@
   <dl class="facts">
     <dt>Id</dt><dd><code>{{ v.version_id }}</code></dd>
     <dt>Dataset</dt><dd>{{ v.dataset }}</dd>
-    <dt>Partition</dt><dd>{{ m.partition_label(v.dataset, v.partition) }} <span class="muted"><code>{{ v.partition }}</code></span></dd>
+    <dt>Partition</dt><dd>{{ m.partition_label(v.dataset, v.partition) }}{% if v.partition != "_" and label_of(v.dataset, v.partition) != v.partition %} <span class="muted"><code>{{ v.partition }}</code></span>{% endif %}</dd>
     <dt>Number</dt><dd>{% if v.seal_seq is not none %}{{ v.seal_seq }}{% else %}<span class="muted">not sealed</span>{% endif %}</dd>
     <dt>Status</dt><dd>{{ m.status_badge(v.status) }}</dd>
     <dt>Sealed by</dt><dd><a href="/runs/{{ v.run_id | urlencode }}">run <code>{{ v.run_id[-8:] }}</code></a></dd>

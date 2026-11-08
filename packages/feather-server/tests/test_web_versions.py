@@ -4,7 +4,7 @@ import re
 
 from fastapi.testclient import TestClient
 
-from feather_connect.storage.port import Version
+from feather_connect.storage.port import Version, VersionDraft
 from feather_server.app import create_app
 from feather_server.testing import World, day
 
@@ -71,3 +71,16 @@ def test_the_flow_page_and_the_partitions_grid_link_to_versions(client: TestClie
     link = f'href="/versions/{version.version_id}"'
     assert link in client.get("/flows/orders").text
     assert link in client.get("/datasets/orders/partitions").text
+
+
+def test_the_partition_row_shows_the_raw_key_only_when_it_says_more(client: TestClient, world: World) -> None:
+    """A day shows its label and its key; the one partition of an unpartitioned dataset, `_`, shows its label only."""
+    version = _sealed(world, day(18))
+    html = client.get(f"/versions/{version.version_id}").text
+    assert f"<code>{day(18)}</code>" in html
+    world.store.versions.stage(
+        VersionDraft("v-all", "orders", "_", "r-all", True, 0, 0, "h", None, None, "sha")
+    )
+    world.store.versions.seal(["v-all"], [])
+    row = re.search(r"<dt>Partition</dt><dd>(.*?)</dd>", client.get("/versions/v-all").text, re.DOTALL)
+    assert row and "<code>_</code>" not in row.group(1)
