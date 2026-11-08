@@ -15,7 +15,7 @@ Two questions came up on 8 Nov 2026: is full multi-tenancy needed for v1, and sh
 
 **1. Light multi-tenancy in v1.**
 - v1 keeps the M1 foundation and the single `default` tenant.
-- Full multi-tenancy moves **after v1**: choosing the tenant per request and per task, row-level security, per-tenant config, secrets, budgets and roles, quotas, worker pools, a tenant switcher and cross-tenant tests (FR-I2, FR-I3, FR-I4).
+- Full multi-tenancy moves **after v1**, to milestone M5 (set on 9 Nov 2026): choosing the tenant per request and per task, row-level security, per-tenant config, secrets, budgets and roles, quotas, worker pools, a tenant switcher and cross-tenant tests (FR-I2, FR-I3, FR-I4).
 - Serving several customers in v1 means a deployment per customer per environment.
 
 **2. Rules that keep full multi-tenancy cheap to add.** Every builder follows them from now on, and reviews check them:

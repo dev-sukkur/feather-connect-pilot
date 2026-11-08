@@ -141,12 +141,12 @@ Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and op
 | ID | Requirement | Priority | Milestone |
 |---|---|---|---|
 | FR-B1 | One dataset can be delivered to any number of destinations ("routes"). Each route progresses, fails and recovers independently. | Must | M1 |
-| FR-B2 | Change strategies, plus custom strategies via a hook:<br>• `by_stamp`: incremental, with lookback;<br>• `snapshot_diff`: hashes and diffs a slice, and detects hard deletes;<br>• `replace`: reloads the full slice;<br>• `push`: webhook or CDC. | Must | M1 (CDC M3) |
+| FR-B2 | Change strategies, plus custom strategies via a hook:<br>• `by_stamp`: incremental, with lookback;<br>• `snapshot_diff`: hashes and diffs a slice, and detects hard deletes;<br>• `replace`: reloads the full slice;<br>• `push`: webhook or CDC. | Must | M1 (CDC M4) |
 | FR-B3 | Partitions name business slices, such as store × day with an explicit timezone. They are the unit of planning, re-runs, verification and backfills. | Must | M1 |
 | FR-B4 | Each extraction produces an immutable version: upserts plus deletes, marked complete or incomplete. Versions are retained according to policy. | Must | M1 |
 | FR-B5 | Extraction never waits for destinations. Data is spooled first, so a destination outage cannot lose a read. | Must | M1 |
 | FR-B6 | A route applies a partition's versions in order, and push datasets keep per-key order. As an opt-in, a whole-document event can supersede an older failed version. | Must | M1 |
-| FR-B7 | Readiness ("this dataset or group is complete through T") is tracked and can gate or trigger downstream flows. It never blocks unrelated routes. | Should | M2 |
+| FR-B7 | Readiness ("this dataset or group is complete through T") is tracked and can gate or trigger downstream flows. It never blocks unrelated routes. | Should | M1.1 |
 | FR-B8 | Any retained version can be replayed to a route, and a newly added route can be bootstrapped from history. | Must | M1 replay, M2 bootstrap |
 | FR-B9 | Schema evolution policy: additive changes apply automatically. Drops, narrowing and type changes are held for approval. The policy can be overridden per dataset. | Should | M2 |
 | FR-B10 | Event latency from webhook receipt to the destination being updated is ≤ 30 s at p95 (target 5 s) under normal load. | Must | M1 |
@@ -166,8 +166,8 @@ Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and op
 | ID | Requirement | Priority | Milestone |
 |---|---|---|---|
 | FR-D1 | Triggers: cron with a timezone, fixed intervals (down to seconds, for pollers), and manual runs from the dashboard, CLI or MCP. | Must | M1 |
-| FR-D2 | Event triggers: webhook arrivals (M1) and database CDC (M3). | Must | M1 / M3 |
-| FR-D3 | Readiness triggers: run when a dataset group is complete through a period. | Should | M2 |
+| FR-D2 | Event triggers: webhook arrivals (M1) and database CDC (M4). | Must | M1 / M4 |
+| FR-D3 | Readiness triggers: run when a dataset group is complete through a period. | Should | M1.1 |
 | FR-D4 | Backfill plans over a partition range, with concurrency and budget limits, previewed before execution. | Must | M1 |
 | FR-D5 | Pause and resume per flow and per route. Connection availability windows (for example, ERP reads only 22:00–05:00). | Should | M1 pause/resume, M2 windows |
 
@@ -192,7 +192,7 @@ Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and op
 | FR-F3 | Partition grid: the status of every dataset × partition × route over time, with drill-down. | Must | M1 |
 | FR-F4 | Runs and tasks: timeline, inputs, logs and attempts. | Must | M1 |
 | FR-F5 | Delivery ledger, and failures grouped by error. | Must | M1 |
-| FR-F6 | Record trace by business key across versions and routes; version diffs; masked samples. | Should | M2 |
+| FR-F6 | Record trace by business key across versions and routes; version diffs; masked samples. | Should | M1.1 trace; M2 diffs and masked samples |
 | FR-F7 | Freshness/SLA and volume-anomaly views. | Should | M2 |
 | FR-F8 | A fleet view across registered environments. | Should | M3 |
 | FR-F9 | Audit log view. | Must | M2 |
@@ -212,7 +212,7 @@ Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and op
 | ID | Requirement | Priority | Milestone |
 |---|---|---|---|
 | FR-H1 | dev, qa, uat and prod are separate deployments of the same images, configured by per-environment overlays. | Must | M1 |
-| FR-H2 | Promotion by git tag and CI. Each environment shows the code version every flow runs. | Must | M2 |
+| FR-H2 | Promotion by git tag and CI. Each environment shows the code version every flow runs. | Must | M1.1, as flow package promotion by checksum (ADR-0011) |
 | FR-H3 | Production protections: a preview and a reason for mass actions, approval for destructive actions, and least-privilege defaults. | Should | M3 |
 | FR-H4 | The dashboard can register several environments and switch between them. | Should | M3 |
 
@@ -221,9 +221,9 @@ Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and op
 | ID | Requirement | Priority | Milestone |
 |---|---|---|---|
 | FR-I1 | Every operational record carries a tenant. Single-tenant installs use an implicit default tenant. | Must | M1 |
-| FR-I2 | Per-tenant connections, secrets, budgets, quotas, alert channels, users and roles. | Should | After v1 (ADR-0013) |
-| FR-I3 | Tenant isolation is enforced in the database (row-level security) as well as in the API. | Must, once there is more than one tenant | After v1 (ADR-0013) |
-| FR-I4 | Optional dedicated worker pools or agents per tenant. | Could | After v1 (ADR-0013) |
+| FR-I2 | Per-tenant connections, secrets, budgets, quotas, alert channels, users and roles. | Should | M5 (ADR-0013) |
+| FR-I3 | Tenant isolation is enforced in the database (row-level security) as well as in the API. | Must, once there is more than one tenant | M5 (ADR-0013) |
+| FR-I4 | Optional dedicated worker pools or agents per tenant. | Could | M5 (ADR-0013) |
 
 ### J. Connectors
 
@@ -239,7 +239,7 @@ Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and op
 | ID | Requirement | Priority | Milestone |
 |---|---|---|---|
 | FR-K1 | Local users and API tokens (M1); OIDC single sign-on (M3). | Must | M1 / M3 |
-| FR-K2 | Role-based access (viewer, operator, developer, admin, plus approver and PII-reader grants), scoped by tenant and environment. | Must | M2 |
+| FR-K2 | Role-based access (viewer, operator, developer, admin, plus approver and PII-reader grants), scoped by tenant and environment. | Must | M1.1 admin and operator; M2 the rest |
 | FR-K3 | Secrets are referenced, never stored. Environment variables and files are supported in M1; Vault and the AWS, Azure and GCP secret stores in M3. Secrets are never logged or displayed. | Must | M1 / M3 |
 | FR-K4 | An immutable audit record for every action by a human, an agent or the system. | Must | M2 |
 | FR-K5 | PII fields are tagged and masked in dashboard, CLI and MCP output. | Should | M2 |
@@ -249,16 +249,16 @@ Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and op
 
 | ID | Requirement | Priority | Milestone |
 |---|---|---|---|
-| FR-L1 | An MCP server exposes read, act and authoring tools under the same RBAC and audit as the API. | Must | M2 |
+| FR-L1 | An MCP server exposes read, act and authoring tools under the same RBAC and audit as the API. | Must | M4 |
 | FR-L2 | AI-ready projects: AGENTS.md conventions, JSON output from every CLI command, and connector descriptions that agents can query. | Must | M1 |
-| FR-L3 | In production, an agent action that changes state creates a hold for human approval unless policy allows it. | Should | M2 |
+| FR-L3 | In production, an agent action that changes state creates a hold for human approval unless policy allows it. | Should | M4 |
 
 ### M. Observability
 
 | ID | Requirement | Priority | Milestone |
 |---|---|---|---|
 | FR-M1 | Structured logs carrying correlation ids (tenant, flow, run, task, dataset, partition, version, route). | Must | M1 |
-| FR-M2 | Optional export of Prometheus metrics and OpenTelemetry traces. The dashboard works without them. | Should | M3 |
+| FR-M2 | Optional export of Prometheus metrics and OpenTelemetry traces. The dashboard works without them. | Should | M4 |
 | FR-M3 | Alert rules (failures, staleness, missing partitions, budgets, volume anomalies, waiting holds, agent down) sent to email, Slack, Teams and webhooks. | Must | M2 |
 
 ## 8. Non-functional requirements
