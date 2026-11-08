@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from textwrap import dedent
 
@@ -43,10 +44,13 @@ FLOW = """
     )
 """
 
+# A manual run of a by_day dataset reads yesterday and today (`_Day.recent`), so the rows' days follow the clock.
+TODAY = datetime.now(UTC).date()
+YESTERDAY = TODAY - timedelta(days=1)
 ROWS = [
-    {"order_id": "o1", "day": "2026-11-06", "total": 10},
-    {"order_id": "o2", "day": "2026-11-07", "total": 12},
-    {"order_id": "o3", "day": "2026-11-07", "total": 7},
+    {"order_id": "o1", "day": YESTERDAY.isoformat(), "total": 10},
+    {"order_id": "o2", "day": TODAY.isoformat(), "total": 12},
+    {"order_id": "o3", "day": TODAY.isoformat(), "total": 7},
 ]
 
 
@@ -86,10 +90,10 @@ def test_run_local_without_sim_names_the_missing_credential(cli: Callable[..., R
 
 
 def test_partition_option_runs_one_slice(cli: Callable[..., Result], demo: Path) -> None:
-    r = cli("run", "demo", "--local", "--sim", "--partition", "day=2026-11-07", "--json")
+    r = cli("run", "demo", "--local", "--sim", "--partition", f"day={TODAY}", "--json")
     doc = json.loads(r.stdout)
     assert r.exit_code == 0 and doc["routes"]["warehouse"]["applied"] == 2
-    assert doc["partitions"] == ["day=2026-11-07"]
+    assert doc["partitions"] == [f"day={TODAY}"]
 
 
 def test_failed_local_run_exits_non_zero_with_the_reason(cli: Callable[..., Result], demo: Path) -> None:
