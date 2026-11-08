@@ -25,6 +25,8 @@ from feather_connect.storage.port import (
     CatalogStore,
     Delivery,
     DeliveryStatus,
+    DuplicateFile,
+    DuplicateRegistry,
     DuplicateUser,
     FailureGroup,
     FlowRow,
@@ -42,6 +44,9 @@ from feather_connect.storage.port import (
     QuarantineStore,
     ReadStore,
     RecordStateStore,
+    RegistryFile,
+    RegistryRow,
+    RegistryStore,
     ResponseRow,
     ResponseStore,
     Role,
@@ -55,6 +60,7 @@ from feather_connect.storage.port import (
     Store,
     TaskRow,
     TokenRow,
+    TokenScope,
     UserRow,
     UserStore,
     Version,
@@ -108,6 +114,10 @@ class _Data:
     ticks: dict[tuple[str, str], datetime] = field(default_factory=dict[tuple[str, str], datetime])
     users: dict[str, UserRow] = field(default_factory=dict[str, UserRow])  # by username
     tokens: dict[str, TokenRow] = field(default_factory=dict[str, TokenRow])  # by token id
+    registry_files: dict[str, tuple[RegistryFile, bytes]] = field(
+        default_factory=dict[str, tuple[RegistryFile, bytes]]
+    )  # by filename, in upload order
+    registries: dict[str, RegistryRow] = field(default_factory=dict[str, RegistryRow])
     audit: list[AuditRow] = field(default_factory=list[AuditRow])
     # The key index, by (dataset, key): (version, partition, op, row hash, chunk), in seal order.
     keys: dict[tuple[str, str], list[tuple[str, str, str, int, int]]] = field(
@@ -1195,14 +1205,20 @@ class _Users(UserStore):
             self._d.users[username] = replace(self._d.users[username], role=role)
 
     def create_token(
-        self, name: str, token_hash: str, expires_at: datetime | None, role: Role, created_by: str | None
+        self,
+        name: str,
+        token_hash: str,
+        expires_at: datetime | None,
+        role: Role,
+        created_by: str | None,
+        scope: TokenScope = "all",
     ) -> str:
         with self._d.lock:
             if any(t.token_hash == token_hash for t in self._d.tokens.values()):
                 raise ValueError("a token with that hash exists")
             token_id = new_id()
             self._d.tokens[token_id] = TokenRow(
-                token_id, name, token_hash, self._d.clock.now(), expires_at, None, role, created_by
+                token_id, name, token_hash, self._d.clock.now(), expires_at, None, role, created_by, scope
             )
             return token_id
 
@@ -1215,6 +1231,69 @@ class _Users(UserStore):
             found = self._d.tokens.get(token_id)
             if found is not None and found.revoked_at is None:
                 self._d.tokens[token_id] = replace(found, revoked_at=self._d.clock.now())
+
+
+class _Registry(RegistryStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def put_file(self, file: RegistryFile, content: bytes) -> None:
+        with self._d.lock:
+            taken = any(
+                f.filename == file.filename or (f.project, f.version) == (file.project, file.version)
+                for f, _ in self._d.registry_files.values()
+            )
+            if taken:
+                raise DuplicateFile(f"{file.project} {file.version}")
+            self._d.registry_files[file.filename] = (file, bytes(content))
+
+    def projects(self) -> list[str]:
+        with self._d.lock:
+            return sorted({f.project for f, _ in self._d.registry_files.values()})
+
+    def files(self, project: str) -> list[RegistryFile]:
+        with self._d.lock:
+            return [f for f, _ in self._d.registry_files.values() if f.project == project]
+
+    def file(self, filename: str) -> RegistryFile | None:
+        with self._d.lock:
+            found = self._d.registry_files.get(filename)
+            return None if found is None else found[0]
+
+    def content(self, filename: str) -> bytes | None:
+        with self._d.lock:
+            found = self._d.registry_files.get(filename)
+            return None if found is None else found[1]
+
+    def yank(self, project: str, version: str, reason: str | None) -> bool:
+        with self._d.lock:
+            for name, (f, content) in self._d.registry_files.items():
+                if (f.project, f.version) == (project, version):
+                    if f.yanked_at is None:
+                        changed = replace(f, yanked_at=self._d.clock.now(), yanked_reason=reason)
+                        self._d.registry_files[name] = (changed, content)
+                    return True
+            return False
+
+    def add_registry(self, name: str, index_url: str, token_ref: str | None, added_by: str) -> RegistryRow:
+        with self._d.lock:
+            if name in self._d.registries:
+                raise DuplicateRegistry(name)
+            row = RegistryRow(name, index_url, token_ref, added_by, self._d.clock.now())
+            self._d.registries[name] = row
+            return row
+
+    def registries(self) -> list[RegistryRow]:
+        with self._d.lock:
+            return [self._d.registries[name] for name in sorted(self._d.registries)]
+
+    def get_registry(self, name: str) -> RegistryRow | None:
+        with self._d.lock:
+            return self._d.registries.get(name)
+
+    def remove_registry(self, name: str) -> bool:
+        with self._d.lock:
+            return self._d.registries.pop(name, None) is not None
 
 
 class _Audit(AuditStore):
@@ -1508,4 +1587,5 @@ class MemoryStore(Store):
             reads=_Reads(data),
             inbox=_Inbox(data, versions),
             responses=_Responses(data),
+            registry=_Registry(data),
         )

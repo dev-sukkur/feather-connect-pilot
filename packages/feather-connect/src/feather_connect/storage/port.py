@@ -21,6 +21,9 @@ QuarantineStatus = Literal["open", "superseded"]
 WorkerState = Literal["alive", "draining", "dead"]
 Role = Literal["admin", "operator"]
 ROLES: tuple[Role, ...] = ("admin", "operator")  # highest first
+TokenScope = Literal[
+    "all", "publish"
+]  # `publish`: it may upload to the built-in registry and do nothing else
 
 
 class VersionSealed(Exception):
@@ -1087,6 +1090,7 @@ class TokenRow:
     revoked_at: datetime | None
     role: Role
     created_by: str | None  # the user whose token it is; None for one the server's CLI made for automation
+    scope: TokenScope = "all"
 
 
 class DuplicateUser(Exception):
@@ -1114,7 +1118,13 @@ class UserStore(Protocol):
         ...
 
     def create_token(
-        self, name: str, token_hash: str, expires_at: datetime | None, role: Role, created_by: str | None
+        self,
+        name: str,
+        token_hash: str,
+        expires_at: datetime | None,
+        role: Role,
+        created_by: str | None,
+        scope: TokenScope = "all",
     ) -> str:
         """Add the token, known by the SHA-256 of its secret, and return its id. That its role is no higher than its
         user's is for the caller to check."""
@@ -1126,6 +1136,80 @@ class UserStore(Protocol):
 
     def revoke_token(self, token_id: str) -> None:
         """Revoke the token, from now. Revoking one twice, or one that isn't there, changes nothing."""
+        ...
+
+
+@dataclass(frozen=True)
+class RegistryFile:
+    """A wheel in the built-in registry (flow packages §4.3). `project` is the package's normalised name (PEP 503).
+    A registry keeps one file per version, and never replaces it: a version is yanked (PEP 592), not deleted."""
+
+    project: str
+    version: str
+    filename: str
+    sha256: str
+    size: int
+    manifest: Mapping[str, Any]
+    uploaded_by: str
+    uploaded_at: datetime
+    yanked_at: datetime | None = None
+    yanked_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class RegistryRow:
+    """Another Python package index this environment trusts. `token_ref` is a secret reference, never a value."""
+
+    name: str
+    index_url: str
+    token_ref: str | None
+    added_by: str
+    added_at: datetime
+
+
+class DuplicateFile(Exception):
+    """The registry has that version, or a file of that name, already: a published version is never replaced."""
+
+
+class DuplicateRegistry(Exception):
+    """A registry of that name exists already."""
+
+
+class RegistryStore(Protocol):
+    """The built-in registry's wheels, and the other registries the environment trusts, for one tenant."""
+
+    def put_file(self, file: RegistryFile, content: bytes) -> None:
+        """Keep the wheel. Raises `DuplicateFile` when the project has the version, or the filename is taken."""
+        ...
+
+    def projects(self) -> list[str]:
+        """The projects that have a file, by name in code point order."""
+        ...
+
+    def files(self, project: str) -> list[RegistryFile]:
+        """The project's files, yanked ones too, oldest upload first."""
+        ...
+
+    def file(self, filename: str) -> RegistryFile | None: ...
+    def content(self, filename: str) -> bytes | None:
+        """The wheel's bytes, or None when there is no such file."""
+        ...
+
+    def yank(self, project: str, version: str, reason: str | None) -> bool:
+        """Mark the version yanked, from now. False when there is no such version; yanking twice keeps the first."""
+        ...
+
+    def add_registry(self, name: str, index_url: str, token_ref: str | None, added_by: str) -> RegistryRow:
+        """Raises `DuplicateRegistry` when the name is taken."""
+        ...
+
+    def registries(self) -> list[RegistryRow]:
+        """By name."""
+        ...
+
+    def get_registry(self, name: str) -> RegistryRow | None: ...
+    def remove_registry(self, name: str) -> bool:
+        """False when there was none of that name."""
         ...
 
 
@@ -1184,6 +1268,7 @@ class Store:
     reads: ReadStore
     inbox: InboxStore
     responses: ResponseStore
+    registry: RegistryStore
 
     def is_unavailable(self, error: BaseException) -> bool:
         """Whether `error` says that the store can't be reached, or can't keep up, just now, so that the same call may

@@ -33,6 +33,8 @@ EXPECTED_TABLES = {
     "budget_window",
     "worker",
     "schedule",
+    "registry",
+    "registry_file",
 }
 
 
