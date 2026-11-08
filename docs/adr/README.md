@@ -17,6 +17,7 @@ Each ADR records one decision with lasting consequences: its context, the decisi
 | [0009](0009-mit-licence.md) | MIT licence | Accepted |
 | [0010](0010-compose-and-feather-dev-deployment.md) | Docker Compose and `feather dev` as the v1 deployment targets | Accepted |
 | [0011](0011-flow-packages-hot-install.md) | Flows ship as packages, installed and activated in a running environment | Accepted |
+| [0012](0012-readiness-triggers.md) | Flows can start when the data they need is complete | Proposed |
 
 ## Template
 

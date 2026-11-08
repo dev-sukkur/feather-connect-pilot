@@ -3,7 +3,7 @@
 - **Status:** Accepted on 2026-11-08 (ADR-0011)
 - **Date:** 2026-11-08
 - **Decision record:** [ADR-0011](../adr/0011-flow-packages-hot-install.md)
-- **Milestone:** brought forward: the first work after M1, ahead of the rest of M2. The two roles it needs are pulled forward from M2's RBAC (§11)
+- **Milestone:** M1.1, brought forward from M2 together with readiness ([milestones](../milestones-and-scope.md)). The two roles it needs are pulled forward from M2's RBAC (§11)
 - **Sponsor's answers (8 Nov 2026):** brought forward; a package registry from the start, built into `feather-server`; running runs finish on deactivate; names always carry the package prefix; packages are the only way to deploy flows, and the M1 project mode is retired
 
 ## 1. The problem
