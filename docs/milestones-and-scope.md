@@ -25,8 +25,8 @@ If this page and one of those disagree, the source wins. Fix this page.
 | **M1: MVP, the core loop** | **Done**, 8 Nov 2026 (PR 8) | SDK, durable runtime on Postgres, JSON API and HTML dashboard, CLI and `feather dev`, generic connectors and templates, Compose | All met (§3.3) |
 | **M1.1: brought forward** | **Next.** Record trace done; flow packages next (design accepted), then readiness (designed) | Everything brought forward from later milestones: record trace, readiness (`on_ready`), and flow packages installed and activated with no restart | §4 |
 | **M2: business connectors and operations** | Not started | SAP, Zakya and Magento connectors with retail templates; on-prem agent; side effects and approvals; RBAC; MCP; alerts | §5 |
-| **M3: enterprise and v1.0** | Not started | Multi-tenancy, environment fleet view, SSO, vaults, Postgres CDC, hardening, the v1.0.0 release | §6 |
-| **After v1.0** | Not scheduled | Helm, Kafka, more connectors, marketplace, lineage, in-dashboard AI | §7 |
+| **M3: enterprise and v1.0** | Not started | Environment fleet view, SSO, vaults, Postgres CDC, hardening, the v1.0.0 release. Multi-tenancy stays light (ADR-0013) | §6 |
+| **After v1.0** | Not scheduled | Full multi-tenancy, sandbox refresh, Helm, Kafka, more connectors, marketplace, lineage, in-dashboard AI | §7 |
 
 ## 3. M1: MVP, the core loop
 
@@ -136,8 +136,8 @@ Order (sponsor, 8 Nov 2026): **flow packages first, then readiness.**
 ## 6. M3: enterprise and v1.0 (~8 weeks)
 
 **Scope (design §19):**
-- **Tenancy:** multi-tenancy (row-level security, quotas, per-tenant config and RBAC, worker pools).
-- **Environments:** environment peers and the fleet view; protections for protected environments.
+- **Tenancy:** light, by [ADR-0013](adr/0013-light-tenancy-and-non-prod-layout.md): the `tenant_id` foundation from M1 and the single `default` tenant. Full multi-tenancy moves after v1. Its eight rules apply to every change.
+- **Environments:** environment peers and the fleet view; protections for protected environments. A Compose layout for the test environments on one machine, a database each (ADR-0013, layout B).
 - **Integrations:** OIDC SSO; vault secret providers; Postgres CDC; Prometheus and OpenTelemetry export.
 - **Hardening:** chaos and performance suites with published results; a security review.
 - **Launch:** the docs site and the v1.0.0 release.
@@ -146,7 +146,7 @@ Order (sponsor, 8 Nov 2026): **flow packages first, then readiness.**
 
 ## 7. After v1.0, and not planned
 
-From [discovery §5](01-discovery/2026-10-30-feather-connect-discovery.md#5-scope):
+From [discovery §5](01-discovery/2026-10-30-feather-connect-discovery.md#5-scope), plus two moved here by [ADR-0013](adr/0013-light-tenancy-and-non-prod-layout.md): **full multi-tenancy** (FR-I2 to FR-I4: row-level security, per-tenant config and roles, quotas, worker pools) and **sandbox refresh** (`feather env refresh` with a masked sample or a full masked copy of production).
 
 | Later (after 1.0) | Not planned |
 |---|---|
@@ -174,7 +174,7 @@ From [discovery §5](01-discovery/2026-10-30-feather-connect-discovery.md#5-scop
 | S1–S23 (findings) | Stage 3 review findings | §8.2 below |
 | B1–B6, rulings 1–12 | Stage 4 preflight: blockers, and binding rulings | §8.3 below |
 | I1–I4, m1–m4 | End of M1 review (Stage 5): Important and Minor findings | [Exit report §6](06-release/m1-exit-report.md#6-end-of-stage-review) |
-| ADR-0001 … 0011 | Architecture decision records | [ADR index](adr/README.md) |
+| ADR-0001 … 0013 | Architecture decision records | [ADR index](adr/README.md) |
 
 The review notes behind §8.1–§8.3 are kept outside the repository, so their findings are summarised here.
 
