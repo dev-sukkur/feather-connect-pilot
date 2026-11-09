@@ -23,6 +23,7 @@ from feather_connect.core.connector import InboundRequest
 from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
+    SHARED_TENANT,
     STREAM_TRIGGER,
     Attempt,
     AuditRow,
@@ -79,6 +80,7 @@ from feather_connect.storage.port import (
     WorkerRegistry,
     WorkerRow,
     WorkerState,
+    account_key,
     check_transition,
     split_error,
     version_key,
@@ -1507,64 +1509,91 @@ class PostgresBudgets(BudgetStore):
 
     A grant locks all of the budget's windows in index order, so that concurrent callers queue up, then takes
     from every window or from none, in one transaction. Tokens are not leased to workers in blocks (not in M1).
+
+    The tenant's `budget` row holds the reserve and, for a vendor account's budget, the `account`, whose windows are
+    kept once under the tenant id `*` (ADR-0013 rule 8): the one place where tenants share rows, and only these.
     """
 
     def __init__(self, db: _Db) -> None:
         self._db = db
 
+    def _owner(self, account: str | None, name: str) -> tuple[str, str]:
+        """The tenant id and name the windows of a budget are kept under."""
+        return (self._db.tenant, name) if account is None else (SHARED_TENANT, account_key(account))
+
     def define(self, spec: BudgetSpec) -> None:
         now = self._db.clock.now()
+        tenant, key = self._owner(spec.account, spec.name)
         with self._db.tx() as conn:
             conn.execute(
                 "select pg_advisory_xact_lock(hashtext(%s))",
-                (f"feather.budget:{self._db.tenant}:{spec.name}",),
+                (f"feather.budget:{tenant}:{key}",),
             )
             budget = conn.execute(
-                "select reserve from feather.budget where tenant_id = %s and name = %s",
+                "select reserve, account from feather.budget where tenant_id = %s and name = %s",
                 (self._db.tenant, spec.name),
             ).fetchone()
             windows = conn.execute(
                 "select units, seconds from feather.budget_window where tenant_id = %s and name = %s order by idx",
-                (self._db.tenant, spec.name),
+                (tenant, key),
             ).fetchall()
+            same_windows = tuple(Window(w["units"], w["seconds"]) for w in windows) == spec.windows
             if (
                 budget is not None
                 and budget["reserve"] == dict(spec.reserve)
-                and tuple(Window(w["units"], w["seconds"]) for w in windows) == spec.windows
+                and budget["account"] == spec.account
+                and same_windows
             ):
                 return  # the same spec keeps what has been used
+            if budget is not None and budget["account"] is None and spec.account is not None:
+                conn.execute(  # the budget was the tenant's own, and now is its account's
+                    "delete from feather.budget_window where tenant_id = %s and name = %s",
+                    (self._db.tenant, spec.name),
+                )
+            conn.execute(
+                """insert into feather.budget (tenant_id, name, reserve, account) values (%s, %s, %s, %s)
+                   on conflict (tenant_id, name) do update set reserve = excluded.reserve, account = excluded.account""",
+                (self._db.tenant, spec.name, Jsonb(dict(spec.reserve)), spec.account),
+            )
+            if spec.account is not None and same_windows and windows:
+                return  # another tenant's budget of the account has these windows already, and what they used
             conn.execute(
                 "delete from feather.budget_window where tenant_id = %s and name = %s",
-                (self._db.tenant, spec.name),
-            )
-            conn.execute(
-                """insert into feather.budget (tenant_id, name, reserve) values (%s, %s, %s)
-                   on conflict (tenant_id, name) do update set reserve = excluded.reserve""",
-                (self._db.tenant, spec.name, Jsonb(dict(spec.reserve))),
+                (tenant, key),
             )
             for idx, window in enumerate(spec.windows):
                 conn.execute(
                     """insert into feather.budget_window (tenant_id, name, idx, units, seconds, tokens, refilled_at)
                        values (%s, %s, %s, %s, %s, %s, %s)""",
-                    (self._db.tenant, spec.name, idx, window.units, window.seconds, window.units, now),
+                    (tenant, key, idx, window.units, window.seconds, window.units, now),
                 )
+
+    def _budget(self, conn: psycopg.Connection[DictRow], name: str) -> tuple[str, str, dict[str, Any]]:
+        """The tenant id and name of the budget's windows, and its reserve. Raises `KeyError` for no such budget."""
+        row = conn.execute(
+            "select reserve, account from feather.budget where tenant_id = %s and name = %s",
+            (self._db.tenant, name),
+        ).fetchone()
+        if row is None:
+            raise KeyError(name)
+        tenant, key = self._owner(row["account"], name)
+        return tenant, key, row["reserve"]
 
     def acquire(self, name: str, units: int, priority: Priority = "normal") -> Grant:
         now = self._db.clock.now()
         with self._db.tx() as conn:
+            tenant, key, reserve = self._budget(conn, name)
             rows = conn.execute(
-                f"""select w.units, w.seconds, {_REFILLED} as tokens, b.reserve
-                    from feather.budget_window w join feather.budget b using (tenant_id, name)
+                f"""select w.units, w.seconds, {_REFILLED} as tokens
+                    from feather.budget_window w
                     where w.tenant_id = %(tenant)s and w.name = %(name)s
                     order by w.idx for update of w""",
-                {"tenant": self._db.tenant, "name": name, "now": now},
+                {"tenant": tenant, "name": key, "now": now},
             ).fetchall()
             if not rows:
                 raise KeyError(name)
             kept = (
-                Fraction(rows[0]["reserve"].get("high", 0.0)).limit_denominator()
-                if priority == "low"
-                else Fraction(0)
+                Fraction(reserve.get("high", 0.0)).limit_denominator() if priority == "low" else Fraction(0)
             )
             wait = Fraction(0)
             for row in rows:
@@ -1581,16 +1610,17 @@ class PostgresBudgets(BudgetStore):
             conn.execute(
                 f"""update feather.budget_window w set tokens = {_REFILLED} - %(units)s, refilled_at = %(now)s
                     where w.tenant_id = %(tenant)s and w.name = %(name)s""",
-                {"tenant": self._db.tenant, "name": name, "now": now, "units": units},
+                {"tenant": tenant, "name": key, "now": now, "units": units},
             )
         return Grant(True)
 
     def usage(self, name: str) -> list[WindowUsage]:
         with self._db.tx() as conn:
+            tenant, key, _ = self._budget(conn, name)
             rows = conn.execute(
                 f"""select w.units, w.seconds, {_REFILLED} as tokens from feather.budget_window w
                     where w.tenant_id = %(tenant)s and w.name = %(name)s order by w.idx""",
-                {"tenant": self._db.tenant, "name": name, "now": self._db.clock.now()},
+                {"tenant": tenant, "name": key, "now": self._db.clock.now()},
             ).fetchall()
         if not rows:
             raise KeyError(name)

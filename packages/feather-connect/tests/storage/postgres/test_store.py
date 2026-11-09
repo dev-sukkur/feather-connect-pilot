@@ -349,3 +349,29 @@ def test_registry_files_and_registries_belong_to_their_tenant(
     assert first.registry.files("acme")[0].yanked_at is None
     assert [r.index_url for r in first.registry.registries()] == ["https://pkgs.example.com/simple/"]
     assert second.registry.remove_registry("company") and first.registry.get_registry("company") is not None
+
+
+def test_a_vendor_account_budget_is_shared_by_tenants_and_no_other_is(
+    pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any
+):  # ADR-0013 rules 6 and 8
+    from feather_connect.storage.port import BudgetSpec, parse_limits
+
+    first, _ = pg_connect(pg_url, clock=clock, tenant="default")
+    second, _ = pg_connect(pg_url, clock=clock, tenant="t2")
+    limits = parse_limits(["10/minute", "100/day"])
+    first.budgets.define(BudgetSpec("zoho-api", limits, account="zakya:60001"))
+    second.budgets.define(
+        BudgetSpec("zakya", limits, account="zakya:60001")
+    )  # its own name, the same account
+    first.budgets.define(BudgetSpec("own", limits))
+    second.budgets.define(BudgetSpec("own", limits))
+    first.budgets.acquire("zoho-api", 4)
+    second.budgets.acquire("zakya", 3)
+    assert [u.used for u in first.budgets.usage("zoho-api")] == [7, 7]
+    assert [u.used for u in second.budgets.usage("zakya")] == [7, 7]
+    first.budgets.acquire("own", 9)
+    assert [u.used for u in second.budgets.usage("own")] == [0, 0]  # a tenant's own budget is its own
+    with pytest.raises(KeyError):
+        second.budgets.acquire("zoho-api", 1)  # the other tenant's name means nothing here
+    second.budgets.define(BudgetSpec("zakya", limits, account="zakya:60001"))  # a restart keeps what was used
+    assert [u.used for u in first.budgets.usage("zoho-api")] == [7, 7]

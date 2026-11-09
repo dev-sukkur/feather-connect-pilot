@@ -962,11 +962,15 @@ class _Budgets(BudgetStore):
                 return
             now = self._d.clock.now()
             self._specs[spec.name] = spec
-            self._buckets[spec.name] = [_Bucket(Fraction(w.units), now) for w in spec.windows]
+            held = self._buckets.get(spec.key)
+            shared = [s for s in self._specs.values() if s.key == spec.key and s.name != spec.name]
+            if held is None or not shared or shared[0].windows != spec.windows:
+                self._buckets[spec.key] = [_Bucket(Fraction(w.units), now) for w in spec.windows]
 
     def _refilled(self, name: str) -> tuple[BudgetSpec, list[_Bucket]]:
         """Bring the buckets of the budget up to now, and return them."""
-        spec, buckets = self._specs[name], self._buckets[name]
+        spec = self._specs[name]
+        buckets = self._buckets[spec.key]
         now = self._d.clock.now()
         for window, bucket in zip(spec.windows, buckets, strict=True):
             earned = (

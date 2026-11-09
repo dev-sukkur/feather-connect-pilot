@@ -774,11 +774,32 @@ class Window:
 @dataclass(frozen=True)
 class BudgetSpec:
     """A named rate budget: it is used up when any of its windows is. `reserve` maps a priority to the share of
-    each window kept for it: `{"high": 0.6}` leaves 60% of every window to `high` requests alone."""
+    each window kept for it: `{"high": 0.6}` leaves 60% of every window to `high` requests alone.
+
+    `account` names the vendor account the limits belong to, such as `zakya:60001` for a Zakya organisation. A
+    budget with one is wider than its tenant (ADR-0013 rule 8): every budget, of any tenant, that names the same
+    account takes from the same windows, as the vendor counts their calls together. Without one, the budget is the
+    tenant's own."""
 
     name: str
     windows: tuple[Window, ...]
     reserve: Mapping[str, float] = field(default_factory=dict[str, float])
+    account: str | None = None
+
+    @property
+    def key(self) -> str:
+        """Where the windows are kept: the budget's name, or its account's, which tenants share."""
+        return self.name if self.account is None else account_key(self.account)
+
+
+SHARED_TENANT = (
+    "*"  # the tenant id under which a vendor account's windows are kept: no tenant's, and every one's
+)
+
+
+def account_key(account: str) -> str:
+    """The name under which the windows of a vendor account's budget are kept."""
+    return f"account:{account}"
 
 
 @dataclass(frozen=True)

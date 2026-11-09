@@ -671,6 +671,18 @@ class StoreContract(
         store.budgets.define(BudgetSpec("z", parse_limits(["20/minute"])))
         assert [u.used for u in store.budgets.usage("z")] == [0]
 
+    def test_budgets_of_one_vendor_account_share_their_windows(self, store: Store):  # ADR-0013 rule 8
+        limits = parse_limits(["10/minute"])
+        store.budgets.define(BudgetSpec("zoho-a", limits, account="zakya:60001"))
+        store.budgets.define(BudgetSpec("zoho-b", limits, account="zakya:60001"))
+        store.budgets.define(BudgetSpec("other", limits, account="zakya:70002"))
+        store.budgets.acquire("zoho-a", 6)
+        assert [u.used for u in store.budgets.usage("zoho-b")] == [6]
+        assert not store.budgets.acquire("zoho-b", 5).granted
+        assert [u.used for u in store.budgets.usage("other")] == [0]
+        store.budgets.define(BudgetSpec("zoho-a", limits, account="zakya:60001"))  # again: the use stays
+        assert [u.used for u in store.budgets.usage("zoho-a")] == [6]
+
     def test_an_unknown_budget_or_an_impossible_request_is_an_error(self, store: Store):
         with pytest.raises(KeyError):
             store.budgets.acquire("nobody", 1)
