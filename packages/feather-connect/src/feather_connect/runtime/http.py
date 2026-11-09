@@ -196,15 +196,24 @@ class _OAuth2:
 
     The token is shared in the process by every auth object with the same token URL, client and grant (the secrets
     are hashed into the key), so that each connection, task and thread doesn't fetch its own: many token endpoints
-    limit how often a client may ask. Each token fetched is masked in logs; once two newer ones replace it, it no
-    longer is.
+    limit how often a client may ask. `partition`, such as the tenant and the connection, is part of the key, so that
+    a token is never shared across what it names (ADR-0013 rule 7). Each token fetched is masked in logs; once two
+    newer ones replace it, it no longer is.
     """
 
-    def __init__(self, token_url: str, client_id: str, client_secret: str, scheme: str) -> None:
+    def __init__(
+        self,
+        token_url: str,
+        client_id: str,
+        client_secret: str,
+        scheme: str,
+        partition: tuple[str, ...] = (),
+    ) -> None:
         self.token_url = token_url
         self.client_id = client_id
         self._client_secret = client_secret
         self.scheme = scheme
+        self.partition = partition
         self._shared: _TokenCell | None = None
 
     def _form(self) -> dict[str, str]:
@@ -215,7 +224,7 @@ class _OAuth2:
         if self._shared is None:
             grant = sorted(self._form().items())
             secret = hashlib.sha256(repr((self._client_secret, grant)).encode()).hexdigest()
-            key = (type(self).__name__, self.token_url, self.client_id, self.scheme, secret)
+            key = (type(self).__name__, *self.partition, self.token_url, self.client_id, self.scheme, secret)
             with _CELLS_LOCK:
                 self._shared = _CELLS.setdefault(key, _TokenCell())
         return self._shared
@@ -288,8 +297,9 @@ class OAuth2ClientCredentials(_OAuth2):
         scope: str | None = None,
         *,
         scheme: str = "Bearer",
+        partition: tuple[str, ...] = (),
     ) -> None:
-        super().__init__(token_url, client_id, client_secret, scheme)
+        super().__init__(token_url, client_id, client_secret, scheme, partition)
         self.scope = scope
 
     def _form(self) -> dict[str, str]:
@@ -310,8 +320,9 @@ class OAuth2RefreshToken(_OAuth2):
         refresh_token: str,
         *,
         scheme: str = "Bearer",
+        partition: tuple[str, ...] = (),
     ) -> None:
-        super().__init__(token_url, client_id, client_secret, scheme)
+        super().__init__(token_url, client_id, client_secret, scheme, partition)
         self._refresh_token = refresh_token
 
     def _form(self) -> dict[str, str]:

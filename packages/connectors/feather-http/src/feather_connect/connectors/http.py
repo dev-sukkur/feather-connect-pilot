@@ -117,7 +117,8 @@ def _need(config: HttpConfig, *names: str) -> list[str]:
     return values
 
 
-def _auth_of(config: HttpConfig) -> Auth | None:
+def _auth_of(config: HttpConfig, partition: tuple[str, ...] = ()) -> Auth | None:
+    """How requests are signed. An OAuth2 token is kept per `partition`: the tenant and the connection."""
     scheme = config.auth_scheme
     if scheme == "none":
         return None
@@ -132,11 +133,21 @@ def _auth_of(config: HttpConfig) -> Auth | None:
     if scheme == "oauth2_client_credentials":
         client_id, client_secret = _need(config, "client_id", "client_secret")
         return OAuth2ClientCredentials(
-            config.token_url, client_id, client_secret, config.scope, scheme=config.token_prefix
+            config.token_url,
+            client_id,
+            client_secret,
+            config.scope,
+            scheme=config.token_prefix,
+            partition=partition,
         )
     client_id, client_secret, refresh_token = _need(config, "client_id", "client_secret", "refresh_token")
     return OAuth2RefreshToken(
-        config.token_url, client_id, client_secret, refresh_token, scheme=config.token_prefix
+        config.token_url,
+        client_id,
+        client_secret,
+        refresh_token,
+        scheme=config.token_prefix,
+        partition=partition,
     )
 
 
@@ -154,6 +165,7 @@ class _HttpConnector:
         self.sleep: Callable[[float], None] = time.sleep
 
     def _config(self, ctx: Context) -> HttpConfig:
+        """The connection's settings, checked. A connector built on these overrides it to translate its own."""
         try:
             return HttpConfig.model_validate(dict(ctx.config))
         except ValidationError as error:
@@ -164,6 +176,9 @@ class _HttpConnector:
         """Return the client for the context's settings, the same one while they stay the same."""
         config = self._config(ctx)
         plain = {k: v.get_secret_value() if isinstance(v, Secret) else v for k, v in config}
+        plain["(tenant)"] = (
+            ctx.tenant
+        )  # a client, and its token, is never shared across tenants (ADR-0013 rule 7)
         digest = hashlib.sha256(json.dumps(plain, sort_keys=True, default=str).encode()).hexdigest()
         with self._lock:
             found = self._clients.get(digest)
@@ -175,7 +190,7 @@ class _HttpConnector:
                 ]
                 found = FeatherHttp(
                     base_url=config.base_url,
-                    auth=_auth_of(config),
+                    auth=_auth_of(config, (ctx.tenant, self.connection)),
                     cost=self.spec.cost,
                     retry=HttpRetry(attempts=config.retry_attempts),
                     secrets=secrets,

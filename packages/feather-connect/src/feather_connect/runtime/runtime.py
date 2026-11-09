@@ -178,7 +178,12 @@ class Runtime:
             handle = BudgetHandle(self._deps.store.budgets, self._budgets[connection], priority, self._sleep)
         config = self._config_of(connection)
         return Context(
-            config, logging.getLogger(connection), self._clock.now(), self._timezone, budget=handle
+            config,
+            logging.getLogger(connection),
+            self._clock.now(),
+            self._timezone,
+            budget=handle,
+            tenant=_TENANT,
         )
 
     @property
