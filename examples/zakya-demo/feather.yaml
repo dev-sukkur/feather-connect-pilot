@@ -4,15 +4,15 @@
 name: zakya-demo
 modules: [flows.invoices]
 settings: {timezone: UTC}
+# The budget is the organisation's: every tenant, flow and connection that names the account shares its windows.
 budgets:
-  zoho-api: {limits: ["90/minute", "1400/day"]}
+  zoho-api: {limits: ["90/minute", "1400/day"], account: "zakya:60001"}
 connections:
   zakya:
-    connector: http.rest
+    connector: zakya
     budget: zoho-api
-    auth_scheme: oauth2_refresh_token
-    token_prefix: Zoho-oauthtoken
-    params: {organization_id: "60001"}
+    domain: in
+    organization_id: "60001"
   erp:
     connector: http.call
     auth_scheme: bearer

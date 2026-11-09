@@ -1,0 +1,34 @@
+[project]
+name = "feather-zakya"
+version = "0.1.0"
+description = "A Zoho Zakya connector for Feather Connect: invoices, credit notes, payments, items and price lists in; items, prices and stock out."
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "feather-connect",
+    "feather-http",
+    "httpx",
+]
+
+[project.entry-points."feather_connect.connectors"]
+"zakya.items" = "feather_connect.connectors.zakya:Items"
+"zakya.prices" = "feather_connect.connectors.zakya:Prices"
+"zakya.source" = "feather_connect.connectors.zakya:Source"
+"zakya.stock" = "feather_connect.connectors.zakya:Stock"
+
+[dependency-groups]
+dev = ["feather-duckdb"]
+
+[tool.uv.sources]
+feather-connect = { workspace = true }
+feather-http = { workspace = true }
+feather-duckdb = { workspace = true }
+
+# The package adds the subpackage `zakya` to the namespace `feather_connect.connectors`, which has no `__init__.py`,
+# nor has `feather_connect`, which belongs to the feather-connect distribution.
+[tool.hatch.build.targets.wheel]
+packages = ["src/feather_connect"]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"

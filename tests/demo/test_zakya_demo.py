@@ -3,6 +3,7 @@ local engine with the memory store, and the receiver's SQLite file read back."""
 
 import importlib.util
 import json
+import shutil
 import socket
 import sqlite3
 import threading
@@ -57,11 +58,12 @@ def _serve(app: Any) -> tuple[uvicorn.Server, threading.Thread, str]:
 def sims(tmp_path: Path) -> Iterator[tuple[Any, Path, dict[str, str]]]:
     """The Zakya simulator (changing only when told), the receiver's SQLite file, and the URLs of both."""
     zakya_sim, receiver_sim = _module("zakya"), _module("receiver")
-    zakya = zakya_sim.Zakya(start=5, every=None, fault_rate=0)
+    zakya = zakya_sim.ZakyaSim(start=5)
     db = tmp_path / "receiver.sqlite"
     receiver = receiver_sim.Receiver(db, fault_rate=0)
-    servers = [_serve(zakya_sim.create_app(zakya)), _serve(receiver_sim.create_app(receiver))]
-    yield zakya, db, {"zakya": servers[0][2], "erp": servers[1][2]}
+    servers = [_serve(receiver_sim.create_app(receiver))]
+    with zakya_sim.running(zakya) as zakya_url:
+        yield zakya, db, {"zakya": zakya_url, "erp": servers[0][2]}
     for server, thread, _ in servers:
         server.should_exit = True
         thread.join(10)
@@ -96,6 +98,19 @@ def test_the_zakya_demo_project_is_sound():
     assert [(w.units, w.seconds) for w in budget.windows] == [(90, 60), (20000, 86400)]
 
 
+def test_a_budget_naming_another_organisation_is_a_problem(tmp_path: Path):  # Stage Z review 8
+    copy = tmp_path / "demo"
+    shutil.copytree(DEMO, copy, ignore=shutil.ignore_patterns(".data", "__pycache__"))
+    for name in ("feather.yaml", "env/dev.yaml"):
+        path = copy / name
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("zakya:60001", "zakya:70002"), encoding="utf-8"
+        )
+    problems = validate_project(load_project(copy, "dev"))
+    assert {p.code for p in problems} == {"budget_account_mismatch"}
+    assert "'zakya:60001'" in problems[0].hint and "zakya:70002" in problems[0].message
+
+
 def test_each_invoice_reaches_the_receiver_once_and_a_changed_one_again(sims, monkeypatch):
     zakya, db, urls = sims
     monkeypatch.chdir(DEMO.parent)  # the fake secret files are read against the project, wherever this runs
@@ -108,11 +123,7 @@ def test_each_invoice_reaches_the_receiver_once_and_a_changed_one_again(sims, mo
     def config_of(connection: str) -> dict[str, Any]:
         config = project.connections[connection].resolve()
         base = urls[connection]
-        return {
-            **config,
-            "base_url": base,
-            **({"token_url": f"{base}/oauth/v2/token"} if "token_url" in config else {}),
-        }
+        return {**config, "base_url": base, **({"accounts_url": base} if "accounts_url" in config else {})}
 
     runtime = Runtime(
         project.flows,
@@ -164,8 +175,8 @@ def test_each_invoice_reaches_the_receiver_once_and_a_changed_one_again(sims, mo
 def test_the_zakya_simulator_keeps_its_invoices_across_a_restart(tmp_path):
     zakya_sim = _module("zakya")
     state = tmp_path / "zakya.json"
-    first = zakya_sim.Zakya(start=3, every=None, fault_rate=0, state=state)
+    first = zakya_sim.ZakyaSim(start=3, state=state)
     first.change()
-    again = zakya_sim.Zakya(start=3, every=None, fault_rate=0, state=state)
+    again = zakya_sim.ZakyaSim(start=3, state=state)
     assert again.invoices == first.invoices
     assert again.add() == ["4600000000004"]

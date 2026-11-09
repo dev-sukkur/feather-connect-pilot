@@ -296,6 +296,56 @@ def test_a_token_endpoint_that_refuses_is_permanent_and_redacted():
 
 
 @respx.mock
+def test_a_token_endpoint_that_says_too_many_requests_is_transient_with_a_long_wait():  # Stage Z review 7
+    body = {"error": "Access Denied", "error_description": "You have made too many requests continuously."}
+    respx.post(TOKEN_URL).mock(return_value=httpx.Response(400, json=body))
+    with pytest.raises(TransientError) as e:
+        FeatherHttp(base_url=BASE, auth=refresh_auth()).request("GET", "/x")
+    assert e.value.retry_after == 600.0
+    handle, _ = budget(["100/minute"])
+    with pytest.raises(BudgetDeferred) as deferred:  # metered: the runtime's durable wait
+        FeatherHttp(base_url=BASE, auth=refresh_auth()).request("GET", "/x", budget=handle)
+    assert deferred.value.wait == timedelta(seconds=600) and deferred.value.budget == "api"
+
+
+@respx.mock
+def test_a_request_not_to_resend_is_sent_again_only_after_a_429(client, sleeps):  # Stage Z review 1
+    route = respx.post(f"{BASE}/orders").mock(
+        side_effect=[httpx.Response(429, headers={"Retry-After": "1"}), httpx.Response(503)]
+    )
+    with pytest.raises(TransientError, match="may have been carried out"):
+        client.request("POST", "/orders", content=b"{}", resend=False)
+    assert route.call_count == 2 and sleeps == [1.0]  # the 429 again, the 503 not
+    lost = respx.post(f"{BASE}/lost").mock(side_effect=httpx.ReadTimeout("no answer"))
+    with pytest.raises(TransientError, match="may have been carried out"):
+        client.request("POST", "/lost", content=b"{}", resend=False)
+    assert lost.call_count == 1
+
+
+@respx.mock
+def test_a_long_wait_of_a_metered_call_is_a_budget_deferral(sleeps):  # Stage Z review 4
+    respx.get(f"{BASE}/x").mock(return_value=httpx.Response(429, headers={"Retry-After": "3600"}))
+    handle, _ = budget(["100/minute"])
+    client = FeatherHttp(base_url=BASE, sleep=sleeps.append, now=lambda: NOW)
+    with pytest.raises(BudgetDeferred) as caught:
+        client.request("GET", "/x", budget=handle)
+    assert caught.value.wait == timedelta(seconds=3600) and caught.value.taken == 1 and sleeps == []
+
+
+@respx.mock
+def test_the_wait_is_read_from_the_answer_when_it_has_no_retry_after(sleeps):  # Stage Z review 5
+    respx.get(f"{BASE}/x").mock(return_value=httpx.Response(429, json={"code": 45}))
+    client = FeatherHttp(
+        base_url=BASE,
+        sleep=sleeps.append,
+        retry_after_of=lambda r: 7200.0 if r.json().get("code") == 45 else None,
+    )
+    with pytest.raises(TransientError) as caught:
+        client.request("GET", "/x")
+    assert caught.value.retry_after == 7200.0 and sleeps == []
+
+
+@respx.mock
 def test_timeout_is_transient(client, sleeps):
     respx.get(f"{BASE}/x").mock(side_effect=httpx.ReadTimeout("slow"))
     with pytest.raises(TransientError, match="timed out"):

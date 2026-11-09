@@ -774,11 +774,44 @@ class Window:
 @dataclass(frozen=True)
 class BudgetSpec:
     """A named rate budget: it is used up when any of its windows is. `reserve` maps a priority to the share of
-    each window kept for it: `{"high": 0.6}` leaves 60% of every window to `high` requests alone."""
+    each window kept for it: `{"high": 0.6}` leaves 60% of every window to `high` requests alone.
+
+    `account` names the vendor account the limits belong to, such as `zakya:60001` for a Zakya organisation. A
+    budget with one is wider than its tenant (ADR-0013 rule 8): every budget, of any tenant, that names the same
+    account takes from the same windows, as the vendor counts their calls together. Without one, the budget is the
+    tenant's own."""
 
     name: str
     windows: tuple[Window, ...]
     reserve: Mapping[str, float] = field(default_factory=dict[str, float])
+    account: str | None = None
+
+    @property
+    def key(self) -> str:
+        """Where the windows are kept: the budget's name, or its account's, which tenants share."""
+        return self.name if self.account is None else account_key(self.account)
+
+
+SHARED_TENANT = (
+    "*"  # the tenant id under which a vendor account's windows are kept: no tenant's, and every one's
+)
+
+
+def account_key(account: str) -> str:
+    """The name under which the windows of a vendor account's budget are kept."""
+    return f"account:{account}"
+
+
+def account_mismatch(spec: "BudgetSpec", other: str, windows: Sequence["Window"]) -> str:
+    """Why `spec` can't be defined: `other`, a budget of the same account, has other `windows`."""
+
+    def text(ws: Sequence[Window]) -> str:
+        return ", ".join(f"{w.units}/{w.seconds:g}s" for w in ws) or "none"
+
+    return (
+        f"budget {spec.name!r} gives account {spec.account!r} the windows {text(spec.windows)}, but {other} has "
+        f"{text(windows)}; the budgets of one account share its windows, so give them all the same limits"
+    )
 
 
 @dataclass(frozen=True)
@@ -815,7 +848,11 @@ class BudgetStore(Protocol):
     """Shared rate budgets. Each window refills continuously, as a token bucket, by the store's clock."""
 
     def define(self, spec: BudgetSpec) -> None:
-        """Create the budget, full. Defining it again with the same spec changes nothing; with another, starts afresh."""
+        """Create the budget, full. Defining it again with the same spec changes nothing; with another, starts afresh.
+
+        A budget of a vendor account takes the account's windows as they are, with what has been used of them. Raises
+        `ValueError` when another budget of the account has other windows: neither is right to reset them.
+        """
         ...
 
     def acquire(self, name: str, units: int, priority: Priority = "normal") -> Grant:

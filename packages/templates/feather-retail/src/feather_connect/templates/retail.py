@@ -1,18 +1,18 @@
 """Retail flow templates, as library functions (ruling 12): a project calls one with what it changes, and gets the
 template's fixes when it upgrades. `feather new flow --template` copies one into a project for full control.
 
-`zakya_invoices_to_erp` reads new and changed invoices from Zakya (Zoho Inventory's API) and upserts each into an ERP,
-`PUT {erp_path}/{invoice_id}`, so that a changed invoice updates the one the ERP has rather than making another:
+`zakya_invoices_to_erp` reads new and changed invoices from Zakya through the `feather-zakya` connector and upserts
+each into an ERP, `PUT {erp_path}/{invoice_id}`, so that a changed invoice updates the one the ERP has rather than
+making another:
 
+    budgets:
+      zoho-api: {limits: ["90/minute", "1400/day"], account: "zakya:60001"}
     connections:
       zakya:
-        connector: http.rest
+        connector: zakya
         budget: zoho-api
-        base_url: https://api.zakya.in
-        auth_scheme: oauth2_refresh_token
-        token_url: https://accounts.zoho.in/oauth/v2/token
-        token_prefix: Zoho-oauthtoken
-        params: {organization_id: "60001"}
+        domain: in
+        organization_id: "60001"
         auth:
           client_id: ${secret:env:ZAKYA_CLIENT_ID}
           client_secret: ${secret:env:ZAKYA_CLIENT_SECRET}
@@ -28,14 +28,17 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import feather_connect as fc
-from feather_connect.connectors import http  # pyright: ignore[reportAttributeAccessIssue]
+from feather_connect.connectors import (
+    http,  # pyright: ignore[reportAttributeAccessIssue]
+    zakya,  # pyright: ignore[reportAttributeAccessIssue]
+)
 from feather_connect.core.flow import RouteSpec
 from feather_connect.core.triggers import Trigger
 
 __all__ = ["EVERY_MINUTE", "ZAKYA_STAMP_FORMAT", "erp_invoice", "zakya_invoices", "zakya_invoices_to_erp"]
 
 # How Zakya writes `last_modified_time`, and takes it back in a filter: 2026-11-07T10:15:00+0530.
-ZAKYA_STAMP_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
+ZAKYA_STAMP_FORMAT = zakya.STAMP_FORMAT
 # The default schedule: a frozen trigger, so one value can be shared by every call.
 EVERY_MINUTE = fc.cron("* * * * *", tz="UTC")
 InvoiceMap = Callable[[Mapping[str, Any]], Mapping[str, Any]]
@@ -68,27 +71,12 @@ def erp_invoice(invoice: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def zakya_invoices(source: str = "zakya", *, page_size: int = 200, lookback: str = "0s") -> fc.Dataset:
-    """The invoices of a Zakya organisation, read by `last_modified_time`: each listed page, then each invoice on its
-    own for its line items. The connection's `params` carry the `organization_id`."""
-    return fc.Dataset(
-        "invoices",
-        source=http.Rest(
-            source,
-            path="/inventory/v1/invoices",
-            records_path="invoices",
-            pagination=http.Page(
-                "page", "per_page", page_size=page_size, has_more_path="page_context.has_more_page"
-            ),
-            params={"sort_column": "last_modified_time", "sort_order": "A"},
-            stamp_param="last_modified_time",
-            stamp_format=ZAKYA_STAMP_FORMAT,
-            detail_path="/inventory/v1/invoices/{invoice_id}",
-            detail_records_path="invoice",
-        ),
-        key="invoice_id",
-        strategy=fc.strategy.by_stamp("last_modified_time", lookback=lookback),
-    )
+def zakya_invoices(
+    source: str = "zakya", *, page_size: int = 200, lookback: str = zakya.DEFAULT_LOOKBACK
+) -> fc.Dataset:
+    """The invoices of a Zakya organisation, read by `last_modified_time` with `lookback` of overlap: each listed
+    page, then each invoice on its own for its line items (`zakya.dataset("invoices")`)."""
+    return zakya.dataset("invoices", source, lookback=lookback, page_size=page_size)
 
 
 def zakya_invoices_to_erp(
@@ -103,7 +91,7 @@ def zakya_invoices_to_erp(
     method: str = "PUT",
     response_map: Mapping[str, str] | None = None,
     page_size: int = 200,
-    lookback: str = "0s",
+    lookback: str = zakya.DEFAULT_LOOKBACK,
 ) -> fc.Flow:
     """A flow that upserts each new or changed Zakya invoice into an ERP, one request each.
 

@@ -6,27 +6,32 @@ attempt, retries included, takes its units from it before it goes out. A wait fo
 `BudgetDeferred` passes through untouched.
 
 Retries cover a 429, a 5xx, a timeout and a connection that fails, with equal-jitter backoff, and OAuth2 token fetches
-go through the same retries and the same budget. A `Retry-After` is honoured; one longer than 60 seconds raises
-`TransientError` at once, so that the engine waits instead of a worker thread. A 3xx (unless a GET asks to follow it)
-and any other 4xx raise `HttpStatusError`, a `PermanentError` with the status and a redacted excerpt of the body.
+go through the same retries and the same budget. A request sent with `resend=False`, one that the server may have
+carried out though no answer came (a POST that creates), is sent again only after a 429, which says it was not; any
+other failure goes up at once, for the caller to find out what happened before it tries again. A `Retry-After` is
+honoured (or what `retry_after_of` reads from the answer when it has none); one longer than 60 seconds goes up at once,
+so that the engine waits instead of a worker thread: as `BudgetDeferred` for a metered call, so that the runtime sleeps
+it off durably, and as `TransientError` otherwise. A 3xx (unless a GET asks to follow it) and any other 4xx raise
+`HttpStatusError`, a `PermanentError` with the status and a redacted excerpt of the body.
 """
 
 import base64
 import email.utils
 import hashlib
 import logging
+import math
 import random
 import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast
 
 import httpx
 
-from feather_connect.core.errors import PermanentError, TransientError
+from feather_connect.core.errors import BudgetDeferred, PermanentError, TransientError
 from feather_connect.logs import MIN_SECRET_LENGTH, register_secrets, unregister_secrets
 from feather_connect.logs import redact as redact_known
 from feather_connect.runtime.budgets import BudgetHandle
@@ -63,6 +68,10 @@ _TOKEN_PATTERNS = (
     ),
 )
 _EARLY_REFRESH_S = 60.0  # a token this close to expiry is refreshed before use
+# A token endpoint that turns a client away for asking too often (Zoho answers 400 "Access Denied") lets it in again
+# after some minutes; this long, unless the answer says.
+TOKEN_LIMIT_WAIT_S = 600.0
+_TOKEN_LIMITED = re.compile(r"too many requests|access denied", re.IGNORECASE)
 _TOKENS_KEPT = 2  # tokens still masked once replaced: the one before may still be in a call's lines
 TOKEN_COST_KEY = "token"  # what a token fetch costs, by the client's `cost`; a key it lacks costs 1
 
@@ -196,15 +205,24 @@ class _OAuth2:
 
     The token is shared in the process by every auth object with the same token URL, client and grant (the secrets
     are hashed into the key), so that each connection, task and thread doesn't fetch its own: many token endpoints
-    limit how often a client may ask. Each token fetched is masked in logs; once two newer ones replace it, it no
-    longer is.
+    limit how often a client may ask. `partition`, such as the tenant and the connection, is part of the key, so that
+    a token is never shared across what it names (ADR-0013 rule 7). Each token fetched is masked in logs; once two
+    newer ones replace it, it no longer is.
     """
 
-    def __init__(self, token_url: str, client_id: str, client_secret: str, scheme: str) -> None:
+    def __init__(
+        self,
+        token_url: str,
+        client_id: str,
+        client_secret: str,
+        scheme: str,
+        partition: tuple[str, ...] = (),
+    ) -> None:
         self.token_url = token_url
         self.client_id = client_id
         self._client_secret = client_secret
         self.scheme = scheme
+        self.partition = partition
         self._shared: _TokenCell | None = None
 
     def _form(self) -> dict[str, str]:
@@ -215,7 +233,7 @@ class _OAuth2:
         if self._shared is None:
             grant = sorted(self._form().items())
             secret = hashlib.sha256(repr((self._client_secret, grant)).encode()).hexdigest()
-            key = (type(self).__name__, self.token_url, self.client_id, self.scheme, secret)
+            key = (type(self).__name__, *self.partition, self.token_url, self.client_id, self.scheme, secret)
             with _CELLS_LOCK:
                 self._shared = _CELLS.setdefault(key, _TokenCell())
         return self._shared
@@ -254,6 +272,12 @@ class _OAuth2:
         token = body.get("access_token")
         if response.status_code == 429 or response.status_code >= 500:
             raise TransientError(f"the token endpoint answered {response.status_code}")
+        if response.status_code == 400 and _TOKEN_LIMITED.search(response.text[:_EXCERPT]):
+            # Asked too often: the client is let in again later, and asking again before then keeps it out.
+            raise TransientError(
+                f"the token endpoint {self.token_url} turned the client away for asking too often (HTTP 400)",
+                retry_after=TOKEN_LIMIT_WAIT_S,
+            )
         if response.status_code >= 400 or not isinstance(token, str) or not token:
             excerpt = redact(response.text[:_EXCERPT], self.secrets())
             raise PermanentError(
@@ -288,8 +312,9 @@ class OAuth2ClientCredentials(_OAuth2):
         scope: str | None = None,
         *,
         scheme: str = "Bearer",
+        partition: tuple[str, ...] = (),
     ) -> None:
-        super().__init__(token_url, client_id, client_secret, scheme)
+        super().__init__(token_url, client_id, client_secret, scheme, partition)
         self.scope = scope
 
     def _form(self) -> dict[str, str]:
@@ -310,8 +335,9 @@ class OAuth2RefreshToken(_OAuth2):
         refresh_token: str,
         *,
         scheme: str = "Bearer",
+        partition: tuple[str, ...] = (),
     ) -> None:
-        super().__init__(token_url, client_id, client_secret, scheme)
+        super().__init__(token_url, client_id, client_secret, scheme, partition)
         self._refresh_token = refresh_token
 
     def _form(self) -> dict[str, str]:
@@ -366,7 +392,8 @@ class FeatherHttp:
     `base_url` is what relative URLs are joined to, and `auth` signs each request. `cost` gives the budget units of each
     kind of call, by the `cost_key` a request names; a key it lacks costs 1. `budget` meters calls that pass none of
     their own. `secrets` are kept out of errors and logs, with the auth's own. `log` takes a line per retry.
-    `sleep` and `transport` are for tests.
+    `retry_after_of` reads how long to wait from an answer that failed with no `Retry-After`, such as a 429 whose body
+    says the day's calls are spent; None from it is no opinion. `sleep` and `transport` are for tests.
     """
 
     def __init__(
@@ -384,8 +411,10 @@ class FeatherHttp:
         sleep: Callable[[float], None] = time.sleep,
         transport: httpx.BaseTransport | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        retry_after_of: Callable[[httpx.Response], float | None] | None = None,
     ) -> None:
         self.auth = auth
+        self._retry_after_of = retry_after_of
         self._budget = budget
         self._cost = dict(cost or {})
         self.retry = retry or HttpRetry()
@@ -421,13 +450,16 @@ class FeatherHttp:
         cost_key: str = "default",
         budget: BudgetHandle | None = None,
         follow_redirects: bool = False,
+        resend: bool = True,
         **kwargs: Any,
     ) -> httpx.Response:
         """Send a request and return a 2xx response.
 
-        Raises `TransientError` when the retries run out or a `Retry-After` is too long to wait here, and
-        `HttpStatusError` for any other 4xx and for a 3xx, which only a GET may ask to follow. A 401 with OAuth2
-        fetches a new token once and tries again.
+        Raises `TransientError` when the retries run out or a `Retry-After` is too long to wait here (`BudgetDeferred`
+        for a metered call), and `HttpStatusError` for any other 4xx and for a 3xx, which only a GET may ask to
+        follow. A 401 with OAuth2 fetches a new token once and tries again. `resend=False` is for a request that is
+        not safe to send twice: after a 5xx, a timeout or a lost connection it may have been carried out, so it is
+        not sent again here, and `TransientError` goes up at once.
         """
         if follow_redirects and method.upper() != "GET":
             raise ValueError(f"only a GET may follow redirects, not a {method}")
@@ -436,7 +468,12 @@ class FeatherHttp:
         call = {**kwargs, "follow_redirects": follow_redirects}
         refreshed = False
         while True:
-            response = self._retrying(method, url, meter, units, lambda: self._send(method, url, call, meter))
+            try:
+                response = self._retrying(
+                    method, url, meter, units, lambda: self._send(method, url, call, meter), resend=resend
+                )
+            except TransientError as error:
+                raise self._deferred(error, meter) from error
             if response.status_code == 401 and isinstance(self.auth, _OAuth2):
                 if refreshed:
                     raise self._status_error(method, url, response, "even after a new access token")
@@ -447,6 +484,13 @@ class FeatherHttp:
                 raise self._status_error(method, url, response)
             return response
 
+    @staticmethod
+    def _deferred(error: TransientError, meter: BudgetHandle | None) -> Exception:
+        """A wait too long for a worker thread, as the runtime's durable wait when the call is metered."""
+        if meter is None or error.retry_after is None or error.retry_after <= _LONGEST_RETRY_AFTER:
+            return error
+        return BudgetDeferred(timedelta(seconds=math.ceil(error.retry_after)), meter.name, meter.taken)
+
     def _retrying(
         self,
         method: str,
@@ -454,8 +498,11 @@ class FeatherHttp:
         meter: BudgetHandle | None,
         units: int,
         send: Callable[[], tuple[httpx.Response | None, str | None]],
+        *,
+        resend: bool = True,
     ) -> httpx.Response:
-        """Send until an answer comes that trying again won't change, metering every attempt, and return it."""
+        """Send until an answer comes that trying again won't change, metering every attempt, and return it.
+        Without `resend`, only a 429 is sent again: any other failure may have been carried out."""
         failed = 0
         while True:
             if meter is not None:
@@ -466,9 +513,17 @@ class FeatherHttp:
             failed += 1
             wait = self.retry.delay(failed)
             retry_after = None if response is None else _retry_after(response, self._now)
+            if retry_after is None and response is not None and self._retry_after_of is not None:
+                retry_after = self._retry_after_of(response)
             if retry_after is not None:
                 wait = retry_after
             why = error or f"HTTP {response.status_code if response is not None else '?'}"
+            if not resend and (response is None or response.status_code != 429):
+                raise TransientError(
+                    f"{method} {self._where(url)}: {why}; it may have been carried out, so it is not sent again "
+                    "until the caller has looked",
+                    retry_after=retry_after,
+                )
             if retry_after is not None and retry_after > _LONGEST_RETRY_AFTER:
                 raise TransientError(
                     f"{method} {self._where(url)}: {why}, and the server asks to wait {retry_after:.0f} s",

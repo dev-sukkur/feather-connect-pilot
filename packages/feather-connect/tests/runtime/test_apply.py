@@ -1152,3 +1152,35 @@ def test_a_batch_map_error_in_a_later_chunk_fails_a_replace_before_anything_is_s
     [v1] = seal_versions(ds, [ROWS], route)
     apply(ds, route, v1)
     assert status("r", v1) == "failed" and route.sink.calls == []
+
+
+class _LastAttempt:
+    """Just enough of a task context on its last attempt for `_step_durably`."""
+
+    def __init__(self, attempt: int) -> None:
+        self.attempt = attempt
+        self.sleeps: list[timedelta] = []
+
+    def step(self, name: str, fn: Any) -> Any:
+        return fn()
+
+    def sleep(self, wait: timedelta) -> None:
+        self.sleeps.append(wait)
+
+
+def test_a_step_that_keeps_failing_on_the_last_attempt_ends_instead_of_spinning():  # Stage Z review 4
+    from feather_connect.runtime.apply import _step_durably  # pyright: ignore[reportPrivateUsage]
+
+    policy = RetryPolicy(max_attempts=3)
+    ctx = _LastAttempt(attempt=3)
+    calls: list[int] = []
+
+    def down() -> None:
+        calls.append(1)
+        raise TransientError("daily cap", retry_after=7200.0)
+
+    with pytest.raises(PermanentError, match="still failing after 3 more tries"):
+        _step_durably(ctx, "chunk:v1:0", down, policy)  # pyright: ignore[reportArgumentType]
+    assert (
+        len(calls) == 3 and ctx.sleeps == [timedelta(seconds=7200)] * 2
+    )  # the server's wait, not the backoff

@@ -58,6 +58,7 @@ PLATFORM_DISTRIBUTIONS = (
     "feather-retail",
     "feather-s3",
     "feather-server",
+    "feather-zakya",
 )
 # A setting whose name says it holds a secret; its value should be a `${secret:...}` reference.
 _SECRET_KEY = re.compile(

@@ -30,6 +30,11 @@ class BudgetHandle:
         self._sleep = sleep
         self._taken = 0
 
+    @property
+    def taken(self) -> int:
+        """The units taken through this handle so far."""
+        return self._taken
+
     def acquire(self, units: int = 1) -> None:
         """Take `units` from the budget. Returns once they are taken.
 

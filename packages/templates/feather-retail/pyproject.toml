@@ -7,11 +7,13 @@ license = "MIT"
 dependencies = [
     "feather-connect",
     "feather-http",
+    "feather-zakya",
 ]
 
 [tool.uv.sources]
 feather-connect = { workspace = true }
 feather-http = { workspace = true }
+feather-zakya = { workspace = true }
 
 # The package adds modules to the namespace `feather_connect.templates` and has no `__init__.py` there, nor in
 # `feather_connect`, which belongs to the feather-connect distribution.

@@ -71,6 +71,7 @@ from feather_connect.storage.port import (
     WorkerRegistry,
     WorkerRow,
     WorkerState,
+    account_mismatch,
     check_transition,
     split_error,
     version_key,
@@ -961,12 +962,17 @@ class _Budgets(BudgetStore):
             if self._specs.get(spec.name) == spec:
                 return
             now = self._d.clock.now()
+            shared = [s for s in self._specs.values() if s.key == spec.key and s.name != spec.name]
+            if shared and shared[0].windows != spec.windows:
+                raise ValueError(account_mismatch(spec, repr(shared[0].name), shared[0].windows))
             self._specs[spec.name] = spec
-            self._buckets[spec.name] = [_Bucket(Fraction(w.units), now) for w in spec.windows]
+            if not shared or spec.key not in self._buckets:
+                self._buckets[spec.key] = [_Bucket(Fraction(w.units), now) for w in spec.windows]
 
     def _refilled(self, name: str) -> tuple[BudgetSpec, list[_Bucket]]:
         """Bring the buckets of the budget up to now, and return them."""
-        spec, buckets = self._specs[name], self._buckets[name]
+        spec = self._specs[name]
+        buckets = self._buckets[spec.key]
         now = self._d.clock.now()
         for window, bucket in zip(spec.windows, buckets, strict=True):
             earned = (

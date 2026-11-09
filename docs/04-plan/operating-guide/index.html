@@ -82,7 +82,7 @@ uv run feather dev</code></pre>
   <div class="scroll"><table>
     <tr><th>Command</th><th>What it shows</th></tr>
     <tr><td><code>uv run feather dev</code></td><td><code>examples/demo</code>: a JSON simulation of a shop's orders, read every minute and delivered to three real destinations on this machine. They are <code>demo.orders</code> in feather dev's own Postgres, <code>bronze_orders</code> in <code>.data/lake.duckdb</code>, and <code>PUT /orders/{order_id}</code> on a small ERP stand-in at <code>http://127.0.0.1:29001/</code>. <code>curl -X POST http://127.0.0.1:29001/_targets/down</code> makes the ERP answer 503 so you can watch one route fail while the others carry on, and <code>/_targets/up</code> brings it back.</td></tr>
-    <tr><td><code>uv run feather dev --project examples/zakya-demo</code></td><td>Invoices from a Zakya-like API, with OAuth2 refresh tokens, paging by <code>last_modified_time</code> and some 429 and 503 answers, sent to an ERP one <code>PUT /invoices/{invoice_id}</code> each, every minute. Both ends are simulators: Zakya on port 29100 and the ERP on 29101, whose page at <code>http://127.0.0.1:29101/</code> lists every request.</td></tr>
+    <tr><td><code>uv run feather dev --project examples/zakya-demo</code></td><td>Invoices from a simulated Zakya organisation through the <code>zakya</code> connector, with OAuth2 refresh tokens, paging by <code>last_modified_time</code> and some 429 and 503 answers, sent to an ERP one <code>PUT /invoices/{invoice_id}</code> each, every minute. Both ends are simulators: Zakya on port 29100 and the ERP on 29101, whose page at <code>http://127.0.0.1:29101/</code> lists every request.</td></tr>
   </table></div>
   <h3>Helper processes</h3>
   <p class="prose">A project can ask <code>feather dev</code> to run its own helpers, such as the simulators above, under <code>dev.processes</code> in <code>feather.yaml</code>. Each starts in the project directory once Postgres is up. <code>feather dev</code> waits for its port, prefixes its output with its name, and stops it with the rest. It also sees the database as <code>FEATHER_DATABASE_URL</code>. If a helper's port is taken, <code>feather dev</code> refuses to start and names it. A leading <code>python</code> means the interpreter that runs feather.</p>
@@ -170,6 +170,7 @@ flow = fc.Flow(
     <tr><td><code>http.rest</code>, <code>http.call</code></td><td>A paged REST API; one HTTP request per record</td><td><code>http.Rest("pricing_api", path="/v1/prices", records_path="prices", pagination=http.Page(page_size=100))</code>, <code>http.Call("erp", method="PUT", url="/orders/{order_id}")</code></td></tr>
     <tr><td><code>graphql.source</code>, <code>graphql.mutation</code></td><td>A GraphQL cursor connection; one mutation per record</td><td><code>graphql.Source("storefront", query=PRODUCTS, connection_path="products", stamp_variable="since")</code></td></tr>
     <tr><td><code>http.webhook</code></td><td>Signed webhooks in</td><td>See <a href="#webhooks">Receive webhooks</a></td></tr>
+    <tr><td><code>zakya.source</code>, <code>zakya.items</code>, <code>zakya.prices</code>, <code>zakya.stock</code> (M1.1)</td><td>A Zoho Zakya organisation's invoices, credit notes, payments, items and price lists; its items, price list rates and stock adjustments</td><td><code>zakya.dataset("invoices")</code>, <code>zakya.Stock("zakya")</code>. See <a href="#zakya">Set up a Zakya connection</a></td></tr>
     <tr><td><code>simulation.*</code>, <code>memory.*</code></td><td>Generated or fixture data, for demos and tests</td><td><code>simulation.Source("hello_source", generator={"id": simulation.seq()}, rows_per_partition=10)</code></td></tr>
   </table></div>
   <p class="prose">Two short examples, each checked with <code>feather validate</code>. A GraphQL source into MotherDuck:</p>
@@ -229,6 +230,53 @@ flow = fc.Flow(
     deliver=[fc.to(postgres.Table("warehouse", table="invoices", key_columns=["invoice_id"]), name="invoices-db")],
     triggers=[fc.every("15m")],
 )</code></pre>
+  <h3 id="zakya">Set up a Zakya connection (M1.1)</h3>
+  <p class="prose">The <code>feather-zakya</code> connector reads and writes one Zakya organisation through Zoho's API. You need five things.</p>
+  <ol class="prose">
+    <li><b>The region.</b> An organisation lives in one Zoho data centre, and its tokens work only there. Set <code>domain:</code> to <code>com</code>, <code>in</code> or <code>eu</code>. That picks the API host (<code>api.zakya.in</code> for India) and the accounts host (<code>accounts.zoho.in</code>).</li>
+    <li><b>An OAuth client.</b> In the Zoho API console of that region (<code>api-console.zoho.in</code>), add a <i>Self Client</i>. It gives a client id and a client secret.</li>
+    <li><b>A refresh token.</b> On the same Self Client, generate a code with the scopes the flows need: <code>ZohoInventory.invoices.READ</code>, <code>ZohoInventory.creditnotes.READ</code>, <code>ZohoInventory.customerpayments.READ</code>, <code>ZohoInventory.items.ALL</code>, <code>ZohoInventory.pricebooks.ALL</code>, <code>ZohoInventory.inventoryadjustments.CREATE</code>, <code>ZohoInventory.inventoryadjustments.READ</code>. Within its few minutes, exchange it for a refresh token: <code>curl -X POST "https://accounts.zoho.in/oauth/v2/token?grant_type=authorization_code&amp;client_id=…&amp;client_secret=…&amp;code=…"</code>. The answer's <code>refresh_token</code> lasts until it is revoked. Feather Connect buys short-lived access tokens with it. It keeps each one in the process per tenant and connection, refreshes it a minute before it expires, and refreshes once more if Zoho answers 401.</li>
+    <li><b>The organisation id.</b> In Zakya, open <i>Settings → Organisation Profile</i>. The id goes with every call.</li>
+    <li><b>The budgets.</b> Zoho counts calls per minute (100) and per day (by plan, discovery Q4), across every client of the organisation. Declare both windows a little below Zoho's. Name the organisation as the budget's <code>account</code>, <code>zakya:</code> and its id, so that every environment tenant and connection using it takes from the same windows (ADR-0013 rule 8). <code>feather validate</code> reports an account that isn't the connection's organisation. Every budget of the account must give the same limits: one that disagrees is refused, and nothing is reset.</li>
+  </ol>
+  <p class="prose">Put the three credentials in the environment (or files) and reference them; a value is never written in YAML:</p>
+  <div class="file">feather.yaml</div>
+  <pre><code>budgets:
+  zoho-api: {limits: ["90/minute", "1400/day"], account: "zakya:60001"}
+connections:
+  zakya:
+    connector: zakya           # one connection serves zakya.source, .items, .prices and .stock
+    budget: zoho-api
+    domain: in
+    organization_id: "60001"
+    auth:
+      client_id: ${secret:env:ZAKYA_CLIENT_ID}
+      client_secret: ${secret:env:ZAKYA_CLIENT_SECRET}
+      refresh_token: ${secret:env:ZAKYA_REFRESH_TOKEN}</code></pre>
+  <pre><code>import feather_connect as fc
+from feather_connect.connectors import duckdb, zakya
+
+flow = fc.Flow(
+    "zakya-to-lake",
+    reads=[zakya.dataset("invoices"), zakya.dataset("price_lists")],
+    deliver=[fc.to(duckdb.Table("lake", table="zakya", key_columns=["_key"]), name="lake")],
+    triggers=[fc.every("15m")],
+)</code></pre>
+  <div class="scroll"><table>
+    <tr><th>Dataset</th><th>Key</th><th>Read by</th></tr>
+    <tr><td><code>invoices</code></td><td><code>invoice_id</code></td><td><code>last_modified_time</code>; each invoice is fetched on its own for its lines</td></tr>
+    <tr><td><code>credit_notes</code></td><td><code>creditnote_id</code></td><td><code>last_modified_time</code>; each note is fetched on its own for its lines</td></tr>
+    <tr><td><code>payments</code></td><td><code>payment_id</code></td><td><code>last_modified_time</code></td></tr>
+    <tr><td><code>items</code></td><td><code>item_id</code></td><td><code>last_modified_time</code></td></tr>
+    <tr><td><code>price_lists</code></td><td><code>pricebook_id</code></td><td>In full, with each price list's rates; it carries no stamp</td></tr>
+  </table></div>
+  <p class="prose">By default, a <code>by_stamp</code> read starts two minutes before the last watermark. A record read again unchanged is dropped, so the overlap costs calls but never a duplicate. <code>zakya.dataset("items", full=True)</code> reads in full instead, and sees deletes. A 429 is waited out for its <code>Retry-After</code>. When the daily cap is spent, the task sleeps durably until midnight in the organisation's time zone (set <code>timezone:</code>, such as <code>Asia/Kolkata</code>), even when Zoho sends no <code>Retry-After</code>. A POST is never sent twice: a lost answer fails the chunk, and its next try looks up what the first made. The writes are idempotent where Zakya allows:</p>
+  <ul class="prose">
+    <li><code>zakya.Items</code> upserts by SKU.</li>
+    <li><code>zakya.Prices</code> sets each price list's rates with one read and one write per chunk. Zakya has no conflict check on that write, so keep one writer of a price list.</li>
+    <li><code>zakya.Stock</code> posts an adjustment once per record, by a <code>reference_number</code> made from the route, version and record, not the chunk.</li>
+  </ul>
+  <p class="prose">The package's README has every setting. Its simulator, <code>feather_connect.connectors.zakya.testing</code>, plays an organisation in tests and in the Zakya demo.</p>
   <h3>The five templates</h3>
   <p class="prose">The generic templates are library functions in <code>feather_connect.templates.generic</code>. Call one with what you change, such as connection names, a <code>map</code>, <code>extra_routes</code> or a <code>schedule</code>, and you get the template's fixes when you upgrade. For full control, <code>feather new flow &lt;name&gt; --template &lt;template&gt;</code> copies its code, fixtures and connections into your project instead.</p>
   <div class="scroll"><table>
@@ -365,12 +413,12 @@ uv run feather replay warehouse --version &lt;version_id&gt; --reason "table res
   <h3>Budgets</h3>
   <p class="prose">A budget limits the calls a connection makes, across every flow and worker. Declare it in <code>feather.yaml</code> and name it on the connection. An environment overlay can change the limits:</p>
   <pre><code>budgets:
-  zoho-api: {limits: ["90/minute", "1400/day"]}
+  zoho-api: {limits: ["90/minute", "1400/day"], account: "zakya:60001"}
 connections:
   zakya:
-    connector: http.rest
+    connector: zakya
     budget: zoho-api</code></pre>
-  <p class="prose">The Overview shows each budget's use, and <code>GET /api/v1/budgets</code> returns it. A connection check spends from the high-priority reserve.</p>
+  <p class="prose">A budget is its tenant's own, unless it names an <code>account</code>: the vendor account the limits belong to. Every budget naming the same account takes from one set of windows, whatever tenant or name it has, because the vendor counts those calls together (ADR-0013 rule 8). The Overview shows each budget's use, and <code>GET /api/v1/budgets</code> returns it. A connection check spends from the high-priority reserve.</p>
   <h3>Secrets</h3>
   <p class="prose">Write secrets as references, <code>${secret:env:NAME}</code> or <code>${secret:file:path}</code>, under a connection's <code>auth</code>. Other providers arrive in M3. They are resolved when used. An error names the reference, never the value, and the dashboard never shows them. <code>feather validate</code> reports one that isn't set.</p>
   <h3>When things go wrong</h3>

@@ -18,6 +18,7 @@ members = [
     "feather-retail",
     "feather-s3",
     "feather-server",
+    "feather-zakya",
 ]
 
 [manifest.dependency-groups]
@@ -1090,12 +1091,14 @@ source = { editable = "packages/templates/feather-retail" }
 dependencies = [
     { name = "feather-connect" },
     { name = "feather-http" },
+    { name = "feather-zakya" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "feather-connect", editable = "packages/feather-connect" },
     { name = "feather-http", editable = "packages/connectors/feather-http" },
+    { name = "feather-zakya", editable = "packages/connectors/feather-zakya" },
 ]
 
 [[package]]
@@ -1145,6 +1148,31 @@ requires-dist = [
     { name = "python-multipart" },
     { name = "uvicorn" },
 ]
+
+[[package]]
+name = "feather-zakya"
+version = "0.1.0"
+source = { editable = "packages/connectors/feather-zakya" }
+dependencies = [
+    { name = "feather-connect" },
+    { name = "feather-http" },
+    { name = "httpx" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "feather-duckdb" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "feather-connect", editable = "packages/feather-connect" },
+    { name = "feather-http", editable = "packages/connectors/feather-http" },
+    { name = "httpx" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "feather-duckdb", editable = "packages/connectors/feather-duckdb" }]
 
 [[package]]
 name = "flask"

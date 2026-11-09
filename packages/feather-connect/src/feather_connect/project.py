@@ -328,10 +328,18 @@ def _budgets(config: Mapping[str, Any], layers: Mapping[str, str]) -> dict[str, 
             raise ProjectError(
                 f"{_where(layers, path + '.limits')}: give a list of limits such as '90/minute'"
             )
+        account = body.get("account")
+        if account is not None and (not isinstance(account, str | int) or not str(account).strip()):
+            raise ProjectError(
+                f"{_where(layers, path + '.account')}: name the vendor account, such as 'zakya:60001'"
+            )
         try:
             reserve = {k: float(v) for k, v in _strkeys(body.get("reserve", {})).items()}
             found[name] = BudgetSpec(
-                name, parse_limits([str(limit) for limit in cast(list[Any], limits)]), reserve
+                name,
+                parse_limits([str(limit) for limit in cast(list[Any], limits)]),
+                reserve,
+                None if account is None else str(account),
             )
         except (ValueError, TypeError, AttributeError):
             raise ProjectError(f"{_where(layers, path)}: limits and reserve are not valid") from None
@@ -599,6 +607,27 @@ def _check_push_sources(flows: Sequence[Flow], connections: Mapping[str, Connect
                 )
 
 
+def _account_problem(project: Project, flow: str, connection: str, obj: Any, path: str) -> Problem | None:
+    """A budget whose `account` is not the vendor account that its connection's settings name, when the connector
+    can tell (`account_of`): budgets of one account share its windows, so a wrong one shares another's."""
+    config = project.connections[connection]
+    budget = project.budgets.get(config.budget) if config.budget else None
+    account_of = getattr(obj, "account_of", None)
+    if budget is None or budget.account is None or not callable(account_of):
+        return None
+    expected = account_of(config.options)
+    if expected is None or expected == budget.account:
+        return None
+    return Problem(
+        "error",
+        "budget_account_mismatch",
+        f"flow {flow!r} uses {connection!r}, whose settings name the account {expected!r}, but its budget "
+        f"{config.budget!r} names {budget.account!r}",
+        path,
+        f"make account: {expected!r} in budgets.{config.budget}, or leave it out for a budget of the tenant's own",
+    )
+
+
 # The code.
 
 
@@ -622,7 +651,8 @@ def _code_sha(root: Path) -> str:
 def validate_project(project: Project) -> list[Problem]:
     """Return every mistake in a loaded project that shows without running it: each flow's own problems
     (`Flow.validate`, with the flow's name in front of the path), a flow that uses a connection the project
-    doesn't define, a connection whose connector is not the one the code uses, and a budget no connection uses.
+    doesn't define, a connection whose connector is not the one the code uses, a budget whose vendor account is not
+    its connection's, and a budget no connection uses.
 
     Nothing is run, no connection is opened and no secret is resolved.
     """
@@ -645,8 +675,12 @@ def validate_project(project: Project) -> list[Problem]:
                         f"add {connection!r} under connections: in feather.yaml or env/{project.env}.yaml",
                     )
                 )
-            elif config.connector != connector and not (
-                config.connector in SIMULATED and getattr(obj, "stands_in", False)
+            elif (
+                config.connector != connector
+                and not connector.startswith(
+                    f"{config.connector}."
+                )  # `zakya` serves zakya.source, zakya.items...
+                and not (config.connector in SIMULATED and getattr(obj, "stands_in", False))
             ):
                 problems.append(
                     Problem(
@@ -658,6 +692,8 @@ def validate_project(project: Project) -> list[Problem]:
                         f"make connector: {connector} in the connection's entry, or use the other connector's class",
                     )
                 )
+            elif (account := _account_problem(project, flow.name, connection, obj, path)) is not None:
+                problems.append(account)
     metered = {c.budget for c in project.connections.values()}
     for name in sorted(project.budgets.keys() - metered):
         problems.append(

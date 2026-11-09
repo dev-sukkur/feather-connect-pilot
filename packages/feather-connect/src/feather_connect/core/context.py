@@ -19,7 +19,8 @@ class Context:
 
     `config` holds the connection's settings, secrets included. `now` is the time of the run, the same for
     every call in it, and `tz` is the IANA name of the time zone the flow works in. `budget` and `http` are
-    the metered services of the connection, when it has them.
+    the metered services of the connection, when it has them. `tenant` is the store's tenant, by which anything a
+    connector keeps for the process, such as an OAuth token, is keyed (ADR-0013 rule 7).
     """
 
     config: Mapping[str, Any] = field(repr=False)  # it can hold secrets, which must stay out of logs
@@ -28,6 +29,7 @@ class Context:
     tz: str
     budget: BudgetHandle | None = None
     http: Any | None = None
+    tenant: str = "default"
     _checkpoint: str | None = field(default=None, init=False, repr=False)
     _answers: list["RecordResponse"] = field(default_factory=list["RecordResponse"], init=False, repr=False)
 
