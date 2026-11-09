@@ -25,6 +25,7 @@ from feather_server import api, auth, ingress, registry, web
 from feather_server.loops import LoopRunner, default_loops
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions
+from feather_server.services.packages import Packages
 from feather_server.services.reads import Reads
 from feather_server.services.registries import Registries
 from feather_server.settings import Settings
@@ -147,6 +148,7 @@ def create_app(
         enabled=state.settings.registry,
         index_url=state.settings.base_url.rstrip("/") + "/registry/simple/",
     )
+    app.state.packages = Packages(state.store, state.clock, app.state.registries, env=state.settings.env)
     ingress.install(app, state)  # first, as routes are tried in order, and this one takes bursts
     auth.install(app, state)
     api.install(app)

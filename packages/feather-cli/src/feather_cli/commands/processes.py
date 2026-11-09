@@ -18,6 +18,7 @@ from feather_cli.options import DatabaseUrl, Env, Json, ProjectDir
 from feather_cli.output import emit, fail
 from feather_connect.clock import SystemClock
 from feather_connect.core.strategies import parse_duration
+from feather_connect.packages.check import protect_server_process
 from feather_connect.project import ProjectError
 from feather_connect.storage.port import DuplicateUser, Store
 from feather_connect.storage.postgres.connect import connect
@@ -134,6 +135,7 @@ def server(
         fail(str(error), hint="run: feather validate", json_mode=json_mode)
     except (psycopg.Error, SQLAlchemyError) as error:
         _unreachable(error, json_mode)
+    protect_server_process()  # a load check's child can't read this process's environment (Linux)
     uvicorn.run(app, host=host, port=port, log_config=None)
 
 

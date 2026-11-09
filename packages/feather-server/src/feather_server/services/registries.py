@@ -7,6 +7,7 @@ token. Another registry is added by an admin, with its token as a secret referen
 registry is called. Everything is of the store's tenant (ADR-0013).
 """
 
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -34,7 +35,13 @@ _LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")  # where plain http is allowed,
 
 
 class RegistryProblem(ValueError):
-    """A registry can't be used for what was asked: it is unknown, can't be reached, or serves no such package."""
+    """A registry can't be used for what was asked: it is unknown, can't be reached, or serves no such package.
+    `check` names the install check it fails (flow packages §5): `fetch`, `size`, `sha256`, `manifest` or
+    `name_version`."""
+
+    def __init__(self, message: str, check: str = "fetch") -> None:
+        super().__init__(message)
+        self.check = check
 
 
 class VersionExists(Exception):
@@ -71,6 +78,7 @@ class Fetched:
     sha256: str
     content: bytes
     manifest: dict[str, Any]
+    yanked: bool = False  # as the registry says at the fetch, which an install refuses unless told otherwise
 
 
 class Registries:
@@ -297,6 +305,7 @@ class Registries:
         manifest read and checked. The first step of an install, whose caller checks the role. Raises `KeyError`
         when the registry or the version is unknown and `RegistryProblem` when the wheel can't be had or checked."""
         project = canonicalize_name(name)
+        check = "fetch"
         try:
             if registry == BUILT_IN:
                 self._built_in()
@@ -304,19 +313,29 @@ class Registries:
                 if not files:
                     raise KeyError(f"the registry has no {project} {version}")
                 file, data = self.content(files[0].filename)
-                filename, expected = file.filename, file.sha256
+                filename, expected, yanked = file.filename, file.sha256, file.yanked_at is not None
             else:
                 with self._index(registry) as index:
                     listed = index.find(project, version)
                     data = index.fetch(listed, MAX_WHEEL)
-                filename, expected = listed.filename, listed.sha256 or ""
+                filename, expected, yanked = listed.filename, listed.sha256 or "", listed.yanked is not False
+            if len(data) > MAX_WHEEL:
+                check = "size"
+                raise ManifestError(
+                    f"{filename} has {len(data)} bytes, more than the {MAX_WHEEL} a package may have"
+                )
+            actual = hashlib.sha256(data).hexdigest()
+            if not expected or actual != expected.lower():
+                raise RegistryProblem(
+                    f"{registry}: {filename} has sha256 {actual}, not the {expected or 'none'} recorded",
+                    "sha256",
+                )
+            check = "manifest"
             info = read_wheel(filename, data)
-        except (IndexReadError, ManifestError) as error:
-            raise RegistryProblem(f"{registry}: {error}") from None
-        if info.sha256 != expected.lower():
-            raise RegistryProblem(
-                f"{registry}: {filename} has sha256 {info.sha256}, not the {expected} recorded"
-            )
+        except IndexReadError as error:
+            raise RegistryProblem(f"{registry}: {error}", error.check or check) from None
+        except ManifestError as error:
+            raise RegistryProblem(f"{registry}: {error}", check) from None
         if info.version != version or canonicalize_name(info.name) != project:
-            raise RegistryProblem(f"{registry}: {filename} holds {info.name} {info.version}")
-        return Fetched(registry, filename, info.sha256, data, dict(info.manifest))
+            raise RegistryProblem(f"{registry}: {filename} holds {info.name} {info.version}", "name_version")
+        return Fetched(registry, filename, info.sha256, data, dict(info.manifest), yanked)

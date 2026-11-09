@@ -7,13 +7,16 @@ same caller within 24 hours gets the first answer again, and does nothing.
 """
 
 import json
-from collections.abc import Callable
+import re
+import threading
+from collections.abc import Callable, Iterator
 from datetime import date, timedelta
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from feather_connect.storage.port import DeliveryStatus, delivery_cursor
@@ -23,6 +26,7 @@ from feather_server.auth import Actor, CurrentActor, require_csrf
 from feather_server.services import task_records as records
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
+from feather_server.services.packages import Packages
 from feather_server.services.previews import Preview
 from feather_server.services.reads import Reads
 from feather_server.services.registries import Registries
@@ -61,6 +65,13 @@ def _registries(request: Request) -> Registries:
 
 
 Trusted = Annotated[Registries, Depends(_registries)]
+
+
+def _packages(request: Request) -> Packages:
+    return request.app.state.packages
+
+
+Installs = Annotated[Packages, Depends(_packages)]
 See = Annotated[Reads, Depends(_reads)]
 
 
@@ -82,13 +93,48 @@ def ok(data: Any, status: int = 200) -> JSONResponse:
 def _once(
     request: Request, actor: Actor, key: str | None, fn: Callable[[], Any], status: int = 200
 ) -> JSONResponse:
-    """Do `fn` once per idempotency key and caller, keeping its answer, success or problem, for 24 hours."""
+    """Do `fn` once per idempotency key and caller, keeping its answer, success or problem, for 24 hours. A request
+    with a key that another request of this process is answering waits for that answer. A 503 is not kept: the
+    request may be repeated with its key."""
     if key is None:
         return _answer(fn, status)
     if not key or len(key) > _MAX_KEY:
         raise ApiProblem(422, "Unprocessable Content", f"an Idempotency-Key has 1 to {_MAX_KEY} characters")
-    overrides = request.app.state.feather.store.overrides
     target = f"{_IDEMPOTENCY}:{actor.kind}:{actor.name}"
+    with _InFlight(f"{target}:{key}"):
+        return _once_held(request, actor, target, key, fn, status)
+
+
+_FLIGHTS: dict[str, tuple[threading.Lock, int]] = {}
+_FLIGHTS_LOCK = threading.Lock()
+
+
+class _InFlight:
+    """A lock per idempotency key, kept while a request holds it or waits for it."""
+
+    def __init__(self, key: str) -> None:
+        self._key = key
+
+    def __enter__(self) -> None:
+        with _FLIGHTS_LOCK:
+            lock, users = _FLIGHTS.get(self._key, (threading.Lock(), 0))
+            _FLIGHTS[self._key] = (lock, users + 1)
+        lock.acquire()
+
+    def __exit__(self, *_: object) -> None:
+        with _FLIGHTS_LOCK:
+            lock, users = _FLIGHTS[self._key]
+            lock.release()
+            if users == 1:
+                del _FLIGHTS[self._key]
+            else:
+                _FLIGHTS[self._key] = (lock, users - 1)
+
+
+def _once_held(
+    request: Request, actor: Actor, target: str, key: str, fn: Callable[[], Any], status: int
+) -> JSONResponse:
+    overrides = request.app.state.feather.store.overrides
     where = f"{request.method} {request.url.path}"
     kept = overrides.get(target, key)
     if kept is not None:
@@ -98,6 +144,8 @@ def _once(
             )
         return JSONResponse(kept["body"], kept["status"], media_type=kept["media_type"])
     answer = _answer(fn, status)
+    if answer.status_code == 503:
+        return answer
     now = request.app.state.feather.clock.now()
     overrides.set(
         target,
@@ -122,6 +170,17 @@ def _answer(fn: Callable[[], Any], status: int) -> JSONResponse:
         return ok(call(fn), status)
     except ApiProblem as problem:
         return problem_response(problem)
+
+
+_UNSAFE = re.compile(r"[^A-Za-z0-9._+-]")
+
+
+def attachment(filename: str) -> str:
+    """A Content-Disposition for `filename` (RFC 6266): a plain ASCII `filename` with anything unsafe replaced, and
+    the name itself, percent-encoded, in `filename*`."""
+    plain = _UNSAFE.sub("_", filename)[:200] or "download"
+    star = "UTF-8" + "''" + quote(filename, safe="")
+    return f'attachment; filename="{plain}"; filename*={star}'
 
 
 # Bodies.
@@ -736,6 +795,75 @@ def yank_package(
         return {"package": package, "version": version, "yanked": True}
 
     return _once(request, actor, key, yank)
+
+
+@router.get("/registries/{name}/packages/{package}/versions/{version}/wheel")
+def fetch_wheel(name: str, package: str, version: str, installs: Installs, actor: CurrentActor) -> Response:
+    """A version's wheel from a registry, its sha256 and manifest checked, for `feather package fetch`: an admin's, as
+    an install is, and audited. It is sent in chunks."""
+    found = call(lambda: installs.fetch(actor, name, package, version))
+    content = found.content
+
+    def chunks() -> Iterator[bytes]:
+        for start in range(0, len(content), _CHUNK):
+            yield content[start : start + _CHUNK]
+
+    return StreamingResponse(
+        chunks(),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": attachment(found.filename),
+            "Content-Length": str(len(content)),
+            "X-Feather-Sha256": found.sha256,
+        },
+    )
+
+
+_CHUNK = 256 * 1024
+
+
+# Installed packages (flow packages §5, §10): installing needs an admin, and leaves every flow inactive.
+
+
+class NewPackage(Reason):
+    name: str = Field(max_length=200)
+    version: str | None = Field(None, max_length=64)  # the registry's newest that isn't yanked when left out
+    registry: str = Field("feather", max_length=64)
+    allow_yanked: bool = False  # take a version the registry has yanked
+    pre: bool = False  # with no version, a pre-release may be the newest
+
+
+@router.post("/packages", status_code=201)
+def install_package(
+    request: Request, installs: Installs, actor: CurrentActor, body: NewPackage, key: IdempotencyKey = None
+) -> JSONResponse:
+    def install() -> Any:
+        return installs.install(
+            actor,
+            body.name,
+            body.version,
+            registry=body.registry,
+            reason=body.reason,
+            allow_yanked=body.allow_yanked,
+            pre=body.pre,
+        )
+
+    return _once(request, actor, key, install, 201)
+
+
+@router.get("/packages")
+def packages(installs: Installs, _: CurrentActor) -> JSONResponse:
+    return ok({"items": installs.packages(), "next_cursor": None})
+
+
+@router.get("/packages/{name}")
+def package(name: str, installs: Installs, _: CurrentActor) -> JSONResponse:
+    return ok(call(lambda: installs.package(name)))
+
+
+@router.get("/packages/{name}/versions/{version}")
+def package_version(name: str, version: str, installs: Installs, _: CurrentActor) -> JSONResponse:
+    return ok(call(lambda: installs.version(name, version)))
 
 
 # Budgets, connections and the summary.

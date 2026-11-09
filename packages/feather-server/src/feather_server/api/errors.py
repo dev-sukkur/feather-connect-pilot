@@ -13,6 +13,7 @@ from feather_connect.logs import redact
 from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.storage.port import DuplicateUser, InvalidTransition
 from feather_server.services.access import Forbidden
+from feather_server.services.packages import Busy, InstallFailed
 from feather_server.services.previews import PreviewError, PreviewInvalid
 from feather_server.services.registries import VersionExists
 
@@ -20,11 +21,15 @@ PROBLEM_JSON = "application/problem+json"
 
 
 class ApiProblem(Exception):
-    """An answer that isn't a success. `extra` adds members to the problem, as RFC 9457 allows."""
+    """An answer that isn't a success. `extra` adds members to the problem, as RFC 9457 allows, and `headers` go
+    with the answer, such as Retry-After."""
 
-    def __init__(self, status: int, title: str, detail: str, **extra: Any) -> None:
+    def __init__(
+        self, status: int, title: str, detail: str, *, headers: dict[str, str] | None = None, **extra: Any
+    ) -> None:
         super().__init__(detail)
         self.status, self.title, self.detail, self.extra = status, title, detail, extra
+        self.headers = headers or {}
 
     def body(self) -> dict[str, Any]:
         return {
@@ -37,7 +42,7 @@ class ApiProblem(Exception):
 
 
 def problem_response(problem: ApiProblem) -> JSONResponse:
-    return JSONResponse(problem.body(), problem.status, media_type=PROBLEM_JSON)
+    return JSONResponse(problem.body(), problem.status, headers=problem.headers, media_type=PROBLEM_JSON)
 
 
 def _message(error: BaseException) -> str:
@@ -51,6 +56,15 @@ def translate(error: Exception) -> ApiProblem | None:
         return error
     if isinstance(error, Forbidden):
         return ApiProblem(403, "Forbidden", str(error), capability=error.capability, role=error.needed)
+    if isinstance(error, Busy):
+        return ApiProblem(
+            503, "Service Unavailable", str(error), headers={"Retry-After": str(error.retry_after)}
+        )
+    if isinstance(error, InstallFailed):  # the check that failed, for a client to show or act on
+        status, title = (
+            (409, "Conflict") if error.check == "not_installed" else (422, "Unprocessable Content")
+        )
+        return ApiProblem(status, title, _message(error), check=error.check)
     if isinstance(error, VersionExists):
         return ApiProblem(409, "Conflict", str(error))
     if isinstance(error, DuplicateUser):

@@ -88,3 +88,16 @@ def read_wheel(filename: str, data: bytes) -> WheelInfo:
     return WheelInfo(
         filename, manifest["name"], manifest["version"], hashlib.sha256(data).hexdigest(), len(data), manifest
     )
+
+
+def read_entry(content: bytes, name: str) -> bytes | None:
+    """One entry of a wheel, at most `MAX_ENTRY` bytes, or None when it has none of that name. Raises `ManifestError`
+    for a zip that can't be read or an entry too big."""
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(content))
+    except zipfile.BadZipFile:
+        raise ManifestError("the wheel is not a zip file") from None
+    with archive:
+        if name not in archive.namelist():
+            return None
+        return _read(archive, name)

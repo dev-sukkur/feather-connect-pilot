@@ -351,6 +351,43 @@ def test_registry_files_and_registries_belong_to_their_tenant(
     assert second.registry.remove_registry("company") and first.registry.get_registry("company") is not None
 
 
+def test_installed_packages_belong_to_their_tenant(pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any):
+    # ADR-0013 rule 6: a second tenant installs the same version, with other bytes, and neither sees the other's.
+    import hashlib
+    from dataclasses import replace
+
+    from feather_connect.storage.port import PackageVersion
+
+    one, two = hashlib.sha256(b"one").hexdigest(), hashlib.sha256(b"two").hexdigest()
+    first, _ = pg_connect(pg_url, clock=clock, tenant="default")
+    second, _ = pg_connect(pg_url, clock=clock, tenant="t2")
+    version = PackageVersion(
+        "acme",
+        "1.0.0",
+        one,
+        "feather",
+        "acme-1.0.0-py3-none-any.whl",
+        3,
+        {},
+        ">=0.1",
+        "b" * 64,
+        "installed",
+        {},
+        "root",
+        T0,
+    )
+    first.packages.install(version, b"one", ["acme/invoices"])
+    assert second.packages.packages() == [] and second.packages.versions() == []
+    assert second.packages.version("acme", "1.0.0") is None and second.packages.wheel(one) is None
+    assert second.packages.activations("acme") == []
+    second.packages.install(
+        replace(version, sha256=two), b"two", ["acme/invoices"]
+    )  # the other tenant's to have
+    assert first.packages.wheel(one) == b"one" and second.packages.wheel(two) == b"two"
+    assert first.packages.wheel(two) is None and second.packages.wheel(one) is None
+    assert [a.flow for a in second.packages.activations("acme")] == ["acme/invoices"]
+
+
 def test_a_vendor_account_budget_is_shared_by_tenants_and_no_other_is(
     pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any
 ):  # ADR-0013 rules 6 and 8
