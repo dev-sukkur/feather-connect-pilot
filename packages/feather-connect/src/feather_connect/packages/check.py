@@ -74,6 +74,12 @@ class LoadCheck:
     error: str | None = None
     seconds: float = 0.0
     own_push_sources: list[str] = field(default_factory=list[str])
+    specs: dict[str, Any] = field(
+        default_factory=dict[str, Any]
+    )  # each prefixed flow's spec_dict(), for the catalogue
+    webhooks: dict[str, Any] = field(
+        default_factory=dict[str, Any]
+    )  # the webhooks the package declares (§7.2)
 
     def as_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -265,8 +271,10 @@ def load_check(
     env: str,
     timeout: float = DEFAULT_TIMEOUT,
     python: str = sys.executable,
+    environment: Mapping[str, Any] | None = None,
 ) -> LoadCheck:
-    """Load the package in a child process for `env`, and check that it defines what `manifest` says."""
+    """Load the package in a child process for `env`, with the environment's own configuration `environment` (no
+    secret in it, only references), and check that it defines what `manifest` says."""
     started = time.monotonic()
 
     def failed(error: str, **found: Any) -> LoadCheck:
@@ -303,7 +311,7 @@ def load_check(
             assert tree.process.stdin is not None and tree.process.stderr is not None
             stderr = _Tail(tree.process.stderr)
             try:
-                tree.process.stdin.write(f"{nonce}\n{result}\n".encode())
+                tree.process.stdin.write(f"{nonce}\n{result}\n{json.dumps(environment or {})}\n".encode())
                 tree.process.stdin.close()
             except OSError:
                 pass  # it ended already: its answer, or the lack of one, says why
@@ -356,8 +364,11 @@ def _judged(found: Mapping[str, Any], manifest: Mapping[str, Any], seconds: floa
     listed = cast(list[object], found.get("problems")) if isinstance(found.get("problems"), list) else []
     problems = [cast(dict[str, Any], p) for p in listed if isinstance(p, dict)]
 
+    specs = cast(dict[str, Any], found["specs"]) if isinstance(found.get("specs"), dict) else {}
+    hooks = cast(dict[str, Any], found["webhooks"]) if isinstance(found.get("webhooks"), dict) else {}
+
     def result(ok: bool, error: str | None = None) -> LoadCheck:
-        return LoadCheck(ok, flows, datasets, routes, problems, error, seconds, own)
+        return LoadCheck(ok, flows, datasets, routes, problems, error, seconds, own, specs, hooks)
 
     if found.get("error"):
         return result(False, str(found["error"]))
@@ -399,15 +410,15 @@ def _is_under(module: str, site: Path) -> bool:
     return True
 
 
-def _check(site: Path, name: str, env: str) -> dict[str, Any]:
-    from feather_connect.project import load_project, validate_project
+def _check(site: Path, name: str, env: str, environment: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    from feather_connect.project import load_project, prefixed, validate_project
 
     sys.path.insert(0, str(site))
     module = _find(site, name).load()
     where = getattr(module, "__file__", None)
     if not where:
         raise LookupError(f"the entry point of {name} is not a module with a file")
-    project = load_project(Path(where).parent, env)
+    project = load_project(Path(where).parent, env, environment=environment)
     described = m.describe(project)
     own = sorted(
         f"{d.name} ({type(d.source).__qualname__})"
@@ -420,6 +431,8 @@ def _check(site: Path, name: str, env: str) -> dict[str, Any]:
         "datasets": [d["name"] for d in described["datasets"]],
         "routes": [r["name"] for r in described["routes"]],
         "own_push_sources": own,
+        "specs": {f.name: f.spec_dict() for f in prefixed(project.flows, name)},
+        "webhooks": cast(dict[str, Any], project.config.get("webhooks") or {}),
         "problems": [
             {"level": p.severity, "code": p.code, "message": p.message, "path": p.path, "hint": p.hint}
             for p in validate_project(project)
@@ -456,10 +469,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     nonce = sys.stdin.readline().strip()
     write = _writer(Path(sys.stdin.readline().strip()), nonce)
     del nonce
+    environment = json.loads(sys.stdin.readline() or "{}")
     sys.stdin.close()
     del sys.argv[1:]
     try:
-        answer = _check(Path(site), name, env)
+        answer = _check(Path(site), name, env, environment)
     except BaseException as error:  # noqa: BLE001 - whatever the package does wrong, SystemExit too, is the answer
         answer = {"error": _why(error, name)}
     write(answer)

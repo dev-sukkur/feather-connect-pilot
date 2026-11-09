@@ -17,7 +17,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -50,8 +50,11 @@ SIMULATED = frozenset({"simulation.source", "simulation.sink"})
 DEFAULTS: dict[str, Any] = {"settings": {"timezone": "UTC"}}
 _DEFAULTS_LAYER = "defaults"
 _PROJECT_FILE = "feather.yaml"
-_SECRET_PROVIDERS = frozenset({"env", "file", "vault", "aws-sm", "azure-kv", "gcp-sm"})
-_LOCAL_PROVIDERS = frozenset({"env", "file"})
+_SECRET_PROVIDERS = frozenset({"env", "file", "db", "vault", "aws-sm", "azure-kv", "gcp-sm"})
+_LOCAL_PROVIDERS = frozenset({"env", "file", "db"})
+_ENVIRONMENT_LAYER = "environment"  # the environment's own configuration, from the database (§8)
+# Opens `${secret:db:<name>}`: set by a server or worker that has the environment's secret store.
+_db_secrets: Callable[[str], str] | None = None
 _SECRET = re.compile(r"^\$\{secret:([^:{}]+):(.+)\}$")
 _CONNECTION_KEYS = frozenset({"connector", "site", "budget", "auth"})
 _ENV_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -143,6 +146,15 @@ def resolve_secret(ref: str, root: Path | None = None) -> str:
         raise ProjectError("not a secret reference: write it as ${secret:<provider>:<path>}")
     provider, path = match.groups()
     _check_provider(provider)
+    if provider == "db":
+        if _db_secrets is None:
+            raise ProjectError(
+                f"secret {ref}: db secrets are opened only by a server or worker with a secret store"
+            )
+        try:
+            return _db_secrets(path)
+        except Exception as error:  # noqa: BLE001 - whatever the opener raises names the secret, never its value
+            raise ProjectError(f"secret {ref}: {error}") from None
     if provider == "env":
         value = os.environ.get(path)
         if value is None:
@@ -157,6 +169,12 @@ def resolve_secret(ref: str, root: Path | None = None) -> str:
         raise ProjectError(f"secret {ref}: can't read the file ({error.strerror})") from None
 
 
+def use_db_secrets(opener: Callable[[str], str] | None) -> None:
+    """Open `${secret:db:<name>}` references with `opener`, or refuse them with None."""
+    global _db_secrets
+    _db_secrets = opener
+
+
 def _check_provider(provider: str) -> None:
     if provider not in _SECRET_PROVIDERS:
         known = ", ".join(sorted(_SECRET_PROVIDERS))
@@ -165,8 +183,20 @@ def _check_provider(provider: str) -> None:
         raise ProjectError(f"the secret provider {provider!r} arrives in M3: use env or file for now")
 
 
-def load_project(root: Path, env: str, *, simulate: bool = False) -> Project:
+def load_project(
+    root: Path,
+    env: str,
+    *,
+    simulate: bool = False,
+    environment: Mapping[str, Any] | None = None,
+    package: str | None = None,
+) -> Project:
     """Load the project in `root` for the environment `env`. Raises `ProjectError` with the file and key at fault.
+
+    `environment` is the environment's own configuration (`connections`, `budgets` and `settings`, as
+    `environment_layer` makes them from the database), merged over the project's files as the layer `environment`, so
+    that a shared connection or budget overrides a package's own of the same name. `package` names an installed flow
+    package: every flow, dataset and route then carries its prefix, `<package>/<name>` (§8).
 
     `simulate` runs every connection on simulation stand-ins, as if each one's `connector:` named a simulation
     connector: what `feather run --sim` does. Sources then read `fixtures/<dataset>.json[l]`, and no secret is needed.
@@ -179,6 +209,8 @@ def load_project(root: Path, env: str, *, simulate: bool = False) -> Project:
     _merge(config, layers, DEFAULTS, _DEFAULTS_LAYER, "")
     for label, path in layer_files:
         _merge(config, layers, _read_yaml(label, path), label, "")
+    if environment:
+        _merge(config, layers, _strkeys(environment), _ENVIRONMENT_LAYER, "")
     _check_secrets(config, layers)
     name = _text(config, "name", layers)
     budgets = _budgets(config, layers)
@@ -190,6 +222,8 @@ def load_project(root: Path, env: str, *, simulate: bool = False) -> Project:
         connections = _all_simulated(flows, connections)
     flows = _simulated(flows, connections, root)
     _check_push_sources(flows, connections, env)
+    if package is not None:
+        flows = prefixed(flows, package)
     return Project(
         name,
         root,
@@ -297,6 +331,8 @@ def _check_secrets(config: Mapping[str, Any], layers: Mapping[str, str]) -> None
     for path, value in _leaves(config, ""):
         parts = path.split(".")
         under_auth = parts[0] == "connections" and len(parts) > 3 and parts[2] == "auth"
+        # A declared webhook's secret (`webhooks.<name>.secret`) is a reference too (flow packages §7.2).
+        under_auth = under_auth or (parts[0] == "webhooks" and len(parts) == 3 and parts[2] == "secret")
         is_ref = isinstance(value, str) and "${secret:" in value
         if is_ref and not under_auth:
             raise ProjectError(f"{_where(layers, path)}: secrets may stand only under a connection's auth")
@@ -706,3 +742,32 @@ def validate_project(project: Project) -> list[Problem]:
             )
         )
     return problems
+
+
+# Installed packages.
+
+
+def prefixed(flows: Sequence[Flow], package: str) -> tuple[Flow, ...]:
+    """The flows with every flow, dataset and route named `<package>/<name>`, as an installed package's are (§8).
+    Connections keep their names: an environment's are shared on purpose."""
+    found: list[Flow] = []
+    for flow in flows:
+        datasets = {d.name: replace(d, name=f"{package}/{d.name}") for d in flow.datasets}
+        routes = [replace(r, name=f"{package}/{r.name}") for r in flow.routes]
+        changed = copy.copy(flow)
+        changed.name = f"{package}/{flow.name}"
+        changed.datasets = list(datasets.values())
+        changed.routes = routes
+        changed.triggers = tuple(_retargeted(t, datasets) for t in flow.triggers)
+        found.append(changed)
+    return tuple(found)
+
+
+def environment_layer(entries: Iterable[Any]) -> dict[str, Any]:
+    """The configuration layer of an environment's own entries (`EnvEntry` rows): its connections, budgets and
+    settings, by name."""
+    layer: dict[str, Any] = {}
+    plural = {"connection": "connections", "budget": "budgets", "setting": "settings"}
+    for entry in entries:
+        layer.setdefault(plural[entry.kind], {})[entry.name] = copy.deepcopy(entry.value)
+    return layer
