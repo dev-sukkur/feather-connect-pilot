@@ -6,9 +6,11 @@ has at most one runner at a time, and another replica takes over within one inte
 
 import logging
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
+from feather_connect.runtime.catalogue import Catalogue
 from feather_connect.runtime.leader import AlwaysLeader, LeaderLock, leader_key
 from feather_connect.runtime.retention import RetentionReport, retention_once
 from feather_connect.runtime.scheduler import tick
@@ -119,6 +121,19 @@ class SweepLog:
             )
 
 
+WEBHOOK_RETENTION_DAYS = 30  # the default of the setting webhook_retention_days
+
+
+def webhook_retention_days(settings: Mapping[str, object]) -> int:
+    """How many days a processed webhook event is kept: the setting `webhook_retention_days`, 1 or more."""
+    value = settings.get("webhook_retention_days", WEBHOOK_RETENTION_DAYS)
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 1
+        else WEBHOOK_RETENTION_DAYS
+    )
+
+
 def default_loops(state: "AppState") -> list[LoopRunner]:
     """Return the loops of a server: the scheduler, the sweeper, retention and the sealer.
 
@@ -129,8 +144,16 @@ def default_loops(state: "AppState") -> list[LoopRunner]:
         url = state.settings.database_url
         return PostgresLeaderLock(url, leader_key(name)) if url else AlwaysLeader()
 
+    if state.catalogue is None:
+        state.catalogue = Catalogue(state.store)  # installed packages' active flows (flow packages §7.2)
+        state.catalogue.listen()
+        state.closers.append(state.catalogue.close)
+    catalogue = state.catalogue
+
     def schedule() -> None:
-        tick(state.runtime, now=state.clock.now())
+        now = state.clock.now()
+        tick(state.runtime, now=now)
+        catalogue.tick(now)
 
     sweep_log = SweepLog()
 
@@ -141,6 +164,10 @@ def default_loops(state: "AppState") -> list[LoopRunner]:
         state.spool.ensure_partitions()  # so that the next days' writes find a partition
         state.store.inbox.ensure_partitions()
         log_retention(retention_once(state.store, state.spool, now=state.clock.now()))
+        days = webhook_retention_days(state.project.settings)
+        purged = state.store.webhooks.purge(state.clock.now() - timedelta(days=days))
+        if purged:
+            log.info("retention deleted %d processed webhook events older than %d days", purged, days)
 
     def seal() -> None:
         seal_once(state.runtime, now=state.clock.now())

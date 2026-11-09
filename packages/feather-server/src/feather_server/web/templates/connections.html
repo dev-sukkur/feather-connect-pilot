@@ -40,4 +40,50 @@
 {% else %}
 <p class="empty">The project defines no connections.</p>
 {% endif %}
+<h2 id="environment">Environment connections</h2>
+<p class="muted">Kept for environment <code>{{ env }}</code>, outside any package, and shared by every package installed here. Settings are plain values you can check and change; a secret field is set once and never shown again.</p>
+{% if environment %}
+{% for c in environment %}
+<section class="card" aria-labelledby="env-{{ c.name }}">
+  <h3 id="env-{{ c.name }}">{{ c.name }} <code>{{ c.connector }}</code></h3>
+  <div class="table-wrap"><table>
+    <caption class="sr-only">Settings of {{ c.name }}</caption>
+    <thead><tr><th scope="col">Setting</th><th scope="col">Value</th></tr></thead>
+    <tbody>
+    {% for key, value in c.settings.items() %}
+      <tr><th scope="row"><code>{{ key }}</code></th><td><code>{{ value }}</code></td></tr>
+    {% endfor %}
+    {% for key, secret in c.secrets.items() %}
+      <tr><th scope="row"><code>{{ key }}</code> <span class="muted">(secret)</span></th>
+        <td>
+          {% if secret.set %}set, updated {{ secret.updated_at }} by {{ secret.updated_by }}{% elif secret.needs_reentry %}<span class="badge tone-bad">needs re-entry</span> <span class="muted">(cleared when where it goes changed)</span>{% elif secret.set is defined %}<span class="badge tone-bad">not set</span>{% else %}<code>{{ secret.ref }}</code>{% endif %}
+          {% if secret.ref.startswith('${secret:db:') %}
+          <form method="post" action="/secrets/{{ secret.ref[12:-1] | urlencode }}" class="inline" aria-label="Replace the secret {{ key }} of {{ c.name }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="back" value="/connections#env-{{ c.name }}">
+            <label for="secret-{{ c.name }}-{{ key }}">New value for {{ key }} of {{ c.name }}</label>
+            <input id="secret-{{ c.name }}-{{ key }}" name="value" type="password" autocomplete="off" required>
+            <button type="submit" aria-label="Replace {{ key }} of {{ c.name }}">Replace</button>
+          </form>
+          {% endif %}
+        </td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  <form method="post" action="/connections/{{ c.name | urlencode }}/settings" aria-label="Change a setting of {{ c.name }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="key-{{ c.name }}">Setting of {{ c.name }}</label>
+    <input id="key-{{ c.name }}" name="key" required>
+    <label for="value-{{ c.name }}">Value for {{ c.name }} <span class="muted">(empty removes it)</span></label>
+    <input id="value-{{ c.name }}" name="value">
+    <label for="reason-{{ c.name }}">Reason for changing {{ c.name }}</label>
+    <input id="reason-{{ c.name }}" name="reason">
+    <button type="submit" aria-label="Save the setting of {{ c.name }}">Save</button>
+  </form>
+  <p class="muted">Changed {{ c.changed_at }} by {{ c.changed_by }}.</p>
+</section>
+{% endfor %}
+{% else %}
+<p class="empty">The environment has no connections of its own: <code>feather config import env/{{ env }}.yaml</code> seeds them.</p>
+{% endif %}
 {% endblock %}

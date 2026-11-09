@@ -47,6 +47,8 @@ from feather_connect.core.context import Context
 from feather_connect.core.errors import PermanentError, TransientError
 from feather_connect.core.records import canonical_json
 
+SECRET_SETTINGS = frozenset({"dsn", "password"})  # never shown, refs only
+
 __all__ = ["FC_COLUMNS", "PostgresConfig", "Query", "Table"]
 
 FC_COLUMNS: dict[str, LiteralString] = {
@@ -135,6 +137,7 @@ class Query(_Postgres, connector.Source):
     """
 
     spec = ConnectorSpec(
+        secrets=SECRET_SETTINGS,
         name="postgres.query",
         config=PostgresConfig,
         strategies=frozenset({"by_stamp", "snapshot_diff", "replace"}),
@@ -232,6 +235,7 @@ class Table(_Postgres, connector.Sink):
     """
 
     spec = ConnectorSpec(
+        secrets=SECRET_SETTINGS,
         name="postgres.table",
         config=PostgresConfig,
         modes=frozenset({"upsert", "append", "replace_partition"}),

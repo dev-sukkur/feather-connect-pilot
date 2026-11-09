@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
     "cronsim",
+    "cryptography>=44",  # AES-GCM for the sealed secrets of `${secret:db:…}`
     "httpx>=0.28.1",
     "jsonschema>=4",
     "packaging",

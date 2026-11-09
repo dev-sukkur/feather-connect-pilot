@@ -429,7 +429,7 @@ def test_every_other_state_changing_route_still_demands_csrf(h: Harness):
         for route in changing
         if require_csrf not in {dependency.call for dependency in route.dependant.dependencies}
     ]
-    assert bare == ["/ingress/{tenant}/{source}"]
+    assert sorted(bare) == ["/ingress/{tenant}/{package}/{webhook}", "/ingress/{tenant}/{source}"]
 
 
 def test_a_dashboard_post_without_a_session_is_still_refused(h: Harness):

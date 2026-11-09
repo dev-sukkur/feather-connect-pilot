@@ -53,6 +53,10 @@ RATE_LIMIT_CODES = frozenset(
     {"THROTTLED", "RATE_LIMITED", "RATE_LIMIT_EXCEEDED", "TOO_MANY_REQUESTS", "MAX_COST_EXCEEDED"}
 )
 
+SECRET_SETTINGS = frozenset(
+    {"client_secret", "refresh_token", "token", "api_key", "password"}
+)  # never shown, refs only
+
 
 def check_errors(body: Any, what: str) -> None:
     """Raise for an answer whose `errors` is not empty: `TransientError` for a rate limit, else `PermanentError`."""
@@ -89,6 +93,7 @@ class Source(_HttpConnector, connector.Source):
     """
 
     spec = ConnectorSpec(
+        secrets=SECRET_SETTINGS,
         name="graphql.source",
         config=HttpConfig,
         strategies=frozenset({"by_stamp", "replace", "snapshot_diff"}),
@@ -226,6 +231,7 @@ class Mutation(_HttpConnector, connector.Sink):
     """
 
     spec = ConnectorSpec(
+        secrets=SECRET_SETTINGS,
         name="graphql.mutation",
         config=HttpConfig,
         modes=frozenset({"upsert", "append"}),

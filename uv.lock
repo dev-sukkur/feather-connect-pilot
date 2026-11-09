@@ -971,6 +971,7 @@ version = "0.1.0"
 source = { editable = "packages/feather-connect" }
 dependencies = [
     { name = "cronsim" },
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "jsonschema" },
     { name = "packaging" },
@@ -990,6 +991,7 @@ postgres = [
 requires-dist = [
     { name = "alembic", marker = "extra == 'postgres'" },
     { name = "cronsim" },
+    { name = "cryptography", specifier = ">=44" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "jsonschema", specifier = ">=4" },
     { name = "packaging" },

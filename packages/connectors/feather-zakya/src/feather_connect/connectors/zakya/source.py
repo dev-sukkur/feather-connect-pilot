@@ -24,6 +24,8 @@ from feather_connect.runtime.http import FeatherHttp
 
 from .config import API_PREFIX, STAMP_FORMAT, Zakya, ZakyaConfig
 
+SECRET_SETTINGS = frozenset({"client_secret", "refresh_token"})  # never shown, refs only
+
 __all__ = ["DATASETS", "Source", "ZakyaDataset", "dataset"]
 
 DEFAULT_PAGE_SIZE = 200  # the most Zakya serves in a page
@@ -87,6 +89,7 @@ class Source(Zakya, http.Rest):
     for the datasets that have them, and can be turned off to save a call per record. `page_size` is at most 200."""
 
     spec = ConnectorSpec(
+        secrets=SECRET_SETTINGS,
         name="zakya.source",
         config=ZakyaConfig,
         strategies=frozenset({"by_stamp", "replace", "snapshot_diff"}),

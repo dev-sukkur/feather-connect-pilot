@@ -29,6 +29,7 @@ from feather_connect.storage.port import (
     DuplicateVersion,
     InboxDay,
     InvalidTransition,
+    KeyMismatch,
     PackageVersion,
     RegistryFile,
     ResponseRow,
@@ -1552,6 +1553,128 @@ class StoreContract(
         with pytest.raises(ValueError, match="sha256"):
             store.packages.install(self._installed("acme-invoices", "1.0.0"), b"tampered", [])
         assert store.packages.packages() == [] and store.packages.wheel(_sha(b"tampered")) is None
+
+    def test_a_flow_is_activated_in_one_version_at_a_time_and_listeners_hear_it(self, store: Store):
+        import threading
+
+        heard = threading.Event()
+        stop = store.packages.listen(heard.set)
+        try:
+            one, two = self._installed("acme", "1.0.0"), self._installed("acme", "1.1.0", b"newer")
+            store.packages.install(one, b"wheel", ["acme/invoices", "acme/orders"])
+            store.packages.install(two, b"newer", ["acme/invoices"])
+            heard.wait(5)
+            heard.clear()  # the listener's first call, on starting, says to read everything
+            assert store.packages.active() == []
+            store.packages.activate("acme/invoices", "acme", "1.0", "ops", T0, "go live")
+            assert heard.wait(10)
+            [first] = store.packages.active()
+            assert (first.flow, first.version, first.state, first.reason) == (
+                "acme/invoices",
+                "1.0.0",
+                "active",
+                "go live",
+            )
+            store.packages.activate("acme/invoices", "acme", "1.1.0", "ops", T0 + timedelta(seconds=1))
+            assert [(a.flow, a.version) for a in store.packages.active()] == [("acme/invoices", "1.1.0")]
+            with pytest.raises(KeyError):
+                store.packages.activate("acme/orders", "acme", "1.1.0", "ops", T0)
+            store.packages.deactivate("acme/invoices", "ops", T0 + timedelta(seconds=2), "paused partner")
+            assert store.packages.active() == []
+            with pytest.raises(KeyError):
+                store.packages.deactivate("acme/invoices", "ops", T0)
+        finally:
+            stop()
+
+    def test_environment_entries_are_kept_per_environment_and_return_what_they_replace(self, store: Store):
+        from feather_connect.storage.port import EnvEntry
+
+        zakya = EnvEntry(
+            "prod", "connection", "zakya", {"connector": "zakya", "organization_id": "1"}, "root", T0
+        )
+        assert store.env_config.put(zakya) is None
+        store.env_config.put(EnvEntry("prod", "budget", "zoho-api", {"limits": ["90/minute"]}, "root", T0))
+        store.env_config.put(EnvEntry("qa", "connection", "zakya", {"connector": "zakya"}, "root", T0))
+        changed = replace(zakya, value={"connector": "zakya", "organization_id": "2"}, changed_by="ops")
+        assert store.env_config.put(changed) == zakya
+        assert [(e.kind, e.name) for e in store.env_config.entries("prod")] == [
+            ("connection", "zakya"),
+            ("budget", "zoho-api"),
+        ]
+        assert store.env_config.entries("prod", "budget")[0].value == {"limits": ["90/minute"]}
+        assert store.env_config.entry("prod", "connection", "zakya") == changed
+        assert store.env_config.remove("prod", "connection", "zakya") == changed
+        assert store.env_config.entry("prod", "connection", "zakya") is None
+        assert store.env_config.remove("prod", "connection", "zakya") is None
+
+    def test_secrets_are_kept_as_ciphertext_by_name(self, store: Store):
+        from feather_connect.storage.port import SealedSecret
+
+        sealed = SealedSecret("prod", "zakya-secret", b"\x01cipher", b"n" * 12, "k1", "root", T0)
+        assert store.secrets.put(sealed) is False
+        assert store.secrets.put(replace(sealed, ciphertext=b"\x02cipher", updated_by="ops")) is True
+        store.secrets.put(replace(sealed, env="qa"))
+        assert [(s.name, s.ciphertext, s.updated_by) for s in store.secrets.names("prod")] == [
+            ("zakya-secret", b"\x02cipher", "ops")
+        ]
+        assert store.secrets.active_key("prod") == "k1" and store.secrets.active_key("dev") is None
+        with pytest.raises(KeyMismatch):  # sealed with another key than the active one
+            store.secrets.put(replace(sealed, key_id="k2"))
+        count = store.secrets.rotate(
+            "prod", "k1", "k2", lambda s: replace(s, ciphertext=b"rotated", key_id="k2")
+        )
+        got = store.secrets.get("prod", "zakya-secret")
+        assert count == 1 and got is not None and (got.ciphertext, got.key_id) == (b"rotated", "k2")
+        assert store.secrets.active_key("prod") == "k2" and store.secrets.active_key("qa") == "k1"
+        with pytest.raises(KeyMismatch):  # rotated meanwhile: compare and swap
+            store.secrets.rotate("prod", "k1", "k3", lambda s: s)
+        with pytest.raises(KeyMismatch):
+            store.secrets.put(sealed)  # k1 is not active in prod any more
+        assert store.secrets.remove("prod", "zakya-secret") and not store.secrets.remove(
+            "prod", "zakya-secret"
+        )
+        assert (
+            store.secrets.get("prod", "zakya-secret") is None
+            and store.secrets.get("qa", "zakya-secret") is not None
+        )
+
+    def test_a_rotation_seals_every_secret_however_many_or_none(self, store: Store):
+        from feather_connect.storage.port import MAX_ENV_ROWS, SealedSecret
+
+        for i in range(MAX_ENV_ROWS + 5):
+            store.secrets.put(SealedSecret("prod", f"s{i:05}", b"c", b"n" * 12, "k1", "root", T0))
+
+        def broken(secret: SealedSecret) -> SealedSecret:
+            if secret.name == "s00500":
+                raise ValueError("doesn't open")
+            return replace(secret, key_id="k2")
+
+        with pytest.raises(ValueError, match="doesn't open"):
+            store.secrets.rotate("prod", "k1", "k2", broken)
+        assert store.secrets.active_key("prod") == "k1"
+        first = store.secrets.get("prod", "s00000")
+        assert first is not None and first.key_id == "k1"  # nothing changed
+        assert store.secrets.rotate("prod", "k1", "k2", lambda s: replace(s, key_id="k2")) == MAX_ENV_ROWS + 5
+        last = store.secrets.get("prod", f"s{MAX_ENV_ROWS + 4:05}")
+        assert last is not None and last.key_id == "k2"
+
+    def test_a_webhook_event_is_kept_once_by_its_key(self, store: Store):
+        from feather_connect.storage.port import WebhookEvent
+
+        event = WebhookEvent("acme", "orders", "o-1", "2026-11-09", b'{"id": "o-1"}', {"x-sig": "ab"}, T0)
+        assert store.webhooks.add(event) and not store.webhooks.add(replace(event, body=b"again"))
+        store.webhooks.add(replace(event, key="o-2", received_at=T0 + timedelta(seconds=1)))
+        assert [(e.key, e.body) for e in store.webhooks.events("acme", "orders")] == [
+            ("o-1", b'{"id": "o-1"}'),
+            ("o-2", b'{"id": "o-1"}'),
+        ]
+        assert store.webhooks.events("acme", "other") == []
+        # Retention deletes only what a worker has processed, received before the cut.
+        assert store.webhooks.processed("acme", "orders", ["o-1", "missing"], T0) == 1
+        assert store.webhooks.purge(T0 + timedelta(days=1)) == 1
+        assert [e.key for e in store.webhooks.events("acme", "orders")] == ["o-2"]
+        store.webhooks.processed("acme", "orders", ["o-2"], T0)
+        assert store.webhooks.purge(T0) == 0  # received after the cut
 
     def test_registries_are_added_listed_and_removed(self, store: Store):
         store.registry.add_registry("zeta", "https://z.example.com/simple/", None, "root")

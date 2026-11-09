@@ -42,6 +42,8 @@ Capability = Literal[
     "registries.manage",
     "packages.publish",  # upload to the built-in registry: an admin, or a token with the publish scope
     "packages.yank",
+    "environment.manage",  # the environment's own connections, budgets and settings (flow packages §8)
+    "secrets.manage",  # the environment's encrypted secrets: set, replace, delete, rotate the key
 ]
 
 NEEDS: Mapping[Capability, Role] = {
@@ -69,6 +71,8 @@ NEEDS: Mapping[Capability, Role] = {
     "registries.manage": "admin",
     "packages.publish": "admin",
     "packages.yank": "admin",
+    "environment.manage": "admin",
+    "secrets.manage": "admin",
 }
 PUBLISH_SCOPE: frozenset[Capability] = frozenset({"packages.publish"})  # all a publish-scoped token may do
 

@@ -61,6 +61,8 @@ from feather_connect.core.partitions import none
 from feather_connect.core.records import canonical_json
 from feather_connect.core.strategies import parse_duration
 
+SECRET_SETTINGS = frozenset({"access_key_id", "secret_access_key", "session_token"})  # never shown, refs only
+
 __all__ = ["Files", "PartitionFiles", "S3Config"]
 
 Format = Literal["csv", "json", "jsonl", "parquet"]
@@ -204,6 +206,7 @@ class Files(_Store, connector.Source):
     """
 
     spec = ConnectorSpec(
+        secrets=SECRET_SETTINGS,
         name="s3.files",
         config=S3Config,
         strategies=frozenset({"replace", "by_stamp", "snapshot_diff"}),
@@ -448,6 +451,7 @@ class PartitionFiles(_Store, connector.Sink):
     """
 
     spec = ConnectorSpec(
+        secrets=SECRET_SETTINGS,
         name="s3.partition_files",
         config=S3Config,
         modes=frozenset({"replace_partition", "append"}),

@@ -47,6 +47,8 @@ from feather_connect.core.records import canonical_json
 
 from .config import Zakya, ZakyaConfig, ZakyaError
 
+SECRET_SETTINGS = frozenset({"client_secret", "refresh_token"})  # never shown, refs only
+
 __all__ = ["ITEM_ID_TTL_S", "Items", "Prices", "Stock", "same_value"]
 
 RecordMap = Callable[[Mapping[str, Any]], Mapping[str, Any]]
@@ -199,6 +201,7 @@ class Items(_Sink):
     left alone."""
 
     spec = ConnectorSpec(
+        secrets=SECRET_SETTINGS,
         name="zakya.items",
         config=ZakyaConfig,
         modes=frozenset({"upsert"}),
@@ -247,6 +250,7 @@ class Prices(_Sink):
     have rates to set. Zakya has no conflict check on that write: see the module's docstring."""
 
     spec = ConnectorSpec(
+        secrets=SECRET_SETTINGS,
         name="zakya.prices",
         config=ZakyaConfig,
         modes=frozenset({"upsert"}),
@@ -341,6 +345,7 @@ class Stock(_Sink):
     posted twice."""
 
     spec = ConnectorSpec(
+        secrets=SECRET_SETTINGS,
         name="zakya.stock",
         config=ZakyaConfig,
         modes=frozenset({"append"}),

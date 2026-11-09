@@ -14,17 +14,20 @@ from feather_connect.clock import Clock, SystemClock
 from feather_connect.engine.local import LocalEngine
 from feather_connect.engine.port import Engine
 from feather_connect.logs import configure_logging, install_task_logs
-from feather_connect.project import Project, load_project
+from feather_connect.project import Project, environment_layer, load_project, use_db_secrets
+from feather_connect.runtime.catalogue import Catalogue
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.port import Store
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import at_head, migrate
 from feather_connect.storage.spool import Spool
+from feather_connect.vault import Vault, keyring_from_env
 from feather_connect.worker import config_of
 from feather_server import api, auth, ingress, registry, web
 from feather_server.loops import LoopRunner, default_loops
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions
+from feather_server.services.environment import Environment
 from feather_server.services.packages import Packages
 from feather_server.services.reads import Reads
 from feather_server.services.registries import Registries
@@ -45,6 +48,8 @@ class AppState:
     runtime: Runtime
     clock: Clock = field(default_factory=SystemClock)
     closers: list[Callable[[], None]] = field(default_factory=list[Callable[[], None]])
+    vault: Vault | None = None  # the process's one vault of its environment; made by `create_app` if None
+    catalogue: Catalogue | None = None  # installed packages' active flows and webhooks; made by `create_app`
 
     def close(self) -> None:
         """Let go of what `build_state` opened. A state made by hand has nothing here."""
@@ -61,10 +66,18 @@ def build_state(settings: Settings) -> AppState:
     The server submits work and workers run it, so with the DBOS engine nothing is registered here. The local engine
     runs in this process: its tasks are registered, and something has to ask it to run them.
     """
-    project = load_project(settings.project, settings.env)
+    keyring = keyring_from_env()  # None is fine: then db secrets fail, saying how to set one
     migrate(settings.database_url)
     clock = SystemClock()
     store, spool = connect(settings.database_url, clock=clock)
+    vault = Vault(store.secrets, settings.env, keyring)
+    use_db_secrets(vault.open)
+    environment = environment_layer(
+        store.env_config.entries(settings.env)
+    )  # a bad entry is left out, with a warning
+    # TODO(flow packages task 6, P4 package hosts; task 8, P6 retiring project mode): the server stops loading a
+    # project here. Installed packages already run from the catalogue (`Catalogue`), never through load_project.
+    project = load_project(settings.project, settings.env, environment=environment)
     configure_logging(os.environ.get("FEATHER_LOG_LEVEL", "INFO"), secrets=[settings.secret_key])
     closers: list[Callable[[], None]] = [store.close, install_task_logs(store)]
     for budget in project.budgets.values():  # the overview reads their use
@@ -94,7 +107,7 @@ def build_state(settings: Settings) -> AppState:
     )
     if local is not None:
         local.register(runtime.tasks())
-    return AppState(settings, project, store, spool, engine, runtime, clock, closers)
+    return AppState(settings, project, store, spool, engine, runtime, clock, closers, vault)
 
 
 def _readiness(state: AppState) -> dict[str, str]:
@@ -149,6 +162,13 @@ def create_app(
         index_url=state.settings.base_url.rstrip("/") + "/registry/simple/",
     )
     app.state.packages = Packages(state.store, state.clock, app.state.registries, env=state.settings.env)
+    if state.vault is None:
+        state.vault = Vault(state.store.secrets, state.settings.env, keyring_from_env())
+    app.state.environment = Environment(state.store, state.clock, state.settings.env, state.vault)
+    if state.catalogue is None:
+        state.catalogue = Catalogue(state.store)  # refreshed on NOTIFY, and every REFRESH_S seconds
+        state.catalogue.listen()
+        state.closers.append(state.catalogue.close)
     ingress.install(app, state)  # first, as routes are tried in order, and this one takes bursts
     auth.install(app, state)
     api.install(app)

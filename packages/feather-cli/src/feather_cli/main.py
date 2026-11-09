@@ -5,7 +5,18 @@ import sys
 
 import typer
 
-from feather_cli.commands import describe, dev, new, package, processes, registry, remote, run, validate
+from feather_cli.commands import (
+    describe,
+    dev,
+    environment,
+    new,
+    package,
+    processes,
+    registry,
+    remote,
+    run,
+    validate,
+)
 from feather_cli.commands import test as test_command
 from feather_connect.logs import configure_logging
 
@@ -29,6 +40,10 @@ app.add_typer(describe.describe_app, name="describe")
 app.add_typer(new.new_app, name="new")
 app.add_typer(package.package_app, name="package")
 app.add_typer(registry.registry_app, name="registry")
+app.add_typer(environment.connection_app, name="connection")
+app.add_typer(environment.config_app, name="config")
+app.add_typer(environment.secret_app, name="secret")
+app.add_typer(environment.flow_app, name="flow")
 app.command()(run.run)
 app.command("test")(test_command.test)
 for command in (remote.status, remote.runs, remote.logs, remote.backfill, remote.replay):

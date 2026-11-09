@@ -157,6 +157,9 @@ class World:
             responses=base.responses,
             registry=base.registry,
             packages=base.packages,
+            env_config=base.env_config,
+            secrets=base.secrets,
+            webhooks=base.webhooks,
         )
         self.store.budgets.define(spec)
         self.engine = LocalEngine(self.clock)
