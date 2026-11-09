@@ -27,6 +27,9 @@ Two questions came up on 8 Nov 2026: is full multi-tenancy needed for v1, and sh
 6. Tests use a second tenant now and then, to prove nothing leaks.
 7. Anything process-wide (caches, OAuth tokens, engine queues) is keyed by tenant, or says why it can't be.
 8. Vendor budgets get a scope that can be wider than one tenant, because two tenants may share one vendor account.
+   - *How (added 9 Nov 2026, with the Zakya connector):* a budget may name an `account` (for Zakya, `zakya:<organization_id>`; `feather validate` checks it against the connection). The windows of an account live in rows with tenant `*`, migration 0017, shared by every tenant that names that account. This is the one sanctioned cross-tenant row; it holds only counters, never data.
+   - Every tenant naming an account must define the same windows; a different definition is refused, naming the other budget only when it is the same tenant's, and nothing is reset.
+   - M5 note: row-level security policies must let the `*` budget rows through, and only an admin path may create or change an account's windows.
 
 **3. Production stays on its own; the test environments share one machine (layout B).**
 - Production is always its own deployment, on its own machines, as ADR-0006 says.
