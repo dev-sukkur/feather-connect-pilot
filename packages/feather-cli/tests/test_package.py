@@ -152,12 +152,14 @@ def test_install_list_show_and_fetch(cli, sample: Path, server, tmp_path: Path):
     assert shown["load_check"]["ok"] and {f["state"] for f in shown["flows"]} == {"inactive"}
     assert "acme-invoices/" in cli("package", "show", "acme-invoices", *operator).stdout
     assert cli("package", "show", "nothing", *operator).exit_code == 1
+    denied = cli("package", "fetch", "acme-invoices==1.0.0", "--out", str(tmp_path / "no"), *operator)
+    assert denied.exit_code == 1 and "403" in denied.stderr  # a fetch is an admin's, as an install is
     fetched = cli(
-        "package", "fetch", "acme-invoices==1.0.0", "--out", str(tmp_path / "got"), *operator, "--json"
+        "package", "fetch", "acme-invoices==1.0.0", "--out", str(tmp_path / "got"), *admin, "--json"
     )
     assert fetched.exit_code == 0, fetched.output
     doc = json.loads(fetched.stdout)
     wheel = Path(doc["wheel"])
     assert wheel.name == "acme_invoices-1.0.0-py3-none-any.whl"
     assert hashlib.sha256(wheel.read_bytes()).hexdigest() == doc["sha256"]
-    assert cli("package", "fetch", "acme-invoices", *operator).exit_code == 1  # a version is needed
+    assert cli("package", "fetch", "acme-invoices", *admin).exit_code == 1  # a version is needed

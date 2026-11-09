@@ -198,9 +198,19 @@ class ApiClient:
         registry: str,
         reason: str | None,
         idempotency_key: str | None = None,
+        *,
+        allow_yanked: bool = False,
+        pre: bool = False,
     ) -> dict[str, Any]:
         """Install a version; the server's load check may take a minute, so this waits longer than other calls."""
-        body = {"name": name, "version": version, "registry": registry, "reason": reason}
+        body = {
+            "name": name,
+            "version": version,
+            "registry": registry,
+            "reason": reason,
+            "allow_yanked": allow_yanked,
+            "pre": pre,
+        }
         return self._call(
             "POST", "/packages", body=body, idempotency_key=idempotency_key, timeout=INSTALL_TIMEOUT_S
         )

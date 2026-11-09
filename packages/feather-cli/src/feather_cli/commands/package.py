@@ -180,6 +180,9 @@ def _wanted(spec: str, json_mode: bool) -> tuple[str, str | None]:
 _INSTALL_HINTS = {
     "not_installed": "a version is installed once: install a new version",
     "fetch": "check the name and version with: feather package search",
+    "not_yanked": "install another version, or pass --allow-yanked to take this one anyway",
+    "lock": "build it again with feather package build, which locks every requirement with its hashes",
+    "webhook_connector": "read webhooks with a Feather Connect push source, such as http.Webhook",
     "sha256": "the registry's record and the wheel disagree: ask the publisher to publish a new version",
     "manifest": "it is not a flow package this server can read: build it again with feather package build",
     "compatibility": "build it for this Feather Connect, or upgrade the server",
@@ -192,6 +195,8 @@ def install(
     spec: Annotated[str, typer.Argument(help="The package, with a version: acme-invoices==1.4.0.")],
     registry: FromRegistry = "feather",
     reason: Reason = None,
+    allow_yanked: Annotated[bool, typer.Option(help="Take a version the registry has yanked.")] = False,
+    pre: Annotated[bool, typer.Option(help="With no version, a pre-release may be the newest.")] = False,
     project: ProjectDir = Path("."),
     env: Env = "dev",
     server: remote.Server = None,
@@ -199,14 +204,16 @@ def install(
     json_mode: Json = False,
 ) -> None:
     """Install a version of a package from one of the environment's registries: the newest not yanked when none is
-    given. It is checked and loaded on the server, in a child process, and its flows start inactive: nothing runs
-    until one is activated."""
+    given, and not a pre-release unless --pre. It is checked and loaded on the server, in a child process, and its
+    flows start inactive: nothing runs until one is activated."""
     name, version = _wanted(spec, json_mode)
     with remote.client(project, env, server, token, json_mode) as api:
 
         def attempt() -> dict[str, Any]:
             try:
-                return api.install_package(name, version, registry, reason)
+                return api.install_package(
+                    name, version, registry, reason, allow_yanked=allow_yanked, pre=pre
+                )
             except ApiError as error:
                 hint = _INSTALL_HINTS.get(str(error.problem.get("check") or ""))
                 if hint is None:
@@ -286,7 +293,7 @@ def fetch(
     json_mode: Json = False,
 ) -> None:
     """Download a version's wheel from one of the environment's registries, through the server, which checks its
-    sha256 and manifest as an install does. It goes to dist/ by default."""
+    sha256 and manifest as an install does. It needs an admin, as an install does, and goes to dist/ by default."""
     name, version = _wanted(spec, json_mode)
     if version is None:
         fail("fetch needs a version", hint="write it as acme-invoices==1.4.0", json_mode=json_mode)
