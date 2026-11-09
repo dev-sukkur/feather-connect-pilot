@@ -54,6 +54,7 @@ markers = [
     "chaos: kills real workers and databases mid-task; takes minutes",
     "perf: measures against a performance target",
     "docker: builds images and runs a Compose stack; needs Docker",
+    "live: calls a real vendor API with credentials from the environment; skipped without them",
 ]
 timeout = 120
 # Starlette would have its test client move to a package we do not use; httpx is the one FastAPI documents.

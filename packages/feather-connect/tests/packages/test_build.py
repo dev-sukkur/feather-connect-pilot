@@ -271,3 +271,14 @@ def test_read_wheel_refuses_what_isnt_a_flow_package(sample: Path):
     ):
         with pytest.raises(ManifestError, match=message):
             read_wheel(filename, payload)
+
+
+def test_every_workspace_distribution_is_left_out_of_a_lock():
+    import tomllib
+
+    from feather_connect.packages.build import PLATFORM_DISTRIBUTIONS
+
+    root = Path(__file__).resolve().parents[4]
+    found = [*root.glob("packages/*/pyproject.toml"), *root.glob("packages/*/*/pyproject.toml")]
+    names = {tomllib.loads(p.read_text(encoding="utf-8"))["project"]["name"] for p in found}
+    assert set(PLATFORM_DISTRIBUTIONS) == names
