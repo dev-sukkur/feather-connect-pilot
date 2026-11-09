@@ -3,6 +3,7 @@
 import json
 import shutil
 from pathlib import Path
+from textwrap import dedent
 
 import pytest
 
@@ -54,7 +55,12 @@ def server():
     store, spool, engine = MemoryStore(clock), MemorySpool(clock), LocalEngine(clock)
     runtime = Runtime([], store, spool, engine, code_sha="sha", clock=clock)
     project = Project("p", Path("."), "dev", (), {}, {}, {"timezone": "UTC"}, "sha")
-    state = AppState(Settings(secret_key="k"), project, store, spool, engine, runtime, clock=clock)
+    from feather_connect.vault import MasterKey, new_master_key
+
+    key = MasterKey.parse(new_master_key())
+    state = AppState(
+        Settings(secret_key="k"), project, store, spool, engine, runtime, clock=clock, master_key=key
+    )
     tokens = {
         role: issue_token(store, role, timedelta(days=1), role="admin" if role == "admin" else "operator",
                           scope="publish" if role == "publish" else "all", clock=clock)
@@ -163,3 +169,73 @@ def test_install_list_show_and_fetch(cli, sample: Path, server, tmp_path: Path):
     assert wheel.name == "acme_invoices-1.0.0-py3-none-any.whl"
     assert hashlib.sha256(wheel.read_bytes()).hexdigest() == doc["sha256"]
     assert cli("package", "fetch", "acme-invoices", *admin).exit_code == 1  # a version is needed
+
+
+def test_activate_and_deactivate_a_flow_of_an_installed_version(cli, sample: Path, server):
+    base, tokens = server
+    assert cli("package", "build", "--project", str(sample)).exit_code == 0
+    publish = ("--project", str(sample), "--url", base, "--token", tokens["publish"])
+    assert cli("package", "publish", *publish).exit_code == 0
+    admin, operator = (
+        ("--server", base, "--token", tokens["admin"]),
+        ("--server", base, "--token", tokens["operator"]),
+    )
+    assert cli("package", "install", "acme-invoices==1.0.0", *admin).exit_code == 0
+    flow = "acme-invoices/invoices"
+    done = cli("flow", "activate", flow, "--version", "1.0.0", "--reason", "go live", *operator)
+    assert done.exit_code == 0, done.output
+    assert f"{flow} 1.0.0: active" in done.stdout
+    assert "1 flows active" in cli("package", "list", *operator).stdout
+    missing = cli("flow", "activate", flow, "--version", "9.9.9", *operator)
+    assert missing.exit_code == 1 and "not installed" in missing.stderr
+    off = cli("flow", "deactivate", flow, *operator, "--json")
+    assert off.exit_code == 0 and json.loads(off.stdout)["state"] == "inactive"
+
+
+def test_connections_and_secrets_of_the_environment(cli, server, tmp_path: Path):
+    base, tokens = server
+    admin, operator = (
+        ("--server", base, "--token", tokens["admin"]),
+        ("--server", base, "--token", tokens["operator"]),
+    )
+    env_file = tmp_path / "prod.yaml"
+    env_file.write_text(
+        dedent("""
+            connections:
+              zakya:
+                connector: zakya
+                organization_id: 60001
+                client_id: abc
+                auth: {client_secret: '${secret:db:zakya-secret}'}
+            budgets:
+              zakya-api: {limits: [100/minute]}
+            settings:
+              timezone: Asia/Kolkata
+        """),
+        encoding="utf-8",
+    )
+    denied = cli("config", "import", str(env_file), *operator)
+    assert denied.exit_code == 1 and "403" in denied.stderr
+    imported = cli("config", "import", str(env_file), *admin)
+    assert imported.exit_code == 0, imported.output
+    assert "3 entries in environment dev" in imported.stdout
+    shown = cli("connection", "show", "zakya", *operator)
+    assert "organization_id: 60001" in shown.stdout and "client_secret (secret): not set" in shown.stdout
+    assert cli("secret", "set", "zakya-secret", *admin, input="s3cr3t-value" + chr(10)).exit_code == 0
+    shown = cli("connection", "show", "zakya", *operator).stdout
+    assert "client_secret (secret): set, updated" in shown and "s3cr3t" not in shown
+    changed = cli("connection", "set", "zakya", "organization_id=60002", "client_id=", *admin, "--json")
+    assert changed.exit_code == 0, changed.output
+    settings = json.loads(changed.stdout)["settings"]
+    assert settings["organization_id"] == 60002 and "client_id" not in settings
+    plain = cli("connection", "set", "zakya", "client_secret=oops", *admin)
+    assert plain.exit_code == 1 and "is secret" in plain.stderr and "oops" not in plain.stderr
+    listed = cli("secret", "list", *operator)
+    assert "zakya-secret: updated" in listed.stdout and "s3cr3t" not in listed.stdout
+    assert "zakya" in cli("connection", "list", *operator).stdout
+    key = tmp_path / "new.key"
+    key.write_text(json.loads(cli("secret", "new-key", "--json").stdout)["key"], encoding="utf-8")
+    rotated = cli("secret", "rotate-key", "--new-key-file", str(key), *admin)
+    assert rotated.exit_code == 0 and "sealed 1 secrets" in rotated.stdout
+    assert cli("secret", "delete", "zakya-secret", *admin).exit_code == 0
+    assert "no secret is set" in cli("secret", "list", *operator).stdout

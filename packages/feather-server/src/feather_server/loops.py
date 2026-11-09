@@ -9,6 +9,7 @@ import threading
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
+from feather_connect.runtime.catalogue import Catalogue
 from feather_connect.runtime.leader import AlwaysLeader, LeaderLock, leader_key
 from feather_connect.runtime.retention import RetentionReport, retention_once
 from feather_connect.runtime.scheduler import tick
@@ -129,8 +130,14 @@ def default_loops(state: "AppState") -> list[LoopRunner]:
         url = state.settings.database_url
         return PostgresLeaderLock(url, leader_key(name)) if url else AlwaysLeader()
 
+    catalogue = Catalogue(state.store)  # installed packages' active flows (flow packages §7.2)
+    catalogue.listen()
+    state.closers.append(catalogue.close)
+
     def schedule() -> None:
-        tick(state.runtime, now=state.clock.now())
+        now = state.clock.now()
+        tick(state.runtime, now=now)
+        catalogue.tick(now)
 
     sweep_log = SweepLog()
 

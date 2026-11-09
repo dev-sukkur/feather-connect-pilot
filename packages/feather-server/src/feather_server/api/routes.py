@@ -15,17 +15,20 @@ from typing import Annotated, Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi import Path as Path_
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from feather_connect.storage.port import DeliveryStatus, delivery_cursor
+from feather_connect.storage.port import DeliveryStatus, EnvEntry, EnvKind, delivery_cursor
+from feather_connect.vault import MasterKey
 from feather_server.api.errors import ApiProblem, translate
 from feather_server.api.paging import check_limit, decode, page
 from feather_server.auth import Actor, CurrentActor, require_csrf
 from feather_server.services import task_records as records
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
+from feather_server.services.environment import Environment
 from feather_server.services.packages import Packages
 from feather_server.services.previews import Preview
 from feather_server.services.reads import Reads
@@ -866,6 +869,201 @@ def package_version(name: str, version: str, installs: Installs, _: CurrentActor
     return ok(call(lambda: installs.version(name, version)))
 
 
+# The environment's own configuration and secrets (flow packages §8): reading needs any role, changing an admin.
+
+
+def _environment(request: Request) -> Environment:
+    return request.app.state.environment
+
+
+Envs = Annotated[Environment, Depends(_environment)]
+Kind = Annotated[EnvKind, Path_(description="connection, budget or setting")]
+
+
+def _entry(entry: EnvEntry) -> dict[str, Any]:
+    return {
+        "kind": entry.kind,
+        "name": entry.name,
+        "value": entry.value,
+        "changed_by": entry.changed_by,
+        "changed_at": entry.changed_at.isoformat(),
+    }
+
+
+class NewValue(Reason):
+    value: Any
+
+
+class Changes(Reason):
+    changes: dict[str, Any]  # a None removes a setting; `auth.<field>` sets a secret field's reference
+
+
+class Imported(Reason):
+    entries: list[dict[str, Any]] = Field(max_length=1000)  # each {kind, name, value}
+
+
+@router.get("/connections/{name}")
+def connection(name: str, envs: Envs, _: CurrentActor) -> JSONResponse:
+    return ok(call(lambda: envs.connection(name)))
+
+
+@router.put("/connections/{name}")
+def set_connection(
+    request: Request, name: str, envs: Envs, actor: CurrentActor, body: NewValue, key: IdempotencyKey = None
+) -> JSONResponse:
+    def put() -> Any:
+        envs.put(actor, "connection", name, body.value, reason=body.reason)
+        return envs.connection(name)
+
+    return _once(request, actor, key, put)
+
+
+@router.patch("/connections/{name}")
+def change_connection(
+    request: Request, name: str, envs: Envs, actor: CurrentActor, body: Changes, key: IdempotencyKey = None
+) -> JSONResponse:
+    def change() -> Any:
+        envs.update(actor, name, body.changes, reason=body.reason)
+        return envs.connection(name)
+
+    return _once(request, actor, key, change)
+
+
+@router.delete("/connections/{name}")
+def remove_connection(
+    request: Request,
+    name: str,
+    envs: Envs,
+    actor: CurrentActor,
+    body: Reason | None = None,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    reason = (body or Reason()).reason
+
+    def remove() -> Any:
+        envs.remove(actor, "connection", name, reason=reason)
+        return {"name": name, "removed": True}
+
+    return _once(request, actor, key, remove)
+
+
+@router.get("/environment")
+def environment(envs: Envs, _: CurrentActor) -> JSONResponse:
+    return ok({"env": envs.env, "items": [_entry(e) for e in envs.entries()], "next_cursor": None})
+
+
+@router.put("/environment/{kind}/{name}")
+def set_entry(
+    request: Request,
+    kind: Kind,
+    name: str,
+    envs: Envs,
+    actor: CurrentActor,
+    body: NewValue,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    return _once(
+        request, actor, key, lambda: _entry(envs.put(actor, kind, name, body.value, reason=body.reason))
+    )
+
+
+@router.delete("/environment/{kind}/{name}")
+def remove_entry(
+    request: Request, kind: Kind, name: str, envs: Envs, actor: CurrentActor, key: IdempotencyKey = None
+) -> JSONResponse:
+    def remove() -> Any:
+        envs.remove(actor, kind, name)
+        return {"kind": kind, "name": name, "removed": True}
+
+    return _once(request, actor, key, remove)
+
+
+@router.post("/environment:import")
+def import_entries(
+    request: Request, envs: Envs, actor: CurrentActor, body: Imported, key: IdempotencyKey = None
+) -> JSONResponse:
+    def imported() -> Any:
+        rows = [(str(e.get("kind")), str(e.get("name")), e.get("value")) for e in body.entries]
+        done = envs.import_entries(actor, rows, reason=body.reason)
+        return {"env": envs.env, "items": [_entry(e) for e in done]}
+
+    return _once(request, actor, key, imported)
+
+
+class NewSecret(Reason):
+    value: str = Field(min_length=1, max_length=65536)
+
+
+class NewKey(Reason):
+    key: str = Field(min_length=1, max_length=200)  # the new master key, base64
+
+
+@router.get("/secrets")
+def secret_names(envs: Envs, _: CurrentActor) -> JSONResponse:
+    """The names of the environment's secrets, when and by whom each was set: never a value."""
+    return ok({"env": envs.env, "items": envs.secrets(), "next_cursor": None})
+
+
+@router.put("/secrets/{name}")
+def set_secret(request: Request, name: str, envs: Envs, actor: CurrentActor, body: NewSecret) -> JSONResponse:
+    """Set or replace a secret. The answer never holds the value, and no Idempotency-Key keeps the request."""
+    replaced = call(lambda: envs.set_secret(actor, name, body.value, reason=body.reason))
+    return ok({"name": name, "replaced": replaced})
+
+
+@router.delete("/secrets/{name}")
+def delete_secret(
+    request: Request, name: str, envs: Envs, actor: CurrentActor, key: IdempotencyKey = None
+) -> JSONResponse:
+    def remove() -> Any:
+        envs.delete_secret(actor, name)
+        return {"name": name, "deleted": True}
+
+    return _once(request, actor, key, remove)
+
+
+@router.post("/secrets:rotate-key")
+def rotate_key(envs: Envs, actor: CurrentActor, body: NewKey) -> JSONResponse:
+    """Seal every secret again under a new master key. Then set FEATHER_MASTER_KEY to it and restart the workers."""
+    new = call(lambda: MasterKey.parse(body.key))
+    count = call(lambda: envs.rotate_key(actor, new, reason=body.reason))
+    return ok({"secrets": count, "key_id": new.key_id})
+
+
+# Activating a package's flows (§6, the minimal step of task 5).
+
+
+class Activation(Reason):
+    version: str = Field(max_length=64)
+
+
+@router.post("/flows/{flow:path}:activate")
+def activate_flow(
+    request: Request,
+    flow: str,
+    installs: Installs,
+    actor: CurrentActor,
+    body: Activation,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    return _once(
+        request, actor, key, lambda: installs.activate(actor, flow, body.version, reason=body.reason)
+    )
+
+
+@router.post("/flows/{flow:path}:deactivate")
+def deactivate_flow(
+    request: Request,
+    flow: str,
+    installs: Installs,
+    actor: CurrentActor,
+    body: Reason | None = None,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    reason = (body or Reason()).reason
+    return _once(request, actor, key, lambda: installs.deactivate(actor, flow, reason=reason))
+
+
 # Budgets, connections and the summary.
 
 
@@ -880,8 +1078,17 @@ def budget_usage(name: str, reads: See, _: CurrentActor) -> JSONResponse:
 
 
 @router.get("/connections")
-def connections(reads: See, _: CurrentActor) -> JSONResponse:
-    return ok({"items": reads.connections(), "next_cursor": None})
+def connections(reads: See, envs: Envs, _: CurrentActor) -> JSONResponse:
+    """The connections the flows use, with their last check, and the environment's own, with their settings and
+    whether each secret is set (`environment`)."""
+    return ok(
+        {
+            "items": reads.connections(),
+            "environment": envs.connections(),
+            "env": envs.env,
+            "next_cursor": None,
+        }
+    )
 
 
 @router.post("/connections/{name}:check")
