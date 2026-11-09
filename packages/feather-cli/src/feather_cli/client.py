@@ -244,13 +244,13 @@ class ApiClient:
         return self._call("GET", "/secrets")["items"]
 
     def set_secret(self, name: str, value: str, reason: str | None) -> dict[str, Any]:
-        return self._call("PUT", f"/secrets/{quote(name, safe='')}", body={"value": value, "reason": reason})
+        return self._call("PUT", f"/secrets/{quote(name, safe='/')}", body={"value": value, "reason": reason})
 
     def delete_secret(self, name: str) -> dict[str, Any]:
-        return self._call("DELETE", f"/secrets/{quote(name, safe='')}")
+        return self._call("DELETE", f"/secrets/{quote(name, safe='/')}")
 
-    def rotate_key(self, key: str, reason: str | None) -> dict[str, Any]:
-        return self._call("POST", "/secrets:rotate-key", body={"key": key, "reason": reason})
+    def rotate_key(self, reason: str | None) -> dict[str, Any]:
+        return self._call("POST", "/secrets:rotate-key", body={"reason": reason})
 
     def activate_flow(self, flow: str, version: str, reason: str | None) -> dict[str, Any]:
         return self._call(

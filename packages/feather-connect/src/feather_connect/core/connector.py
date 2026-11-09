@@ -269,5 +269,20 @@ def secret_fields(spec: ConnectorSpec) -> frozenset[str]:
     if spec.config is None:
         return frozenset()
     return frozenset(
-        name for name, info in spec.config.model_fields.items() if "SecretStr" in repr(info.annotation)
+        name for name, info in spec.config.model_fields.items() if is_secret_type(info.annotation)
     )
+
+
+def is_secret_type(annotation: Any) -> bool:
+    """Whether a config field's type is a pydantic secret (`SecretStr`, `SecretBytes`, `Secret[...]`), alone or inside
+    `Optional`, a union or `Annotated`."""
+    import typing
+
+    from pydantic import Secret, SecretBytes, SecretStr
+
+    if isinstance(annotation, type) and issubclass(annotation, SecretStr | SecretBytes | Secret):
+        return True
+    origin = typing.get_origin(annotation)
+    if isinstance(origin, type) and issubclass(origin, Secret):
+        return True
+    return any(is_secret_type(arg) for arg in typing.get_args(annotation))

@@ -21,7 +21,6 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from feather_connect.storage.port import DeliveryStatus, EnvEntry, EnvKind, delivery_cursor
-from feather_connect.vault import MasterKey
 from feather_server.api.errors import ApiProblem, translate
 from feather_server.api.paging import check_limit, decode, page
 from feather_server.auth import Actor, CurrentActor, require_csrf
@@ -994,24 +993,20 @@ class NewSecret(Reason):
     value: str = Field(min_length=1, max_length=65536)
 
 
-class NewKey(Reason):
-    key: str = Field(min_length=1, max_length=200)  # the new master key, base64
-
-
 @router.get("/secrets")
 def secret_names(envs: Envs, _: CurrentActor) -> JSONResponse:
     """The names of the environment's secrets, when and by whom each was set: never a value."""
     return ok({"env": envs.env, "items": envs.secrets(), "next_cursor": None})
 
 
-@router.put("/secrets/{name}")
+@router.put("/secrets/{name:path}")
 def set_secret(request: Request, name: str, envs: Envs, actor: CurrentActor, body: NewSecret) -> JSONResponse:
     """Set or replace a secret. The answer never holds the value, and no Idempotency-Key keeps the request."""
     replaced = call(lambda: envs.set_secret(actor, name, body.value, reason=body.reason))
     return ok({"name": name, "replaced": replaced})
 
 
-@router.delete("/secrets/{name}")
+@router.delete("/secrets/{name:path}")
 def delete_secret(
     request: Request, name: str, envs: Envs, actor: CurrentActor, key: IdempotencyKey = None
 ) -> JSONResponse:
@@ -1023,11 +1018,10 @@ def delete_secret(
 
 
 @router.post("/secrets:rotate-key")
-def rotate_key(envs: Envs, actor: CurrentActor, body: NewKey) -> JSONResponse:
+def rotate_key(envs: Envs, actor: CurrentActor, body: Reason | None = None) -> JSONResponse:
     """Seal every secret again under a new master key. Then set FEATHER_MASTER_KEY to it and restart the workers."""
-    new = call(lambda: MasterKey.parse(body.key))
-    count = call(lambda: envs.rotate_key(actor, new, reason=body.reason))
-    return ok({"secrets": count, "key_id": new.key_id})
+    reason = (body or Reason()).reason
+    return ok(call(lambda: envs.rotate_key(actor, reason=reason)))
 
 
 # Activating a package's flows (§6, the minimal step of task 5).

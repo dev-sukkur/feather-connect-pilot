@@ -3,8 +3,9 @@ secrets, and activating a package's flows (flow packages §6 and §8). Each call
 needs an admin, and activating an operator.
 
 A connection's settings are plain values, shown and changed by name (`feather connection set zakya
-organization_id=60001`); a secret field is a reference under `auth` (`auth.client_secret='${secret:db:zakya-secret}'`)
-whose value is set with `feather secret set` and never shown again.
+organization_id=60001`); a secret field is a reference under `auth`,
+named for its connection and field (`auth.client_secret='${secret:db:zakya/client_secret}'`), whose value is set
+with `feather secret set zakya/client_secret` and never shown again.
 """
 
 import sys
@@ -240,9 +241,6 @@ def new_key(json_mode: Json = False) -> None:
 
 @secret_app.command("rotate-key")
 def rotate_key(
-    key_file: Annotated[
-        Path, typer.Option("--new-key-file", help="A file holding the new master key (base64).")
-    ],
     reason: Reason = None,
     project: ProjectDir = Path("."),
     env: Env = "dev",
@@ -250,15 +248,17 @@ def rotate_key(
     token: remote.Token = None,
     json_mode: Json = False,
 ) -> None:
-    """Seal every secret again under a new master key. Then set FEATHER_MASTER_KEY to it everywhere and restart."""
-    key = key_file.read_text(encoding="utf-8").strip()
+    """Seal every secret again under the server's current master key and make it the active one. First restart
+    every server and worker with the new key as FEATHER_MASTER_KEY and the old one as FEATHER_MASTER_KEY_PREVIOUS;
+    after this, drop the old key."""
     with remote.client(project, env, server, token, json_mode) as api:
-        done = remote.call(lambda: api.rotate_key(key, reason), json_mode)
+        done = remote.call(lambda: api.rotate_key(reason), json_mode)
     emit(
         done,
         json_mode=json_mode,
         human=lambda d: typer.echo(
-            f"sealed {d['secrets']} secrets with key {d['key_id']}: set FEATHER_MASTER_KEY to it and restart"
+            f"sealed {d['secrets']} secrets with key {d['key_id']}, now the active one: "
+            "drop FEATHER_MASTER_KEY_PREVIOUS once every process has restarted"
         ),
     )
 

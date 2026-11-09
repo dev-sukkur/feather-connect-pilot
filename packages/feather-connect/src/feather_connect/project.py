@@ -13,6 +13,7 @@ sits in a `Project`, in its repr or in an error message.
 
 import copy
 import importlib
+import logging
 import os
 import re
 import subprocess
@@ -22,6 +23,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -36,12 +38,19 @@ __all__ = [
     "DevProcess",
     "Project",
     "ProjectError",
+    "check_binding",
+    "check_environment",
+    "db_secret_name",
     "effective_config",
+    "environment_layer",
     "is_secret_ref",
     "load_project",
     "resolve_secret",
     "validate_project",
+    "webhook_secret_name",
 ]
+
+log = logging.getLogger(__name__)
 
 # The connectors an environment names to run a connection on simulation stand-ins (B2).
 SIMULATED = frozenset({"simulation.source", "simulation.sink"})
@@ -81,7 +90,10 @@ class ConnectionConfig:
     """The project directory, which a relative `file` secret's path is read against."""
 
     def resolve(self) -> dict[str, Any]:
-        """Return the settings with every credential resolved, as a connector's `Context.config` holds them."""
+        """Return the settings with every credential resolved, as a connector's `Context.config` holds them. A `db`
+        secret opens only for the connection and field it is named for, `<connection>/<field>`."""
+        for key, ref in self.secret_refs.items():
+            check_binding(ref, self.name, key)
         return {
             **self.options,
             **{key: resolve_secret(ref, self.root) for key, ref in self.secret_refs.items()},
@@ -134,6 +146,33 @@ def is_secret_ref(value: object) -> bool:
     return isinstance(value, str) and _SECRET.match(value) is not None
 
 
+def db_secret_name(connection: str, field: str) -> str:
+    """The name a connection's `db` secret must have: it opens for that connection and field only."""
+    return f"{connection}/{field}"
+
+
+def webhook_secret_name(package: str | None, webhook: str) -> str:
+    """The name a declared webhook's `db` secret must have."""
+    return f"{package}/webhooks/{webhook}" if package else f"webhooks/{webhook}"
+
+
+def check_binding(ref: str, connection: str, field: str) -> None:
+    """Refuse a `db` reference that isn't named for this connection's field, so that no connection can be pointed at
+    another's secret."""
+    match = _SECRET.match(ref)
+    if match is not None and match.group(1) == "db" and match.group(2) != db_secret_name(connection, field):
+        raise ProjectError(
+            f"connection {connection}: auth.{field} may refer only to ${{secret:db:{db_secret_name(connection, field)}}}"
+        )
+
+
+def _check_reserved(provider: str, path: str) -> None:
+    if provider == "env" and path.upper().startswith("FEATHER_"):
+        raise ProjectError(
+            "a secret may not be read from a FEATHER_ variable: those configure feather itself, such as its master key"
+        )
+
+
 def resolve_secret(ref: str, root: Path | None = None) -> str:
     """Return the value that the reference `${secret:env:NAME}` or `${secret:file:PATH}` points to.
 
@@ -146,6 +185,7 @@ def resolve_secret(ref: str, root: Path | None = None) -> str:
         raise ProjectError("not a secret reference: write it as ${secret:<provider>:<path>}")
     provider, path = match.groups()
     _check_provider(provider)
+    _check_reserved(provider, path)
     if provider == "db":
         if _db_secrets is None:
             raise ProjectError(
@@ -211,7 +251,7 @@ def load_project(
         _merge(config, layers, _read_yaml(label, path), label, "")
     if environment:
         _merge(config, layers, _strkeys(environment), _ENVIRONMENT_LAYER, "")
-    _check_secrets(config, layers)
+    _check_secrets(config, layers, package)
     name = _text(config, "name", layers)
     budgets = _budgets(config, layers)
     connections = _connections(config, layers, budgets, root)
@@ -325,9 +365,10 @@ def _text(config: Mapping[str, Any], key: str, layers: Mapping[str, str]) -> str
 # Secrets.
 
 
-def _check_secrets(config: Mapping[str, Any], layers: Mapping[str, str]) -> None:
+def _check_secrets(config: Mapping[str, Any], layers: Mapping[str, str], package: str | None = None) -> None:
     """Allow secret references under a connection's `auth` only, and only with a provider that exists. Require
-    that everything under `auth` is a reference, so that no credential is committed as plain text."""
+    that everything under `auth` is a reference, so that no credential is committed as plain text. A `db` secret must
+    be named for its connection and field (or its webhook), and no secret is read from a `FEATHER_` variable."""
     for path, value in _leaves(config, ""):
         parts = path.split(".")
         under_auth = parts[0] == "connections" and len(parts) > 3 and parts[2] == "auth"
@@ -345,6 +386,13 @@ def _check_secrets(config: Mapping[str, Any], layers: Mapping[str, str]) -> None
             assert match is not None
             try:
                 _check_provider(match.group(1))
+                _check_reserved(match.group(1), match.group(2))
+                if parts[0] == "connections":
+                    check_binding(str(value), parts[1], parts[3])
+                elif match.group(1) == "db" and match.group(2) != webhook_secret_name(package, parts[1]):
+                    raise ProjectError(
+                        f"a webhook's db secret is ${{secret:db:{webhook_secret_name(package, parts[1])}}}"
+                    )
             except ProjectError as error:
                 raise ProjectError(f"{_where(layers, path)}: {error}") from None
 
@@ -763,11 +811,55 @@ def prefixed(flows: Sequence[Flow], package: str) -> tuple[Flow, ...]:
     return tuple(found)
 
 
+_PLURAL = {"connection": "connections", "budget": "budgets", "setting": "settings"}
+
+
+def check_environment(environment: Mapping[str, Any]) -> None:
+    """Check the environment's own configuration as `load_project` reads it, so that an entry accepted into the
+    database can't stop a server or worker from starting. Raises `ProjectError`. A connection's budget must be one of
+    the environment's own."""
+    config: dict[str, Any] = {}
+    layers: dict[str, str] = {}
+    _merge(config, layers, DEFAULTS, _DEFAULTS_LAYER, "")
+    _merge(config, layers, _strkeys(environment), _ENVIRONMENT_LAYER, "")
+    _check_secrets(config, layers)
+    budgets = _budgets(config, layers)
+    _connections(config, layers, budgets, Path("."))
+    timezone = _mapping(config, "settings", layers).get("timezone")
+    try:
+        ZoneInfo(str(timezone))
+    except (ValueError, ZoneInfoNotFoundError):
+        raise ProjectError(
+            f"{_where(layers, 'settings.timezone')}: {timezone!r} is not a time zone"
+        ) from None
+
+
+def _entry_value(kind: str, value: Any) -> Any:
+    """An entry's value as configuration: a connection's own bookkeeping (keys starting `_`) left out."""
+    if kind == "connection" and isinstance(value, dict):
+        return {
+            k: copy.deepcopy(v) for k, v in cast(dict[str, Any], value).items() if not str(k).startswith("_")
+        }
+    return copy.deepcopy(value)
+
+
 def environment_layer(entries: Iterable[Any]) -> dict[str, Any]:
     """The configuration layer of an environment's own entries (`EnvEntry` rows): its connections, budgets and
-    settings, by name."""
+    settings, by name. An entry that doesn't pass `check_environment` is left out with a warning, so that one bad row
+    never stops a server or worker from starting."""
+    rows = list(entries)
     layer: dict[str, Any] = {}
-    plural = {"connection": "connections", "budget": "budgets", "setting": "settings"}
-    for entry in entries:
-        layer.setdefault(plural[entry.kind], {})[entry.name] = copy.deepcopy(entry.value)
+    for kind in ("budget", "setting", "connection"):  # a connection is checked against the budgets kept
+        for entry in (e for e in rows if e.kind == kind):
+            value = _entry_value(kind, entry.value)
+            candidate = {k: dict(v) for k, v in layer.items()}
+            candidate.setdefault(_PLURAL[kind], {})[entry.name] = value
+            try:
+                check_environment(
+                    {"budgets": candidate.get("budgets", {}), _PLURAL[kind]: {entry.name: value}}
+                )
+            except ProjectError as error:
+                log.warning("the environment's %s %s is left out: %s", kind, entry.name, error)
+                continue
+            layer = candidate
     return layer

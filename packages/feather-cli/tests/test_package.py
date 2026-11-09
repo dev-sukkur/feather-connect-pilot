@@ -55,11 +55,18 @@ def server():
     store, spool, engine = MemoryStore(clock), MemorySpool(clock), LocalEngine(clock)
     runtime = Runtime([], store, spool, engine, code_sha="sha", clock=clock)
     project = Project("p", Path("."), "dev", (), {}, {}, {"timezone": "UTC"}, "sha")
-    from feather_connect.vault import MasterKey, new_master_key
+    from feather_connect.vault import MasterKey, Vault, new_master_key
 
     key = MasterKey.parse(new_master_key())
     state = AppState(
-        Settings(secret_key="k"), project, store, spool, engine, runtime, clock=clock, master_key=key
+        Settings(secret_key="k"),
+        project,
+        store,
+        spool,
+        engine,
+        runtime,
+        clock=clock,
+        vault=Vault(store.secrets, "dev", key),
     )
     tokens = {
         role: issue_token(store, role, timedelta(days=1), role="admin" if role == "admin" else "operator",
@@ -206,7 +213,7 @@ def test_connections_and_secrets_of_the_environment(cli, server, tmp_path: Path)
                 connector: zakya
                 organization_id: 60001
                 client_id: abc
-                auth: {client_secret: '${secret:db:zakya-secret}'}
+                auth: {client_secret: '${secret:env:ZAKYA_SECRET}'}  # an M1 reference: imported as a db one
             budgets:
               zakya-api: {limits: [100/minute]}
             settings:
@@ -221,7 +228,7 @@ def test_connections_and_secrets_of_the_environment(cli, server, tmp_path: Path)
     assert "3 entries in environment dev" in imported.stdout
     shown = cli("connection", "show", "zakya", *operator)
     assert "organization_id: 60001" in shown.stdout and "client_secret (secret): not set" in shown.stdout
-    assert cli("secret", "set", "zakya-secret", *admin, input="s3cr3t-value" + chr(10)).exit_code == 0
+    assert cli("secret", "set", "zakya/client_secret", *admin, input="s3cr3t-value" + chr(10)).exit_code == 0
     shown = cli("connection", "show", "zakya", *operator).stdout
     assert "client_secret (secret): set, updated" in shown and "s3cr3t" not in shown
     changed = cli("connection", "set", "zakya", "organization_id=60002", "client_id=", *admin, "--json")
@@ -231,11 +238,10 @@ def test_connections_and_secrets_of_the_environment(cli, server, tmp_path: Path)
     plain = cli("connection", "set", "zakya", "client_secret=oops", *admin)
     assert plain.exit_code == 1 and "is secret" in plain.stderr and "oops" not in plain.stderr
     listed = cli("secret", "list", *operator)
-    assert "zakya-secret: updated" in listed.stdout and "s3cr3t" not in listed.stdout
+    assert "zakya/client_secret: updated" in listed.stdout and "s3cr3t" not in listed.stdout
     assert "zakya" in cli("connection", "list", *operator).stdout
-    key = tmp_path / "new.key"
-    key.write_text(json.loads(cli("secret", "new-key", "--json").stdout)["key"], encoding="utf-8")
-    rotated = cli("secret", "rotate-key", "--new-key-file", str(key), *admin)
+    assert len(json.loads(cli("secret", "new-key", "--json").stdout)["key"]) == 44  # 32 bytes, base64
+    rotated = cli("secret", "rotate-key", "--reason", "yearly", *admin)
     assert rotated.exit_code == 0 and "sealed 1 secrets" in rotated.stdout
-    assert cli("secret", "delete", "zakya-secret", *admin).exit_code == 0
+    assert cli("secret", "delete", "zakya/client_secret", *admin).exit_code == 0
     assert "no secret is set" in cli("secret", "list", *operator).stdout

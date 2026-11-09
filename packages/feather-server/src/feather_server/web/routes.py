@@ -24,7 +24,7 @@ from feather_connect.storage.port import (
     delivery_cursor,
     failure_cursor,
 )
-from feather_connect.vault import VaultError
+from feather_connect.vault import KeyConflict, VaultError
 from feather_server.api.errors import ApiProblem
 from feather_server.api.paging import decode, encode
 from feather_server.auth import Actor, CurrentActor, csrf_token, current_actor, require_csrf
@@ -32,7 +32,7 @@ from feather_server.services import actions as action_limits
 from feather_server.services.access import Forbidden
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
-from feather_server.services.environment import Environment
+from feather_server.services.environment import Environment, coerce_setting
 from feather_server.services.previews import Preview, PreviewError, PreviewExpired, PreviewInvalid
 from feather_server.services.reads import FlowSummary, Reads
 from feather_server.services.task_records import NoRecords, TaskRecordReader
@@ -1156,7 +1156,12 @@ async def set_connection_setting(request: Request, actor: CurrentActor, name: st
     key, value, reason = (str(form.get(f) or "").strip() for f in ("key", "value", "reason"))
     environment: Environment = request.app.state.environment
     try:
-        environment.update(actor, name, {key: value or None}, reason=reason or None)
+        current = environment.entry("connection", name).value
+        connector = str(current.get("connector") or "") if isinstance(current, dict) else ""
+        typed = (
+            None if not value else value if key.startswith("auth.") else coerce_setting(connector, key, value)
+        )
+        environment.update(actor, name, {key: typed}, reason=reason or None)
     except Forbidden as error:
         return _connections_page(request, actor, status=403, notice=("bad", str(error)))
     except (KeyError, ValueError) as error:
@@ -1164,7 +1169,7 @@ async def set_connection_setting(request: Request, actor: CurrentActor, name: st
     return RedirectResponse(f"/connections#env-{quote(name, safe='')}", status_code=303)
 
 
-@router.post("/secrets/{name}", dependencies=[Depends(require_csrf)])
+@router.post("/secrets/{name:path}", dependencies=[Depends(require_csrf)])
 async def replace_secret(request: Request, actor: CurrentActor, name: str) -> Response:
     form = await request.form()
     value, back = str(form.get("value") or ""), str(form.get("back") or "/connections")
@@ -1173,6 +1178,8 @@ async def replace_secret(request: Request, actor: CurrentActor, name: str) -> Re
         environment.set_secret(actor, name, value)
     except Forbidden as error:
         return _connections_page(request, actor, status=403, notice=("bad", str(error)))
+    except KeyConflict as error:
+        return _connections_page(request, actor, status=409, notice=("bad", str(error)))
     except (VaultError, ValueError) as error:
         return _connections_page(request, actor, status=422, notice=("bad", str(error)))
     return RedirectResponse(back if back.startswith("/connections") else "/connections", status_code=303)
