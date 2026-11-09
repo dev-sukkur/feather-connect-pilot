@@ -172,13 +172,18 @@ class _HttpConnector:
             problems = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in error.errors())
             raise PermanentError(f"connection {self.connection!r} is not set up right: {problems}") from None
 
+    def _retry_after_of(self, ctx: Context) -> Callable[[httpx.Response], float | None] | None:
+        """How long a failed answer with no `Retry-After` asks to wait, for an API that says so in its body. A
+        connector built on these overrides it; None reads nothing."""
+        return None
+
     def client(self, ctx: Context) -> FeatherHttp:
         """Return the client for the context's settings, the same one while they stay the same."""
         config = self._config(ctx)
         plain = {k: v.get_secret_value() if isinstance(v, Secret) else v for k, v in config}
-        plain["(tenant)"] = (
-            ctx.tenant
-        )  # a client, and its token, is never shared across tenants (ADR-0013 rule 7)
+        # A client, and its token, is never shared across tenants (ADR-0013 rule 7); the time zone is the one a wait
+        # read from an answer may be counted in.
+        plain["(tenant)"], plain["(tz)"] = ctx.tenant, ctx.tz
         digest = hashlib.sha256(json.dumps(plain, sort_keys=True, default=str).encode()).hexdigest()
         with self._lock:
             found = self._clients.get(digest)
@@ -199,6 +204,7 @@ class _HttpConnector:
                     headers=config.headers,
                     sleep=self.sleep,
                     transport=self.transport,
+                    retry_after_of=self._retry_after_of(ctx),
                 )
                 # Settings that changed leave the old client to the calls still using it, and close it at the next
                 # change, by when they are done with it.
