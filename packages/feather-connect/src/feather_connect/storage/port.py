@@ -1258,6 +1258,85 @@ class RegistryStore(Protocol):
         ...
 
 
+PackageState = Literal["installed", "preparing", "ready", "failed", "uninstalled"]
+ActivationState = Literal["inactive", "activating", "active", "deactivating", "failed"]
+MAX_PACKAGE_ROWS = 500  # the most rows a package listing returns
+
+
+@dataclass(frozen=True)
+class PackageVersion:
+    """An installed version of a flow package (flow packages §5, §9). `name` is the package's normalised name, and
+    `sha256` names its wheel, which the store keeps once per sha256. `load_check` is what the install's load check
+    found: the flows, datasets and routes the code defines, and how long it took."""
+
+    name: str
+    version: str
+    sha256: str
+    registry: str
+    filename: str
+    size: int
+    manifest: Mapping[str, Any]
+    fc_versions: str
+    lock_hash: str
+    state: PackageState
+    load_check: Mapping[str, Any]
+    installed_by: str
+    installed_at: datetime
+
+
+@dataclass(frozen=True)
+class FlowActivation:
+    """Whether a flow of an installed package version is in service here (flow packages §6). `flow` carries the
+    package prefix, `acme-invoices/invoices`."""
+
+    flow: str
+    package: str
+    version: str
+    state: ActivationState
+    changed_by: str
+    changed_at: datetime
+    reason: str | None = None
+    error: str | None = None
+
+
+class DuplicateVersion(Exception):
+    """That version of the package is installed already, by `version_key`: a version always means the same code."""
+
+
+class PackageStore(Protocol):
+    """The installed flow packages of one tenant: their versions, wheels and flows' activations."""
+
+    def install(
+        self, version: PackageVersion, content: bytes, flows: Sequence[str], reason: str | None = None
+    ) -> None:
+        """Record the version as installed in one transaction: the package if it is new, the wheel by its sha256 if
+        the store hasn't it, the version, and each of `flows` (prefixed names) inactive. Raises `DuplicateVersion`
+        when the package has the version, by `version_key`, and changes nothing then."""
+        ...
+
+    def packages(self) -> list[str]:
+        """The installed packages' names, in code point order, at most `MAX_PACKAGE_ROWS`."""
+        ...
+
+    def versions(self, name: str | None = None) -> list[PackageVersion]:
+        """The installed versions, of one package or of all, by name and then oldest install first, at most
+        `MAX_PACKAGE_ROWS`."""
+        ...
+
+    def version(self, name: str, version: str) -> PackageVersion | None:
+        """The version, matched by `version_key`, or None."""
+        ...
+
+    def wheel(self, sha256: str) -> bytes | None:
+        """The wheel's bytes, or None when the store has no wheel of that sha256."""
+        ...
+
+    def activations(self, name: str, version: str | None = None) -> list[FlowActivation]:
+        """The flows of the package's versions, or of one, by flow and then as they changed, at most
+        `MAX_PACKAGE_ROWS`."""
+        ...
+
+
 @dataclass(frozen=True)
 class AuditRow:
     audit_id: str
@@ -1314,6 +1393,7 @@ class Store:
     inbox: InboxStore
     responses: ResponseStore
     registry: RegistryStore
+    packages: PackageStore
 
     def is_unavailable(self, error: BaseException) -> bool:
         """Whether `error` says that the store can't be reached, or can't keep up, just now, so that the same call may

@@ -26,8 +26,10 @@ from feather_connect.storage.port import (
     DuplicateFile,
     DuplicateRegistry,
     DuplicateUser,
+    DuplicateVersion,
     InboxDay,
     InvalidTransition,
+    PackageVersion,
     RegistryFile,
     ResponseRow,
     Role,
@@ -1483,6 +1485,66 @@ class StoreContract(
         (found,) = store.registry.files("acme-invoices")
         assert (found.yanked_at, found.yanked_reason) == (T0 + timedelta(hours=1), "broken totals")
         assert store.registry.content(found.filename) == b"one"  # yanked, not deleted
+
+    # installed packages
+
+    @staticmethod
+    def _installed(name: str, version: str, sha: str = "a" * 64, at: datetime = T0) -> PackageVersion:
+        manifest = {"name": name, "version": version, "flows": [{"name": "invoices"}]}
+        return PackageVersion(
+            name,
+            version,
+            sha,
+            "feather",
+            f"{name.replace('-', '_')}-{version}-py3-none-any.whl",
+            5,
+            manifest,
+            ">=0.1,<1",
+            "b" * 64,
+            "installed",
+            {"flows": ["invoices"], "seconds": 1.5},
+            "root",
+            at,
+        )
+
+    def test_an_installed_version_reads_back_with_its_wheel_and_inactive_flows(self, store: Store):
+        first = self._installed("acme-invoices", "1.0.0")
+        store.packages.install(first, b"wheel", ["acme-invoices/invoices", "acme-invoices/orders"], "go")
+        later = self._installed("acme-invoices", "1.1.0", "c" * 64, T0 + timedelta(minutes=1))
+        store.packages.install(later, b"newer", ["acme-invoices/invoices"])
+        store.packages.install(self._installed("zed", "0.1", at=T0 + timedelta(minutes=2)), b"wheel", [])
+        assert store.packages.packages() == ["acme-invoices", "zed"]
+        assert store.packages.version("acme-invoices", "1.0.0") == first
+        assert store.packages.version("acme-invoices", "1.0") == first  # by version_key
+        assert store.packages.version("acme-invoices", "2.0.0") is None
+        assert [v.version for v in store.packages.versions("acme-invoices")] == ["1.0.0", "1.1.0"]
+        assert [v.name for v in store.packages.versions()] == ["acme-invoices", "acme-invoices", "zed"]
+        assert store.packages.wheel("a" * 64) == b"wheel"  # once by sha256, though zed has the same bytes
+        assert store.packages.wheel("c" * 64) == b"newer" and store.packages.wheel("d" * 64) is None
+        flows = store.packages.activations("acme-invoices", "1.0.0")
+        assert [(a.flow, a.state, a.version, a.reason) for a in flows] == [
+            ("acme-invoices/invoices", "inactive", "1.0.0", "go"),
+            ("acme-invoices/orders", "inactive", "1.0.0", "go"),
+        ]
+        assert [(a.flow, a.version) for a in store.packages.activations("acme-invoices")] == [
+            ("acme-invoices/invoices", "1.0.0"),
+            ("acme-invoices/invoices", "1.1.0"),
+            ("acme-invoices/orders", "1.0.0"),
+        ]
+        assert flows[0].changed_by == "root" and flows[0].changed_at == T0
+
+    def test_a_version_installed_before_is_refused_and_changes_nothing(self, store: Store):
+        first = self._installed("acme-invoices", "1.0.0")
+        store.packages.install(first, b"wheel", ["acme-invoices/invoices"])
+        for again in (
+            first,
+            replace(first, version="1.0", sha256="e" * 64),
+        ):  # 1.0 is 1.0.0 to every installer
+            with pytest.raises(DuplicateVersion):
+                store.packages.install(again, b"other", ["acme-invoices/other"])
+        assert store.packages.version("acme-invoices", "1.0.0") == first
+        assert store.packages.wheel("e" * 64) is None
+        assert [a.flow for a in store.packages.activations("acme-invoices")] == ["acme-invoices/invoices"]
 
     def test_registries_are_added_listed_and_removed(self, store: Store):
         store.registry.add_registry("zeta", "https://z.example.com/simple/", None, "root")

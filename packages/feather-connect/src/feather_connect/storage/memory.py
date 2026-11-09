@@ -16,6 +16,7 @@ from feather_connect.core.connector import InboundRequest
 from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
+    MAX_PACKAGE_ROWS,
     STREAM_TRIGGER,
     Attempt,
     AuditRow,
@@ -28,7 +29,9 @@ from feather_connect.storage.port import (
     DuplicateFile,
     DuplicateRegistry,
     DuplicateUser,
+    DuplicateVersion,
     FailureGroup,
+    FlowActivation,
     FlowRow,
     Grant,
     InboxDay,
@@ -38,6 +41,8 @@ from feather_connect.storage.port import (
     Ledger,
     Override,
     OverrideStore,
+    PackageStore,
+    PackageVersion,
     PartitionRow,
     Priority,
     QuarantineRow,
@@ -120,6 +125,14 @@ class _Data:
         default_factory=dict[str, tuple[RegistryFile, bytes]]
     )  # by filename, in upload order
     registries: dict[str, RegistryRow] = field(default_factory=dict[str, RegistryRow])
+    packages: dict[str, datetime] = field(default_factory=dict[str, datetime])  # name: created at
+    package_versions: dict[tuple[str, str], PackageVersion] = field(
+        default_factory=dict[tuple[str, str], PackageVersion]
+    )  # by (name, version_key), in install order
+    wheels: dict[str, bytes] = field(default_factory=dict[str, bytes])  # by sha256
+    activations: dict[tuple[str, str, str], FlowActivation] = field(
+        default_factory=dict[tuple[str, str, str], FlowActivation]
+    )  # by (flow, package, version_key)
     audit: list[AuditRow] = field(default_factory=list[AuditRow])
     # The key index, by (dataset, key): (version, partition, op, row hash, chunk), in seal order.
     keys: dict[tuple[str, str], list[tuple[str, str, str, int, int]]] = field(
@@ -1304,6 +1317,61 @@ class _Registry(RegistryStore):
             return self._d.registries.pop(name, None) is not None
 
 
+class _Packages(PackageStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def install(
+        self, version: PackageVersion, content: bytes, flows: Sequence[str], reason: str | None = None
+    ) -> None:
+        key = (version.name, version_key(version.version))
+        with self._d.lock:
+            if key in self._d.package_versions:
+                raise DuplicateVersion(f"{version.name} {version.version}")
+            self._d.packages.setdefault(version.name, version.installed_at)
+            self._d.wheels.setdefault(version.sha256, bytes(content))
+            self._d.package_versions[key] = version
+            for flow in flows:
+                self._d.activations[(flow, version.name, key[1])] = FlowActivation(
+                    flow,
+                    version.name,
+                    version.version,
+                    "inactive",
+                    version.installed_by,
+                    version.installed_at,
+                    reason,
+                )
+
+    def packages(self) -> list[str]:
+        with self._d.lock:
+            return sorted(self._d.packages)[:MAX_PACKAGE_ROWS]
+
+    def versions(self, name: str | None = None) -> list[PackageVersion]:
+        with self._d.lock:
+            found = [v for v in self._d.package_versions.values() if name is None or v.name == name]
+        found.sort(key=lambda v: (v.name, v.installed_at))
+        return found[:MAX_PACKAGE_ROWS]
+
+    def version(self, name: str, version: str) -> PackageVersion | None:
+        with self._d.lock:
+            return self._d.package_versions.get((name, version_key(version)))
+
+    def wheel(self, sha256: str) -> bytes | None:
+        with self._d.lock:
+            return self._d.wheels.get(sha256)
+
+    def activations(self, name: str, version: str | None = None) -> list[FlowActivation]:
+        wanted = None if version is None else version_key(version)
+        with self._d.lock:
+            found = [
+                a
+                for (_, package, key), a in self._d.activations.items()
+                if package == name and (wanted is None or key == wanted)
+            ]
+        found.sort(key=lambda a: (a.flow, a.changed_at, a.version))
+        return found[:MAX_PACKAGE_ROWS]
+
+
 class _Audit(AuditStore):
     def __init__(self, data: _Data) -> None:
         self._d = data
@@ -1596,4 +1664,5 @@ class MemoryStore(Store):
             inbox=_Inbox(data, versions),
             responses=_Responses(data),
             registry=_Registry(data),
+            packages=_Packages(data),
         )

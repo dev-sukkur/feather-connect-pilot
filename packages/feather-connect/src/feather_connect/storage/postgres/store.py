@@ -23,6 +23,7 @@ from feather_connect.core.connector import InboundRequest
 from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
+    MAX_PACKAGE_ROWS,
     SHARED_TENANT,
     STREAM_TRIGGER,
     Attempt,
@@ -36,7 +37,9 @@ from feather_connect.storage.port import (
     DuplicateFile,
     DuplicateRegistry,
     DuplicateUser,
+    DuplicateVersion,
     FailureGroup,
+    FlowActivation,
     FlowRow,
     Grant,
     InboxDay,
@@ -46,6 +49,8 @@ from feather_connect.storage.port import (
     Ledger,
     Override,
     OverrideStore,
+    PackageStore,
+    PackageVersion,
     PartitionRow,
     Priority,
     QuarantineRow,
@@ -2177,6 +2182,148 @@ class _Registry(RegistryStore):
         return gone.rowcount > 0
 
 
+class _Packages(PackageStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    _COLUMNS = """name, version, sha256, registry, filename, size, manifest, fc_versions, lock_hash, state, load_check,
+                  installed_by, installed_at"""
+
+    @staticmethod
+    def _version(row: Mapping[str, Any]) -> PackageVersion:
+        return PackageVersion(
+            row["name"],
+            row["version"],
+            row["sha256"],
+            row["registry"],
+            row["filename"],
+            row["size"],
+            row["manifest"],
+            row["fc_versions"],
+            row["lock_hash"],
+            row["state"],
+            row["load_check"],
+            row["installed_by"],
+            row["installed_at"],
+        )
+
+    def install(
+        self, version: PackageVersion, content: bytes, flows: Sequence[str], reason: str | None = None
+    ) -> None:
+        tenant, key = self._db.tenant, version_key(version.version)
+        try:
+            with self._db.tx() as conn:
+                conn.execute(
+                    """insert into feather.package (tenant_id, name, created_at) values (%s, %s, %s)
+                       on conflict (tenant_id, name) do nothing""",
+                    (tenant, version.name, version.installed_at),
+                )
+                conn.execute(
+                    """insert into feather.package_wheel (tenant_id, sha256, size, content, stored_at)
+                       values (%s, %s, %s, %s, %s) on conflict (tenant_id, sha256) do nothing""",
+                    (tenant, version.sha256, len(content), content, version.installed_at),
+                )
+                conn.execute(
+                    f"""insert into feather.package_version (tenant_id, version_key, {self._COLUMNS})
+                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        tenant,
+                        key,
+                        version.name,
+                        version.version,
+                        version.sha256,
+                        version.registry,
+                        version.filename,
+                        version.size,
+                        _json(dict(version.manifest)),
+                        version.fc_versions,
+                        version.lock_hash,
+                        version.state,
+                        _json(dict(version.load_check)),
+                        version.installed_by,
+                        version.installed_at,
+                    ),
+                )
+                for flow in flows:
+                    conn.execute(
+                        """insert into feather.flow_activation (tenant_id, flow, package, version_key, version, state,
+                               changed_by, changed_at, reason)
+                           values (%s, %s, %s, %s, %s, 'inactive', %s, %s, %s)""",
+                        (
+                            tenant,
+                            flow,
+                            version.name,
+                            key,
+                            version.version,
+                            version.installed_by,
+                            version.installed_at,
+                            reason,
+                        ),
+                    )
+        except psycopg.errors.UniqueViolation:
+            raise DuplicateVersion(f"{version.name} {version.version}") from None
+
+    def packages(self) -> list[str]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select name collate "C" as name from feather.package where tenant_id = %s
+                   order by 1 limit %s""",
+                (self._db.tenant, MAX_PACKAGE_ROWS),
+            ).fetchall()
+        return [row["name"] for row in rows]
+
+    def versions(self, name: str | None = None) -> list[PackageVersion]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                f"""select {self._COLUMNS} from feather.package_version
+                    where tenant_id = %s and (%s::text is null or name = %s)
+                    order by name collate "C", installed_at limit %s""",
+                (self._db.tenant, name, name, MAX_PACKAGE_ROWS),
+            ).fetchall()
+        return [self._version(row) for row in rows]
+
+    def version(self, name: str, version: str) -> PackageVersion | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                f"""select {self._COLUMNS} from feather.package_version
+                    where tenant_id = %s and name = %s and version_key = %s""",
+                (self._db.tenant, name, version_key(version)),
+            ).fetchone()
+        return None if row is None else self._version(row)
+
+    def wheel(self, sha256: str) -> bytes | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                "select content from feather.package_wheel where tenant_id = %s and sha256 = %s",
+                (self._db.tenant, sha256),
+            ).fetchone()
+        return None if row is None else bytes(row["content"])
+
+    def activations(self, name: str, version: str | None = None) -> list[FlowActivation]:
+        key = None if version is None else version_key(version)
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select flow, package, version, state, changed_by, changed_at, reason, error
+                   from feather.flow_activation
+                   where tenant_id = %s and package = %s and (%s::text is null or version_key = %s)
+                   order by flow collate "C", changed_at, version collate "C" limit %s""",
+                (self._db.tenant, name, key, key, MAX_PACKAGE_ROWS),
+            ).fetchall()
+        return [
+            FlowActivation(
+                r["flow"],
+                r["package"],
+                r["version"],
+                r["state"],
+                r["changed_by"],
+                r["changed_at"],
+                r["reason"],
+                r["error"],
+            )
+            for r in rows
+        ]
+
+
 class _Audit(AuditStore):
     def __init__(self, db: _Db) -> None:
         self._db = db
@@ -2604,6 +2751,7 @@ class PostgresStore(Store):
             inbox=_Inbox(db, versions),
             responses=_Responses(db),
             registry=_Registry(db),
+            packages=_Packages(db),
         )
         object.__setattr__(self, "_pool", pool)  # `Store` is frozen
 
