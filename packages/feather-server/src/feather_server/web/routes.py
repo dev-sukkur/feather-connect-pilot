@@ -634,10 +634,11 @@ def _grid_page(
     rows = [r for r in grid.rows if _matches(q, r.label, r.partition)]
     cells = [c.status for r in grid.rows for c in r.cells]
     failed = sum(1 for c in cells if c == "failed")
+    applied = sum(1 for c in cells if c == "applied")
     tiles = [
         Tile("Partitions on this page", len(grid.rows)),
         Tile("Routes", len(grid.routes)),
-        Tile("Applied", sum(1 for c in cells if c == "applied"), "ok"),
+        Tile("Applied", applied, "ok" if applied else ""),
         Tile("Failed", failed, "bad" if failed else ""),
     ]
     return render(
@@ -1185,7 +1186,7 @@ def _deliveries_page(
     counts = {s: sum(1 for d in found if d.status == s) for s in ("applied", "failed", "held")}
     tiles = [
         Tile("On this page", len(found)),
-        Tile("Applied", counts["applied"], "ok"),
+        Tile("Applied", counts["applied"], "ok" if counts["applied"] else ""),
         Tile("Failed", counts["failed"], "bad" if counts["failed"] else ""),
         Tile("Held", counts["held"], "warn" if counts["held"] else ""),
     ]
@@ -1482,9 +1483,10 @@ def _connections_page(
     found = reads(request).connections()
     shown = [c for c in found if _matches(q, c.name, c.connector, c.site, *c.flows)]
     failing = sum(1 for c in found if c.last_check_ok is False)
+    checked = sum(1 for c in found if c.last_check_ok)
     tiles = [
         Tile("Connections", len(found)),
-        Tile("Checked OK", sum(1 for c in found if c.last_check_ok), "ok"),
+        Tile("Checked OK", checked, "ok" if checked else ""),
         Tile("Check failed", failing, "bad" if failing else ""),
         Tile("Not checked yet", sum(1 for c in found if c.last_check_at is None)),
     ]
