@@ -6,6 +6,8 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote, urlencode
@@ -29,28 +31,63 @@ from feather_server.api.errors import ApiProblem
 from feather_server.api.paging import decode, encode
 from feather_server.auth import Actor, CurrentActor, csrf_token, current_actor, require_csrf
 from feather_server.services import actions as action_limits
-from feather_server.services.access import Forbidden
+from feather_server.services.access import Capability, Forbidden, can
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.environment import Environment, coerce_setting
 from feather_server.services.previews import Preview, PreviewError, PreviewExpired, PreviewInvalid
-from feather_server.services.reads import FlowSummary, Reads
+from feather_server.services.reads import COUNT_CAP, FlowSummary, Reads
 from feather_server.services.task_records import NoRecords, TaskRecordReader
 from feather_server.services.text import span
 from feather_server.services.trace import Tracer
 from feather_server.web.charts import meter, sparkline
 from feather_server.web.flow_graph import flow_graph
+from feather_server.web.icons import icon
 
 TEMPLATES = Path(__file__).parent / "templates"
-NAV: list[tuple[str, str]] = [
-    ("Overview", "/"),
-    ("Flows", "/flows"),
-    ("Runs", "/runs"),
-    ("Failures", "/failures"),
-    ("Quarantine", "/quarantine"),
-    ("Connections", "/connections"),
-    ("Trace a record", "/trace"),
-]  # (label, path): a page that exists adds itself here
+
+
+@dataclass(frozen=True)
+class NavItem:
+    """A page of the sidebar: its label, address and icon, the addresses under it that mark it current, and the
+    capability it needs to be shown (None: everyone's)."""
+
+    label: str
+    path: str
+    icon: str
+    under: tuple[str, ...] = ()
+    needs: Capability | None = None
+
+    def current(self, path: str) -> bool:
+        if self.path == "/":
+            return path == "/"
+        return any(path == p or path.startswith(p + "/") for p in (self.path, *self.under))
+
+
+NAV: list[NavItem] = [
+    NavItem("Overview", "/", "overview"),
+    NavItem("Flows", "/flows", "flows"),
+    NavItem("Runs", "/runs", "runs", ("/tasks",)),
+    NavItem("Datasets", "/datasets", "datasets", ("/versions",)),
+    NavItem("Deliveries", "/deliveries", "deliveries", ("/routes",)),
+    NavItem("Failures", "/failures", "failures"),
+    NavItem("Quarantine", "/quarantine", "quarantine"),
+    NavItem("Connections", "/connections", "connections"),
+    NavItem("Secrets", "/secrets", "secrets"),
+    NavItem("Users", "/users", "users", needs="users.manage"),
+    NavItem("Trace a record", "/trace", "trace"),
+    # P5 adds Packages and Registries here, with the "packages" icon.
+]  # a page that exists adds itself here
+
+
+def _version() -> str:
+    try:
+        return package_version("feather-server")
+    except PackageNotFoundError:  # run from a source tree that was never installed
+        return "dev"
+
+
+VERSION = _version()
 _RECENT_RUNS = 8
 _FAILURE_GROUPS = 10
 
@@ -83,8 +120,50 @@ def pretty(value: Any) -> str:
     return json.dumps(value, indent=2, sort_keys=True, default=str, ensure_ascii=False)
 
 
+_STATUSES: dict[str, tuple[str, str, str]] = {  # status: (icon, word, tone)
+    "succeeded": ("✓", "Succeeded", "ok"),
+    "applied": ("✓", "Applied", "ok"),
+    "alive": ("●", "Alive", "ok"),
+    "failed": ("✕", "Failed", "bad"),
+    "dead": ("✕", "Dead", "bad"),
+    "rejected": ("✕", "Rejected", "bad"),
+    "running": ("▶", "Running", "info"),
+    "claimed": ("▶", "Applying", "info"),
+    "draining": ("◐", "Draining", "warn"),
+    "queued": ("…", "Queued", "idle"),
+    "pending": ("…", "Pending", "idle"),
+    "held": ("⏸", "Held", "warn"),
+    "paused": ("⏸", "Paused", "warn"),
+    "open": ("!", "Open", "warn"),
+    "skipped": ("⤼", "Skipped", "idle"),
+    "cancelled": ("⊘", "Cancelled", "idle"),
+    "superseded": ("⤼", "Superseded", "idle"),
+    "sealed": ("✓", "Sealed", "ok"),
+    "staged": ("…", "Staged", "idle"),
+    "never": ("○", "Never run", "idle"),
+    "disabled": ("⊘", "Disabled", "idle"),
+    "active": ("●", "Active", "ok"),
+}
+
+
+def status_info(status: str) -> tuple[str, str, str, str]:
+    """A status's icon, word and tone, and the class name it gives its badge."""
+    if status in _STATUSES:
+        return (*_STATUSES[status], status)
+    return ("•", status.capitalize(), "idle", "other")
+
+
 templates.env.filters.update({"ago": ago, "span": span, "stamp": stamp, "show": show, "pretty": pretty})
-templates.env.globals.update({"meter": meter, "sparkline": sparkline, "flow_graph": flow_graph})
+templates.env.globals.update(
+    {
+        "meter": meter,
+        "sparkline": sparkline,
+        "flow_graph": flow_graph,
+        "icon": icon,
+        "can": can,
+        "status_info": status_info,
+    }
+)
 
 
 def reads(request: Request) -> Reads:
@@ -126,6 +205,8 @@ def render(
             "label_of": label_of,
             "url": url,
             "engine": state.settings.engine,
+            "env": request.app.state.environment.env,
+            "version": VERSION,
             **context,
         },
         status_code=status,
@@ -234,32 +315,154 @@ def _not_found(request: Request, what: str) -> HTMLResponse:
     return render(request, "error.html", status=404, title="Not found", message=what)
 
 
-@router.get("/flows", response_class=HTMLResponse)
-def flows_list(
-    request: Request, actor: CurrentActor, status: str = "", owner: str = "", tag: str = ""
+# What every list page has: tiles at the top, a search box, and the actions it can do to many rows at once.
+
+_BULK_MOST = 100  # rows one bulk action may name
+Search = Annotated[str, Query(max_length=200)]
+Names = Annotated[list[str] | None, Form()]
+
+
+@dataclass(frozen=True)
+class Tile:
+    """A number at the top of a list page. `trend` is drawn under it, oldest first, when the charts are shown."""
+
+    label: str
+    value: int | str
+    tone: str = ""  # "", "ok", "warn" or "bad"
+    trend: tuple[float, ...] = ()
+    note: str = ""
+
+
+def _capped(count: int, cap: int) -> int | str:
+    return f"{cap}+" if count >= cap else count
+
+
+def _matches(query: str, *texts: str | None) -> bool:
+    """Whether any of `texts` holds `query`, ignoring case. An empty query matches everything."""
+    wanted = query.strip().lower()
+    return not wanted or any(wanted in (text or "").lower() for text in texts)
+
+
+def _plural(count: int, one: str, many: str | None = None) -> str:
+    return f"{count} {one if count == 1 else many or one + 's'}"
+
+
+def _today(request: Request) -> datetime:
+    now = request.app.state.feather.clock.now()
+    return datetime.combine(now.date(), time.min, now.tzinfo or UTC)
+
+
+_FLOW_BULK = {"run": "started", "pause": "paused", "resume": "resumed"}
+
+
+def _flows_page(
+    request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
 ) -> HTMLResponse:
-    everything = reads(request).flows()
+    query = request.query_params
+    chosen = {k: query.get(k, "")[:200] for k in ("status", "owner", "tag", "q", "active")}
+    read = reads(request)
+    everything = read.flows()
     shown = [
         f
         for f in everything
-        if (not status or _state_of(f) == status)
-        and (not owner or f.owner == owner)
-        and (not tag or tag in f.tags)
+        if (not chosen["status"] or _state_of(f) == chosen["status"])
+        and (not chosen["owner"] or f.owner == chosen["owner"])
+        and (not chosen["tag"] or chosen["tag"] in f.tags)
+        and (not chosen["active"] or (f.enabled and not f.paused))
+        and _matches(chosen["q"], f.name, f.owner, *f.tags)
     ]
+    started, failed = read.run_activity()
+    failing = sum(1 for f in everything if f.last_run and f.last_run.status == "failed")
+    paused = sum(1 for f in everything if f.paused)
+    tiles = [
+        Tile(
+            "Active",
+            sum(1 for f in everything if f.enabled and not f.paused),
+            "",
+            tuple(started),
+            "runs a day",
+        ),
+        Tile("Paused", paused, "warn" if paused else ""),
+        Tile("Failing", failing, "bad" if failing else "", tuple(failed), "failed runs a day"),
+    ]
+    done = query.get("done", "")
+    count = query.get("n", "")
+    if notice is None and done in _FLOW_BULK.values() and count.isascii() and count.isdigit():
+        notice = ("ok", f"{_plural(int(count), 'flow')} {done}.")
     return render(
         request,
         "flows.html",
         fragment="_flows_table.html",
+        status=status,
         title="Flows",
         actor=actor,
         flows=shown,
+        total=len(everything),
+        tiles=tiles,
         state_of=_state_of,
         statuses=sorted({_state_of(f) for f in everything} | {"failed", "paused", "never"}),
         owners=sorted({f.owner for f in everything if f.owner}),
         tags=sorted({t for f in everything for t in f.tags}),
-        chosen={"status": status, "owner": owner, "tag": tag},
+        chosen=chosen,
+        notice=notice,
         sha=request.app.state.feather.project.code_sha[:8],
     )
+
+
+@router.get("/flows", response_class=HTMLResponse)
+def flows_list(request: Request, actor: CurrentActor) -> HTMLResponse:
+    return _flows_page(request, actor)
+
+
+@router.post("/flows/bulk", dependencies=[Depends(require_csrf)])
+def flows_bulk(
+    request: Request,
+    actor: CurrentActor,
+    action: Annotated[str, Form()],
+    name: Names = None,
+    reason: Reason = "",
+) -> Response:
+    """Run, pause or resume the ticked flows, each through the action the flow page uses, so each is checked and
+    audited alike. A refusal of the role stops at the first flow, before any has changed."""
+    names = list(dict.fromkeys(name or []))
+    if action not in _FLOW_BULK:
+        return _flows_page(request, actor, status=422, notice=("bad", "Choose run, pause or resume."))
+    if not names or len(names) > _BULK_MOST:
+        message = f"Tick between 1 and {_BULK_MOST} flows first."
+        return _flows_page(request, actor, status=422, notice=("bad", message))
+    act, why = actions(request), _reason(reason)
+    problems: list[str] = []
+    for flow in names:
+        try:
+            if action == "run":
+                act.run_flow(actor, flow, reason=why)
+            elif action == "pause":
+                act.pause_flow(actor, flow, reason=why)
+            else:
+                act.resume_flow(actor, flow, reason=why)
+        except KeyError:
+            problems.append(f"there is no flow named {flow!r}")
+        except FlowPaused as error:
+            problems.append(str(error))
+    if problems:
+        done = len(names) - len(problems)
+        message = (
+            f"{_plural(done, 'flow')} {_FLOW_BULK[action]}; not the others: " + "; ".join(problems) + "."
+        )
+        return _flows_page(request, actor, status=409, notice=("bad", message))
+    return RedirectResponse(
+        f"/flows?{urlencode({'done': _FLOW_BULK[action], 'n': len(names)})}", status_code=303
+    )
+
+
+@router.get("/flows/{name}/row", response_class=HTMLResponse)
+def flow_row(request: Request, actor: CurrentActor, name: str) -> HTMLResponse:
+    """What a flow's row opens to on the list: its datasets, its routes and its last runs."""
+    try:
+        detail = reads(request).flow_detail(name)
+    except KeyError:
+        return _not_found(request, f"No flow named {name!r}.")
+    return render(request, "_flow_child.html", title=name, actor=actor, detail=detail)
 
 
 def _flow_page(
@@ -427,6 +630,16 @@ def _grid_page(
         flow = _flow_of(request, dataset)
     except KeyError:
         return _not_found(request, f"No dataset named {dataset!r}.")
+    q = request.query_params.get("q", "")[:200]
+    rows = [r for r in grid.rows if _matches(q, r.label, r.partition)]
+    cells = [c.status for r in grid.rows for c in r.cells]
+    failed = sum(1 for c in cells if c == "failed")
+    tiles = [
+        Tile("Partitions on this page", len(grid.rows)),
+        Tile("Routes", len(grid.routes)),
+        Tile("Applied", sum(1 for c in cells if c == "applied"), "ok"),
+        Tile("Failed", failed, "bad" if failed else ""),
+    ]
     return render(
         request,
         "partitions.html",
@@ -434,6 +647,9 @@ def _grid_page(
         title=f"{dataset} partitions",
         actor=actor,
         grid=grid,
+        rows=rows,
+        tiles=tiles,
+        q=q,
         flow=flow,
         notice=notice,
         preview=preview,
@@ -577,30 +793,130 @@ _NO_RERUN = (
 )
 
 
-@router.get("/runs", response_class=HTMLResponse)
-def runs_list(
+_RUN_STATUSES = ["queued", "running", "succeeded", "failed", "cancelled", "skipped"]
+
+
+def _runs_page(
     request: Request,
-    actor: CurrentActor,
-    flow: str = "",
-    status: str = "",
-    cursor: str = "",
-    limit: Annotated[int, Query(ge=1, le=100)] = _RUNS_PAGE,
+    actor: Actor,
+    *,
+    status: int = 200,
+    notice: tuple[str, str] | None = None,
+    confirm_cancel: list[str] | None = None,
 ) -> HTMLResponse:
-    found = reads(request).runs(flow=flow or None, status=status or None, limit=limit, cursor=cursor or None)
-    flows = reads(request).flows()
+    query = request.query_params
+    chosen = {k: query.get(k, "")[:200] for k in ("flow", "status", "q", "active")}
+    limit = _page_size(request, _RUNS_PAGE, 100)
+    cursor = query.get("cursor") or None
+    read = reads(request)
+    if chosen["active"]:  # queued or running: never many, so both in full and no further page
+        page = sorted(
+            [r for s in _ACTIVE for r in read.runs(flow=chosen["flow"] or None, status=s, limit=limit)],
+            key=lambda r: r.created_at,
+            reverse=True,
+        )[:limit]
+        next_cursor = None
+    else:
+        page = read.runs(
+            flow=chosen["flow"] or None, status=chosen["status"] or None, limit=limit, cursor=cursor
+        )
+        next_cursor = page[-1].run_id if len(page) == limit else None
+    found = [r for r in page if _matches(chosen["q"], r.run_id, r.flow, r.actor, r.trigger, r.reason)]
+    started, failed = read.run_activity()
+    cap = COUNT_CAP
+    running, queued = read.count_runs("running"), read.count_runs("queued")
+    failed_today = read.count_runs("failed", since=_today(request))
+    tiles = [
+        Tile(
+            "Started today", _capped(read.count_runs(since=_today(request)), cap), "", tuple(started), "a day"
+        ),
+        Tile("Running", _capped(running, cap), "ok" if running else ""),
+        Tile(
+            "Failed today", _capped(failed_today, cap), "bad" if failed_today else "", tuple(failed), "a day"
+        ),
+        Tile("Queued", _capped(queued, cap), "warn" if queued else ""),
+    ]
+    done, count = query.get("done", ""), query.get("n", "")
+    if notice is None and done == "cancelled" and count.isascii() and count.isdigit():
+        notice = ("ok", f"{_plural(int(count), 'run')} cancelled.")
     return render(
         request,
         "runs.html",
         fragment="_runs_table.html",
+        status=status,
         title="Runs",
         actor=actor,
         runs=found,
-        retries=reads(request).retried_tasks([r.run_id for r in found]),
-        flows=sorted(f.name for f in flows),
-        statuses=["queued", "running", "succeeded", "failed", "cancelled", "skipped"],
-        chosen={"flow": flow, "status": status},
-        next_cursor=found[-1].run_id if len(found) == limit else None,
+        tiles=tiles,
+        retries=read.retried_tasks([r.run_id for r in found]),
+        flows=sorted(f.name for f in read.flows()),
+        statuses=_RUN_STATUSES,
+        chosen=chosen,
+        next_cursor=next_cursor,
+        notice=notice,
+        confirm_cancel=confirm_cancel or [],
+        stream=STREAM_TRIGGER,
+        active_statuses=_ACTIVE,
     )
+
+
+@router.get("/runs", response_class=HTMLResponse)
+def runs_list(request: Request, actor: CurrentActor) -> HTMLResponse:
+    return _runs_page(request, actor)
+
+
+@router.post("/runs/bulk", dependencies=[Depends(require_csrf)])
+def runs_bulk(
+    request: Request,
+    actor: CurrentActor,
+    action: Annotated[str, Form()],
+    run_id: Names = None,
+    confirm: Annotated[str, Form()] = "",
+    reason: Reason = "",
+) -> Response:
+    """Cancel the ticked runs. The first step only asks, as on a run's page; a daily stream run and a run that is
+    already over are left as they are, and said so."""
+    ids = list(dict.fromkeys(run_id or []))
+    if action != "cancel":
+        return _runs_page(request, actor, status=422, notice=("bad", "Runs can only be cancelled in bulk."))
+    if not ids or len(ids) > _BULK_MOST:
+        message = f"Tick between 1 and {_BULK_MOST} runs first."
+        return _runs_page(request, actor, status=422, notice=("bad", message))
+    if confirm != "yes":
+        return _runs_page(request, actor, confirm_cancel=ids)
+    read, act = reads(request), actions(request)
+    left: list[str] = []
+    cancelled = 0
+    for one in ids:
+        try:
+            run = read.run(one)
+        except KeyError:
+            left.append(f"{one[:8]} is not a run")
+            continue
+        if run.trigger == STREAM_TRIGGER:
+            left.append(f"{one[:8]} is a daily stream run")
+        elif run.status not in _ACTIVE:
+            left.append(f"{one[:8]} is already over")
+        else:
+            act.cancel_run(actor, one, reason=_reason(reason))
+            cancelled += 1
+    if left:
+        message = f"{_plural(cancelled, 'run')} cancelled; not the others: " + "; ".join(left) + "."
+        return _runs_page(request, actor, status=409, notice=("bad", message))
+    return RedirectResponse(f"/runs?{urlencode({'done': 'cancelled', 'n': cancelled})}", status_code=303)
+
+
+_CHILD_TASKS = 20
+
+
+@router.get("/runs/{run_id}/row", response_class=HTMLResponse)
+def run_row(request: Request, actor: CurrentActor, run_id: str) -> HTMLResponse:
+    """What a run's row opens to on the list: its first tasks."""
+    try:
+        detail = reads(request).run_detail(run_id, limit=_CHILD_TASKS)
+    except KeyError:
+        return _not_found(request, f"No run with the id {run_id!r}.")
+    return render(request, "_run_child.html", title=run_id[:8], actor=actor, detail=detail)
 
 
 def _run_page(
@@ -802,13 +1118,24 @@ def _failures_page(
     if cursor is not None and not _good_failure_cursor(cursor):
         return _bad_cursor(request)
     views = reads(request).failure_views(route, cursor, limit)
+    q = request.query_params.get("q", "")[:200]
+    shown = [v for v in views if _matches(q, v.group.route, v.group.error_class, v.group.message)]
+    blocked = sum(len(v.blocked) for v in views)
+    tiles = [
+        Tile("Groups of failures", len(views), "bad" if views else ""),
+        Tile("Failed deliveries", sum(v.group.count for v in views), "bad" if views else ""),
+        Tile("Routes", len({v.group.route for v in views})),
+        Tile("Partitions held up", blocked, "warn" if blocked else ""),
+    ]
     return render(
         request,
         "failures.html",
         status=status,
         title="Failures",
         actor=actor,
-        views=views,
+        views=shown,
+        tiles=tiles,
+        q=q,
         route=route or "",
         routes=sorted({r.name for f in request.app.state.feather.runtime.flows() for r in f.routes}),
         next_cursor=failure_cursor(views[-1].group) if len(views) == limit else None,
@@ -853,6 +1180,15 @@ def _deliveries_page(
     found = reads(request).deliveries(
         route, next((s for s in _DELIVERY_STATUSES if s == chosen), None), partition, limit, cursor
     )
+    q = request.query_params.get("q", "")[:200]
+    shown = [d for d in found if _matches(q, d.partition, d.version_id, d.last_error, d.status)]
+    counts = {s: sum(1 for d in found if d.status == s) for s in ("applied", "failed", "held")}
+    tiles = [
+        Tile("On this page", len(found)),
+        Tile("Applied", counts["applied"], "ok"),
+        Tile("Failed", counts["failed"], "bad" if counts["failed"] else ""),
+        Tile("Held", counts["held"], "warn" if counts["held"] else ""),
+    ]
     return render(
         request,
         "deliveries.html",
@@ -861,7 +1197,9 @@ def _deliveries_page(
         actor=actor,
         route=route,
         destination=spec.sink.connection,
-        deliveries=found,
+        deliveries=shown,
+        tiles=tiles,
+        q=q,
         statuses=_DELIVERY_STATUSES,
         chosen={"status": chosen, "partition": partition or ""},
         next_cursor=delivery_cursor(found[-1]) if len(found) == limit else None,
@@ -1082,13 +1420,22 @@ def _quarantine_page(
     query = {"route": route} if route else {}
     if notice is None and request.query_params.get("dismissed"):
         notice = ("ok", "The entry is dismissed.")
+    q = request.query_params.get("q", "")[:200]
+    shown = [e for e in entries if _matches(q, e.row.route, e.row.key, e.row.error, e.dataset, e.partition)]
+    tiles = [
+        Tile("Open", total, "warn" if total else ""),
+        Tile("Routes on this page", len({e.row.route for e in entries})),
+        Tile("Datasets on this page", len({e.dataset for e in entries if e.dataset})),
+    ]
     return render(
         request,
         "quarantine.html",
         status=status,
         title="Quarantine",
         actor=actor,
-        entries=entries,
+        entries=shown,
+        tiles=tiles,
+        q=q,
         total=total,
         first=offset + 1,
         last=after,
@@ -1131,14 +1478,26 @@ def _connections_page(
     request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
 ) -> HTMLResponse:
     environment: Environment = request.app.state.environment
+    q = request.query_params.get("q", "")[:200]
+    found = reads(request).connections()
+    shown = [c for c in found if _matches(q, c.name, c.connector, c.site, *c.flows)]
+    failing = sum(1 for c in found if c.last_check_ok is False)
+    tiles = [
+        Tile("Connections", len(found)),
+        Tile("Checked OK", sum(1 for c in found if c.last_check_ok), "ok"),
+        Tile("Check failed", failing, "bad" if failing else ""),
+        Tile("Not checked yet", sum(1 for c in found if c.last_check_at is None)),
+    ]
     return render(
         request,
         "connections.html",
         status=status,
         title="Connections",
         actor=actor,
-        connections=reads(request).connections(),
-        environment=environment.connections(),
+        connections=shown,
+        tiles=tiles,
+        q=q,
+        environment=[e for e in environment.connections() if _matches(q, e["name"], e["connector"])],
         env=environment.env,
         timeout=f"{action_limits.CHECK_TIMEOUT_S:g}",
         notice=notice,
@@ -1182,7 +1541,40 @@ async def replace_secret(request: Request, actor: CurrentActor, name: str) -> Re
         return _connections_page(request, actor, status=409, notice=("bad", str(error)))
     except (VaultError, ValueError) as error:
         return _connections_page(request, actor, status=422, notice=("bad", str(error)))
-    return RedirectResponse(back if back.startswith("/connections") else "/connections", status_code=303)
+    ours = back.startswith(("/connections", "/secrets")) and not back.startswith(("//", "/\\"))
+    return RedirectResponse(back if ours else "/connections", status_code=303)
+
+
+@router.get("/secrets", response_class=HTMLResponse)
+def secrets(request: Request, actor: CurrentActor) -> HTMLResponse:
+    """The environment's encrypted secrets, by name: when each was set and by whom, never a value."""
+    environment: Environment = request.app.state.environment
+    q = request.query_params.get("q", "")[:200]
+    rows = [
+        {**row, "updated_at": datetime.fromisoformat(row["updated_at"])}
+        for row in environment.secrets()
+        if _matches(q, row["name"], row["updated_by"])
+    ]
+    everything = environment.secrets()
+    tiles = [
+        Tile("Secrets", len(everything)),
+        Tile(
+            "Connections using them",
+            len({r["name"].partition("/")[0] for r in everything if "/" in r["name"]}),
+        ),
+        Tile("Keys in use", len({r["key_id"] for r in everything})),
+    ]
+    return render(
+        request,
+        "secrets.html",
+        title="Secrets",
+        actor=actor,
+        rows=rows,
+        tiles=tiles,
+        q=q,
+        env=environment.env,
+        manage=can(actor, "secrets.manage"),
+    )
 
 
 @router.post("/connections/{name}/check", dependencies=[Depends(require_csrf)])
@@ -1201,13 +1593,22 @@ def _users_page(
     request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
 ) -> HTMLResponse:
     accounts: Accounts = request.app.state.accounts
+    everyone = accounts.users(actor)
+    q = request.query_params.get("q", "")[:200]
+    tiles = [
+        Tile("Users", len(everyone)),
+        Tile("Admins", sum(1 for u in everyone if u.role == "admin")),
+        Tile("Operators", sum(1 for u in everyone if u.role == "operator")),
+    ]
     return render(
         request,
         "users.html",
         status=status,
         title="Users",
         actor=actor,
-        users=accounts.users(actor),
+        users=[u for u in everyone if _matches(q, u.username, u.role)],
+        tiles=tiles,
+        q=q,
         roles=ROLES,
         notice=notice,
     )
@@ -1228,6 +1629,158 @@ def set_role(request: Request, actor: CurrentActor, username: str, role: Annotat
     except ValueError as error:
         return _users_page(request, actor, status=422, notice=("bad", str(error)))
     return _users_page(request, actor, notice=("ok", f"{username} is now an {role}."))
+
+
+# Datasets and routes: the lists the sidebar's Datasets and Deliveries open.
+
+
+@router.get("/datasets", response_class=HTMLResponse)
+def datasets(request: Request, actor: CurrentActor) -> HTMLResponse:
+    read = reads(request)
+    everything = read.datasets()
+    q = request.query_params.get("q", "")[:200]
+    late = {s.dataset for s in read.stale_datasets()}
+    never = sum(1 for d in everything if d.last_sealed_at is None)
+    tiles = [
+        Tile("Datasets", len(everything)),
+        Tile("Late", len(late), "warn" if late else ""),
+        Tile("Never read", never, "warn" if never else ""),
+    ]
+    return render(
+        request,
+        "datasets.html",
+        title="Datasets",
+        actor=actor,
+        rows=[d for d in everything if _matches(q, d.name, d.flow, d.connection, d.strategy)],
+        late=late,
+        tiles=tiles,
+        q=q,
+    )
+
+
+@router.get("/deliveries", response_class=HTMLResponse)
+def deliveries(request: Request, actor: CurrentActor) -> HTMLResponse:
+    everything = reads(request).routes()
+    q = request.query_params.get("q", "")[:200]
+    failing = sum(1 for r in everything if r.failed)
+    tiles = [
+        Tile("Routes", len(everything)),
+        Tile(
+            "Paused",
+            sum(1 for r in everything if r.paused),
+            "warn" if any(r.paused for r in everything) else "",
+        ),
+        Tile("With failures", failing, "bad" if failing else ""),
+        Tile(
+            "Held deliveries",
+            sum(r.held for r in everything),
+            "warn" if any(r.held for r in everything) else "",
+        ),
+    ]
+    return render(
+        request,
+        "routes.html",
+        title="Deliveries",
+        actor=actor,
+        rows=[r for r in everything if _matches(q, r.name, r.flow, r.connection)],
+        tiles=tiles,
+        q=q,
+    )
+
+
+# The shell: the status bar and the search of the command palette.
+
+_READY_FOR = 10.0  # seconds a database check is reused for: every open page asks every 15 s
+_ready: dict[int, tuple[float, dict[str, str]]] = {}
+
+
+def _database(request: Request) -> dict[str, str]:
+    from feather_server.app import readiness  # the app imports this module
+
+    state = request.app.state.feather
+    now = state.clock.now().timestamp()
+    found = _ready.get(id(state))
+    if found is None or not 0 <= now - found[0] < _READY_FOR:
+        found = (now, readiness(state))
+        _ready[id(state)] = found
+    return found[1]
+
+
+@router.get("/status", response_class=HTMLResponse)
+def status_bar(request: Request, actor: CurrentActor) -> HTMLResponse:
+    """The bottom bar: is the server up, does the database answer, who runs the work, which environment and
+    version this is, and when this was looked at."""
+    alive = sum(1 for w in reads(request).workers() if w.state == "alive")
+    return render(
+        request, "_status.html", title="Status", actor=actor, database=_database(request), alive=alive
+    )
+
+
+_SEARCH_MOST = 25
+_RUN_ID_FROM = 4  # characters of a run id before the search looks for runs
+
+
+@dataclass(frozen=True)
+class Found:
+    kind: str  # page, flow, run, dataset, route or connection
+    label: str
+    href: str
+    detail: str = ""
+
+
+def _search(request: Request, actor: Actor, q: str) -> list[Found]:
+    wanted = q.strip()
+    found = [
+        Found("page", item.label, item.path, "Go to")
+        for item in NAV
+        if (item.needs is None or can(actor, item.needs)) and _matches(wanted, item.label)
+    ]
+    if not wanted:
+        return found
+    runtime = request.app.state.feather.runtime
+    for flow in runtime.flows():
+        if _matches(wanted, flow.name, flow.owner, *flow.tags):
+            found.append(Found("flow", flow.name, f"/flows/{quote(flow.name, safe='')}", "Flow"))
+    for flow in runtime.flows():
+        for dataset in flow.datasets:
+            if _matches(wanted, dataset.name):
+                href = f"/datasets/{quote(dataset.name, safe='')}/partitions"
+                found.append(Found("dataset", dataset.name, href, f"Dataset of {flow.name}"))
+        for route in flow.routes:
+            if _matches(wanted, route.name):
+                href = f"/routes/{quote(route.name, safe='')}/deliveries"
+                found.append(Found("route", route.name, href, f"Route of {flow.name}"))
+    names = set(request.app.state.feather.project.connections)
+    names |= {e["name"] for e in request.app.state.environment.connections()}
+    for name in sorted(n for n in names if _matches(wanted, n)):
+        found.append(
+            Found("connection", name, f"/connections#connection-{quote(name, safe='')}", "Connection")
+        )
+    if len(wanted) >= _RUN_ID_FROM and re.fullmatch(r"[0-9A-Za-z_-]+", wanted):
+        for run in reads(request).find_runs(wanted):
+            href = f"/runs/{quote(run.run_id, safe='')}"
+            found.append(Found("run", f"Run {run.run_id[:8]}", href, f"{run.flow} · {run.status}"))
+    return found[:_SEARCH_MOST]
+
+
+@router.get("/search.json")
+def search_json(request: Request, actor: CurrentActor, q: Search = "") -> Response:
+    """What the command palette offers for `q`: pages, flows, datasets, routes, connections and runs by id."""
+    items = [
+        {"kind": f.kind, "label": f.label, "href": f.href, "detail": f.detail}
+        for f in _search(request, actor, q)
+    ]
+    return Response(
+        json.dumps({"items": items}),
+        media_type="application/json",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/search", response_class=HTMLResponse)
+def search_page(request: Request, actor: CurrentActor, q: Search = "") -> HTMLResponse:
+    """The same search as a page, for a browser without JavaScript."""
+    return render(request, "search.html", title="Search", actor=actor, q=q, found=_search(request, actor, q))
 
 
 def refused(request: Request, error: Forbidden) -> HTMLResponse:

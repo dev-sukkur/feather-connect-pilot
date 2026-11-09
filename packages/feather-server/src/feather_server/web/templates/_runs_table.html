@@ -1,24 +1,61 @@
 {% import "_macros.html" as m with context %}
+{% set bulk = can(actor, "runs.cancel") %}
 <div id="live" hx-get="{{ url() }}" hx-trigger="every 5s" hx-swap="outerHTML">
   {% if runs %}
-  <div class="table-wrap"><table>
+  <div class="table-wrap scroll"><table class="data" data-table="runs">
     <caption class="sr-only">Runs, newest first</caption>
-    <thead><tr><th scope="col">Run</th><th scope="col">Flow</th><th scope="col">Started by</th><th scope="col">Status</th><th scope="col">Started</th><th scope="col">Took</th><th scope="col">Retries</th><th scope="col">Reason</th></tr></thead>
+    <thead><tr>
+      {% if bulk %}<th scope="col" class="select"><input type="checkbox" data-select-all aria-label="Tick every run shown" hidden></th>{% endif %}
+      <th scope="col" class="expand-col"><span class="sr-only">Open</span></th>
+      <th scope="col" data-col="status" data-sort>Status</th>
+      <th scope="col" data-sort>Run</th>
+      <th scope="col" data-col="flow" data-sort>Flow</th>
+      <th scope="col" data-col="by" data-sort>Started by</th>
+      <th scope="col" data-col="started" data-sort>Started</th>
+      <th scope="col" data-col="took" data-sort>Took</th>
+      <th scope="col" data-col="retries">Retries</th>
+      <th scope="col" data-col="reason">Reason</th>
+      <th scope="col" class="row-actions-col"><span class="sr-only">Actions</span></th>
+    </tr></thead>
     <tbody>
     {% for run in runs %}
+      {% set cancellable = run.status in active_statuses and run.trigger != stream %}
       <tr>
+        {% if bulk %}<td class="select"><input type="checkbox" name="run_id" value="{{ run.run_id }}" form="bulk" data-select aria-label="Tick run {{ run.run_id[:8] }}"></td>{% endif %}
+        <td class="expand-col"><button type="button" class="expand" aria-expanded="false" aria-controls="child-{{ loop.index }}" data-child-src="/runs/{{ run.run_id | urlencode }}/row" hidden>{{ icon("chevron") }}<span class="sr-only">Show the tasks of run {{ run.run_id[:8] }}</span></button></td>
+        <td data-col="status" data-value="{{ run.status }}">{{ m.status_dot(run.status) }}</td>
         <th scope="row"><a href="/runs/{{ run.run_id | urlencode }}"><code>{{ run.run_id[:8] }}</code></a></th>
-        <td><a href="/flows/{{ run.flow | urlencode }}">{{ run.flow }}</a></td>
-        <td>{{ run.trigger }} · {{ run.actor }}{% if run.trigger == "stream" %} · {{ run.params.get("day", "") }}{% endif %}</td>
-        <td>{{ m.status_badge(run.status) }}</td>
-        <td>{{ m.time_ago(run.created_at) }}</td>
-        <td>{% if run.status in ("succeeded", "failed", "cancelled") and run.trigger != "stream" %}{{ (run.updated_at - run.created_at) | span }}{% else %}<span class="muted">&ndash;</span>{% endif %}</td>
-        <td>{% if retries.get(run.run_id) %}{{ retries[run.run_id] }} task{{ "s" if retries[run.run_id] != 1 }} retried{% endif %}</td>
-        <td>{% if run.reason %}{{ run.reason }}{% endif %}</td>
+        <td data-col="flow"><a href="/flows/{{ run.flow | urlencode }}">{{ run.flow }}</a></td>
+        <td data-col="by">{{ run.trigger }} · {{ run.actor }}{% if run.trigger == "stream" %} · {{ run.params.get("day", "") }}{% endif %}</td>
+        <td data-col="started">{{ m.time_ago(run.created_at) }}</td>
+        <td data-col="took">{% if run.status in ("succeeded", "failed", "cancelled") and run.trigger != "stream" %}<span data-value="{{ (run.updated_at - run.created_at).total_seconds() }}">{{ (run.updated_at - run.created_at) | span }}</span>{% else %}<span class="muted">&ndash;</span>{% endif %}</td>
+        <td data-col="retries">{% if retries.get(run.run_id) %}{{ retries[run.run_id] }} task{{ "s" if retries[run.run_id] != 1 }} retried{% endif %}</td>
+        <td data-col="reason">{% if run.reason %}{{ run.reason }}{% endif %}</td>
+        <td class="row-actions-col"><div class="row-actions">
+          {% if bulk and cancellable %}
+          <form method="post" action="/runs/bulk">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="run_id" value="{{ run.run_id }}"><input type="hidden" name="action" value="cancel">
+            <button type="submit" class="icon-button" title="Cancel run {{ run.run_id[:8] }}" data-confirm="Cancel run {{ run.run_id[:8] }} of {{ run.flow }}? Its queued and running tasks stop." data-confirm-field="confirm">{{ icon("stop") }}<span class="sr-only">Cancel run {{ run.run_id[:8] }}</span></button>
+          </form>
+          {% endif %}
+          <details class="row-menu">
+            <summary class="icon-button" title="More for run {{ run.run_id[:8] }}">{{ icon("more") }}<span class="sr-only">More for run {{ run.run_id[:8] }}</span></summary>
+            <div class="menu-panel">
+              <ul>
+                {% if run.trigger != stream %}<li><a href="/runs/{{ run.run_id | urlencode }}#h-actions">{{ icon("replay") }} Run it again</a></li>{% endif %}
+                <li><a href="/flows/{{ run.flow | urlencode }}">{{ icon("flows") }} Its flow</a></li>
+                <li><a href="/trace">{{ icon("trace") }} Trace a record</a></li>
+                <li><button type="button" class="link" data-copy="{{ run.run_id }}" hidden>{{ icon("copy") }} Copy the id</button></li>
+              </ul>
+            </div>
+          </details>
+        </div></td>
       </tr>
+      <tr class="child" id="child-{{ loop.index }}" hidden><td colspan="11"><div class="child-body"></div></td></tr>
     {% endfor %}
     </tbody>
   </table></div>
+  {{ m.table_foot(runs | length, "run", "runs", next_cursor) }}
   {{ m.pagination(next_cursor) }}
   {% else %}
   <p class="empty">No runs match.</p>

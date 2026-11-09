@@ -1,0 +1,13 @@
+{% import "_macros.html" as m with context %}
+<ul class="status-items">
+  <li><span class="state tone-ok"><span class="dot" aria-hidden="true"></span>Server up</span></li>
+  <li>{% if database.database == "ok" and database.get("schema", "current") == "current" %}<span class="state tone-ok"><span class="dot" aria-hidden="true"></span>Database reachable</span>
+    {% elif database.database == "ok" %}<span class="state tone-warn"><span class="dot" aria-hidden="true"></span>Database schema behind</span>
+    {% else %}<span class="state tone-bad"><span class="dot" aria-hidden="true"></span>Database down</span>{% endif %}</li>
+  <li>{% if engine == "local" %}<span class="state tone-ok"><span class="dot" aria-hidden="true"></span>Engine local</span>
+    {% elif alive %}<span class="state tone-ok"><span class="dot" aria-hidden="true"></span>{{ alive }} worker{{ "s" if alive != 1 }} alive</span>
+    {% else %}<span class="state tone-bad"><span class="dot" aria-hidden="true"></span>No worker alive</span>{% endif %}</li>
+  <li><span class="env env-{{ env if env in ('dev', 'qa', 'prod') else 'other' }}">Environment {{ env }}</span></li>
+  <li class="muted">Feather Connect {{ version }}</li>
+  <li class="muted status-time">Refreshed <time datetime="{{ now.isoformat() }}" title="{{ now | stamp }}">{{ now.strftime("%H:%M:%S") }} UTC</time></li>
+</ul>

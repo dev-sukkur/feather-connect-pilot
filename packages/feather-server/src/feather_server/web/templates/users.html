@@ -1,17 +1,21 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m with context %}
 {% block content %}
-<h1>Users</h1>
-<p class="muted">Who can sign in, and with what role. An operator runs, re-runs, backfills, retries, skips, replays, cancels, pauses and settles the quarantine. An admin can do all that, and manage users, their roles and API tokens too. A token acts with no higher a role than its user's, so changing a role changes what their tokens can do at once.</p>
-{% if notice %}<p class="notice notice-{{ notice[0] }}" role="{{ 'alert' if notice[0] == 'bad' else 'status' }}">{{ notice[1] }}</p>{% endif %}
-<div class="table-wrap"><table>
+{{ m.page_head("Users", tiles) }}
+<p class="muted lead">Who can sign in, and with what role. An operator runs, re-runs, backfills, retries, skips, replays, cancels, pauses and settles the quarantine. An admin can do all that, and manage users, their roles and API tokens too. A token acts with no higher a role than its user's, so changing a role changes what their tokens can do at once.</p>
+{{ m.notice_of(notice) }}
+{% call m.toolbar("/users", q, "users", columns=[("role", "Role"), ("since", "Since")], table="users") %}{% endcall %}
+<div id="live">
+{% if users %}
+<div class="table-wrap scroll"><table class="data" data-table="users">
   <caption class="sr-only">Users and their roles</caption>
-  <thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Since</th><th scope="col">Change the role</th></tr></thead>
+  <thead><tr><th scope="col" data-sort>User</th><th scope="col" data-col="role" data-sort>Role</th><th scope="col" data-col="since" data-sort>Since</th><th scope="col">Change the role</th></tr></thead>
   <tbody>
   {% for u in users %}
     <tr id="user-{{ u.username }}">
       <th scope="row">{{ u.username }}{% if actor and u.username == actor.user %} <span class="muted">(you)</span>{% endif %}</th>
-      <td>{{ u.role }}</td>
-      <td>{{ u.created_at[:10] }}</td>
+      <td data-col="role">{{ u.role }}</td>
+      <td data-col="since">{{ u.created_at[:10] }}</td>
       <td>
         <form method="post" action="/users/{{ u.username | urlencode }}/role" class="inline-form">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -19,12 +23,17 @@
           <select id="role-{{ loop.index }}" name="role">
             {% for r in roles %}<option value="{{ r }}"{% if r == u.role %} selected{% endif %}>{{ r }}</option>{% endfor %}
           </select>
-          <button type="submit">Save</button>
+          <button type="submit">Save<span class="sr-only"> the role of {{ u.username }}</span></button>
         </form>
       </td>
     </tr>
   {% endfor %}
   </tbody>
 </table></div>
+{{ m.table_foot(users | length, "user", "users") }}
+{% else %}
+<p class="empty">No users match {{ q }}.</p>
+{% endif %}
+</div>
 <p class="muted">Add users and tokens with <code>feather server create-user</code> and <code>feather server create-token</code>, or through the API.</p>
 {% endblock %}

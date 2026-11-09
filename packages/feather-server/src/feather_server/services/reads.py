@@ -47,6 +47,7 @@ _VERSIONS_SHOWN = 50  # of each dataset, on a run's page: a stream run holds a d
 _RECENT_VERSIONS = 15
 _FAILED_RUNS_SHOWN = 100
 _BLOCKED_SHOWN = 2
+COUNT_CAP = 500  # runs a tile or the search looks at, newest first
 _KEPT_DAYS_FOR = timedelta(
     seconds=60
 )  # the page refreshes every 10 s, and working this out reads every old day
@@ -81,6 +82,30 @@ class FlowSummary:
     last_sealed_at: datetime | None = (
         None  # when any of its datasets last got a version: how fresh the flow is
     )
+
+
+@dataclass(frozen=True)
+class DatasetRow:
+    """A dataset of a flow, with when it last got a version."""
+
+    name: str
+    flow: str
+    connection: str
+    strategy: str
+    priority: str
+    last_sealed_at: datetime | None
+
+
+@dataclass(frozen=True)
+class RouteRow:
+    """A route of a flow, with how many of its deliveries are failed and held, each counted up to a cap."""
+
+    name: str
+    flow: str
+    connection: str
+    paused: bool
+    failed: int
+    held: int
 
 
 @dataclass(frozen=True)
@@ -634,3 +659,78 @@ class Reads:
                 )
             )
         return found
+
+    # The dashboard's tiles, sparklines and search. Every one of these reads a bounded number of rows.
+
+    def count_runs(
+        self, status: str | None = None, since: datetime | None = None, cap: int = COUNT_CAP
+    ) -> int:
+        """How many runs have `status` (any, when None) and started at `since` or later, counting at most `cap`: a
+        tile shows `cap` as "cap+"."""
+        found = self._store.runs.list_runs(status=status, limit=cap)
+        if since is None:
+            return len(found)
+        return sum(1 for r in found if r.created_at >= since)  # newest first, so these are the first ones
+
+    def run_activity(self, days: int = 7) -> tuple[list[int], list[int]]:
+        """Runs started and runs failed on each of the last `days` days, oldest first, from the newest
+        `COUNT_CAP` runs."""
+        today = self._state.clock.now().date()
+        started, failed = [0] * days, [0] * days
+        for run in self._store.runs.list_runs(limit=COUNT_CAP):
+            age = (today - run.created_at.date()).days
+            if 0 <= age < days:
+                started[days - 1 - age] += 1
+                if run.status == "failed":
+                    failed[days - 1 - age] += 1
+        return started, failed
+
+    def find_runs(self, prefix: str, limit: int = 5) -> list[Run]:
+        """Runs whose id starts with `prefix`, among the newest `COUNT_CAP`."""
+        wanted = prefix.lower()
+        found = [
+            r for r in self._store.runs.list_runs(limit=COUNT_CAP) if r.run_id.lower().startswith(wanted)
+        ]
+        return found[:limit]
+
+    def count_deliveries(self, route: str, status: DeliveryStatus, cap: int = 100) -> int:
+        """How many deliveries of `route` have `status`, counting at most `cap`."""
+        return len(self._store.ledger.list_deliveries(route=route, status=status, limit=cap))
+
+    def workers(self) -> list[WorkerRow]:
+        return self._store.workers.list_workers()
+
+    def run(self, run_id: str) -> Run:
+        """One run. Raises `KeyError` for an unknown one."""
+        return self._store.runs.get_run(run_id)
+
+    def datasets(self) -> list[DatasetRow]:
+        return [
+            DatasetRow(
+                d.name,
+                flow.name,
+                d.source.connection,
+                d.strategy.name,
+                d.priority,
+                self._store.versions.last_sealed_at(d.name),
+            )
+            for flow in self._rt.flows()
+            for d in flow.datasets
+        ]
+
+    def stale_datasets(self) -> list[StaleDataset]:
+        return self._stale()
+
+    def routes(self, cap: int = 100) -> list[RouteRow]:
+        return [
+            RouteRow(
+                r.name,
+                flow.name,
+                r.sink.connection,
+                self._rt.is_route_paused(r.name),
+                self.count_deliveries(r.name, "failed", cap),
+                self.count_deliveries(r.name, "held", cap),
+            )
+            for flow in self._rt.flows()
+            for r in flow.routes
+        ]

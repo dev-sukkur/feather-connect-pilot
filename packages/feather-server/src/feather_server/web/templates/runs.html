@@ -1,19 +1,40 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m with context %}
 {% block content %}
-<h1>Runs</h1>
-<form class="filters" method="get" action="/runs">
-  <p><label for="f-flow">Flow</label><br>
+{{ m.page_head("Runs", tiles) }}
+{{ m.notice_of(notice) }}
+{% if confirm_cancel %}
+<section class="confirm" aria-labelledby="confirm-title">
+  <h2 id="confirm-title">Check before you confirm</h2>
+  <p>Cancel {{ confirm_cancel | length }} run{{ "s" if confirm_cancel | length != 1 }}: {% for one in confirm_cancel %}<code>{{ one[:8] }}</code>{% if not loop.last %}, {% endif %}{% endfor %}? Their queued and running tasks stop.</p>
+  <form method="post" action="/runs/bulk">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="action" value="cancel"><input type="hidden" name="confirm" value="yes">
+    {% for one in confirm_cancel %}<input type="hidden" name="run_id" value="{{ one }}">{% endfor %}
+    <p><label for="reason">Reason (kept in the audit log)</label><br><input id="reason" name="reason" type="text" maxlength="500"></p>
+    <p><button type="submit" class="primary">Cancel the runs</button> <a class="button" href="/runs">Keep them</a></p>
+  </form>
+</section>
+{% endif %}
+{% call m.toolbar("/runs", chosen.q, "runs on this page", chosen.active, "Only queued and running", [("status", "Status"), ("flow", "Flow"), ("by", "Started by"), ("started", "Started"), ("took", "Took"), ("retries", "Retries"), ("reason", "Reason")], "runs") %}
+  <p><label for="f-flow" class="sr-only">Flow</label>
     <select id="f-flow" name="flow">
-      <option value="">Any</option>
+      <option value="">Any flow</option>
       {% for name in flows %}<option value="{{ name }}"{% if name == chosen.flow %} selected{% endif %}>{{ name }}</option>{% endfor %}
     </select></p>
-  <p><label for="f-status">Status</label><br>
+  <p><label for="f-status" class="sr-only">Status</label>
     <select id="f-status" name="status">
-      <option value="">Any</option>
+      <option value="">Any status</option>
       {% for s in statuses %}<option value="{{ s }}"{% if s == chosen.status %} selected{% endif %}>{{ s | capitalize }}</option>{% endfor %}
     </select></p>
-  <p><button type="submit">Filter</button>
-    {% if chosen.flow or chosen.status %}<a class="button" href="/runs">Clear</a>{% endif %}</p>
+  {% if chosen.flow or chosen.status or chosen.q or chosen.active %}<p><a class="button" href="/runs">Clear</a></p>{% endif %}
+{% endcall %}
+{% if can(actor, "runs.cancel") %}
+<form id="bulk" class="bulkbar" method="post" action="/runs/bulk" data-bulk aria-label="With the ticked runs">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <span class="bulk-count" aria-live="polite" data-bulk-count>Tick runs to act on several at once.</span>
+  <button type="submit" name="action" value="cancel" class="danger" data-confirm="Cancel the ticked runs? Their queued and running tasks stop. A daily stream run and a run that is over are left as they are." data-confirm-field="confirm">{{ icon("stop") }} Cancel</button>
 </form>
+{% endif %}
 {% include "_runs_table.html" %}
 {% endblock %}

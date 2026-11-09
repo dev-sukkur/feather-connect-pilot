@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{{ m.page_head("Deliveries", tiles, "Each route delivers its flow's versions to a destination, oldest first. Open one for its deliveries, to retry, skip or replay them.") }}
+{% call m.toolbar("/deliveries", q, "routes", columns=[("state", "Status"), ("flow", "Flow"), ("to", "Destination"), ("failed", "Failed"), ("held", "Held")], table="routes") %}{% endcall %}
+<div id="live">
+{% if rows %}
+<div class="table-wrap scroll"><table class="data" data-table="routes">
+  <caption class="sr-only">Routes and their deliveries</caption>
+  <thead><tr><th scope="col" data-col="state" data-sort>Status</th><th scope="col" data-sort>Route</th><th scope="col" data-col="flow" data-sort>Flow</th><th scope="col" data-col="to" data-sort>Destination</th><th scope="col" data-col="failed" class="num" data-sort>Failed</th><th scope="col" data-col="held" class="num" data-sort>Held</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    {% set state = "paused" if r.paused else ("failed" if r.failed else "active") %}
+    <tr>
+      <td data-col="state" data-value="{{ state }}">{{ m.status_dot(state) }}</td>
+      <th scope="row"><a href="/routes/{{ r.name | urlencode }}/deliveries">{{ r.name }}</a></th>
+      <td data-col="flow"><a href="/flows/{{ r.flow | urlencode }}">{{ r.flow }}</a></td>
+      <td data-col="to">{{ r.connection }}</td>
+      <td data-col="failed" class="num">{% if r.failed %}<a href="/routes/{{ r.name | urlencode }}/deliveries?status=failed">{{ r.failed }}{% if r.failed >= 100 %}+{% endif %}<span class="sr-only"> failed deliveries to {{ r.name }}</span></a>{% else %}0{% endif %}</td>
+      <td data-col="held" class="num">{% if r.held %}<a href="/routes/{{ r.name | urlencode }}/deliveries?status=held">{{ r.held }}{% if r.held >= 100 %}+{% endif %}<span class="sr-only"> held deliveries to {{ r.name }}</span></a>{% else %}0{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{{ m.table_foot(rows | length, "route", "routes") }}
+{% else %}
+<p class="empty">No routes match.</p>
+{% endif %}
+</div>
+{% endblock %}

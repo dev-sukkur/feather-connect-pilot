@@ -1,24 +1,34 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m with context %}
 {% block content %}
-<h1>Flows</h1>
-<form class="filters" method="get" action="/flows">
-  <p><label for="f-status">Status</label><br>
+{{ m.page_head("Flows", tiles) }}
+{{ m.notice_of(notice) }}
+{% call m.toolbar("/flows", chosen.q, "flows", chosen.active, "Only active flows", [("status", "Status"), ("schedule", "Starts"), ("last_run", "Last run"), ("started", "Last started"), ("fresh", "Data fresh"), ("owner", "Owner"), ("tags", "Tags"), ("code", "Code")], "flows") %}
+  <p><label for="f-status" class="sr-only">Status</label>
     <select id="f-status" name="status">
-      <option value="">Any</option>
+      <option value="">Any status</option>
       {% for s in statuses %}<option value="{{ s }}"{% if s == chosen.status %} selected{% endif %}>{{ s | capitalize }}</option>{% endfor %}
     </select></p>
-  <p><label for="f-owner">Owner</label><br>
+  <p><label for="f-owner" class="sr-only">Owner</label>
     <select id="f-owner" name="owner">
-      <option value="">Anyone</option>
+      <option value="">Any owner</option>
       {% for o in owners %}<option value="{{ o }}"{% if o == chosen.owner %} selected{% endif %}>{{ o }}</option>{% endfor %}
     </select></p>
-  <p><label for="f-tag">Tag</label><br>
+  <p><label for="f-tag" class="sr-only">Tag</label>
     <select id="f-tag" name="tag">
-      <option value="">Any</option>
+      <option value="">Any tag</option>
       {% for t in tags %}<option value="{{ t }}"{% if t == chosen.tag %} selected{% endif %}>{{ t }}</option>{% endfor %}
     </select></p>
-  <p><button type="submit">Filter</button>
-    {% if chosen.status or chosen.owner or chosen.tag %}<a class="button" href="/flows">Clear</a>{% endif %}</p>
+  {% if chosen.status or chosen.owner or chosen.tag or chosen.q or chosen.active %}<p><a class="button" href="/flows">Clear</a></p>{% endif %}
+{% endcall %}
+{% if can(actor, "runs.start") or can(actor, "flows.pause") %}
+<form id="bulk" class="bulkbar" method="post" action="/flows/bulk" data-bulk aria-label="With the ticked flows">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <span class="bulk-count" aria-live="polite" data-bulk-count>Tick flows to act on several at once.</span>
+  {% if can(actor, "runs.start") %}<button type="submit" name="action" value="run">{{ icon("play") }} Run</button>{% endif %}
+  {% if can(actor, "flows.pause") %}<button type="submit" name="action" value="pause" data-confirm="Pause the ticked flows? Nothing new of theirs starts until they are resumed.">{{ icon("pause") }} Pause</button>
+  <button type="submit" name="action" value="resume">{{ icon("play") }} Resume</button>{% endif %}
 </form>
+{% endif %}
 {% include "_flows_table.html" %}
 {% endblock %}
