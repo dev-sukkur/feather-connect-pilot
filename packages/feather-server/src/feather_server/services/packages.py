@@ -4,21 +4,33 @@ child process, and recorded with every flow inactive. For the API, the dashboard
 The checks run in order and an install stops at the first that fails, which `InstallFailed.check` names:
 
 - `not_installed`: the version (by `version_key`) is not installed here yet; a version always means the same code.
-- `fetch`: the registry knows the package and serves the version (the newest not yanked when none is asked for).
+- `fetch`: the registry knows the package and serves the version. With none asked for, it is the newest that isn't
+  yanked, and not a pre-release unless `pre` says so.
 - `size`, `sha256`, `manifest`, `name_version`: the wheel is at most 50 MiB, has the sha256 the registry recorded, holds
   a manifest that matches the schema, and names the package and version asked for.
+- `not_yanked`: the registry hasn't yanked the version, as it says at the fetch, unless `allow_yanked` says to take it.
 - `compatibility`: the manifest's `fc_versions` takes this Feather Connect.
-- `lock`: the locked requirements in the wheel are the ones the manifest's `lock_hash` names.
+- `lock`: the locked requirements in the wheel are the ones the manifest's `lock_hash` names, and each is pinned with
+  `==` and has its sha256 hashes: no index options, direct URLs or paths.
 - `load_check`: in a child process, the code imports, loads for this environment with no error, and defines the flows,
-  datasets and routes the manifest says. This process never imports package code.
+  datasets and routes the manifest says. This process never imports package code. The check is a correctness gate, not
+  a security boundary, until task 6 moves it to the package hosts (see `feather_connect.packages.check`).
+- `webhook_connector`: no push dataset reads with a source class of the package's own. Webhook ingress runs in the
+  server, which never loads package code, so a package can't bring its own webhook connector (§7.2, §12).
+
+At most `MAX_BUSY` installs and wheel fetches run at once, for each holds a worker thread for as long as a load check
+takes; one more raises `Busy`, which the API answers 503 with Retry-After.
 
 Then the wheel, the version and its flows (named `<package>/<flow>`, all `inactive`) are stored in one transaction,
 and an audit row says who installed what and why. Nothing runs until a flow is activated (§6). Every failure is audited
-too, with its check.
+too, with its check, or as `internal` for an error that is a bug.
 """
 
 import hashlib
-from collections.abc import Callable, Mapping
+import re
+import threading
+from collections.abc import Callable, Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,7 +49,10 @@ from feather_server.auth import Actor
 from feather_server.services.access import require
 from feather_server.services.registries import BUILT_IN, Fetched, Registries, RegistryProblem
 
-__all__ = ["CHECKS", "InstallFailed", "Packages"]
+__all__ = ["CHECKS", "MAX_BUSY", "Busy", "InstallFailed", "Packages", "check_lock"]
+
+MAX_BUSY = 2  # installs and wheel fetches at once
+BUSY_RETRY_S = 30
 
 CHECKS = (
     "not_installed",
@@ -46,10 +61,14 @@ CHECKS = (
     "sha256",
     "manifest",
     "name_version",
+    "not_yanked",
     "compatibility",
     "lock",
     "load_check",
+    "webhook_connector",
 )
+_PINNED = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._, -]+\])?==[A-Za-z0-9.+!_-]+(\s*;.*)?")
+_HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}")
 
 Checker = Callable[..., LoadCheck]
 
@@ -60,6 +79,37 @@ class InstallFailed(ValueError):
     def __init__(self, check: str, message: str) -> None:
         super().__init__(f"{check}: {message}")
         self.check = check
+
+
+class Busy(Exception):
+    """As many installs and wheel fetches as may run at once are running: try again in `retry_after` seconds."""
+
+    def __init__(self, retry_after: int = BUSY_RETRY_S) -> None:
+        super().__init__(f"{MAX_BUSY} installs or fetches are running: try again in {retry_after} s")
+        self.retry_after = retry_after
+
+
+def check_lock(lock: bytes) -> None:
+    """Every requirement in a package's lock pinned with `==` and carrying sha256 hashes, and nothing else: no
+    `--index-url` or other option, no direct URL, no path. Raises `ValueError` naming the first line that isn't."""
+    text = re.sub(r"\\\r?\n", " ", lock.decode("utf-8", "replace"))  # a line ending in a backslash goes on
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        line = line.split(" #", 1)[0].strip()
+        parts = line.split()
+        hashes = [p for p in parts if p.startswith("--hash")]
+        requirement = " ".join(p for p in parts if not p.startswith("--hash"))
+        shown = requirement[:80] or line[:80]
+        if requirement.startswith("-"):
+            raise ValueError(f"line {number}: {shown!r} is an option; a lock holds only pinned requirements")
+        if "://" in requirement or "@" in requirement or not _PINNED.fullmatch(requirement):
+            raise ValueError(f"line {number}: {shown!r} is not pinned as name==version (no URLs or paths)")
+        if not hashes or not all(_HASH.fullmatch(h) for h in hashes):
+            raise ValueError(
+                f"line {number}: {shown!r} has no --hash=sha256:<64 hex digits> for each of its files"
+            )
 
 
 @dataclass(frozen=True)
@@ -96,6 +146,7 @@ class Packages:
         self._env = env
         self._checker = checker
         self._timeout = timeout
+        self._slots = threading.BoundedSemaphore(MAX_BUSY)
 
     # Installing.
 
@@ -107,22 +158,66 @@ class Packages:
         *,
         registry: str = BUILT_IN,
         reason: str | None = None,
+        allow_yanked: bool = False,
+        pre: bool = False,
     ) -> Installed:
         """Install a version of a package from one of the environment's registries, its flows inactive. Raises
-        `Forbidden` for an actor that isn't an admin, and `InstallFailed` naming the check that failed."""
+        `Forbidden` for an actor that isn't an admin, `Busy` when `MAX_BUSY` installs or fetches are running, and
+        `InstallFailed` naming the check that failed."""
         project = canonicalize_name(name)
         target = f"package:{project}"
         require(actor, "packages.install", self._store.audit, target)
-        request: dict[str, Any] = {"version": version, "registry": registry, "reason": reason}
-        try:
-            installed = self._install(actor, project, version, registry, reason, request)
-        except InstallFailed as error:
-            self._store.audit.record(
-                actor.kind, actor.name, "install_package", target, request, f"failed: {redact(str(error))}"
-            )
-            raise
-        self._store.audit.record(actor.kind, actor.name, "install_package", target, request, "ok")
+        request: dict[str, Any] = {
+            "version": version,
+            "registry": registry,
+            "reason": reason,
+            "allow_yanked": allow_yanked,
+            "pre": pre,
+        }
+        with self._slot():
+            try:
+                installed = self._install(actor, project, version, registry, reason, request)
+            except InstallFailed as error:
+                self._audit(actor, "install_package", target, request, f"failed: {redact(str(error))}")
+                raise
+            except Exception:
+                self._audit(actor, "install_package", target, request, "failed: internal")
+                raise
+        self._audit(actor, "install_package", target, request, "ok")
         return installed
+
+    def fetch(self, actor: Actor, registry: str, name: str, version: str) -> Fetched:
+        """A version's wheel from a registry, its sha256 and manifest checked, for `feather package fetch`: an
+        admin's, as an install is, and audited. Raises `Busy` as `install` does."""
+        project = canonicalize_name(name)
+        target = f"package:{project}"
+        require(actor, "packages.install", self._store.audit, target)
+        request: dict[str, Any] = {"version": version, "registry": registry}
+        with self._slot():
+            try:
+                fetched = self._registries.fetch(registry, project, version)
+            except (KeyError, RegistryProblem) as error:
+                text = error.args[0] if isinstance(error, KeyError) and error.args else error
+                self._audit(actor, "fetch_package", target, request, f"failed: {redact(str(text))}")
+                raise
+            except Exception:
+                self._audit(actor, "fetch_package", target, request, "failed: internal")
+                raise
+        request["sha256"] = fetched.sha256
+        self._audit(actor, "fetch_package", target, request, "ok")
+        return fetched
+
+    @contextmanager
+    def _slot(self) -> Generator[None]:
+        if not self._slots.acquire(blocking=False):
+            raise Busy()
+        try:
+            yield
+        finally:
+            self._slots.release()
+
+    def _audit(self, actor: Actor, action: str, target: str, request: dict[str, Any], result: str) -> None:
+        self._store.audit.record(actor.kind, actor.name, action, target, request, result)
 
     def _install(
         self,
@@ -134,7 +229,7 @@ class Packages:
         request: dict[str, Any],
     ) -> Installed:
         passed: list[str] = []
-        wanted = self._version_of(project, version, registry)
+        wanted = self._version_of(project, version, registry, pre=bool(request["pre"]))
         request["version"] = wanted
         if self._store.packages.version(project, wanted) is not None:
             raise InstallFailed(
@@ -144,6 +239,12 @@ class Packages:
         fetched = self._fetch(project, wanted, registry)
         request["sha256"] = fetched.sha256
         passed += ["fetch", "size", "sha256", "manifest", "name_version"]
+        if fetched.yanked and not request["allow_yanked"]:
+            raise InstallFailed(
+                "not_yanked",
+                f"registry {registry} has yanked {project} {wanted}: allow a yanked version to take it anyway",
+            )
+        passed.append("not_yanked")
         manifest = fetched.manifest
         try:
             m.check_fc_versions(manifest["fc_versions"])
@@ -156,6 +257,13 @@ class Packages:
         if not found.ok:
             raise InstallFailed("load_check", found.error or "the package doesn't load")
         passed.append("load_check")
+        if found.own_push_sources:
+            raise InstallFailed(
+                "webhook_connector",
+                f"the push datasets {', '.join(found.own_push_sources)} read with a source of the package's own: "
+                "webhooks are verified and parsed in the server, which runs only Feather Connect's connectors",
+            )
+        passed.append("webhook_connector")
         flows = [f"{project}/{flow}" for flow in sorted(found.flows)]
         row = PackageVersion(
             project,
@@ -178,8 +286,9 @@ class Packages:
             raise InstallFailed("not_installed", f"{project} {wanted} is installed here already") from None
         return Installed(project, row.version, row.sha256, registry, row.state, flows, passed, row.load_check)
 
-    def _version_of(self, project: str, version: str | None, registry: str) -> str:
-        """The version asked for, in its normal form, or the registry's newest that isn't yanked."""
+    def _version_of(self, project: str, version: str | None, registry: str, *, pre: bool) -> str:
+        """The version asked for, in its normal form, or the registry's newest that isn't yanked, nor a pre-release
+        unless `pre`."""
         if version is not None:
             try:
                 return str(Version(version))
@@ -191,9 +300,18 @@ class Packages:
             raise InstallFailed("fetch", str(error.args[0] if error.args else error)) from None
         except RegistryProblem as error:
             raise InstallFailed("fetch", str(error)) from None
-        usable = [v for v in found[0].versions if v not in found[0].yanked] if found else []
+        listed = found[0] if found else None
+        usable = [
+            v
+            for v in (listed.versions if listed else [])
+            if listed and v not in listed.yanked and (pre or not Version(v).is_prerelease)
+        ]
         if not usable:
-            raise InstallFailed("fetch", f"registry {registry} has no version of {project} that isn't yanked")
+            kind = "version" if pre else "release"
+            raise InstallFailed(
+                "fetch",
+                f"registry {registry} has no {kind} of {project} that isn't yanked: name a version to take one",
+            )
         return usable[0]
 
     def _fetch(self, project: str, version: str, registry: str) -> Fetched:
@@ -216,6 +334,10 @@ class Packages:
             raise InstallFailed("lock", f"the wheel has no {where}")
         if hashlib.sha256(lock).hexdigest() != manifest["lock_hash"]:
             raise InstallFailed("lock", f"{where} is not the lock the manifest's lock_hash names")
+        try:
+            check_lock(lock)
+        except ValueError as error:
+            raise InstallFailed("lock", f"{where}: {error}") from None
 
     # Reading.
 

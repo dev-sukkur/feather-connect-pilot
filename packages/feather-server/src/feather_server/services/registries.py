@@ -78,6 +78,7 @@ class Fetched:
     sha256: str
     content: bytes
     manifest: dict[str, Any]
+    yanked: bool = False  # as the registry says at the fetch, which an install refuses unless told otherwise
 
 
 class Registries:
@@ -312,12 +313,12 @@ class Registries:
                 if not files:
                     raise KeyError(f"the registry has no {project} {version}")
                 file, data = self.content(files[0].filename)
-                filename, expected = file.filename, file.sha256
+                filename, expected, yanked = file.filename, file.sha256, file.yanked_at is not None
             else:
                 with self._index(registry) as index:
                     listed = index.find(project, version)
                     data = index.fetch(listed, MAX_WHEEL)
-                filename, expected = listed.filename, listed.sha256 or ""
+                filename, expected, yanked = listed.filename, listed.sha256 or "", listed.yanked is not False
             if len(data) > MAX_WHEEL:
                 check = "size"
                 raise ManifestError(
@@ -337,4 +338,4 @@ class Registries:
             raise RegistryProblem(f"{registry}: {error}", check) from None
         if info.version != version or canonicalize_name(info.name) != project:
             raise RegistryProblem(f"{registry}: {filename} holds {info.name} {info.version}", "name_version")
-        return Fetched(registry, filename, info.sha256, data, dict(info.manifest))
+        return Fetched(registry, filename, info.sha256, data, dict(info.manifest), yanked)
