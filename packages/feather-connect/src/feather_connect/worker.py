@@ -23,11 +23,12 @@ from typing import Any
 
 from feather_connect.core.errors import PermanentError
 from feather_connect.logs import configure_logging, install_task_logs, register_secrets
-from feather_connect.project import Project, ProjectError, load_project
+from feather_connect.project import Project, ProjectError, environment_layer, load_project, use_db_secrets
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.port import Store
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import migrate
+from feather_connect.vault import Vault, master_key_from_env
 
 log = logging.getLogger(__name__)
 
@@ -96,10 +97,12 @@ def run_worker(
     configure_logging(os.environ.get("FEATHER_LOG_LEVEL", "INFO"))
     worker_id = worker_id or os.environ.get("FEATHER_WORKER_ID") or socket.gethostname()
     labels = dict(labels or {})
-    project = load_project(project_root, env)
-    _check_connections(project)
     migrate(database_url)
     store, spool = connect(database_url)
+    key = master_key_from_env()
+    use_db_secrets(lambda name: Vault(store.secrets, env, key).open(name))
+    project = load_project(project_root, env, environment=environment_layer(store.env_config.entries(env)))
+    _check_connections(project)
     remove_task_logs = install_task_logs(store)
     engine: DbosEngine | None = None
     try:

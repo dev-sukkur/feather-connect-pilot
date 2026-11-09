@@ -224,6 +224,42 @@ class ApiClient:
     def package_version(self, name: str, version: str) -> dict[str, Any]:
         return self._call("GET", f"/packages/{quote(name, safe='')}/versions/{quote(version, safe='')}")
 
+    # The environment's own configuration and secrets.
+
+    def connections(self) -> dict[str, Any]:
+        return self._call("GET", "/connections")
+
+    def connection(self, name: str) -> dict[str, Any]:
+        return self._call("GET", f"/connections/{quote(name, safe='')}")
+
+    def change_connection(self, name: str, changes: Mapping[str, Any], reason: str | None) -> dict[str, Any]:
+        return self._call(
+            "PATCH", f"/connections/{quote(name, safe='')}", body={"changes": dict(changes), "reason": reason}
+        )
+
+    def import_environment(self, entries: list[dict[str, Any]], reason: str | None) -> dict[str, Any]:
+        return self._call("POST", "/environment:import", body={"entries": entries, "reason": reason})
+
+    def secrets(self) -> list[dict[str, Any]]:
+        return self._call("GET", "/secrets")["items"]
+
+    def set_secret(self, name: str, value: str, reason: str | None) -> dict[str, Any]:
+        return self._call("PUT", f"/secrets/{quote(name, safe='')}", body={"value": value, "reason": reason})
+
+    def delete_secret(self, name: str) -> dict[str, Any]:
+        return self._call("DELETE", f"/secrets/{quote(name, safe='')}")
+
+    def rotate_key(self, key: str, reason: str | None) -> dict[str, Any]:
+        return self._call("POST", "/secrets:rotate-key", body={"key": key, "reason": reason})
+
+    def activate_flow(self, flow: str, version: str, reason: str | None) -> dict[str, Any]:
+        return self._call(
+            "POST", f"/flows/{quote(flow, safe='/')}:activate", body={"version": version, "reason": reason}
+        )
+
+    def deactivate_flow(self, flow: str, reason: str | None) -> dict[str, Any]:
+        return self._call("POST", f"/flows/{quote(flow, safe='/')}:deactivate", body={"reason": reason})
+
     def fetch_wheel(self, registry: str, name: str, version: str, out_dir: Path) -> tuple[Path, str]:
         """Download a version's wheel from one of the environment's registries into `out_dir`, at most `MAX_WHEEL`
         bytes, and check it against the sha256 the server sends. Returns the file and its sha256."""

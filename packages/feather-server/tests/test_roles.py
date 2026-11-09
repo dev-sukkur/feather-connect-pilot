@@ -67,6 +67,8 @@ def test_the_capabilities_are_split_between_the_two_roles() -> None:
         "registries.manage",
         "packages.publish",
         "packages.yank",
+        "environment.manage",
+        "secrets.manage",
     }
     assert NEEDS["flows.activate"] == "operator"
     assert all(NEEDS[c] == "operator" for c in CAPABILITIES.values())  # all M1 actions stay an operator's

@@ -67,6 +67,10 @@ from feather_connect.runtime.http import (
     OAuth2RefreshToken,
 )
 
+SECRET_SETTINGS = frozenset(
+    {"client_secret", "refresh_token", "token", "api_key", "password"}
+)  # never shown, refs only
+
 __all__ = ["Call", "Cursor", "HttpConfig", "Link", "Offset", "Page", "Rest", "SignatureInvalid", "Webhook"]
 
 AuthScheme = Literal[
@@ -393,6 +397,7 @@ class Rest(_HttpConnector, connector.Source):
     """
 
     spec = ConnectorSpec(
+        secrets=SECRET_SETTINGS,
         name="http.rest",
         config=HttpConfig,
         strategies=frozenset({"by_stamp", "replace", "snapshot_diff"}),
@@ -631,7 +636,11 @@ class Webhook:
     """
 
     spec = ConnectorSpec(
-        name="http.webhook", strategies=frozenset({"push"}), deletes="explicit", maturity="beta"
+        secrets=SECRET_SETTINGS,
+        name="http.webhook",
+        strategies=frozenset({"push"}),
+        deletes="explicit",
+        maturity="beta",
     )
 
     def __init__(
@@ -792,6 +801,7 @@ class Call(_HttpConnector, connector.Sink):
     """
 
     spec = ConnectorSpec(
+        secrets=SECRET_SETTINGS,
         name="http.call",
         config=HttpConfig,
         modes=frozenset({"upsert", "append"}),

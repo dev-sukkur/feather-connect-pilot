@@ -24,6 +24,7 @@ from feather_connect.storage.port import (
     delivery_cursor,
     failure_cursor,
 )
+from feather_connect.vault import VaultError
 from feather_server.api.errors import ApiProblem
 from feather_server.api.paging import decode, encode
 from feather_server.auth import Actor, CurrentActor, csrf_token, current_actor, require_csrf
@@ -31,6 +32,7 @@ from feather_server.services import actions as action_limits
 from feather_server.services.access import Forbidden
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
+from feather_server.services.environment import Environment
 from feather_server.services.previews import Preview, PreviewError, PreviewExpired, PreviewInvalid
 from feather_server.services.reads import FlowSummary, Reads
 from feather_server.services.task_records import NoRecords, TaskRecordReader
@@ -1125,17 +1127,55 @@ def quarantine_dismiss(
 # Connections.
 
 
-@router.get("/connections", response_class=HTMLResponse)
-def connections(request: Request, actor: CurrentActor) -> HTMLResponse:
+def _connections_page(
+    request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
+) -> HTMLResponse:
+    environment: Environment = request.app.state.environment
     return render(
         request,
         "connections.html",
+        status=status,
         title="Connections",
         actor=actor,
         connections=reads(request).connections(),
+        environment=environment.connections(),
+        env=environment.env,
         timeout=f"{action_limits.CHECK_TIMEOUT_S:g}",
-        notice=None,
+        notice=notice,
     )
+
+
+@router.get("/connections", response_class=HTMLResponse)
+def connections(request: Request, actor: CurrentActor) -> HTMLResponse:
+    return _connections_page(request, actor)
+
+
+@router.post("/connections/{name}/settings", dependencies=[Depends(require_csrf)])
+async def set_connection_setting(request: Request, actor: CurrentActor, name: str) -> Response:
+    form = await request.form()
+    key, value, reason = (str(form.get(f) or "").strip() for f in ("key", "value", "reason"))
+    environment: Environment = request.app.state.environment
+    try:
+        environment.update(actor, name, {key: value or None}, reason=reason or None)
+    except Forbidden as error:
+        return _connections_page(request, actor, status=403, notice=("bad", str(error)))
+    except (KeyError, ValueError) as error:
+        return _connections_page(request, actor, status=422, notice=("bad", str(error)))
+    return RedirectResponse(f"/connections#env-{quote(name, safe='')}", status_code=303)
+
+
+@router.post("/secrets/{name}", dependencies=[Depends(require_csrf)])
+async def replace_secret(request: Request, actor: CurrentActor, name: str) -> Response:
+    form = await request.form()
+    value, back = str(form.get("value") or ""), str(form.get("back") or "/connections")
+    environment: Environment = request.app.state.environment
+    try:
+        environment.set_secret(actor, name, value)
+    except Forbidden as error:
+        return _connections_page(request, actor, status=403, notice=("bad", str(error)))
+    except (VaultError, ValueError) as error:
+        return _connections_page(request, actor, status=422, notice=("bad", str(error)))
+    return RedirectResponse(back if back.startswith("/connections") else "/connections", status_code=303)
 
 
 @router.post("/connections/{name}/check", dependencies=[Depends(require_csrf)])

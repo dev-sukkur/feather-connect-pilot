@@ -12,6 +12,7 @@ from feather_connect.core.errors import PermanentError
 from feather_connect.logs import redact
 from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.storage.port import DuplicateUser, InvalidTransition
+from feather_connect.vault import NoMasterKey, VaultError
 from feather_server.services.access import Forbidden
 from feather_server.services.packages import Busy, InstallFailed
 from feather_server.services.previews import PreviewError, PreviewInvalid
@@ -75,6 +76,10 @@ def translate(error: Exception) -> ApiProblem | None:
         return ApiProblem(409, "Conflict", _message(error))
     if isinstance(error, FlowPaused | InvalidTransition):
         return ApiProblem(409, "Conflict", _message(error))
+    if isinstance(error, NoMasterKey):  # the server runs without one: db secrets wait for it
+        return ApiProblem(503, "Service Unavailable", str(error))
+    if isinstance(error, VaultError):
+        return ApiProblem(422, "Unprocessable Content", str(error))
     if isinstance(error, KeyError | LookupError):
         return ApiProblem(404, "Not Found", _message(error))
     if isinstance(error, ValueError | PermanentError):

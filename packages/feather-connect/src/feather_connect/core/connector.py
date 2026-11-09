@@ -44,6 +44,10 @@ class ConnectorSpec:
     `deletes` says how the connector reports deleted records, `"none"` when it doesn't. `config` is the
     Pydantic model of its connection settings and `cost` the budget units each kind of call uses. `maturity` says how
     far it has come, and `resumable` that a source's read saves checkpoints and can start again from one.
+
+    `secrets` names the settings that are secret: they are given only as secret references, under the connection's
+    `auth`, and never shown. When it is None, they are the fields of `config` typed `Secret`. Every other setting, such
+    as a base URL, an organisation id or a client id, is a plain value that may be shown and edited.
     """
 
     name: str
@@ -54,6 +58,7 @@ class ConnectorSpec:
     cost: Mapping[str, int] = field(default_factory=dict[str, int])
     maturity: Maturity = "experimental"
     resumable: bool = False
+    secrets: AbstractSet[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -254,3 +259,15 @@ class Sink(Protocol):
     def compensate(self, ctx: Context, batch: ApplyBatch) -> ApplyResult:
         """Reverse an applied batch. Only the sinks of side-effect routes implement this."""
         raise PermanentError(f"{self.spec.name} can't compensate a batch")
+
+
+def secret_fields(spec: ConnectorSpec) -> frozenset[str]:
+    """The settings of a connector's connections that are secret: what `spec.secrets` names, or else the fields of its
+    config model typed `Secret`."""
+    if spec.secrets is not None:
+        return frozenset(spec.secrets)
+    if spec.config is None:
+        return frozenset()
+    return frozenset(
+        name for name, info in spec.config.model_fields.items() if "SecretStr" in repr(info.annotation)
+    )
