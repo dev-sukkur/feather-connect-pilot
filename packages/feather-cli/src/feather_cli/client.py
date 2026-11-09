@@ -5,6 +5,7 @@ token, or answered with a problem (RFC 9457), whose detail it carries.
 """
 
 import hashlib
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Self
@@ -14,6 +15,15 @@ import httpx
 
 API = "/api/v1"
 TIMEOUT_S = 30.0
+INSTALL_TIMEOUT_S = 300.0  # an install fetches the wheel and loads it in a child process
+MAX_WHEEL = 50 * 1024 * 1024  # bytes a fetched wheel may have, as the server's limit
+_FILENAME = re.compile(r'filename="([A-Za-z0-9._+-]+\.whl)"')
+
+
+def _attachment(header: str) -> str | None:
+    """The wheel's name from `Content-Disposition`, when it is a plain one: never a path."""
+    found = _FILENAME.search(header)
+    return None if found is None else found.group(1)
 
 
 class ApiError(Exception):
@@ -63,12 +73,16 @@ class ApiClient:
         params: Mapping[str, Any] | None = None,
         body: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
+        timeout: float | None = None,
     ) -> Any:
         url = f"{self.base_url}{API}{path}"
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         query = {k: v for k, v in (params or {}).items() if v is not None}
+        wait = self._http.timeout if timeout is None else httpx.Timeout(timeout)
         try:
-            answer = self._http.request(method, f"{API}{path}", params=query, json=body, headers=headers)
+            answer = self._http.request(
+                method, f"{API}{path}", params=query, json=body, headers=headers, timeout=wait
+            )
         except httpx.TimeoutException:
             raise ApiError(f"the server at {url} did not answer within {self._http.timeout.read}s") from None
         except httpx.HTTPError as error:
@@ -174,6 +188,69 @@ class ApiClient:
         return self._call("GET", f"/registries/{quote(registry, safe='')}/packages", params={"q": query})[
             "items"
         ]
+
+    # Installed packages.
+
+    def install_package(
+        self,
+        name: str,
+        version: str | None,
+        registry: str,
+        reason: str | None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Install a version; the server's load check may take a minute, so this waits longer than other calls."""
+        body = {"name": name, "version": version, "registry": registry, "reason": reason}
+        return self._call(
+            "POST", "/packages", body=body, idempotency_key=idempotency_key, timeout=INSTALL_TIMEOUT_S
+        )
+
+    def packages(self) -> list[dict[str, Any]]:
+        return self._call("GET", "/packages")["items"]
+
+    def package(self, name: str) -> dict[str, Any]:
+        return self._call("GET", f"/packages/{quote(name, safe='')}")
+
+    def package_version(self, name: str, version: str) -> dict[str, Any]:
+        return self._call("GET", f"/packages/{quote(name, safe='')}/versions/{quote(version, safe='')}")
+
+    def fetch_wheel(self, registry: str, name: str, version: str, out_dir: Path) -> tuple[Path, str]:
+        """Download a version's wheel from one of the environment's registries into `out_dir`, at most `MAX_WHEEL`
+        bytes, and check it against the sha256 the server sends. Returns the file and its sha256."""
+        path = (
+            f"{API}/registries/{quote(registry, safe='')}/packages/{quote(name, safe='')}"
+            f"/versions/{quote(version, safe='')}/wheel"
+        )
+        url = f"{self.base_url}{path}"
+        try:
+            with self._http.stream("GET", path, timeout=httpx.Timeout(INSTALL_TIMEOUT_S)) as answer:
+                if not answer.is_success:
+                    answer.read()
+                    try:
+                        detail = answer.json().get("detail") or answer.reason_phrase
+                    except ValueError:
+                        detail = answer.text[:200] or answer.reason_phrase
+                    raise ApiError(
+                        f"GET {url} failed ({answer.status_code}): {detail}", status=answer.status_code
+                    )
+                expected = answer.headers.get("x-feather-sha256", "")
+                filename = _attachment(answer.headers.get("content-disposition", ""))
+                data = bytearray()
+                for chunk in answer.iter_bytes():
+                    data += chunk
+                    if len(data) > MAX_WHEEL:
+                        raise ApiError(f"GET {url}: the wheel is more than {MAX_WHEEL} bytes")
+        except httpx.HTTPError as error:
+            raise ApiError(f"can't reach the server at {url}: {error}") from None
+        digest = hashlib.sha256(data).hexdigest()
+        if not filename or digest != expected:
+            raise ApiError(
+                f"GET {url}: the wheel's sha256 is {digest}, not the {expected or 'none'} the server sent"
+            )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        target = out_dir / filename
+        target.write_bytes(bytes(data))
+        return target, digest
 
     def publish(self, path: Path) -> None:
         """Upload a wheel to the built-in registry, as `uv publish` does: the legacy upload form at `/registry/`."""

@@ -120,3 +120,44 @@ def test_registry_add_list_test_and_remove(cli, sample: Path, server, monkeypatc
         assert failing.exit_code == 1 and "refused the credentials" in failing.stderr
     removed = cli("registry", "remove", "acme", *admin, "--token", tokens["admin"])
     assert removed.exit_code == 0 and "removed registry acme" in removed.stdout
+
+
+def test_install_list_show_and_fetch(cli, sample: Path, server, tmp_path: Path):
+    import hashlib
+
+    base, tokens = server
+    assert cli("package", "build", "--project", str(sample)).exit_code == 0
+    published = cli(
+        "package", "publish", "--project", str(sample), "--url", base, "--token", tokens["publish"]
+    )
+    assert published.exit_code == 0, published.output
+    admin, operator = (
+        ("--server", base, "--token", tokens["admin"]),
+        ("--server", base, "--token", tokens["operator"]),
+    )
+    denied = cli("package", "install", "acme-invoices==1.0.0", *operator)
+    assert denied.exit_code == 1 and "403" in denied.stderr
+    installed = cli("package", "install", "acme-invoices==1.0.0", "--reason", "first", *admin)
+    assert installed.exit_code == 0, installed.output
+    assert "installed acme-invoices 1.0.0 from feather" in installed.stdout
+    assert ": inactive" in installed.stdout and "activate a flow to run it" in installed.stdout
+    again = cli("package", "install", "acme-invoices==1.0", *admin)
+    assert again.exit_code == 1 and "install a new version" in again.stderr
+    missing = cli("package", "install", "acme-invoices==9.9.9", *admin)
+    assert missing.exit_code == 1 and "feather package search" in missing.stderr
+    assert cli("package", "install", "==1.0", *admin).exit_code != 0
+    listed = cli("package", "list", *operator)
+    assert "acme-invoices: 1.0.0 (installed); 0 flows active" in listed.stdout
+    shown = json.loads(cli("package", "show", "acme-invoices==1.0.0", *operator, "--json").stdout)
+    assert shown["load_check"]["ok"] and {f["state"] for f in shown["flows"]} == {"inactive"}
+    assert "acme-invoices/" in cli("package", "show", "acme-invoices", *operator).stdout
+    assert cli("package", "show", "nothing", *operator).exit_code == 1
+    fetched = cli(
+        "package", "fetch", "acme-invoices==1.0.0", "--out", str(tmp_path / "got"), *operator, "--json"
+    )
+    assert fetched.exit_code == 0, fetched.output
+    doc = json.loads(fetched.stdout)
+    wheel = Path(doc["wheel"])
+    assert wheel.name == "acme_invoices-1.0.0-py3-none-any.whl"
+    assert hashlib.sha256(wheel.read_bytes()).hexdigest() == doc["sha256"]
+    assert cli("package", "fetch", "acme-invoices", *operator).exit_code == 1  # a version is needed

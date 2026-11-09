@@ -1,4 +1,5 @@
-"""`feather package`: build a flow package from the project, publish it to a registry, and search a registry."""
+"""`feather package`: build a flow package from the project, publish it to a registry, search a registry, fetch a
+wheel from one, and install a version into an environment, list what is installed and show it."""
 
 import hashlib
 from pathlib import Path
@@ -13,7 +14,7 @@ from feather_cli.output import emit, fail
 from feather_connect.packages.build import build_package
 from feather_connect.packages.manifest import ManifestError
 
-package_app = typer.Typer(help="Build, publish and find flow packages.", no_args_is_help=True)
+package_app = typer.Typer(help="Build, publish, find and install flow packages.", no_args_is_help=True)
 
 OutDir = Annotated[
     Path | None,
@@ -158,3 +159,142 @@ def search(
             typer.echo(f"{item['name']}: {versions}")
 
     emit({"registry": registry, "items": found}, json_mode=json_mode, human=human)
+
+
+Reason = Annotated[str | None, typer.Option(help="Why, for the audit log.", show_default=False)]
+FromRegistry = Annotated[str, typer.Option("--registry", help="The registry to install from.")]
+
+
+def _wanted(spec: str, json_mode: bool) -> tuple[str, str | None]:
+    """`acme-invoices==1.4.0` or `acme-invoices`, as pip writes it."""
+    name, _, version = spec.partition("==")
+    if not name.strip() or (version == "" and "==" in spec):
+        fail(
+            f"{spec!r} is not a package",
+            hint="write it as acme-invoices or acme-invoices==1.4.0",
+            json_mode=json_mode,
+        )
+    return name.strip(), version.strip() or None
+
+
+_INSTALL_HINTS = {
+    "not_installed": "a version is installed once: install a new version",
+    "fetch": "check the name and version with: feather package search",
+    "sha256": "the registry's record and the wheel disagree: ask the publisher to publish a new version",
+    "manifest": "it is not a flow package this server can read: build it again with feather package build",
+    "compatibility": "build it for this Feather Connect, or upgrade the server",
+    "load_check": "fix the package (feather validate --env <env> shows the same problems), then publish a new version",
+}
+
+
+@package_app.command()
+def install(
+    spec: Annotated[str, typer.Argument(help="The package, with a version: acme-invoices==1.4.0.")],
+    registry: FromRegistry = "feather",
+    reason: Reason = None,
+    project: ProjectDir = Path("."),
+    env: Env = "dev",
+    server: remote.Server = None,
+    token: remote.Token = None,
+    json_mode: Json = False,
+) -> None:
+    """Install a version of a package from one of the environment's registries: the newest not yanked when none is
+    given. It is checked and loaded on the server, in a child process, and its flows start inactive: nothing runs
+    until one is activated."""
+    name, version = _wanted(spec, json_mode)
+    with remote.client(project, env, server, token, json_mode) as api:
+
+        def attempt() -> dict[str, Any]:
+            try:
+                return api.install_package(name, version, registry, reason)
+            except ApiError as error:
+                hint = _INSTALL_HINTS.get(str(error.problem.get("check") or ""))
+                if hint is None:
+                    raise
+                fail(str(error), hint=hint, json_mode=json_mode)
+
+        installed = remote.call(attempt, json_mode)
+
+    def human(doc: dict[str, Any]) -> None:
+        typer.echo(f"installed {doc['name']} {doc['version']} from {doc['registry']}, sha256 {doc['sha256']}")
+        for flow in doc["flows"]:
+            typer.echo(f"  {flow}: inactive")
+        typer.echo("activate a flow to run it")
+
+    emit(installed, json_mode=json_mode, human=human)
+
+
+@package_app.command("list")
+def list_packages(
+    project: ProjectDir = Path("."),
+    env: Env = "dev",
+    server: remote.Server = None,
+    token: remote.Token = None,
+    json_mode: Json = False,
+) -> None:
+    """The packages installed in the environment, with their versions."""
+    with remote.client(project, env, server, token, json_mode) as api:
+        found = remote.call(api.packages, json_mode)
+
+    def human(doc: dict[str, Any]) -> None:
+        if not doc["items"]:
+            typer.echo("no package is installed")
+        for item in doc["items"]:
+            versions = ", ".join(f"{v['version']} ({v['state']})" for v in item["versions"])
+            typer.echo(f"{item['name']}: {versions}; {item['active_flows']} flows active")
+
+    emit({"items": found}, json_mode=json_mode, human=human)
+
+
+@package_app.command()
+def show(
+    spec: Annotated[str, typer.Argument(help="The package, or a version of it: acme-invoices==1.4.0.")],
+    project: ProjectDir = Path("."),
+    env: Env = "dev",
+    server: remote.Server = None,
+    token: remote.Token = None,
+    json_mode: Json = False,
+) -> None:
+    """An installed package's versions and flows, or one version's manifest, load check and flows."""
+    name, version = _wanted(spec, json_mode)
+    with remote.client(project, env, server, token, json_mode) as api:
+        if version is None:
+            found = remote.call(lambda: api.package(name), json_mode)
+        else:
+            found = remote.call(lambda: api.package_version(name, version), json_mode)
+
+    def human(doc: dict[str, Any]) -> None:
+        for v in doc.get("versions") or [doc]:
+            typer.echo(
+                f"{v['name']} {v['version']}: {v['state']}, from {v['registry']}, sha256 {v['sha256']}"
+            )
+        for flow in doc["flows"]:
+            typer.echo(f"  {flow['flow']} {flow['version']}: {flow['state']}")
+
+    emit(found, json_mode=json_mode, human=human)
+
+
+@package_app.command()
+def fetch(
+    spec: Annotated[str, typer.Argument(help="The package and version: acme-invoices==1.4.0.")],
+    registry: Annotated[str, typer.Option(help="The registry to fetch from.")] = "feather",
+    out: OutDir = None,
+    project: ProjectDir = Path("."),
+    env: Env = "dev",
+    server: remote.Server = None,
+    token: remote.Token = None,
+    json_mode: Json = False,
+) -> None:
+    """Download a version's wheel from one of the environment's registries, through the server, which checks its
+    sha256 and manifest as an install does. It goes to dist/ by default."""
+    name, version = _wanted(spec, json_mode)
+    if version is None:
+        fail("fetch needs a version", hint="write it as acme-invoices==1.4.0", json_mode=json_mode)
+    where = out or Path("dist")
+    with remote.client(project, env, server, token, json_mode) as api:
+        path, sha256 = remote.call(lambda: api.fetch_wheel(registry, name, version, where), json_mode)
+    emit(
+        {"wheel": str(path), "sha256": sha256, "registry": registry},
+        json_mode=json_mode,
+        human=lambda d: typer.echo(f"fetched {d['wheel']}\nsha256 {d['sha256']}"),
+    )
