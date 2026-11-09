@@ -78,6 +78,7 @@ from feather_connect.storage.port import (
     WorkerState,
     account_mismatch,
     check_transition,
+    check_wheel,
     split_error,
     version_key,
 )
@@ -1325,6 +1326,7 @@ class _Packages(PackageStore):
         self, version: PackageVersion, content: bytes, flows: Sequence[str], reason: str | None = None
     ) -> None:
         key = (version.name, version_key(version.version))
+        check_wheel(version, content)
         with self._d.lock:
             if key in self._d.package_versions:
                 raise DuplicateVersion(f"{version.name} {version.version}")

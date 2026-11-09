@@ -88,6 +88,7 @@ from feather_connect.storage.port import (
     account_key,
     account_mismatch,
     check_transition,
+    check_wheel,
     split_error,
     version_key,
 )
@@ -2211,6 +2212,7 @@ class _Packages(PackageStore):
         self, version: PackageVersion, content: bytes, flows: Sequence[str], reason: str | None = None
     ) -> None:
         tenant, key = self._db.tenant, version_key(version.version)
+        check_wheel(version, content)
         try:
             with self._db.tx() as conn:
                 conn.execute(

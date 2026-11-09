@@ -1299,6 +1299,16 @@ class FlowActivation:
     error: str | None = None
 
 
+def check_wheel(version: "PackageVersion", content: bytes) -> None:
+    """Raise `ValueError` unless `content` is the wheel the version names by sha256 and size."""
+    import hashlib
+
+    if hashlib.sha256(content).hexdigest() != version.sha256 or len(content) != version.size:
+        raise ValueError(
+            f"the wheel stored for {version.name} {version.version} is not the one its sha256 names"
+        )
+
+
 class DuplicateVersion(Exception):
     """That version of the package is installed already, by `version_key`: a version always means the same code."""
 
@@ -1311,7 +1321,8 @@ class PackageStore(Protocol):
     ) -> None:
         """Record the version as installed in one transaction: the package if it is new, the wheel by its sha256 if
         the store hasn't it, the version, and each of `flows` (prefixed names) inactive. Raises `DuplicateVersion`
-        when the package has the version, by `version_key`, and changes nothing then."""
+        when the package has the version, by `version_key`, and `ValueError` when `content` is not the bytes whose
+        sha256 the version names; it changes nothing then."""
         ...
 
     def packages(self) -> list[str]:
