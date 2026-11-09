@@ -328,10 +328,18 @@ def _budgets(config: Mapping[str, Any], layers: Mapping[str, str]) -> dict[str, 
             raise ProjectError(
                 f"{_where(layers, path + '.limits')}: give a list of limits such as '90/minute'"
             )
+        account = body.get("account")
+        if account is not None and (not isinstance(account, str | int) or not str(account).strip()):
+            raise ProjectError(
+                f"{_where(layers, path + '.account')}: name the vendor account, such as 'zakya:60001'"
+            )
         try:
             reserve = {k: float(v) for k, v in _strkeys(body.get("reserve", {})).items()}
             found[name] = BudgetSpec(
-                name, parse_limits([str(limit) for limit in cast(list[Any], limits)]), reserve
+                name,
+                parse_limits([str(limit) for limit in cast(list[Any], limits)]),
+                reserve,
+                None if account is None else str(account),
             )
         except (ValueError, TypeError, AttributeError):
             raise ProjectError(f"{_where(layers, path)}: limits and reserve are not valid") from None
@@ -645,8 +653,12 @@ def validate_project(project: Project) -> list[Problem]:
                         f"add {connection!r} under connections: in feather.yaml or env/{project.env}.yaml",
                     )
                 )
-            elif config.connector != connector and not (
-                config.connector in SIMULATED and getattr(obj, "stands_in", False)
+            elif (
+                config.connector != connector
+                and not connector.startswith(
+                    f"{config.connector}."
+                )  # `zakya` serves zakya.source, zakya.items...
+                and not (config.connector in SIMULATED and getattr(obj, "stands_in", False))
             ):
                 problems.append(
                     Problem(
