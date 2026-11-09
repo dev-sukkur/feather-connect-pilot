@@ -29,7 +29,12 @@ TIMEOUT_S = 30.0
 
 
 class IndexReadError(Exception):
-    """The index can't be read, or what it serves is not what was asked for. The message never holds the token."""
+    """The index can't be read, or what it serves is not what was asked for. The message never holds the token.
+    `check` names what a fetched file failed, `size` or `sha256`, for an install to report."""
+
+    def __init__(self, message: str, check: str | None = None) -> None:
+        super().__init__(message)
+        self.check = check
 
 
 @dataclass(frozen=True)
@@ -210,7 +215,7 @@ class SimpleIndex:
         else says the bytes are the ones published."""
         if file.sha256 is None:
             raise IndexReadError(f"{file.filename}: the index gives no sha256 for it, so it can't be checked")
-        too_big = IndexReadError(f"{file.filename} has more than the {max_bytes} bytes allowed")
+        too_big = IndexReadError(f"{file.filename} has more than the {max_bytes} bytes allowed", "size")
         chunks: list[bytes] = []
         size = 0
         with self._stream(file.url) as answer:
@@ -225,6 +230,6 @@ class SimpleIndex:
         digest = hashlib.sha256(data).hexdigest()
         if digest != file.sha256.lower():
             raise IndexReadError(
-                f"{file.filename}: its sha256 is {digest}, not the {file.sha256} the index gives"
+                f"{file.filename}: its sha256 is {digest}, not the {file.sha256} the index gives", "sha256"
             )
         return data
