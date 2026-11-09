@@ -166,11 +166,34 @@ def check_binding(ref: str, connection: str, field: str) -> None:
         )
 
 
+# The variables that hold feather's own secrets: no connection may read them. Others, such as a deployment's
+# FEATHER_DATABASE_URL, may be given to a connection in the project's files, which the operator controls.
+RESERVED_VARIABLES = frozenset(
+    {
+        "FEATHER_MASTER_KEY",
+        "FEATHER_MASTER_KEY_FILE",
+        "FEATHER_MASTER_KEY_PREVIOUS",
+        "FEATHER_MASTER_KEY_PREVIOUS_FILE",
+        "FEATHER_SECRET_KEY",
+    }
+)
+_KEY_FILES = ("FEATHER_MASTER_KEY_FILE", "FEATHER_MASTER_KEY_PREVIOUS_FILE")
+
+
 def _check_reserved(provider: str, path: str) -> None:
-    if provider == "env" and path.upper().startswith("FEATHER_"):
+    if provider == "env" and path.upper() in RESERVED_VARIABLES:
         raise ProjectError(
-            "a secret may not be read from a FEATHER_ variable: those configure feather itself, such as its master key"
+            f"a secret may not be read from {path.upper()}: it holds feather's own secret, such as its master key"
         )
+
+
+def _check_key_file(file: Path) -> None:
+    """Refuse a `file` reference to the master key's own file."""
+    for name in _KEY_FILES:
+        if (where := os.environ.get(name)) and Path(where).resolve() == file.resolve():
+            raise ProjectError(
+                f"a secret may not be read from the file {name} names: it is feather's master key"
+            )
 
 
 def resolve_secret(ref: str, root: Path | None = None) -> str:
@@ -204,6 +227,7 @@ def resolve_secret(ref: str, root: Path | None = None) -> str:
         file = Path(path)
         if root is not None and not file.is_absolute():
             file = root / file
+        _check_key_file(file)
         return file.read_text(encoding="utf-8").rstrip("\r\n")
     except OSError as error:
         raise ProjectError(f"secret {ref}: can't read the file ({error.strerror})") from None

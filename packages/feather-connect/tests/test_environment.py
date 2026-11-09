@@ -162,6 +162,22 @@ def test_no_secret_is_read_from_a_feather_variable(tmp_path: Path, monkeypatch: 
         load_project(root, "dev")
 
 
+def test_only_feathers_own_secrets_are_reserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FEATHER_DATABASE_URL", "postgresql://demo")  # the demo's warehouse reads it
+    assert resolve_secret("${secret:env:FEATHER_DATABASE_URL}") == "postgresql://demo"
+    for name in ("FEATHER_SECRET_KEY", "FEATHER_MASTER_KEY_PREVIOUS", "FEATHER_MASTER_KEY_FILE"):
+        monkeypatch.setenv(name, "x")
+        with pytest.raises(ProjectError, match=name):
+            resolve_secret(f"${{secret:env:{name}}}")
+    key = tmp_path / "master.key"
+    key.write_text(new_master_key(), encoding="utf-8")
+    monkeypatch.setenv("FEATHER_MASTER_KEY_FILE", str(key))
+    with pytest.raises(ProjectError, match="master key"):
+        resolve_secret(f"${{secret:file:{key}}}")
+    (tmp_path / "other").write_text("fine", encoding="utf-8")
+    assert resolve_secret(f"${{secret:file:{tmp_path / 'other'}}}") == "fine"
+
+
 def test_a_package_may_point_a_connection_only_at_its_own_db_secret(tmp_path: Path):
     root = _package(tmp_path / "a", "acme-a")
     (root / "feather.yaml").write_text(
