@@ -802,6 +802,18 @@ def account_key(account: str) -> str:
     return f"account:{account}"
 
 
+def account_mismatch(spec: "BudgetSpec", other: str, windows: Sequence["Window"]) -> str:
+    """Why `spec` can't be defined: `other`, a budget of the same account, has other `windows`."""
+
+    def text(ws: Sequence[Window]) -> str:
+        return ", ".join(f"{w.units}/{w.seconds:g}s" for w in ws) or "none"
+
+    return (
+        f"budget {spec.name!r} gives account {spec.account!r} the windows {text(spec.windows)}, but {other} has "
+        f"{text(windows)}; the budgets of one account share its windows, so give them all the same limits"
+    )
+
+
 @dataclass(frozen=True)
 class Grant:
     """The answer to an `acquire`. When it is refused, `wait` is how long until the same request would be granted."""
@@ -836,7 +848,11 @@ class BudgetStore(Protocol):
     """Shared rate budgets. Each window refills continuously, as a token bucket, by the store's clock."""
 
     def define(self, spec: BudgetSpec) -> None:
-        """Create the budget, full. Defining it again with the same spec changes nothing; with another, starts afresh."""
+        """Create the budget, full. Defining it again with the same spec changes nothing; with another, starts afresh.
+
+        A budget of a vendor account takes the account's windows as they are, with what has been used of them. Raises
+        `ValueError` when another budget of the account has other windows: neither is right to reset them.
+        """
         ...
 
     def acquire(self, name: str, units: int, priority: Priority = "normal") -> Grant:

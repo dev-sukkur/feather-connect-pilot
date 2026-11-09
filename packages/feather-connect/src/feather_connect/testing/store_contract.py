@@ -683,6 +683,24 @@ class StoreContract(
         store.budgets.define(BudgetSpec("zoho-a", limits, account="zakya:60001"))  # again: the use stays
         assert [u.used for u in store.budgets.usage("zoho-a")] == [6]
 
+    def test_a_budget_that_disagrees_with_its_account_is_refused_and_resets_nothing(self, store: Store):
+        limits = parse_limits(["10/minute"])
+        store.budgets.define(BudgetSpec("zoho-a", limits, account="zakya:60001"))
+        store.budgets.define(BudgetSpec("zoho-b", limits, account="zakya:60001"))
+        store.budgets.acquire("zoho-a", 6)
+        with pytest.raises(ValueError, match="zoho-a"):
+            store.budgets.define(BudgetSpec("zoho-b", parse_limits(["20/minute"]), account="zakya:60001"))
+        with pytest.raises(ValueError, match="zoho-"):
+            store.budgets.define(BudgetSpec("zoho-c", parse_limits(["20/minute"]), account="zakya:60001"))
+        assert [u.used for u in store.budgets.usage("zoho-b")] == [6]
+        assert [w.window.units for w in store.budgets.usage("zoho-b")] == [10]
+        store.budgets.define(BudgetSpec("alone", limits, account="zakya:70002"))
+        store.budgets.acquire("alone", 4)
+        store.budgets.define(BudgetSpec("alone", parse_limits(["20/minute"]), account="zakya:70002"))
+        assert [(u.window.units, u.used) for u in store.budgets.usage("alone")] == [
+            (20, 0)
+        ]  # its only budget
+
     def test_an_unknown_budget_or_an_impossible_request_is_an_error(self, store: Store):
         with pytest.raises(KeyError):
             store.budgets.acquire("nobody", 1)

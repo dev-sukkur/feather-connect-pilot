@@ -81,6 +81,7 @@ from feather_connect.storage.port import (
     WorkerRow,
     WorkerState,
     account_key,
+    account_mismatch,
     check_transition,
     split_error,
     version_key,
@@ -1537,7 +1538,24 @@ class PostgresBudgets(BudgetStore):
                 "select units, seconds from feather.budget_window where tenant_id = %s and name = %s order by idx",
                 (tenant, key),
             ).fetchall()
-            same_windows = tuple(Window(w["units"], w["seconds"]) for w in windows) == spec.windows
+            held = tuple(Window(w["units"], w["seconds"]) for w in windows)
+            same_windows = held == spec.windows
+            if spec.account is not None and windows and not same_windows:
+                # Who else uses the account: the one read across tenants, of the account's own rows (ADR-0013
+                # rule 8). Another tenant is not named to this one.
+                other = conn.execute(
+                    """select tenant_id, name from feather.budget
+                       where account = %s and not (tenant_id = %s and name = %s)
+                       order by tenant_id = %s desc, name limit 1""",
+                    (spec.account, self._db.tenant, spec.name, self._db.tenant),
+                ).fetchone()
+                if other is not None:
+                    who = (
+                        repr(other["name"])
+                        if other["tenant_id"] == self._db.tenant
+                        else "a budget of another tenant"
+                    )
+                    raise ValueError(account_mismatch(spec, who, held))
             if (
                 budget is not None
                 and budget["reserve"] == dict(spec.reserve)

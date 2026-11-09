@@ -375,3 +375,7 @@ def test_a_vendor_account_budget_is_shared_by_tenants_and_no_other_is(
         second.budgets.acquire("zoho-api", 1)  # the other tenant's name means nothing here
     second.budgets.define(BudgetSpec("zakya", limits, account="zakya:60001"))  # a restart keeps what was used
     assert [u.used for u in first.budgets.usage("zoho-api")] == [7, 7]
+    with pytest.raises(ValueError, match="a budget of another tenant") as refused:
+        second.budgets.define(BudgetSpec("zakya", parse_limits(["50/minute"]), account="zakya:60001"))
+    assert "zoho-api" not in str(refused.value) and "default" not in str(refused.value)  # nor named to t2
+    assert [u.used for u in first.budgets.usage("zoho-api")] == [7, 7]  # and nothing was reset
