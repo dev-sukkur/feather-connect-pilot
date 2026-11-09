@@ -46,6 +46,7 @@ from feather_connect.packages.manifest import ManifestError
 from feather_connect.packages.webhooks import parse_webhooks
 from feather_connect.packages.wheel import read_entry
 from feather_connect.project import environment_layer
+from feather_connect.runtime.catalogue import restart_ticks
 from feather_connect.storage.port import DuplicateVersion, FlowActivation, PackageVersion, Store
 from feather_server.auth import Actor
 from feather_server.services.access import require
@@ -364,9 +365,11 @@ class Packages:
         installed = self._store.packages.version(package, version)
         if installed is None:
             raise KeyError(f"{package} {version} is not installed here")
-        done = self._store.packages.activate(
-            flow, package, installed.version, actor.name, self._clock.now(), reason
-        )
+        now = self._clock.now()
+        spec = cast(dict[str, Any], installed.load_check.get("specs") or {}).get(flow)
+        if spec is not None:
+            restart_ticks(self._store, flow, spec, now)  # no catch-up of the time it was inactive
+        done = self._store.packages.activate(flow, package, installed.version, actor.name, now, reason)
         self._sync(package, installed)
         request = {"version": installed.version, "reason": reason}
         self._audit(actor, "activate_flow", target, request, "ok")

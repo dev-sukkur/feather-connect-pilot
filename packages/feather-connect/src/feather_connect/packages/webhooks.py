@@ -15,8 +15,15 @@ server's own ingress verifies, deduplicates and keeps each raw event; the packag
 
 The schemes are `hmac-sha256` and `hmac-sha1` (a header, `hex` or `base64`, an optional prefix), `shopify`
 (`X-Shopify-Hmac-Sha256`, base64), `stripe` (`Stripe-Signature`, `t=…,v1=…`, with a timestamp tolerance against
-replays), `zoho` (`X-Zoho-Webhook-Signature`, HMAC-SHA256 of the body in hex) and `bearer` (`Authorization: Bearer
-<secret>`). Every comparison takes constant time.
+replays), `zoho` and `bearer` (`Authorization: Bearer <secret>`). Every comparison takes constant time; a hex
+signature compares without regard to case.
+
+`zoho` is *unverified*: Zoho documents no one signature format for every product, so it is assumed to be HMAC-SHA256
+of the body, hex, in `X-Zoho-Webhook-Signature`; check it against the product's own documentation before relying on
+it. Any HMAC scheme may also name a `timestamp_header` (epoch seconds), which is then held to `tolerance` against
+replays.
+
+The header that carries the signature (or the bearer token) is never kept with the event.
 """
 
 import base64
@@ -29,17 +36,38 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, cast
 
-__all__ = ["SCHEMES", "Rejected", "Webhook", "parse_webhooks", "pick", "verify"]
+__all__ = [
+    "SCHEMES",
+    "UNVERIFIED_SCHEMES",
+    "Malformed",
+    "Rejected",
+    "Unauthentic",
+    "Webhook",
+    "parse_webhooks",
+    "pick",
+    "signature_header",
+    "verify",
+]
 
 Scheme = Literal["hmac-sha256", "hmac-sha1", "shopify", "stripe", "zoho", "bearer"]
 SCHEMES: tuple[Scheme, ...] = ("hmac-sha256", "hmac-sha1", "shopify", "stripe", "zoho", "bearer")
+UNVERIFIED_SCHEMES = frozenset({"zoho"})  # its format is assumed, not confirmed against every product
 _NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+_DIGITS = re.compile(r"[0-9]+")
 _PATH = re.compile(r"^\$(\.[A-Za-z_][A-Za-z0-9_-]*)+$")
 DEFAULT_TOLERANCE_S = 300
 
 
 class Rejected(Exception):
     """A request that isn't a genuine event of the webhook. The message is for the server's log, never sent back."""
+
+
+class Unauthentic(Rejected):
+    """Not signed by the sender, or replayed: answered 401."""
+
+
+class Malformed(Rejected):
+    """Signed, but not an event the webhook can keep (not JSON, or no key): answered 400."""
 
 
 @dataclass(frozen=True)
@@ -57,6 +85,11 @@ class Webhook:
     prefix: str = ""
     tolerance_s: int = DEFAULT_TOLERANCE_S
     ack: int = 202
+    timestamp_header: str | None = None
+
+    @property
+    def unverified(self) -> bool:
+        return self.scheme in UNVERIFIED_SCHEMES
 
 
 def parse_webhooks(raw: Mapping[str, Any]) -> dict[str, Webhook]:
@@ -100,6 +133,9 @@ def parse_webhooks(raw: Mapping[str, Any]) -> dict[str, Webhook]:
         tolerance = v.get("tolerance", DEFAULT_TOLERANCE_S)
         if not isinstance(tolerance, int) or tolerance <= 0:
             raise ValueError(f"{where}.verify.tolerance: seconds, more than 0")
+        stamp_header = v.get("timestamp_header")
+        if stamp_header is not None and (not isinstance(stamp_header, str) or scheme in ("stripe", "bearer")):
+            raise ValueError(f"{where}.verify.timestamp_header: a header name, for an HMAC scheme")
         found[name] = Webhook(
             name,
             dataset,
@@ -112,8 +148,20 @@ def parse_webhooks(raw: Mapping[str, Any]) -> dict[str, Webhook]:
             str(v.get("prefix") or ""),
             tolerance,
             ack,
+            stamp_header,
         )
     return found
+
+
+def signature_header(hook: Webhook) -> str:
+    """The header that carries the webhook's signature or token, lower-case: never kept with an event."""
+    default = {
+        "shopify": "X-Shopify-Hmac-Sha256",
+        "zoho": "X-Zoho-Webhook-Signature",
+        "stripe": "Stripe-Signature",
+        "bearer": "Authorization",
+    }
+    return (hook.header or default.get(hook.scheme) or "").lower()
 
 
 def _mac(secret: str, payload: bytes, digest: str) -> bytes:
@@ -124,15 +172,28 @@ def _encoded(mac: bytes, encoding: str) -> str:
     return mac.hex() if encoding == "hex" else base64.b64encode(mac).decode()
 
 
-def _same(given: str, expected: str) -> bool:
-    return hmac.compare_digest(given.strip().encode(), expected.encode())
+def _same(given: str, expected: str, *, hex_digits: bool = False) -> bool:
+    """Compare in constant time; hex without regard to case."""
+    given = given.strip()
+    if hex_digits:
+        given, expected = given.lower(), expected.lower()
+    return hmac.compare_digest(given.encode(), expected.encode())
 
 
 def _header(headers: Mapping[str, str], name: str) -> str:
     value = headers.get(name.lower())
     if value is None:
-        raise Rejected(f"no {name} header")
+        raise Unauthentic(f"no {name} header")
     return value
+
+
+def _fresh(hook: Webhook, stamp: str, now: datetime) -> None:
+    if not _DIGITS.fullmatch(stamp):
+        raise Unauthentic("the event's timestamp is not a number of seconds")
+    if abs(now.timestamp() - int(stamp)) > hook.tolerance_s:
+        raise Unauthentic(
+            f"the event's timestamp is more than {hook.tolerance_s} s away: a replay, or a clock off"
+        )
 
 
 def verify(hook: Webhook, secret: str, headers: Mapping[str, str], body: bytes, now: datetime) -> None:
@@ -143,40 +204,45 @@ def verify(hook: Webhook, secret: str, headers: Mapping[str, str], body: bytes, 
             given = _header(headers, hook.header)
             if hook.prefix:
                 if not given.startswith(hook.prefix):
-                    raise Rejected(f"{hook.header} doesn't start with {hook.prefix}")
+                    raise Unauthentic(f"{hook.header} doesn't start with {hook.prefix}")
                 given = given[len(hook.prefix) :]
             digest = "sha256" if hook.scheme == "hmac-sha256" else "sha1"
-            ok = _same(given, _encoded(_mac(secret, body, digest), hook.encoding))
+            ok = _same(
+                given, _encoded(_mac(secret, body, digest), hook.encoding), hex_digits=hook.encoding == "hex"
+            )
         case "shopify":
             given = _header(headers, hook.header or "X-Shopify-Hmac-Sha256")
             ok = _same(given, _encoded(_mac(secret, body, "sha256"), "base64"))
         case "zoho":
             given = _header(headers, hook.header or "X-Zoho-Webhook-Signature")
-            ok = _same(given, _encoded(_mac(secret, body, "sha256"), hook.encoding))
+            ok = _same(
+                given,
+                _encoded(_mac(secret, body, "sha256"), hook.encoding),
+                hex_digits=hook.encoding == "hex",
+            )
         case "stripe":
             ok = _stripe(hook, secret, _header(headers, hook.header or "Stripe-Signature"), body, now)
         case "bearer":
             given = _header(headers, hook.header or "Authorization")
             ok = _same(given, f"Bearer {secret}")
     if not ok:
-        raise Rejected("the signature doesn't match")
+        raise Unauthentic("the signature doesn't match")
+    if hook.timestamp_header is not None:
+        _fresh(hook, _header(headers, hook.timestamp_header).strip(), now)
 
 
 def _stripe(hook: Webhook, secret: str, header: str, body: bytes, now: datetime) -> bool:
     parts = [p.split("=", 1) for p in header.split(",") if "=" in p]
     stamps = [v for k, v in parts if k.strip() == "t"]
     signatures = [v for k, v in parts if k.strip() == "v1"]
-    if len(stamps) != 1 or not stamps[0].strip().isdigit() or not signatures:
-        raise Rejected("Stripe-Signature has no t= and v1=")
-    stamp = int(stamps[0])
-    if abs(now.timestamp() - stamp) > hook.tolerance_s:
-        raise Rejected(
-            f"the event's timestamp is more than {hook.tolerance_s} s away: a replay, or a clock off"
-        )
+    if len(stamps) != 1 or not _DIGITS.fullmatch(stamps[0].strip()) or not signatures:
+        raise Unauthentic("Stripe-Signature has no t= and v1=")
+    stamp = stamps[0].strip()
+    _fresh(hook, stamp, now)
     expected = _mac(secret, f"{stamp}.".encode() + body, "sha256").hex()
     matched = False
     for signature in signatures:  # every one compared, in constant time each
-        matched = _same(signature, expected) or matched
+        matched = _same(signature, expected, hex_digits=True) or matched
     return matched
 
 
@@ -185,11 +251,11 @@ def pick(body: bytes, path: str) -> str:
     try:
         node: Any = json.loads(body)
     except ValueError:
-        raise Rejected("the event is not JSON") from None
+        raise Malformed("the event is not JSON") from None
     for part in path[2:].split("."):
         if not isinstance(node, dict) or part not in node:
-            raise Rejected(f"the event has no {path}")
+            raise Malformed(f"the event has no {path}")
         node = cast(dict[str, Any], node)[part]
     if node is None or isinstance(node, dict | list):
-        raise Rejected(f"{path} is not a value")
+        raise Malformed(f"{path} is not a value")
     return str(node)

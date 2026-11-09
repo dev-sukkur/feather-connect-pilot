@@ -20,7 +20,7 @@ import queue
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -38,11 +38,12 @@ from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import PermanentError
 from feather_connect.core.webhooks import SignatureInvalid
 from feather_connect.logs import redact
-from feather_connect.packages.webhooks import Rejected, Webhook, parse_webhooks, pick, verify
-from feather_connect.project import ProjectError, resolve_secret
+from feather_connect.packages.webhooks import Rejected, Unauthentic, Webhook, pick, signature_header, verify
+from feather_connect.project import ProjectError, resolve_secret, webhook_secret_name
 from feather_connect.storage.port import WebhookEvent
 
 if TYPE_CHECKING:
+    from feather_connect.runtime.catalogue import Catalogue
     from feather_server.app import AppState
 
 log = logging.getLogger(__name__)
@@ -462,30 +463,14 @@ async def ingress(request: Request, tenant: str, source: str) -> Response:
 # Webhooks a package declares (flow packages §7.2): verified, deduplicated and kept raw here, parsed on a worker.
 
 
-def _declared(state: "AppState", package: str, name: str) -> Webhook | None:
-    """The webhook `name` of `package`, when a version of it declares it and the flow reading its dataset is active."""
-    active = [a for a in state.store.packages.active() if a.package == package]
-    for activation in active:
-        version = state.store.packages.version(package, activation.version)
-        if version is None:
-            continue
-        try:
-            hooks = parse_webhooks(cast(dict[str, Any], version.load_check.get("webhooks") or {}))
-        except ValueError:
-            continue
-        hook = hooks.get(name)
-        specs = cast(dict[str, Any], version.load_check.get("specs") or {})
-        spec = cast(dict[str, Any], specs.get(activation.flow) or {})
-        datasets = {str(d.get("name")) for d in cast(list[dict[str, Any]], spec.get("datasets") or [])}
-        if hook is not None and f"{package}/{hook.dataset}" in datasets:
-            return hook
-    return None
-
-
 def _keep_declared(
     state: "AppState", package: str, hook: Webhook, headers: dict[str, str], body: bytes
 ) -> Response:
     now = state.clock.now()
+    bound = f"${{secret:db:{webhook_secret_name(package, hook.name)}}}"
+    if hook.secret.startswith("${secret:db:") and hook.secret != bound:
+        log.error("webhook %s/%s: its secret must be %s", package, hook.name, bound)
+        return _problem(503, _RETRY_AFTER)
     try:
         secret = resolve_secret(hook.secret)
     except ProjectError as error:
@@ -495,12 +480,16 @@ def _keep_declared(
         verify(hook, secret, headers, body, now)
         key = pick(body, hook.key)
         stamp = pick(body, hook.stamp) if hook.stamp else None
-    except Rejected as error:
+    except Unauthentic as error:
         log.warning("webhook %s/%s: refused: %s", package, hook.name, error)
-        return _problem(
-            401 if "signature" in str(error) or "header" in str(error) or "timestamp" in str(error) else 400
-        )
-    kept = {k: v for k, v in headers.items() if k not in _NOT_KEPT}
+        return _problem(401)
+    except Rejected as error:  # Malformed
+        log.warning("webhook %s/%s: refused: %s", package, hook.name, error)
+        return _problem(400)
+    dropped = _NOT_KEPT | {signature_header(hook)}
+    if hook.timestamp_header:
+        dropped |= {hook.timestamp_header.lower()}
+    kept = {k: v for k, v in headers.items() if k not in dropped}
     new = state.store.webhooks.add(
         WebhookEvent(package, hook.name, key[:_MAX_EVENT_ID], stamp, body, kept, now)
     )
@@ -512,13 +501,15 @@ async def declared_webhook(request: Request, tenant: str, package: str, webhook:
     state: AppState = request.app.state.feather
     if tenant != _TENANT:
         return _problem(404)
-    hook = await run_in_threadpool(_declared, state, package, webhook)
-    if hook is None:
-        return _problem(404)
     address = request.client.host if request.client else "unknown"
-    refused = _over_rate(request.app.state.ingress_rate, f"address:{package}/{webhook}:{address}", webhook)
+    # Before anything reads the database: a flood of unknown paths costs nothing but this.
+    refused = _over_rate(request.app.state.ingress_rate, f"address:declared:{address}", webhook)
     if refused is not None:
         return refused
+    catalogue = cast("Catalogue", state.catalogue)
+    hook = await run_in_threadpool(catalogue.webhook, package, webhook)  # from memory, but after a change
+    if hook is None:
+        return _problem(404)
     try:
         body = await _read_body(request, state.settings.ingress_max_bytes)
     except _TooLarge:

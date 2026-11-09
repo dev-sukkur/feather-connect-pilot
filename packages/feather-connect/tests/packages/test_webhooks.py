@@ -6,7 +6,16 @@ from datetime import UTC, datetime
 
 import pytest
 
-from feather_connect.packages.webhooks import Rejected, Webhook, parse_webhooks, pick, verify
+from feather_connect.packages.webhooks import (
+    Malformed,
+    Rejected,
+    Unauthentic,
+    Webhook,
+    parse_webhooks,
+    pick,
+    signature_header,
+    verify,
+)
 
 NOW = datetime(2026, 11, 9, 9, tzinfo=UTC)
 # RFC 4231 test case 2 and RFC 2202 test case 2: key "Jefe".
@@ -97,3 +106,46 @@ def test_a_key_is_picked_from_the_event():
         pick(b'{"order": {}}', "$.order.id")
     with pytest.raises(Rejected, match="not JSON"):
         pick(b"<xml/>", "$.id")
+
+
+def test_a_refusal_says_whether_it_is_unauthentic_or_malformed():
+    hook = _hook("hmac-sha256", header="X-Signature")
+    with pytest.raises(Unauthentic):
+        verify(hook, KEY, {"x-signature": "00"}, DATA, NOW)
+    with pytest.raises(Malformed):
+        pick(b"<xml/>", "$.id")
+    assert issubclass(Unauthentic, Rejected) and issubclass(Malformed, Rejected)
+
+
+def test_hex_compares_without_regard_to_case():
+    verify(_hook("hmac-sha256", header="X-Signature"), KEY, {"x-signature": SHA256.upper()}, DATA, NOW)
+    verify(_hook("zoho"), KEY, {"x-zoho-webhook-signature": SHA256.upper()}, DATA, NOW)
+
+
+def test_a_stripe_timestamp_is_ascii_digits_only():
+    hook = _hook("stripe")
+    arabic = "".join(chr(0x0660 + int(d)) for d in str(int(NOW.timestamp())))  # str.isdigit() takes these
+    with pytest.raises(Unauthentic, match="t= and v1="):
+        verify(hook, "whsec", {"stripe-signature": f"t={arabic},v1=00"}, b"{}", NOW)
+
+
+def test_zoho_is_labelled_unverified_and_may_hold_a_timestamp_to_a_tolerance():
+    assert _hook("zoho").unverified and not _hook("shopify").unverified
+    hook = _hook("zoho", timestamp_header="X-Zoho-Timestamp", tolerance=60)
+    now = str(int(NOW.timestamp()))
+    verify(hook, KEY, {"x-zoho-webhook-signature": SHA256, "x-zoho-timestamp": now}, DATA, NOW)
+    with pytest.raises(Unauthentic, match="replay"):
+        late = str(int(NOW.timestamp()) - 61)
+        verify(hook, KEY, {"x-zoho-webhook-signature": SHA256, "x-zoho-timestamp": late}, DATA, NOW)
+    with pytest.raises(Unauthentic, match="header"):
+        verify(hook, KEY, {"x-zoho-webhook-signature": SHA256}, DATA, NOW)
+    with pytest.raises(ValueError, match="timestamp_header"):
+        _hook("bearer", timestamp_header="X-T")
+
+
+def test_each_scheme_names_the_header_that_is_never_kept():
+    assert signature_header(_hook("bearer")) == "authorization"
+    assert signature_header(_hook("bearer", header="X-Token")) == "x-token"
+    assert signature_header(_hook("shopify")) == "x-shopify-hmac-sha256"
+    assert signature_header(_hook("stripe")) == "stripe-signature"
+    assert signature_header(_hook("hmac-sha1", header="X-Hub-Signature")) == "x-hub-signature"
