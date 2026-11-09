@@ -11,6 +11,8 @@ invoices as time passes and paying some, as the demo does.
     sim.add(5)                       # five invoices, now
     sim.expire_tokens()              # the next call gets a 401, and a new token fixes it
     sim.fail_next(503, times=2)      # the next two calls fail
+    sim.fail_after_applying()        # the next POST is carried out, and its answer lost
+    sim.limit_tokens()               # the next token request is turned away for asking too often
 """
 
 import argparse
@@ -22,7 +24,8 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
@@ -70,6 +73,16 @@ def parse_stamp(text: str) -> datetime:
     return datetime.strptime(text.replace(" ", "+"), STAMP)
 
 
+def _sort_value(value: Any) -> tuple[int, Any]:
+    """A value to sort by: a stamp as the moment it names, whatever its offset; anything else as text."""
+    if isinstance(value, str):
+        try:
+            return (0, parse_stamp(value))
+        except ValueError:
+            pass
+    return (1, "" if value is None else str(value))
+
+
 def _answer(status: int, body: Mapping[str, Any], headers: Mapping[str, str] | None = None) -> httpx.Response:
     return httpx.Response(status, json=dict(body), headers=dict(headers or {}))
 
@@ -78,7 +91,8 @@ class ZakyaSim:
     """One simulated organisation: its records by list, the tokens it has issued, and its limits.
 
     `per_minute` and `per_day` cap the API calls (None: no cap); a call past either answers 429 with `Retry-After`,
-    the seconds to the next minute or to midnight in India. `token_lifetime` is the seconds an access token lasts.
+    the seconds to the next minute or to midnight in `zone` (India's), or with none for the day's when
+    `daily_retry_after` is False, as Zoho may answer: code 45 alone. `token_lifetime` is the seconds an access token lasts.
     `now` is the clock, real time by default. `every` raises new and changed invoices every that many seconds when a
     list is called (None: only when `add` or `change` is called), `fault_rate` is the share of calls that answer 429
     or 503 by chance, and `state` is a JSON file that keeps the invoices across restarts.
@@ -97,8 +111,12 @@ class ZakyaSim:
         fault_rate: float = 0.0,
         seed: int = 7,
         state: Path | None = None,
+        zone: tzinfo = timezone(timedelta(hours=5, minutes=30)),
+        daily_retry_after: bool = True,
     ) -> None:
         self.organization_id = organization_id
+        self.zone = zone
+        self.daily_retry_after = daily_retry_after
         self.per_minute = per_minute
         self.per_day = per_day
         self.token_lifetime = token_lifetime
@@ -114,6 +132,10 @@ class ZakyaSim:
         self._random = random.Random(seed)
         self._lock = threading.RLock()
         self._faults: list[tuple[int, str | None]] = []
+        self._lose: list[
+            tuple[str, int | None]
+        ] = []  # calls of a method whose answer to lose: a status, or None
+        self._token_limits = 0
         self._minute: tuple[datetime, int] = (datetime.min.replace(tzinfo=UTC), 0)
         self._day: tuple[str, int] = ("", 0)
         self._state = state
@@ -235,6 +257,30 @@ class ZakyaSim:
         with self._lock:
             self._faults += [(status, retry_after)] * times
 
+    def fail_after_applying(self, times: int = 1, status: int | None = None, method: str = "POST") -> None:
+        """Carry out each of the next `times` API calls of `method`, then lose its answer: the connection drops (a
+        read timeout) or, with `status`, the call answers that instead, as a gateway that timed out would."""
+        with self._lock:
+            self._lose += [(method, status)] * times
+
+    def limit_tokens(self, times: int = 1) -> None:
+        """Turn the next `times` token requests away for asking too often, as Zoho's accounts server does: HTTP 400,
+        "Access Denied"."""
+        with self._lock:
+            self._token_limits += times
+
+    def spend(self, calls: int) -> None:
+        """Count `calls` against today's cap, as the organisation's other clients would have spent them."""
+        with self._lock:
+            day = self.now().astimezone(self.zone).date().isoformat()
+            self._day = (day, (self._day[1] if self._day[0] == day else 0) + calls)
+
+    def remove(self, collection: str, record_id: str) -> None:
+        """Delete a record, as someone in Zakya would."""
+        with self._lock:
+            self.data[collection].pop(record_id, None)
+            self._sorted.clear()
+
     def _fault(self) -> httpx.Response | None:
         if self._faults:
             status, retry_after = self._faults.pop(0)
@@ -253,16 +299,17 @@ class ZakyaSim:
         """Count the call against the per-minute and per-day caps, or answer 429 if it is past one."""
         now = self.now()
         minute = now.replace(second=0, microsecond=0)
-        day = now.astimezone(IST).date().isoformat()
+        day = now.astimezone(self.zone).date().isoformat()
         used_minute = self._minute[1] if self._minute[0] == minute else 0
         used_day = self._day[1] if self._day[0] == day else 0
         if self.per_day is not None and used_day >= self.per_day:
             midnight = datetime.combine(
-                now.astimezone(IST).date() + timedelta(days=1), datetime.min.time(), IST
+                now.astimezone(self.zone).date() + timedelta(days=1), datetime.min.time(), self.zone
             )
             wait = max(1, int((midnight - now).total_seconds()))
             message = "You have reached the maximum number of API calls allowed for a day"
-            return _answer(429, {"code": 45, "message": message}, {"Retry-After": str(wait)})
+            headers = {"Retry-After": str(wait)} if self.daily_retry_after else {}
+            return _answer(429, {"code": 45, "message": message}, headers)
         if self.per_minute is not None and used_minute >= self.per_minute:
             wait = max(1, int((minute + timedelta(minutes=1) - now).total_seconds()))
             return _answer(429, {"code": 44, "message": "Too many requests"}, {"Retry-After": str(wait)})
@@ -276,6 +323,13 @@ class ZakyaSim:
         return httpx.MockTransport(self.handle)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
+        """Answer a request, with a `Date` of the simulator's clock, as a server's answer has."""
+        with self._lock:
+            response = self._handle(request)
+            response.headers["Date"] = format_datetime(self.now().astimezone(UTC), usegmt=True)
+            return response
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
         with self._lock:
             path = request.url.path
             if path == "/oauth/v2/token" and request.method == "POST":
@@ -295,19 +349,34 @@ class ZakyaSim:
                 return _answer(404, {"code": 5, "message": "Invalid URL Passed"})
             if request.method == "GET" and len(parts) == 1:
                 self.tick()
-                return self._list(collection, dict(request.url.params))
+                return self._lost(self._list(collection, dict(request.url.params)), request)
             if request.method == "GET" and len(parts) == 2:
-                return self._one(collection, parts[1])
+                return self._lost(self._one(collection, parts[1]), request)
             body = cast(dict[str, Any], json.loads(request.content or b"{}"))
             if request.method == "POST" and len(parts) == 1:
-                return self._create(collection, body)
+                return self._lost(self._create(collection, body), request)
             if request.method == "PUT" and len(parts) == 2:
-                return self._update(collection, parts[1], body)
+                return self._lost(self._update(collection, parts[1], body), request)
             return _answer(405, {"code": 5, "message": "Invalid URL Passed"})
+
+    def _lost(self, response: httpx.Response, request: httpx.Request) -> httpx.Response:
+        """The answer to a call carried out already, or what came back instead when it is to be lost."""
+        if not self._lose or self._lose[0][0] != request.method:
+            return response
+        _, status = self._lose.pop(0)
+        if status is None:
+            raise httpx.ReadTimeout("the answer was lost", request=request)
+        return _answer(status, {"code": status, "message": "the gateway timed out"})
 
     def _token(self, request: httpx.Request) -> httpx.Response:
         form = dict(parse_qsl(request.content.decode()))
         self.token_requests += 1
+        if self._token_limits:
+            self._token_limits -= 1
+            description = "You have made too many requests continuously. Please try again after some time."
+            return _answer(
+                400, {"error_description": description, "error": "Access Denied", "status": "failure"}
+            )
         if form.get("grant_type") != "refresh_token" or not all(
             form.get(k) for k in ("client_id", "client_secret", "refresh_token")
         ):
@@ -341,7 +410,9 @@ class ZakyaSim:
             key = COLLECTIONS[collection][0]
             rows = list(self.data[collection].values())
             if column:
-                found = sorted(rows, key=lambda r: (str(r.get(column, "")), str(r.get(key, r.get("id", "")))))
+                found = sorted(
+                    rows, key=lambda r: (_sort_value(r.get(column)), str(r.get(key, r.get("id", ""))))
+                )
             else:
                 found = rows
             self._sorted[(collection, column)] = found
@@ -430,7 +501,11 @@ def serve(sim: ZakyaSim, host: str = "127.0.0.1", port: int = 29100) -> Threadin
                 headers=dict(self.headers.items()),
                 content=self.rfile.read(length) if length else b"",
             )
-            response = sim.handle(request)
+            try:
+                response = sim.handle(request)
+            except httpx.TransportError:  # an answer to lose: the connection drops with none
+                self.close_connection = True
+                return
             self.send_response(response.status_code)
             for name, value in response.headers.items():
                 if name.lower() not in ("content-length", "transfer-encoding", "connection"):

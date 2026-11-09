@@ -14,9 +14,16 @@ from feather_connect.core.context import Context
 from feather_connect.core.errors import PermanentError
 
 
-def _batch(rows: list[dict[str, Any]], mode: RouteMode = "upsert", key: str = "r:v1:0") -> ApplyBatch:
+def _batch(
+    rows: list[dict[str, Any]],
+    mode: RouteMode = "upsert",
+    key: str = "r:v1:0",
+    *,
+    version: str = "v1",
+    chunk: int = 0,
+) -> ApplyBatch:
     records = [ApplyRecord(str(r.get("sku", r.get("id"))), "upsert", r) for r in rows]
-    return ApplyBatch("r", "v1", 0, "*", mode, records, key, True, True)
+    return ApplyBatch("r", version, chunk, "*", mode, records, key, True, True)
 
 
 def _writes(sim: ZakyaSim) -> list[str]:
@@ -109,11 +116,15 @@ def test_stock_is_adjusted_once_per_record_whatever_the_repeats(
         wire(zakya.Stock("zakya")).apply(ctx, batch).responses[0].status == 200
     )  # a new instance: found, not posted
     (adjustment,) = sim.data["inventoryadjustments"].values()
-    assert adjustment["reference_number"] == zakya.Stock.reference(batch, batch.records[0])
+    assert adjustment["reference_number"] == zakya.Stock.reference(batch, batch.records[0], ctx.tenant)
     assert adjustment["line_items"] == [{"item_id": "i1", "quantity_adjusted": -3, "warehouse_id": "w1"}]
     assert adjustment["date"] == "2026-11-07" and sim.items["i1"]["stock_on_hand"] == 7
     other = wire(zakya.Stock("zakya")).apply(
-        ctx, _batch(rows, "append", key="r:v2:0")
+        ctx, _batch(rows, "append", key="r:v1:7", chunk=7)
+    )  # the same record in another chunk, as a replay with another chunk size sends it: found, not posted
+    assert other.responses[0].status == 200 and sim.items["i1"]["stock_on_hand"] == 7
+    other = wire(zakya.Stock("zakya")).apply(
+        ctx, _batch(rows, "append", key="r:v2:0", version="v2")
     )  # another version: posted
     assert other.applied == 1 and sim.items["i1"]["stock_on_hand"] == 4
     unknown = wire(zakya.Stock("zakya")).apply(

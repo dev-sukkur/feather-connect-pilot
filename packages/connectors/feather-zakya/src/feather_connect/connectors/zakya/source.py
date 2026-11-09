@@ -3,9 +3,12 @@
 Each dataset is a list endpoint paged by `page` and `per_page` that says `page_context.has_more_page`. A `by_stamp`
 read asks for `last_modified_time` at or after the watermark, sorted by it, and pages by stamp (as `http.Rest` does)
 so that a record changed during the read is not skipped. A dataset that has line items (invoices, credit notes, price
-lists) fetches each listed record on its own for them, one more call each. Records whose stamp is before the one asked
-for are dropped here too, and a record read twice in one read at the same stamp is kept once, so an endpoint that
-ignores the filter costs calls but no duplicates.
+lists) fetches each listed record on its own for them, one more call each. The record keeps the stamp it was listed
+with, not the one its own fetch shows: a record changed between the list and the fetch has a later stamp there, and a
+watermark taken from it would skip the records listed after it but changed before. Records whose stamp is before the
+one asked for are dropped here too, and a record read again in one read is kept only if its stamp is later than the
+one read before (the runtime keeps the last of a key), so an endpoint that ignores the filter costs calls but no
+duplicates.
 """
 
 from collections.abc import Iterator, Mapping
@@ -17,6 +20,7 @@ from feather_connect.connectors import http  # pyright: ignore[reportAttributeAc
 from feather_connect.core.connector import ConnectorSpec, ReadRequest
 from feather_connect.core.context import Context
 from feather_connect.core.strategies import read_stamp
+from feather_connect.runtime.http import FeatherHttp
 
 from .config import API_PREFIX, STAMP_FORMAT, Zakya, ZakyaConfig
 
@@ -124,24 +128,34 @@ class Source(Zakya, http.Rest):
         )
         self.dataset = found
 
+    def _detail(self, ctx: Context, client: FeatherHttp, record: Mapping[str, Any]) -> dict[str, Any]:
+        """The record on its own, with the stamp it was listed with: the read's watermark is the list's."""
+        found = super()._detail(ctx, client, record)
+        stamp = self.dataset.stamp
+        if stamp is not None and stamp in record:
+            found[stamp] = record[stamp]
+        return found
+
     def read(self, ctx: Context, req: ReadRequest) -> Iterator[list[dict[str, Any]]]:
         since = read_stamp(req.since) if req.since is not None and req.stamp_field else None
         field = req.stamp_field
-        seen: set[tuple[str, str]] = set()
+        latest: dict[str, Any] = {}  # each key's latest stamp read so far
         for rows in super().read(ctx, req):
-            kept: list[dict[str, Any]] = []
+            kept: dict[str, dict[str, Any]] = {}
             for row in rows:
-                stamp = row.get(field) if field else None
-                if since is not None and stamp is not None and _before(read_stamp(stamp), since):
+                if not field or field not in row:
+                    kept[str(id(row))] = row
+                    continue
+                stamp = read_stamp(row[field])
+                if since is not None and _before(stamp, since):
                     continue  # the endpoint did not filter by the stamp
-                if field:
-                    mark = (str(row.get(self.dataset.key)), str(stamp))
-                    if mark in seen:
-                        continue
-                    seen.add(mark)
-                kept.append(row)
+                key = str(row.get(self.dataset.key))
+                if key in latest and not _before(latest[key], stamp):
+                    continue  # read already, as late or later
+                latest[key] = stamp
+                kept[key] = row
             if kept:
-                yield kept
+                yield list(kept.values())
 
 
 def _before(stamp: Any, since: Any) -> bool:

@@ -25,18 +25,26 @@ connections:
 | `organization_id` | required | Sent as `organization_id` on every call |
 | `domain` | `com` | The organisation's Zoho region: the API host (`api.zakya.com`, `.in`, `.eu`) and the accounts host (`accounts.zoho.com`, `.in`, `.eu`) |
 | `base_url`, `accounts_url` | from `domain` | Override either host, for a simulator or a new region |
+| `timezone` | the flow's | The organisation's time zone (such as `Asia/Kolkata`), whose midnight ends a spent daily cap |
 | `client_id`, `client_secret`, `refresh_token` | required | Secret references only. A Zoho API console *Self Client* of the region, and a refresh token made with the scopes the flows need |
 | `timeout`, `retry_attempts` | as `http.rest` | Per call |
 
 Auth uses the OAuth refresh-token flow. An access token is kept in memory per (tenant, connection) (ADR-0013 rule 7). It is
-refreshed a minute before it expires, and once more on a 401. Tokens and secrets never reach logs or the audit table.
+refreshed a minute before it expires, and once more on a 401. When Zoho's accounts server turns the client away for
+asking too often (HTTP 400, "Access Denied"), that is a ten-minute wait, not a failure. Tokens and secrets never reach
+logs or the audit table.
 
 ## Budgets
 
 Zoho counts calls per minute and per day across every client of an organisation. Declare both windows a little below
-Zoho's, and name the organisation as the budget's `account`. Every budget that names the same account takes from one
-set of windows, whatever tenant or name it has (ADR-0013 rule 8). A 429 is waited out for its `Retry-After`. When the
-daily cap is spent, Zoho answers until midnight in the organisation's time zone, and the task waits until then.
+Zoho's, and name the organisation as the budget's `account`, `zakya:<organization_id>`; `feather validate` reports a
+budget that names another (`budget_account_mismatch`). Every budget that names the same account takes from one set of
+windows, whatever tenant or name it has (ADR-0013 rule 8), so they must all give it the same limits: a budget that
+disagrees is refused when it is defined, naming the other, and nothing is reset.
+
+A 429 is waited out for its `Retry-After`. A wait over a minute, such as a spent daily cap's, goes to the runtime as
+a budget deferral, which it sleeps off durably: the read starts again after it, and the chunk is sent again. A daily
+cap answered with no `Retry-After` (Zoho's code 45 alone) waits until midnight in `timezone`, by the answer's `Date`.
 
 ## Datasets
 
@@ -52,26 +60,38 @@ stops when `page_context.has_more_page` is false.
 | `price_lists` | `/pricebooks` | `pricebook_id` | none: always in full | `/pricebooks/{pricebook_id}`, for rates |
 
 A dataset with a stamp is read `by_stamp`, sorted by the stamp ascending, from `lookback` before the last watermark. A
-record read again unchanged is dropped, so the overlap costs calls but never a duplicate. `full=True` (or no stamp)
+record read again is kept only with a later stamp than the one read before, so the overlap costs calls but never a
+duplicate. A record fetched on its own keeps the stamp it was listed with: one changed between the list and its fetch
+is read again next time, and the watermark never passes records listed after it. `full=True` (or no stamp)
 reads with `snapshot_diff`, which sees deletes. `zakya.Source(...)` also takes `replace`.
 
 ## Sinks
 
 | Connector | Mode | Idempotent by |
 |---|---|---|
-| `zakya.Items(connection, map=, match="sku")` | upsert | The SKU: GET `/items?sku=`, then POST if new, PUT if changed, nothing if unchanged |
+| `zakya.Items(connection, map=, match="sku")` | upsert | The SKU: GET `/items?sku=`, then POST if new, PUT if changed, nothing if unchanged; a SKU made by someone else meanwhile (code 1001) is updated |
 | `zakya.Prices(connection, rate_field="rate", pricebook_field=, pricebook_id=)` | upsert | One GET and one PUT per price list and chunk, merging `pricebook_items` by item; an unchanged list is not written |
-| `zakya.Stock(connection, quantity_field=, warehouse_field=, reason=)` | append | `reference_number` = `FC-` + a hash of the delivery's idempotency key and the record key; looked up before posting |
+| `zakya.Stock(connection, quantity_field=, warehouse_field=, reason=)` | append | `reference_number` = `FC-` + a hash of the tenant, route, version and record key (not the chunk); looked up before posting |
 
-Deletes are rejected. A 401, 403, 405 or a missing organisation fails the chunk; other Zakya errors reject the record.
-`Prices` rejects a price list that is not `per_item`, and a SKU it cannot find.
+The client never sends a POST twice: when its answer is lost (a timeout, a dropped connection, a 5xx), Zakya may have
+carried it out, so the chunk fails and is tried again, and the lookup by SKU or by reference finds what it made.
+Values are compared as numbers where both are (Zakya answers `180.0` for `"180"`), so an unchanged record sends nothing.
+
+Zakya has no version or `If-Match` on a price list, so `Prices` can't detect a change made in Zakya between its read
+and its write: such a change is overwritten for the items the write names. Keep one writer of a price list's rates.
+
+Item ids found by SKU are kept five minutes per tenant, connection and organisation; one Zakya no longer knows (code
+1002) is forgotten and looked up again. Deletes are rejected. A 401, 403, 405 or a missing organisation fails the
+chunk; other Zakya errors reject the record. `Prices` rejects a price list that is not `per_item`, and a SKU it cannot
+find.
 
 ## Simulator
 
 `feather_connect.connectors.zakya.testing.ZakyaSim` plays an organisation as an httpx transport, or over HTTP with
 `running(sim)`. It covers the token endpoint, access token expiry (401, code 57), per-minute and per-day caps (429 with
-`Retry-After`), paging and the `last_modified_time` filter. It also has `fail_next(status, times, retry_after)` and
-random faults. `python -m feather_connect.connectors.zakya.testing --port 29100` serves it; the Zakya demo uses it.
+`Retry-After`), paging and the `last_modified_time` filter. It also has `fail_next(status, times, retry_after)`,
+`fail_after_applying(times, status, method)` (carried out, answer lost), `limit_tokens(times)`, `spend(calls)`,
+`daily_retry_after=False` (code 45 alone), `remove(collection, id)` and random faults. `python -m feather_connect.connectors.zakya.testing --port 29100` serves it; the Zakya demo uses it.
 
 ## The live exit run
 
@@ -93,5 +113,6 @@ These need checking against a real organisation:
 - The API host for the eu region.
 - Which list endpoints honour the `last_modified_time` filter.
 - Zoho's exact codes for the per-minute and daily caps.
-- Whether `/inventoryadjustments` filters by `reference_number`.
+- Whether `/inventoryadjustments` filters by `reference_number` (the live run checks it, reading only).
+- How long Zoho's accounts server keeps out a client that asked too often (ten minutes assumed).
 - Whether price lists other than `per_item` need support.

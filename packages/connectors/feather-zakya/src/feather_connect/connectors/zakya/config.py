@@ -4,14 +4,22 @@ Zakya is Zoho's retail edition of Zoho Inventory, and speaks its API: OAuth2 wit
 server of the organisation's region, an `Authorization: Zoho-oauthtoken <token>` header, and the `organization_id` as
 a query parameter of every call. The access token is kept in the process per tenant and connection (ADR-0013 rule 7),
 refreshed a minute before it expires and once on a 401. A 429 is waited out for its `Retry-After`; one longer than a
-minute, such as the daily cap's, goes back to the engine as a `TransientError` that says how long to wait.
+minute, such as the daily cap's, goes back to the runtime as a `BudgetDeferred` that it sleeps off durably. A daily
+cap answered with no `Retry-After` (Zoho's code 45) waits until midnight in the organisation's time zone.
+
+A POST that creates (an item, a stock adjustment) is never sent twice by the client: an answer lost after Zakya
+carried it out would make a second one. It goes up instead, the chunk is tried again, and the sink looks up the SKU
+or the reference number before it posts anything.
 """
 
-from collections.abc import Mapping
+import email.utils
+from collections.abc import Callable, Mapping
+from datetime import datetime, timedelta
 from typing import Any, Literal, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from feather_connect.connectors import http  # pyright: ignore[reportAttributeAccessIssue]
 from feather_connect.core.connector import Secret
@@ -31,6 +39,7 @@ API_PREFIX = "/inventory/v1"
 # How Zakya writes `last_modified_time`, and takes it back in a filter: 2026-11-07T10:15:00+0530.
 STAMP_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 TOKEN_PREFIX = "Zoho-oauthtoken"
+DAILY_CAP_CODE = 45  # Zoho's code for a day's API calls spent
 _CREDENTIALS = ("client_id", "client_secret", "refresh_token")
 
 
@@ -48,6 +57,8 @@ class ZakyaConfig(BaseModel):
 
     `organization_id` is sent with every call. `domain` picks the region (`com`, `in` or `eu`), which sets the API
     host and Zoho's accounts host; `base_url` and `accounts_url` override them, for a simulator or a proxy.
+    `timezone` is the organisation's (an IANA name such as Asia/Kolkata), whose midnight ends a spent daily cap; the
+    flow's time zone by default.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, coerce_numbers_to_str=True)
@@ -56,12 +67,23 @@ class ZakyaConfig(BaseModel):
     domain: Literal["com", "in", "eu"] = "com"
     base_url: str | None = None
     accounts_url: str | None = None
+    timezone: str | None = None
     timeout: float = 30.0
     retry_attempts: int = 6
     # From `auth`:
     client_id: Secret | None = None
     client_secret: Secret | None = None
     refresh_token: Secret | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def _known_zone(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                ZoneInfo(value)
+            except (ZoneInfoNotFoundError, ValueError):
+                raise ValueError(f"{value!r} is not a time zone, such as Asia/Kolkata") from None
+        return value
 
     @property
     def api_url(self) -> str:
@@ -75,6 +97,23 @@ class ZakyaConfig(BaseModel):
 class Zakya(http._HttpConnector):  # pyright: ignore[reportPrivateUsage]
     """What the Zakya connectors share: the connection's settings, read as Zakya's and run as an OAuth2 REST client,
     and a call that carries the organisation and reads Zakya's own error codes."""
+
+    @staticmethod
+    def account_of(options: Mapping[str, Any]) -> str | None:
+        """The vendor account a connection's settings name, `zakya:<organization_id>`: the one its budget's
+        `account` must be, as Zoho counts calls per organisation."""
+        organization = options.get("organization_id")
+        return None if organization in (None, "") else f"zakya:{organization}"
+
+    def _retry_after_of(self, ctx: Context) -> Callable[[httpx.Response], float | None]:
+        zone = ZoneInfo(self.zakya_config(ctx).timezone or ctx.tz)
+
+        def daily_cap(response: httpx.Response) -> float | None:
+            if response.status_code != 429 or _zoho_error(response)[0] != DAILY_CAP_CODE:
+                return None
+            return until_midnight(_answered_at(response) or datetime.now(zone), zone)
+
+        return daily_cap
 
     def zakya_config(self, ctx: Context) -> ZakyaConfig:
         try:
@@ -126,6 +165,7 @@ class Zakya(http._HttpConnector):  # pyright: ignore[reportPrivateUsage]
                 json=None if body is None else dict(body),
                 cost_key=cost_key,
                 budget=ctx.budget,
+                resend=method.upper() != "POST",  # a POST creates: never twice, see the module's docstring
             )
         except HttpStatusError as error:
             code, message = _zoho_error(error.response)
@@ -147,6 +187,21 @@ class Zakya(http._HttpConnector):  # pyright: ignore[reportPrivateUsage]
                 response.status_code,
             )
         return answer
+
+
+def _answered_at(response: httpx.Response) -> datetime | None:
+    """When the server answered, by its `Date` header: its clock, not ours, says when its day ends."""
+    try:
+        return email.utils.parsedate_to_datetime(response.headers["date"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def until_midnight(now: datetime, zone: ZoneInfo) -> float:
+    """The seconds from `now` to the next midnight in `zone`, when a spent daily cap is given back."""
+    here = now.astimezone(zone)
+    midnight = datetime.combine(here.date() + timedelta(days=1), datetime.min.time(), zone)
+    return max(1.0, (midnight - here).total_seconds())
 
 
 def _zoho_error(response: httpx.Response | None) -> tuple[int | None, str]:

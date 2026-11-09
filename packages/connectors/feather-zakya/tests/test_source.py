@@ -5,10 +5,14 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
+import httpx
 import pytest
 
 import feather_connect as fc
-from feather_connect.connectors import zakya  # pyright: ignore[reportAttributeAccessIssue]
+from feather_connect.connectors import (
+    http,  # pyright: ignore[reportAttributeAccessIssue]
+    zakya,  # pyright: ignore[reportAttributeAccessIssue]
+)
 from feather_connect.connectors.zakya.testing import ZakyaSim, parse_stamp  # pyright: ignore[reportMissingImports]
 from feather_connect.core.connector import ReadRequest
 from feather_connect.core.context import Context
@@ -113,3 +117,63 @@ def test_discover_names_the_fields_of_the_first_record(
     sim.add(1)
     (stream,) = wire(zakya.Source("zakya", "invoices")).discover(ctx)
     assert stream.name == "/inventory/v1/invoices" and stream.fields["last_modified_time"] == "str"
+
+
+def test_a_record_keeps_the_stamp_it_was_listed_with_not_its_later_one(
+    sim: ZakyaSim, ctx: Context, clock: Clock, wire: Callable[[Any], Any]
+):  # Stage Z review 6
+    [first, second] = sim.add(2)
+    listed = sim.invoices[first]["last_modified_time"]
+    handle = sim.handle
+
+    def changed_between_list_and_fetch(request: Any) -> Any:
+        if request.url.path.endswith(f"/invoices/{first}"):
+            clock.at += timedelta(minutes=5)
+            sim.change(first)  # changed after the list was read, before its own fetch
+        return handle(request)
+
+    source = wire(zakya.Source("zakya", "invoices"))
+    source.transport = httpx.MockTransport(changed_between_list_and_fetch)
+    rows = _read(source, ctx, since=parse_stamp(listed) - timedelta(minutes=1), field="last_modified_time")
+    by_id = {r["invoice_id"]: r for r in rows}
+    assert by_id[first]["last_modified_time"] == listed  # the list's stamp: the watermark can't pass `second`
+    assert (
+        by_id[first]["status"] == "paid" and second in by_id
+    )  # the change itself is kept, for the next read
+
+
+def test_a_key_read_again_is_kept_only_with_a_later_stamp(
+    ctx: Context, monkeypatch: pytest.MonkeyPatch
+):  # Stage Z review 11
+    pages = [
+        [
+            {"invoice_id": "a", "last_modified_time": "2026-11-07T10:00:00+0530", "v": 1},
+            {"invoice_id": "a", "last_modified_time": "2026-11-07T10:05:00+0530", "v": 2},
+        ],
+        [
+            {"invoice_id": "a", "last_modified_time": "2026-11-07T10:01:00+0530", "v": 3},  # older: dropped
+            {"invoice_id": "b", "last_modified_time": "2026-11-07T10:01:00+0530", "v": 4},
+            {"invoice_id": "a", "last_modified_time": "2026-11-07T10:09:00+0530", "v": 5},
+        ],
+    ]
+    monkeypatch.setattr(http.Rest, "read", lambda self, ctx, req: iter(pages))
+    got = list(
+        zakya.Source("zakya", "invoices").read(
+            ctx, ReadRequest("*", none(), stamp_field="last_modified_time")
+        )
+    )
+    assert [[r["v"] for r in page] for page in got] == [[2], [4, 5]]
+
+
+def test_the_simulator_sorts_stamps_as_moments_whatever_their_offset(
+    sim: ZakyaSim, ctx: Context, wire: Callable[[Any], Any]
+):  # Stage Z review 13
+    sim.seed(
+        "items",
+        [
+            {"item_id": "late", "sku": "A", "last_modified_time": "2026-11-07T10:00:00+0530"},  # 04:30 UTC
+            {"item_id": "early", "sku": "B", "last_modified_time": "2026-11-07T04:00:00+0000"},
+        ],
+    )
+    rows = _read(wire(zakya.Source("zakya", "items")), ctx)
+    assert [r["item_id"] for r in rows] == ["early", "late"]

@@ -7,17 +7,22 @@ skipped unless every variable below is set.
     ZAKYA_LIVE_DOMAIN            com, in or eu (com if unset)
     ZAKYA_LIVE_CLIENT_ID         a Zoho API console "self client" of the organisation's region
     ZAKYA_LIVE_CLIENT_SECRET
-    ZAKYA_LIVE_REFRESH_TOKEN     made with the scope ZohoInventory.invoices.READ
+    ZAKYA_LIVE_REFRESH_TOKEN     made with the scopes ZohoInventory.invoices.READ and
+                                 ZohoInventory.inventoryadjustments.READ
     ZAKYA_LIVE_DAILY_CAP         the organisation's daily call cap (discovery Q4; 1000 if unset)
     MOTHERDUCK_TOKEN
     ZAKYA_LIVE_MOTHERDUCK_DB     such as md:feather_live; the run writes the table zakya_invoices_live
 
     uv run pytest packages/connectors/feather-zakya/tests/test_live.py -m live -v -s
 
+It also checks, reading only, that `/inventoryadjustments` filters by `reference_number`, which `zakya.Stock` counts
+on to post an adjustment once: a reference no adjustment has finds none, and one an adjustment has finds that one.
+
 The same run against the simulator and a DuckDB file, `test_the_exit_run_works_on_the_simulator`, runs every time.
 """
 
 import json
+import logging
 import os
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -55,6 +60,21 @@ TABLE = "zakya_invoices_live"
 def _row(invoice: Mapping[str, Any], ctx: Context) -> dict[str, Any]:
     """An invoice as a flat row: its lines kept as JSON text."""
     return {**invoice, "line_items": json.dumps(invoice.get("line_items") or [], default=str)}
+
+
+def reference_filter_works(zakya_config: Mapping[str, Any]) -> int:
+    """Check that adjustments are filtered by `reference_number`, reading only. Returns how many adjustments the first
+    page listed with a reference, so a caller can tell an organisation with none (only the first half checked)."""
+    stock = zakya.Stock("zakya")
+    ctx = Context(dict(zakya_config), logging.getLogger("zakya-live"), datetime.now(UTC), "UTC")
+    assert stock._posted(ctx, "FC-no-such-reference-000") is None  # pyright: ignore[reportPrivateUsage]
+    listed = stock.call(ctx, "GET", "/inventoryadjustments", params={"per_page": 25})
+    held = [a for a in listed.get("inventory_adjustments") or [] if a.get("reference_number")]
+    if held:
+        reference = held[0]["reference_number"]
+        found = stock.call(ctx, "GET", "/inventoryadjustments", params={"reference_number": reference})
+        assert {a.get("reference_number") for a in found.get("inventory_adjustments") or []} == {reference}
+    return len(held)
 
 
 def exit_run(
@@ -110,6 +130,8 @@ def test_the_exit_run_works_on_the_simulator(tmp_path: Path):
             "refresh_token": "1000.sim-refresh-token",
         }
         rows, invoices, calls = exit_run(config, {"database": str(tmp_path / "warehouse.duckdb")}, 1000)
+        sim.seed("inventoryadjustments", [{"inventory_adjustment_id": "a1", "reference_number": "FC-held"}])
+        assert reference_filter_works(config) == 1
     assert rows == invoices == 7
     # A token, the list and each invoice; then the second run reads two minutes back, the same seven again, which
     # by_stamp drops as unchanged: the overlap costs calls, never a duplicate.
@@ -135,3 +157,7 @@ def test_zakya_invoices_reach_motherduck():
     rows, invoices, calls = exit_run(config, warehouse, cap)
     print(f"\n{invoices} invoices in {TABLE}; {calls:.0f} of the day's {cap} calls used by two runs")
     assert rows == invoices > 0
+    held = reference_filter_works(config)
+    print(
+        f"the reference_number filter works{'' if held else ' (no adjustment has a reference: half checked)'}"
+    )
