@@ -3,6 +3,7 @@ local engine with the memory store, and the receiver's SQLite file read back."""
 
 import importlib.util
 import json
+import shutil
 import socket
 import sqlite3
 import threading
@@ -95,6 +96,19 @@ def test_the_zakya_demo_project_is_sound():
         project.budgets.values()
     )  # M13: a dev day of the simulator takes far more than Zoho's 1400 calls
     assert [(w.units, w.seconds) for w in budget.windows] == [(90, 60), (20000, 86400)]
+
+
+def test_a_budget_naming_another_organisation_is_a_problem(tmp_path: Path):  # Stage Z review 8
+    copy = tmp_path / "demo"
+    shutil.copytree(DEMO, copy, ignore=shutil.ignore_patterns(".data", "__pycache__"))
+    for name in ("feather.yaml", "env/dev.yaml"):
+        path = copy / name
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("zakya:60001", "zakya:70002"), encoding="utf-8"
+        )
+    problems = validate_project(load_project(copy, "dev"))
+    assert {p.code for p in problems} == {"budget_account_mismatch"}
+    assert "'zakya:60001'" in problems[0].hint and "zakya:70002" in problems[0].message
 
 
 def test_each_invoice_reaches_the_receiver_once_and_a_changed_one_again(sims, monkeypatch):
