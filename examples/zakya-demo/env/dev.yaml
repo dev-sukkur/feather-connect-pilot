@@ -2,11 +2,11 @@
 # project directory.
 # The simulator makes about 8 calls a minute, which would spend Zoho's 1400 a day in three hours: a dev day gets more.
 budgets:
-  zoho-api: {limits: ["90/minute", "20000/day"]}
+  zoho-api: {limits: ["90/minute", "20000/day"], account: "zakya:60001"}
 connections:
   zakya:
     base_url: http://127.0.0.1:29100
-    token_url: http://127.0.0.1:29100/oauth/v2/token
+    accounts_url: http://127.0.0.1:29100
     retry_attempts: 4
     auth:
       client_id: ${secret:file:secrets/zakya-client-id.txt}

@@ -57,11 +57,12 @@ def _serve(app: Any) -> tuple[uvicorn.Server, threading.Thread, str]:
 def sims(tmp_path: Path) -> Iterator[tuple[Any, Path, dict[str, str]]]:
     """The Zakya simulator (changing only when told), the receiver's SQLite file, and the URLs of both."""
     zakya_sim, receiver_sim = _module("zakya"), _module("receiver")
-    zakya = zakya_sim.Zakya(start=5, every=None, fault_rate=0)
+    zakya = zakya_sim.ZakyaSim(start=5)
     db = tmp_path / "receiver.sqlite"
     receiver = receiver_sim.Receiver(db, fault_rate=0)
-    servers = [_serve(zakya_sim.create_app(zakya)), _serve(receiver_sim.create_app(receiver))]
-    yield zakya, db, {"zakya": servers[0][2], "erp": servers[1][2]}
+    servers = [_serve(receiver_sim.create_app(receiver))]
+    with zakya_sim.running(zakya) as zakya_url:
+        yield zakya, db, {"zakya": zakya_url, "erp": servers[0][2]}
     for server, thread, _ in servers:
         server.should_exit = True
         thread.join(10)
@@ -108,11 +109,7 @@ def test_each_invoice_reaches_the_receiver_once_and_a_changed_one_again(sims, mo
     def config_of(connection: str) -> dict[str, Any]:
         config = project.connections[connection].resolve()
         base = urls[connection]
-        return {
-            **config,
-            "base_url": base,
-            **({"token_url": f"{base}/oauth/v2/token"} if "token_url" in config else {}),
-        }
+        return {**config, "base_url": base, **({"accounts_url": base} if "accounts_url" in config else {})}
 
     runtime = Runtime(
         project.flows,
@@ -164,8 +161,8 @@ def test_each_invoice_reaches_the_receiver_once_and_a_changed_one_again(sims, mo
 def test_the_zakya_simulator_keeps_its_invoices_across_a_restart(tmp_path):
     zakya_sim = _module("zakya")
     state = tmp_path / "zakya.json"
-    first = zakya_sim.Zakya(start=3, every=None, fault_rate=0, state=state)
+    first = zakya_sim.ZakyaSim(start=3, state=state)
     first.change()
-    again = zakya_sim.Zakya(start=3, every=None, fault_rate=0, state=state)
+    again = zakya_sim.ZakyaSim(start=3, state=state)
     assert again.invoices == first.invoices
     assert again.add() == ["4600000000004"]

@@ -24,10 +24,8 @@ TOKEN_URL = "https://accounts.example.test/oauth/v2/token"
 NOW = datetime(2026, 11, 7, 9, tzinfo=UTC)
 ZAKYA_CONFIG = {
     "base_url": ZAKYA,
-    "auth_scheme": "oauth2_refresh_token",
-    "token_url": TOKEN_URL,
-    "token_prefix": "Zoho-oauthtoken",
-    "params": {"organization_id": "60001"},
+    "accounts_url": "https://accounts.example.test",
+    "organization_id": "60001",
     "client_id": "fake-client",
     "client_secret": "fake-secret",
     "refresh_token": "fake-refresh",
@@ -85,6 +83,7 @@ def test_the_flow_reads_zakya_invoices_page_by_page_with_details():
     flow = zakya_invoices_to_erp(page_size=2)
     (dataset,) = flow.datasets
     assert (dataset.name, dataset.key, dataset.strategy.name) == ("invoices", "invoice_id", "by_stamp")
+    assert dataset.source.spec.name == "zakya.source"
     request = ReadRequest("*", fc.partition.none())
     rows = [row for batch in dataset.source.read(ctx(**ZAKYA_CONFIG), request) for row in batch]
     assert [r["invoice_id"] for r in rows] == ["inv-1", "inv-2", "inv-3"]
