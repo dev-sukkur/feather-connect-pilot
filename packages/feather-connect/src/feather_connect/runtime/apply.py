@@ -538,9 +538,13 @@ def _step_durably[T](ctx: TaskContext, name: str, fn: Callable[[], T], retry: Re
     """Run a step, and sleep off a budget deferral before running it again.
 
     An error for the engine to retry goes to the engine. On the task's last attempt the engine won't, while a delivery
-    can still have tries left, since a task can catch up on several. So the task sleeps and tries again itself.
+    can still have tries left, since a task can catch up on several. So the task sleeps and tries again itself, as
+    long as the server asks (`TransientError.retry_after`) when it says, up to `retry.max_attempts` times: then the
+    step's error is permanent, and fails the delivery rather than holding the task for good. A budget deferral is a
+    wait, not a failure, and doesn't count.
     """
     last_attempt = ctx.attempt >= retry.max_attempts
+    failed = 0
     while True:
         try:
             return ctx.step(name, fn)
@@ -550,10 +554,17 @@ def _step_durably[T](ctx: TaskContext, name: str, fn: Callable[[], T], retry: Re
             if deferred.wait < _SLEEP_FROM and not last_attempt:
                 raise
             ctx.sleep(deferred.wait)
-        except Exception:
+        except Exception as error:
             if not last_attempt:
                 raise
-            ctx.sleep(retry.delay(ctx.attempt, rand=lambda: 1.0))
+            failed += 1
+            if failed >= retry.max_attempts:
+                raise PermanentError(
+                    f"{name}: still failing after {failed} more tries on the task's last attempt: {error}"
+                ) from error
+            wait = retry.delay(ctx.attempt + failed - 1, rand=lambda: 1.0)
+            asked = error.retry_after if isinstance(error, TransientError) else None
+            ctx.sleep(max(wait, timedelta(seconds=asked)) if asked is not None else wait)
 
 
 def _deliver(
