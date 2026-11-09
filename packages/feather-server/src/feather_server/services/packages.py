@@ -32,7 +32,7 @@ import threading
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
@@ -43,7 +43,9 @@ from feather_connect.packages import manifest as m
 from feather_connect.packages.build import LOCK_FILE
 from feather_connect.packages.check import DEFAULT_TIMEOUT, LoadCheck, load_check
 from feather_connect.packages.manifest import ManifestError
+from feather_connect.packages.webhooks import parse_webhooks
 from feather_connect.packages.wheel import read_entry
+from feather_connect.project import environment_layer
 from feather_connect.storage.port import DuplicateVersion, FlowActivation, PackageVersion, Store
 from feather_server.auth import Actor
 from feather_server.services.access import require
@@ -253,7 +255,10 @@ class Packages:
         passed.append("compatibility")
         self._check_lock(fetched)
         passed.append("lock")
-        found = self._checker(fetched.content, manifest, env=self._env, timeout=self._timeout)
+        environment = environment_layer(self._store.env_config.entries(self._env))
+        found = self._checker(
+            fetched.content, manifest, env=self._env, timeout=self._timeout, environment=environment
+        )
         if not found.ok:
             raise InstallFailed("load_check", found.error or "the package doesn't load")
         passed.append("load_check")
@@ -262,6 +267,15 @@ class Packages:
                 "webhook_connector",
                 f"the push datasets {', '.join(found.own_push_sources)} read with a source of the package's own: "
                 "webhooks are verified and parsed in the server, which runs only Feather Connect's connectors",
+            )
+        try:
+            declared = parse_webhooks(found.webhooks)
+        except ValueError as error:
+            raise InstallFailed("webhook_connector", f"a declared webhook is not valid: {error}") from None
+        unknown = sorted(h.dataset for h in declared.values() if h.dataset not in found.datasets)
+        if unknown:
+            raise InstallFailed(
+                "webhook_connector", f"declared webhooks feed datasets it doesn't define: {unknown}"
             )
         passed.append("webhook_connector")
         flows = [f"{project}/{flow}" for flow in sorted(found.flows)]
@@ -338,6 +352,46 @@ class Packages:
             check_lock(lock)
         except ValueError as error:
             raise InstallFailed("lock", f"{where}: {error}") from None
+
+    # Activating (§6): the minimal step of task 5; package hosts come with task 6.
+
+    def activate(self, actor: Actor, flow: str, version: str, *, reason: str | None = None) -> dict[str, Any]:
+        """Make `version` the active one of `flow` (`<package>/<name>`), audited. The scheduler fires its triggers
+        from its next tick, with no restart. Raises `KeyError` when the version or the flow isn't installed."""
+        target = f"flow:{flow}"
+        require(actor, "flows.activate", self._store.audit, target)
+        package = canonicalize_name(flow.split("/", 1)[0])
+        installed = self._store.packages.version(package, version)
+        if installed is None:
+            raise KeyError(f"{package} {version} is not installed here")
+        done = self._store.packages.activate(
+            flow, package, installed.version, actor.name, self._clock.now(), reason
+        )
+        self._sync(package, installed)
+        request = {"version": installed.version, "reason": reason}
+        self._audit(actor, "activate_flow", target, request, "ok")
+        return self._activation(done)
+
+    def deactivate(self, actor: Actor, flow: str, *, reason: str | None = None) -> dict[str, Any]:
+        """Take `flow` out of service: its triggers stop at the next tick. Runs in progress finish."""
+        target = f"flow:{flow}"
+        require(actor, "flows.activate", self._store.audit, target)
+        done = self._store.packages.deactivate(flow, actor.name, self._clock.now(), reason)
+        installed = self._store.packages.version(done.package, done.version)
+        if installed is not None:
+            self._sync(done.package, installed)
+        self._audit(actor, "deactivate_flow", target, {"version": done.version, "reason": reason}, "ok")
+        return self._activation(done)
+
+    def _sync(self, package: str, version: PackageVersion) -> None:
+        """Show the package's active flows of `version` in the catalogue, as the dashboard reads it."""
+        active = {
+            a.flow
+            for a in self._store.packages.active()
+            if a.package == package and a.version == version.version
+        }
+        specs = cast(dict[str, Any], version.load_check.get("specs") or {})
+        self._store.catalog.sync(package, version.sha256, {f: specs[f] for f in sorted(active) if f in specs})
 
     # Reading.
 
