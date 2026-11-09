@@ -27,7 +27,7 @@ def test_flows_list_shows_status_last_run_freshness_owner_tags_sha(client: TestC
     assert "Never run" in client.get("/flows").text
     world.run()
     html = client.get("/flows").text
-    assert '<a href="/flows/orders">orders</a>' in html
+    assert '<th scope="row"><a href="/flows/orders">orders</a></th>' in html
     assert "Succeeded" in html and "just now" in html  # last run, and how fresh the data is
     assert ">ops<" in html and "retail" in html  # owner and tags
     assert world.state.project.code_sha[:8] in html
@@ -42,7 +42,7 @@ def test_filters_live_in_the_query_string(client: TestClient, world: World) -> N
     assert "orders" in client.get("/flows?owner=ops&tag=retail").text
     assert "No flows match" in client.get("/flows?tag=finance").text
     page = client.get("/flows?owner=ops").text
-    assert '<form class="filters" method="get" action="/flows">' in page  # works without JavaScript
+    assert '<form class="filters" method="get" action="/flows" ' in page  # works without JavaScript
     world.sink("warehouse").fail_next(PermanentError("no such table"))
     world.run()
     assert "orders" in client.get("/flows?status=failed").text.split("<tbody>")[-1]
