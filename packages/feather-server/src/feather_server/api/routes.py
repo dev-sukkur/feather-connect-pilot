@@ -13,7 +13,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from feather_connect.storage.port import DeliveryStatus, delivery_cursor
@@ -23,6 +23,7 @@ from feather_server.auth import Actor, CurrentActor, require_csrf
 from feather_server.services import task_records as records
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
+from feather_server.services.packages import Packages
 from feather_server.services.previews import Preview
 from feather_server.services.reads import Reads
 from feather_server.services.registries import Registries
@@ -61,6 +62,13 @@ def _registries(request: Request) -> Registries:
 
 
 Trusted = Annotated[Registries, Depends(_registries)]
+
+
+def _packages(request: Request) -> Packages:
+    return request.app.state.packages
+
+
+Installs = Annotated[Packages, Depends(_packages)]
 See = Annotated[Reads, Depends(_reads)]
 
 
@@ -736,6 +744,54 @@ def yank_package(
         return {"package": package, "version": version, "yanked": True}
 
     return _once(request, actor, key, yank)
+
+
+@router.get("/registries/{name}/packages/{package}/versions/{version}/wheel")
+def fetch_wheel(name: str, package: str, version: str, trusted: Trusted, _: CurrentActor) -> Response:
+    """A version's wheel from a registry, its sha256 and manifest checked, for `feather package fetch`."""
+    found = call(lambda: trusted.fetch(name, package, version))
+    return Response(
+        found.content,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{found.filename}"',
+            "X-Feather-Sha256": found.sha256,
+        },
+    )
+
+
+# Installed packages (flow packages §5, §10): installing needs an admin, and leaves every flow inactive.
+
+
+class NewPackage(Reason):
+    name: str = Field(max_length=200)
+    version: str | None = Field(None, max_length=64)  # the registry's newest that isn't yanked when left out
+    registry: str = Field("feather", max_length=64)
+
+
+@router.post("/packages", status_code=201)
+def install_package(
+    request: Request, installs: Installs, actor: CurrentActor, body: NewPackage, key: IdempotencyKey = None
+) -> JSONResponse:
+    def install() -> Any:
+        return installs.install(actor, body.name, body.version, registry=body.registry, reason=body.reason)
+
+    return _once(request, actor, key, install, 201)
+
+
+@router.get("/packages")
+def packages(installs: Installs, _: CurrentActor) -> JSONResponse:
+    return ok({"items": installs.packages(), "next_cursor": None})
+
+
+@router.get("/packages/{name}")
+def package(name: str, installs: Installs, _: CurrentActor) -> JSONResponse:
+    return ok(call(lambda: installs.package(name)))
+
+
+@router.get("/packages/{name}/versions/{version}")
+def package_version(name: str, version: str, installs: Installs, _: CurrentActor) -> JSONResponse:
+    return ok(call(lambda: installs.version(name, version)))
 
 
 # Budgets, connections and the summary.
