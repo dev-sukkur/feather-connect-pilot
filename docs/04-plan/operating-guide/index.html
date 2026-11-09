@@ -237,7 +237,7 @@ flow = fc.Flow(
     <li><b>An OAuth client.</b> In the Zoho API console of that region (<code>api-console.zoho.in</code>), add a <i>Self Client</i>. It gives a client id and a client secret.</li>
     <li><b>A refresh token.</b> On the same Self Client, generate a code with the scopes the flows need: <code>ZohoInventory.invoices.READ</code>, <code>ZohoInventory.creditnotes.READ</code>, <code>ZohoInventory.customerpayments.READ</code>, <code>ZohoInventory.items.ALL</code>, <code>ZohoInventory.pricebooks.ALL</code>, <code>ZohoInventory.inventoryadjustments.CREATE</code>, <code>ZohoInventory.inventoryadjustments.READ</code>. Within its few minutes, exchange it for a refresh token: <code>curl -X POST "https://accounts.zoho.in/oauth/v2/token?grant_type=authorization_code&amp;client_id=…&amp;client_secret=…&amp;code=…"</code>. The answer's <code>refresh_token</code> lasts until it is revoked. Feather Connect buys short-lived access tokens with it. It keeps each one in the process per tenant and connection, refreshes it a minute before it expires, and refreshes once more if Zoho answers 401.</li>
     <li><b>The organisation id.</b> In Zakya, open <i>Settings → Organisation Profile</i>. The id goes with every call.</li>
-    <li><b>The budgets.</b> Zoho counts calls per minute (100) and per day (by plan, discovery Q4), across every client of the organisation. Declare both windows a little below Zoho's. Name the organisation as the budget's <code>account</code>, so that every environment tenant and connection using it takes from the same windows (ADR-0013 rule 8).</li>
+    <li><b>The budgets.</b> Zoho counts calls per minute (100) and per day (by plan, discovery Q4), across every client of the organisation. Declare both windows a little below Zoho's. Name the organisation as the budget's <code>account</code>, <code>zakya:</code> and its id, so that every environment tenant and connection using it takes from the same windows (ADR-0013 rule 8). <code>feather validate</code> reports an account that isn't the connection's organisation. Every budget of the account must give the same limits: one that disagrees is refused, and nothing is reset.</li>
   </ol>
   <p class="prose">Put the three credentials in the environment (or files) and reference them; a value is never written in YAML:</p>
   <div class="file">feather.yaml</div>
@@ -270,11 +270,11 @@ flow = fc.Flow(
     <tr><td><code>items</code></td><td><code>item_id</code></td><td><code>last_modified_time</code></td></tr>
     <tr><td><code>price_lists</code></td><td><code>pricebook_id</code></td><td>In full, with each price list's rates; it carries no stamp</td></tr>
   </table></div>
-  <p class="prose">By default, a <code>by_stamp</code> read starts two minutes before the last watermark. A record read again unchanged is dropped, so the overlap costs calls but never a duplicate. <code>zakya.dataset("items", full=True)</code> reads in full instead, and sees deletes. A 429 is waited out for its <code>Retry-After</code>. When the daily cap is spent, the task waits until midnight in the organisation's time zone. The writes are idempotent where Zakya allows:</p>
+  <p class="prose">By default, a <code>by_stamp</code> read starts two minutes before the last watermark. A record read again unchanged is dropped, so the overlap costs calls but never a duplicate. <code>zakya.dataset("items", full=True)</code> reads in full instead, and sees deletes. A 429 is waited out for its <code>Retry-After</code>. When the daily cap is spent, the task sleeps durably until midnight in the organisation's time zone (set <code>timezone:</code>, such as <code>Asia/Kolkata</code>), even when Zoho sends no <code>Retry-After</code>. A POST is never sent twice: a lost answer fails the chunk, and its next try looks up what the first made. The writes are idempotent where Zakya allows:</p>
   <ul class="prose">
     <li><code>zakya.Items</code> upserts by SKU.</li>
-    <li><code>zakya.Prices</code> sets each price list's rates with one read and one write per chunk.</li>
-    <li><code>zakya.Stock</code> posts an adjustment once per record, by a <code>reference_number</code> made from the delivery.</li>
+    <li><code>zakya.Prices</code> sets each price list's rates with one read and one write per chunk. Zakya has no conflict check on that write, so keep one writer of a price list.</li>
+    <li><code>zakya.Stock</code> posts an adjustment once per record, by a <code>reference_number</code> made from the route, version and record, not the chunk.</li>
   </ul>
   <p class="prose">The package's README has every setting. Its simulator, <code>feather_connect.connectors.zakya.testing</code>, plays an organisation in tests and in the Zakya demo.</p>
   <h3>The five templates</h3>
