@@ -1458,11 +1458,31 @@ class SealedSecret:
     updated_at: datetime
 
 
+class KeyMismatch(Exception):
+    """A secret sealed with a master key that isn't the environment's active one, or a rotation from a key that
+    isn't active any more: another process rotated meanwhile."""
+
+    def __init__(self, active: str | None, given: str | None) -> None:
+        super().__init__(f"the active master key is {active}, not {given}")
+        self.active, self.given = active, given
+
+
 class SecretStore(Protocol):
-    """The encrypted secrets of this tenant, per environment. Nothing here can decrypt them."""
+    """The encrypted secrets of this tenant, per environment, and the id of each environment's active master key.
+    Nothing here can decrypt them."""
+
+    @property
+    def tenant(self) -> str:
+        """The tenant, which a secret's associated data names."""
+        ...
 
     def put(self, secret: SealedSecret) -> bool:
-        """Set or replace a secret. Returns whether it replaced one."""
+        """Set or replace a secret. Returns whether it replaced one. Raises `KeyMismatch` when `secret.key_id` isn't
+        the environment's active key; the first secret of an environment makes its key the active one."""
+        ...
+
+    def active_key(self, env: str) -> str | None:
+        """The id of the environment's active master key, or None before its first secret."""
         ...
 
     def get(self, env: str, name: str) -> SealedSecret | None: ...
@@ -1473,8 +1493,13 @@ class SecretStore(Protocol):
 
     def remove(self, env: str, name: str) -> bool: ...
 
-    def replace_all(self, env: str, secrets: Sequence[SealedSecret]) -> None:
-        """Write every one of `secrets` over the stored ones in one transaction: a key rotation."""
+    def rotate(
+        self, env: str, expected: str | None, new_key: str, reseal: Callable[[SealedSecret], SealedSecret]
+    ) -> int:
+        """A key rotation, in one transaction with the environment's key row locked, so that no secret is set
+        meanwhile: raises `KeyMismatch` unless the active key is `expected`, writes `reseal(s)` over every secret `s`
+        of `env` (all of them, however many), makes `new_key` the active key and returns how many were sealed again.
+        If `reseal` raises, nothing changes."""
         ...
 
 
@@ -1490,6 +1515,7 @@ class WebhookEvent:
     body: bytes
     headers: Mapping[str, str]
     received_at: datetime
+    processed_at: datetime | None = None
 
 
 class WebhookEventStore(Protocol):
@@ -1501,6 +1527,15 @@ class WebhookEventStore(Protocol):
 
     def events(self, package: str, webhook: str, limit: int = 100) -> list[WebhookEvent]:
         """The webhook's events, oldest first."""
+        ...
+
+    def processed(self, package: str, webhook: str, keys: Sequence[str], at: datetime) -> int:
+        """Mark events as parsed by a worker, so that retention may delete them. Returns how many it marked."""
+        ...
+
+    def purge(self, before: datetime) -> int:
+        """Delete the processed events received before `before`, and return how many. An event not yet processed
+        is kept, however old."""
         ...
 
 

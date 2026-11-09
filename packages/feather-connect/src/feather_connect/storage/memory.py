@@ -42,6 +42,7 @@ from feather_connect.storage.port import (
     InboxDay,
     InboxEvent,
     InboxStore,
+    KeyMismatch,
     KeySighting,
     Ledger,
     Override,
@@ -148,6 +149,7 @@ class _Data:
         default_factory=dict[tuple[str, str, str], EnvEntry]
     )
     secrets: dict[tuple[str, str], SealedSecret] = field(default_factory=dict[tuple[str, str], SealedSecret])
+    secret_keys: dict[str, str] = field(default_factory=dict[str, str])
     webhook_events: dict[tuple[str, str, str], WebhookEvent] = field(
         default_factory=dict[tuple[str, str, str], WebhookEvent]
     )  # by (package, webhook, key), in arrival order
@@ -1471,8 +1473,15 @@ class _Secrets(SecretStore):
     def __init__(self, data: _Data) -> None:
         self._d = data
 
+    @property
+    def tenant(self) -> str:
+        return "default"
+
     def put(self, secret: SealedSecret) -> bool:
         with self._d.lock:
+            active = self._d.secret_keys.setdefault(secret.env, secret.key_id)
+            if active != secret.key_id:
+                raise KeyMismatch(active, secret.key_id)
             replaced = (secret.env, secret.name) in self._d.secrets
             self._d.secrets[(secret.env, secret.name)] = secret
             return replaced
@@ -1490,10 +1499,21 @@ class _Secrets(SecretStore):
         with self._d.lock:
             return self._d.secrets.pop((env, name), None) is not None
 
-    def replace_all(self, env: str, secrets: Sequence[SealedSecret]) -> None:
+    def active_key(self, env: str) -> str | None:
         with self._d.lock:
-            for secret in secrets:
-                self._d.secrets[(env, secret.name)] = secret
+            return self._d.secret_keys.get(env)
+
+    def rotate(
+        self, env: str, expected: str | None, new_key: str, reseal: Callable[[SealedSecret], SealedSecret]
+    ) -> int:
+        with self._d.lock:
+            active = self._d.secret_keys.get(env)
+            if active != expected:
+                raise KeyMismatch(active, expected)
+            sealed = {k: reseal(s) for k, s in self._d.secrets.items() if k[0] == env}
+            self._d.secrets.update(sealed)
+            self._d.secret_keys[env] = new_key
+            return len(sealed)
 
 
 class _Webhooks(WebhookEventStore):
@@ -1512,6 +1532,27 @@ class _Webhooks(WebhookEventStore):
         with self._d.lock:
             found = [e for (p, w, _), e in self._d.webhook_events.items() if (p, w) == (package, webhook)]
         return found[: max(0, min(limit, MAX_ENV_ROWS))]
+
+    def processed(self, package: str, webhook: str, keys: Sequence[str], at: datetime) -> int:
+        marked = 0
+        with self._d.lock:
+            for key in keys:
+                event = self._d.webhook_events.get((package, webhook, key))
+                if event is not None:
+                    self._d.webhook_events[(package, webhook, key)] = replace(event, processed_at=at)
+                    marked += 1
+        return marked
+
+    def purge(self, before: datetime) -> int:
+        with self._d.lock:
+            old = [
+                k
+                for k, e in self._d.webhook_events.items()
+                if e.processed_at is not None and e.received_at < before
+            ]
+            for key in old:
+                del self._d.webhook_events[key]
+        return len(old)
 
 
 class _Audit(AuditStore):

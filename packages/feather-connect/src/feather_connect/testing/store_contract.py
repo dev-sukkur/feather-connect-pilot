@@ -29,6 +29,7 @@ from feather_connect.storage.port import (
     DuplicateVersion,
     InboxDay,
     InvalidTransition,
+    KeyMismatch,
     PackageVersion,
     RegistryFile,
     ResponseRow,
@@ -1616,9 +1617,19 @@ class StoreContract(
         assert [(s.name, s.ciphertext, s.updated_by) for s in store.secrets.names("prod")] == [
             ("zakya-secret", b"\x02cipher", "ops")
         ]
-        store.secrets.replace_all("prod", [replace(sealed, ciphertext=b"rotated", key_id="k2")])
+        assert store.secrets.active_key("prod") == "k1" and store.secrets.active_key("dev") is None
+        with pytest.raises(KeyMismatch):  # sealed with another key than the active one
+            store.secrets.put(replace(sealed, key_id="k2"))
+        count = store.secrets.rotate(
+            "prod", "k1", "k2", lambda s: replace(s, ciphertext=b"rotated", key_id="k2")
+        )
         got = store.secrets.get("prod", "zakya-secret")
-        assert got is not None and (got.ciphertext, got.key_id) == (b"rotated", "k2")
+        assert count == 1 and got is not None and (got.ciphertext, got.key_id) == (b"rotated", "k2")
+        assert store.secrets.active_key("prod") == "k2" and store.secrets.active_key("qa") == "k1"
+        with pytest.raises(KeyMismatch):  # rotated meanwhile: compare and swap
+            store.secrets.rotate("prod", "k1", "k3", lambda s: s)
+        with pytest.raises(KeyMismatch):
+            store.secrets.put(sealed)  # k1 is not active in prod any more
         assert store.secrets.remove("prod", "zakya-secret") and not store.secrets.remove(
             "prod", "zakya-secret"
         )
@@ -1626,6 +1637,26 @@ class StoreContract(
             store.secrets.get("prod", "zakya-secret") is None
             and store.secrets.get("qa", "zakya-secret") is not None
         )
+
+    def test_a_rotation_seals_every_secret_however_many_or_none(self, store: Store):
+        from feather_connect.storage.port import MAX_ENV_ROWS, SealedSecret
+
+        for i in range(MAX_ENV_ROWS + 5):
+            store.secrets.put(SealedSecret("prod", f"s{i:05}", b"c", b"n" * 12, "k1", "root", T0))
+
+        def broken(secret: SealedSecret) -> SealedSecret:
+            if secret.name == "s00500":
+                raise ValueError("doesn't open")
+            return replace(secret, key_id="k2")
+
+        with pytest.raises(ValueError, match="doesn't open"):
+            store.secrets.rotate("prod", "k1", "k2", broken)
+        assert store.secrets.active_key("prod") == "k1"
+        first = store.secrets.get("prod", "s00000")
+        assert first is not None and first.key_id == "k1"  # nothing changed
+        assert store.secrets.rotate("prod", "k1", "k2", lambda s: replace(s, key_id="k2")) == MAX_ENV_ROWS + 5
+        last = store.secrets.get("prod", f"s{MAX_ENV_ROWS + 4:05}")
+        assert last is not None and last.key_id == "k2"
 
     def test_a_webhook_event_is_kept_once_by_its_key(self, store: Store):
         from feather_connect.storage.port import WebhookEvent
@@ -1638,6 +1669,12 @@ class StoreContract(
             ("o-2", b'{"id": "o-1"}'),
         ]
         assert store.webhooks.events("acme", "other") == []
+        # Retention deletes only what a worker has processed, received before the cut.
+        assert store.webhooks.processed("acme", "orders", ["o-1", "missing"], T0) == 1
+        assert store.webhooks.purge(T0 + timedelta(days=1)) == 1
+        assert [e.key for e in store.webhooks.events("acme", "orders")] == ["o-2"]
+        store.webhooks.processed("acme", "orders", ["o-2"], T0)
+        assert store.webhooks.purge(T0) == 0  # received after the cut
 
     def test_registries_are_added_listed_and_removed(self, store: Store):
         store.registry.add_registry("zeta", "https://z.example.com/simple/", None, "root")

@@ -51,6 +51,7 @@ from feather_connect.storage.port import (
     InboxDay,
     InboxEvent,
     InboxStore,
+    KeyMismatch,
     KeySighting,
     Ledger,
     Override,
@@ -2927,9 +2928,40 @@ class _Secrets(SecretStore):
         ).fetchone()
         return bool(row and row["replaced"])
 
+    @property
+    def tenant(self) -> str:
+        return self._db.tenant
+
+    def _locked_key(
+        self, conn: psycopg.Connection[DictRow], env: str, mode: Literal["share", "update"]
+    ) -> str | None:
+        query = (
+            "select key_id from feather.secret_key where tenant_id = %s and env = %s for share"
+            if mode == "share"
+            else "select key_id from feather.secret_key where tenant_id = %s and env = %s for update"
+        )
+        row = conn.execute(query, (self._db.tenant, env)).fetchone()
+        return None if row is None else str(row["key_id"])
+
     def put(self, secret: SealedSecret) -> bool:
         with self._db.tx() as conn:
+            conn.execute(
+                """insert into feather.secret_key (tenant_id, env, key_id, changed_at) values (%s, %s, %s, %s)
+                   on conflict (tenant_id, env) do nothing""",
+                (self._db.tenant, secret.env, secret.key_id, secret.updated_at),
+            )
+            active = self._locked_key(conn, secret.env, "share")  # waits for a rotation in progress
+            if active != secret.key_id:
+                raise KeyMismatch(active, secret.key_id)
             return self._upsert(conn, secret)
+
+    def active_key(self, env: str) -> str | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                "select key_id from feather.secret_key where tenant_id = %s and env = %s",
+                (self._db.tenant, env),
+            ).fetchone()
+        return None if row is None else str(row["key_id"])
 
     def get(self, env: str, name: str) -> SealedSecret | None:
         with self._db.tx() as conn:
@@ -2956,10 +2988,30 @@ class _Secrets(SecretStore):
             )
         return done.rowcount > 0
 
-    def replace_all(self, env: str, secrets: Sequence[SealedSecret]) -> None:
+    def rotate(
+        self, env: str, expected: str | None, new_key: str, reseal: Callable[[SealedSecret], SealedSecret]
+    ) -> int:
         with self._db.tx() as conn:
-            for secret in secrets:
-                self._upsert(conn, secret)
+            conn.execute(
+                """insert into feather.secret_key (tenant_id, env, key_id, changed_at) values (%s, %s, %s, now())
+                   on conflict (tenant_id, env) do nothing""",
+                (self._db.tenant, env, expected or new_key),
+            )
+            active = self._locked_key(conn, env, "update")
+            if active != (expected or new_key):
+                raise KeyMismatch(active, expected)
+            rows = conn.execute(
+                f"""select {self._COLUMNS} from feather.secret where tenant_id = %s and env = %s
+                    order by name collate "C" for update""",
+                (self._db.tenant, env),
+            ).fetchall()
+            for row in rows:
+                self._upsert(conn, reseal(self._secret(row)))
+            conn.execute(
+                "update feather.secret_key set key_id = %s, changed_at = now() where tenant_id = %s and env = %s",
+                (new_key, self._db.tenant, env),
+            )
+        return len(rows)
 
 
 class _Webhooks(WebhookEventStore):
@@ -2989,7 +3041,8 @@ class _Webhooks(WebhookEventStore):
     def events(self, package: str, webhook: str, limit: int = 100) -> list[WebhookEvent]:
         with self._db.tx() as conn:
             rows = conn.execute(
-                """select package, webhook, event_key, stamp, body, headers, received_at from feather.webhook_event
+                """select package, webhook, event_key, stamp, body, headers, received_at, processed_at
+                   from feather.webhook_event
                    where tenant_id = %s and package = %s and webhook = %s order by received_at, event_key limit %s""",
                 (self._db.tenant, package, webhook, max(0, min(limit, MAX_ENV_ROWS))),
             ).fetchall()
@@ -3002,9 +3055,28 @@ class _Webhooks(WebhookEventStore):
                 bytes(r["body"]),
                 _unjson(r["headers"]),
                 r["received_at"],
+                r["processed_at"],
             )
             for r in rows
         ]
+
+    def processed(self, package: str, webhook: str, keys: Sequence[str], at: datetime) -> int:
+        with self._db.tx() as conn:
+            done = conn.execute(
+                """update feather.webhook_event set processed_at = %s
+                   where tenant_id = %s and package = %s and webhook = %s and event_key = any(%s)""",
+                (at, self._db.tenant, package, webhook, list(keys)),
+            )
+        return done.rowcount
+
+    def purge(self, before: datetime) -> int:
+        with self._db.tx() as conn:
+            done = conn.execute(
+                """delete from feather.webhook_event
+                   where tenant_id = %s and processed_at is not null and received_at < %s""",
+                (self._db.tenant, before),
+            )
+        return done.rowcount
 
 
 class PostgresStore(Store):

@@ -443,3 +443,124 @@ def test_a_vendor_account_budget_is_shared_by_tenants_and_no_other_is(
         second.budgets.define(BudgetSpec("zakya", parse_limits(["50/minute"]), account="zakya:60001"))
     assert "zoho-api" not in str(refused.value) and "default" not in str(refused.value)  # nor named to t2
     assert [u.used for u in first.budgets.usage("zoho-api")] == [7, 7]  # and nothing was reset
+
+
+def _package_version(load_check: dict[str, Any]) -> Any:
+    import hashlib
+
+    from feather_connect.storage.port import PackageVersion
+
+    manifest = {"name": "acme", "version": "1.0.0", "flows": [{"name": "invoices"}]}
+    sha = hashlib.sha256(b"wheel").hexdigest()
+    return PackageVersion(
+        "acme", "1.0.0", sha, "feather", "acme-1.0.0-py3-none-any.whl", 5, manifest, ">=0.1", "b" * 64,
+        "installed", load_check, "root", T0,
+    )  # fmt: skip
+
+
+def test_a_deactivated_flow_stops_firing_within_seconds_over_listen_notify(store: Store, clock: FrozenClock):
+    import time
+
+    from feather_connect.runtime.catalogue import Catalogue
+
+    spec = {"name": "acme/invoices", "datasets": [], "triggers": [{"kind": "every", "seconds": 1.0}]}
+    store.packages.install(_package_version({"specs": {"acme/invoices": spec}}), b"wheel", ["acme/invoices"])
+    store.packages.activate("acme/invoices", "acme", "1.0.0", "ops", T0)
+    catalogue = Catalogue(store, monotonic=lambda: 0.0)  # no poll: only NOTIFY makes it read again
+    catalogue.listen()
+    try:
+        catalogue.tick(clock.now())
+        clock.advance(timedelta(seconds=1))
+        assert len(catalogue.tick(clock.now())) == 1
+        started = time.monotonic()
+        store.packages.deactivate("acme/invoices", "ops", clock.now())
+        while catalogue.flows() and time.monotonic() - started < 5:
+            time.sleep(0.05)
+        assert catalogue.flows() == [] and time.monotonic() - started <= 5
+        clock.advance(timedelta(seconds=5))
+        assert catalogue.tick(clock.now()) == []
+    finally:
+        catalogue.close()
+
+
+def test_a_notify_during_a_read_isnt_lost(store: Store):
+    import threading
+    import time
+
+    from feather_connect.runtime.catalogue import Catalogue
+
+    spec = {"name": "acme/invoices", "datasets": [], "triggers": []}
+    store.packages.install(_package_version({"specs": {"acme/invoices": spec}}), b"wheel", ["acme/invoices"])
+    catalogue = Catalogue(store, monotonic=lambda: 0.0)
+    catalogue.listen()
+    reading, go = threading.Event(), threading.Event()
+    real = store.packages.active
+
+    def slow_active() -> Any:
+        found = real()  # what was active when the read began: nothing
+        reading.set()
+        go.wait(5)
+        return found
+
+    try:
+        object.__setattr__(store.packages, "active", slow_active)
+        first = threading.Thread(target=catalogue.flows)
+        first.start()
+        assert reading.wait(5)
+        object.__setattr__(store.packages, "active", real)
+        store.packages.activate("acme/invoices", "acme", "1.0.0", "ops", T0)  # NOTIFY while the read runs
+        deadline = time.monotonic() + 5
+        while catalogue._generation == 0 and time.monotonic() < deadline:  # pyright: ignore[reportPrivateUsage]
+            time.sleep(0.02)
+        go.set()
+        first.join(5)
+        assert [f.name for f in catalogue.flows()] == ["acme/invoices"]  # the stale read was not kept
+    finally:
+        go.set()
+        catalogue.close()
+
+
+def test_a_set_waits_for_a_rotation_and_is_refused_after_it(pg_url: str, clock: FrozenClock, pg_connect: Any):
+    import threading
+    import time
+
+    from feather_connect.vault import KeyConflict, Keyring, MasterKey, Vault, new_master_key
+
+    first, _ = pg_connect(pg_url, clock=clock, tenant="default")
+    second, _ = pg_connect(pg_url, clock=clock, tenant="default")  # another process
+    old, new = MasterKey.parse(new_master_key()), MasterKey.parse(new_master_key())
+    stale = Vault(first.secrets, "prod", Keyring(old, (new,)))
+    fresh = Vault(second.secrets, "prod", Keyring(new, (old,)))
+    for i in range(3):
+        stale.set(f"s{i}", f"v{i}", "root", T0)
+    sealing, release = threading.Event(), threading.Event()
+    real = fresh._seal  # pyright: ignore[reportPrivateUsage]
+
+    def slow(*args: Any, **kwargs: Any) -> Any:
+        sealing.set()
+        release.wait(5)
+        return real(*args, **kwargs)
+
+    fresh._seal = slow  # type: ignore[method-assign]  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
+    rotating = threading.Thread(target=fresh.rotate, args=("root", T0))
+    rotating.start()
+    assert sealing.wait(5)
+    outcome: list[Any] = []
+
+    def attempt() -> None:
+        try:
+            outcome.append(stale.set("s1", "stale", "root", T0))
+        except KeyConflict as error:
+            outcome.append(error)
+
+    setter = threading.Thread(target=attempt)
+    setter.start()
+    time.sleep(0.3)
+    assert outcome == []  # it waits for the rotation's lock
+    release.set()
+    rotating.join(10)
+    setter.join(10)
+    assert isinstance(outcome[0], KeyConflict)
+    assert first.secrets.active_key("prod") == new.key_id
+    restarted = Vault(first.secrets, "prod", Keyring(new))
+    assert [restarted.open(f"s{i}") for i in range(3)] == ["v0", "v1", "v2"]

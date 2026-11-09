@@ -1,9 +1,17 @@
 """The environment's encrypted secrets: `${secret:db:<name>}` (flow packages §8, sponsor decision of 2026-11-09).
 
 A secret is sealed with AES-256-GCM under the environment's master key, with a fresh 12-byte nonce each time and the
-environment and name as associated data, so that a ciphertext copied to another name or environment doesn't open. The
-store keeps only the ciphertext, the nonce and the key's id; the key comes from `FEATHER_MASTER_KEY` (32 bytes, base64)
-or the file `FEATHER_MASTER_KEY_FILE` names, and is never in the database.
+tenant, environment and name as associated data, so that a ciphertext copied to another name, environment or tenant
+doesn't open. The store keeps only the ciphertext, the nonce and the key's id; the key comes from `FEATHER_MASTER_KEY`
+(32 bytes, base64) or the file `FEATHER_MASTER_KEY_FILE` names, and is never in the database.
+
+A process holds a keyring: its current key, which it seals with, and the keys it may still open with,
+`FEATHER_MASTER_KEY_PREVIOUS` (or `_PREVIOUS_FILE`; several, comma-separated). The database keeps the id of each
+environment's active key, so a process whose current key isn't the active one may open but not set (`KeyConflict`).
+A rotation seals every secret again under the rotating process's current key, in one transaction that locks the key
+row and swaps it only if it is still the key the rotation began from. To rotate: give every process the new key as a
+previous one, then make it current (with the old one previous) and restart, run `feather secret rotate-key`, and drop
+the old key once every process has restarted.
 
 Secrets are write-only: they can be set, replaced, listed by name and deleted, and are opened only to resolve a
 reference when a connection is used. Without a master key the server still starts; resolving a `db` secret then fails
@@ -22,12 +30,21 @@ from pathlib import Path
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from feather_connect.storage.port import SealedSecret, SecretStore
+from feather_connect.storage.port import KeyMismatch, SealedSecret, SecretStore
 
-__all__ = ["MasterKey", "NoMasterKey", "Vault", "VaultError", "master_key_from_env", "new_master_key"]
+__all__ = [
+    "KeyConflict",
+    "Keyring",
+    "MasterKey",
+    "NoMasterKey",
+    "Vault",
+    "VaultError",
+    "keyring_from_env",
+    "new_master_key",
+]
 
 _NONCE = 12
-_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./")
 MAX_SECRET = 64 * 1024  # bytes of a secret's value
 
 
@@ -37,6 +54,10 @@ class VaultError(Exception):
 
 class NoMasterKey(VaultError):
     """The environment has no master key, so its `db` secrets can't be set or opened."""
+
+
+class KeyConflict(VaultError):
+    """This process's current key isn't the environment's active one, or another process rotated meanwhile."""
 
 
 @dataclass(frozen=True, repr=False)
@@ -70,48 +91,99 @@ def new_master_key() -> str:
     return base64.b64encode(AESGCM.generate_key(bit_length=256)).decode()
 
 
-def master_key_from_env(environ: Mapping[str, str] | None = None) -> MasterKey | None:
-    """The master key `FEATHER_MASTER_KEY` or `FEATHER_MASTER_KEY_FILE` gives, or None when neither is set."""
-    environ = os.environ if environ is None else environ
-    if text := environ.get("FEATHER_MASTER_KEY"):
-        return MasterKey.parse(text)
-    if where := environ.get("FEATHER_MASTER_KEY_FILE"):
+@dataclass(frozen=True)
+class Keyring:
+    """The key a process seals with, and the earlier keys it may still open with."""
+
+    current: MasterKey
+    previous: tuple[MasterKey, ...] = ()
+
+    def find(self, key_id: str) -> MasterKey | None:
+        return next((k for k in (self.current, *self.previous) if k.key_id == key_id), None)
+
+    @property
+    def key_ids(self) -> list[str]:
+        return [k.key_id for k in (self.current, *self.previous)]
+
+
+def _read(environ: Mapping[str, str], name: str) -> str | None:
+    if text := environ.get(name):
+        return text
+    if where := environ.get(f"{name}_FILE"):
         try:
-            return MasterKey.parse(Path(where).read_text(encoding="utf-8"))
+            return Path(where).read_text(encoding="utf-8")
         except OSError as error:
-            raise VaultError(f"can't read FEATHER_MASTER_KEY_FILE ({error.strerror})") from None
+            raise VaultError(f"can't read {name}_FILE ({error.strerror})") from None
     return None
 
 
+def keyring_from_env(environ: Mapping[str, str] | None = None) -> Keyring | None:
+    """The keyring `FEATHER_MASTER_KEY` (or `_FILE`) and `FEATHER_MASTER_KEY_PREVIOUS` (or `_FILE`, comma-separated)
+    give, or None when no master key is set."""
+    environ = os.environ if environ is None else environ
+    current, previous = _read(environ, "FEATHER_MASTER_KEY"), _read(environ, "FEATHER_MASTER_KEY_PREVIOUS")
+    if current is None:
+        if previous is not None:
+            raise VaultError("FEATHER_MASTER_KEY_PREVIOUS is set without FEATHER_MASTER_KEY")
+        return None
+    older = tuple(MasterKey.parse(p) for p in previous.split(",") if p.strip()) if previous else ()
+    return Keyring(MasterKey.parse(current), older)
+
+
 def check_name(name: str) -> str:
-    if not name or len(name) > 200 or not set(name) <= _NAME_CHARS:
-        raise VaultError(f"{name!r} is not a secret name: use letters, digits, '-', '_' and '.'")
+    if (
+        not name
+        or len(name) > 200
+        or not set(name) <= _NAME_CHARS
+        or any(part in ("", ".", "..") for part in name.split("/"))
+    ):
+        raise VaultError(
+            f"{name!r} is not a secret name: use letters, digits, '-', '_' and '.', in parts such as "
+            "<connection>/<field>"
+        )
     return name
 
 
-def _aad(env: str, name: str) -> bytes:
+def _aad(tenant: str, env: str, name: str) -> bytes:
+    return f"feather-secret/2\0{tenant}\0{env}\0{name}".encode()
+
+
+def _legacy_aad(env: str, name: str) -> bytes:
+    """The associated data of a secret sealed before the tenant was in it: opened, and sealed anew by a rotation."""
     return f"feather-secret\0{env}\0{name}".encode()
 
 
 class Vault:
-    """The secrets of one environment of a store's tenant, sealed with `key`. `key` may be None: then listing and
-    deleting work, and setting or opening raises `NoMasterKey`."""
+    """The secrets of one environment of a store's tenant. `keys` may be None: then listing and deleting work, and
+    setting or opening raises `NoMasterKey`. A process makes one and shares it."""
 
-    def __init__(self, store: SecretStore, env: str, key: MasterKey | None) -> None:
-        self._store, self._env, self._key = store, env, key
+    def __init__(self, store: SecretStore, env: str, keys: Keyring | MasterKey | None) -> None:
+        self._store, self._env = store, env
+        self._ring = Keyring(keys) if isinstance(keys, MasterKey) else keys
 
-    def _need_key(self) -> MasterKey:
-        if self._key is None:
+    @property
+    def keyring(self) -> Keyring | None:
+        return self._ring
+
+    def _need_ring(self) -> Keyring:
+        if self._ring is None:
             raise NoMasterKey(
                 f"environment {self._env} has no master key, so its db secrets can't be used: set FEATHER_MASTER_KEY "
                 "or FEATHER_MASTER_KEY_FILE (make one with `feather secret new-key`)"
             )
-        return self._key
+        return self._ring
 
     def _seal(self, key: MasterKey, name: str, value: bytes, by: str, at: datetime) -> SealedSecret:
         nonce = os.urandom(_NONCE)
-        sealed = AESGCM(key.key).encrypt(nonce, value, _aad(self._env, name))
+        sealed = AESGCM(key.key).encrypt(nonce, value, _aad(self._store.tenant, self._env, name))
         return SealedSecret(self._env, name, sealed, nonce, key.key_id, by, at)
+
+    def _conflict(self, error: KeyMismatch) -> KeyConflict:
+        return KeyConflict(
+            f"environment {self._env}'s secrets are sealed with master key {error.active}, and this process's "
+            f"current key is {self._need_ring().current.key_id}: restart it with the active key as "
+            "FEATHER_MASTER_KEY, or rotate from a process whose current key is the new one"
+        )
 
     def set(self, name: str, value: str, by: str, at: datetime) -> bool:
         """Seal and keep a secret, replacing one of that name. Returns whether it replaced one."""
@@ -119,7 +191,10 @@ class Vault:
         data = value.encode("utf-8")
         if not data or len(data) > MAX_SECRET:
             raise VaultError(f"secret {name}: a value has 1 to {MAX_SECRET} bytes")
-        return self._store.put(self._seal(self._need_key(), name, data, by, at))
+        try:
+            return self._store.put(self._seal(self._need_ring().current, name, data, by, at))
+        except KeyMismatch as error:
+            raise self._conflict(error) from None
 
     def names(self) -> list[SealedSecret]:
         return self._store.names(self._env)
@@ -129,35 +204,42 @@ class Vault:
 
     def open(self, name: str) -> str:
         """The value of a secret, to resolve `${secret:db:<name>}` when a connection is used, and for nothing else."""
-        key = self._need_key()
+        ring = self._need_ring()
         sealed = self._store.get(self._env, name)
         if sealed is None:
             raise VaultError(
                 f"secret {name} is not set in environment {self._env}: feather secret set {name}"
             )
-        return self._open(key, sealed)
+        return self._open(ring, sealed)
 
-    def _open(self, key: MasterKey, sealed: SealedSecret) -> str:
-        if sealed.key_id != key.key_id:
+    def _open(self, ring: Keyring, sealed: SealedSecret) -> str:
+        key = ring.find(sealed.key_id)
+        if key is None:
             raise VaultError(
-                f"secret {sealed.name} was sealed with master key {sealed.key_id}, but this server has {key.key_id}: "
-                "set the key it was sealed with, or set the secret again"
+                f"secret {sealed.name} was sealed with master key {sealed.key_id}, but this process has "
+                f"{', '.join(ring.key_ids)}: add it as FEATHER_MASTER_KEY_PREVIOUS, or set the secret again"
             )
-        try:
-            return (
-                AESGCM(key.key)
-                .decrypt(sealed.nonce, sealed.ciphertext, _aad(sealed.env, sealed.name))
-                .decode()
-            )
-        except (InvalidTag, UnicodeDecodeError):
-            raise VaultError(f"secret {sealed.name} doesn't open with master key {key.key_id}") from None
+        cipher = AESGCM(key.key)
+        for aad in (_aad(self._store.tenant, sealed.env, sealed.name), _legacy_aad(sealed.env, sealed.name)):
+            try:
+                return cipher.decrypt(sealed.nonce, sealed.ciphertext, aad).decode()
+            except (InvalidTag, UnicodeDecodeError):
+                continue
+        raise VaultError(f"secret {sealed.name} doesn't open with master key {key.key_id}")
 
-    def rotate(self, new: MasterKey, by: str, at: datetime) -> int:
-        """Seal every secret again under `new`, in one transaction, and return how many. Every secret must open
-        with the current key first, so a rotation never half happens."""
-        key = self._need_key()
-        opened = [(s, self._open(key, s).encode()) for s in self._store.names(self._env)]
-        sealed = [replace(self._seal(new, s.name, value, by, at)) for s, value in opened]
-        self._store.replace_all(self._env, sealed)
-        self._key = new
-        return len(sealed)
+    def rotate(self, by: str, at: datetime) -> int:
+        """Seal every secret of the environment again under this process's current key, and make it the active one,
+        in one transaction: every secret must open with the keyring, or nothing changes. Returns how many."""
+        ring = self._need_ring()
+        expected = self._store.active_key(self._env)
+
+        def reseal(sealed: SealedSecret) -> SealedSecret:
+            value = self._open(ring, sealed).encode()
+            return replace(self._seal(ring.current, sealed.name, value, by, at), updated_by=sealed.updated_by)
+
+        try:
+            return self._store.rotate(self._env, expected, ring.current.key_id, reseal)
+        except KeyMismatch as error:
+            raise KeyConflict(
+                f"environment {self._env}'s active key changed to {error.active} during the rotation: run it again"
+            ) from None

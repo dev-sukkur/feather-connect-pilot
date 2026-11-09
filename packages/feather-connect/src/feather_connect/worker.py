@@ -28,7 +28,7 @@ from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.port import Store
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import migrate
-from feather_connect.vault import Vault, master_key_from_env
+from feather_connect.vault import Vault, keyring_from_env
 
 log = logging.getLogger(__name__)
 
@@ -99,8 +99,10 @@ def run_worker(
     labels = dict(labels or {})
     migrate(database_url)
     store, spool = connect(database_url)
-    key = master_key_from_env()
-    use_db_secrets(lambda name: Vault(store.secrets, env, key).open(name))
+    keyring = keyring_from_env()
+    use_db_secrets(Vault(store.secrets, env, keyring).open)  # one vault for the process
+    # TODO(flow packages task 6, P4 package hosts; task 8, P6 retiring project mode): workers stop loading a project
+    # here and run installed packages' flows from the catalogue on package hosts.
     project = load_project(project_root, env, environment=environment_layer(store.env_config.entries(env)))
     _check_connections(project)
     remove_task_logs = install_task_logs(store)
