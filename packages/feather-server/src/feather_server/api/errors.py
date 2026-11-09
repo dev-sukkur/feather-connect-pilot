@@ -14,6 +14,7 @@ from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.storage.port import DuplicateUser, InvalidTransition
 from feather_server.services.access import Forbidden
 from feather_server.services.previews import PreviewError, PreviewInvalid
+from feather_server.services.registries import VersionExists
 
 PROBLEM_JSON = "application/problem+json"
 
@@ -50,6 +51,8 @@ def translate(error: Exception) -> ApiProblem | None:
         return error
     if isinstance(error, Forbidden):
         return ApiProblem(403, "Forbidden", str(error), capability=error.capability, role=error.needed)
+    if isinstance(error, VersionExists):
+        return ApiProblem(409, "Conflict", str(error))
     if isinstance(error, DuplicateUser):
         return ApiProblem(409, "Conflict", f"the user {error.args[0]!r} exists already")
     if isinstance(error, PreviewInvalid):

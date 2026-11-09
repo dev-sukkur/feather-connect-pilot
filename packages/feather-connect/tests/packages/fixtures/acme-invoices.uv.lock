@@ -1,0 +1,38 @@
+# A uv.lock for the sample package acme-invoices (dependencies = ["feather-connect"]), checked in so that the build
+# test runs `uv export` from it with no network and no cache. The hashes are made up: nothing is downloaded.
+version = 1
+revision = 3
+requires-python = ">=3.12"
+
+[[package]]
+name = "acme-invoices"
+version = "1.0.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "feather-connect" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "feather-connect" }]
+
+[[package]]
+name = "feather-connect"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/00/00/feather_connect-0.1.0.tar.gz", hash = "sha256:11d8b654e655856ab92d326cd5a58a92d08f057882c45613fe8623eebb6f7d28", size = 1000 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/00/00/feather_connect-0.1.0-py3-none-any.whl", hash = "sha256:71f44a9c34b182f039800b2f8c99475e2791c4273e187b3118d19faeec535b61", size = 1000 },
+]
+
+[[package]]
+name = "pyyaml"
+version = "6.0.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/00/00/pyyaml-6.0.2.tar.gz", hash = "sha256:a9c57f614a29a3e718d3d82cb1aa39145f2a387f53165791bb3113b68d9d931d", size = 1000 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/00/00/PyYAML-6.0.2-cp312-cp312-win_amd64.whl", hash = "sha256:9dda24299f2ae0e87a16b40967c267014de7bf50c45e9a13e7968fa43511cef1", size = 1000 },
+    { url = "https://files.pythonhosted.org/packages/00/00/PyYAML-6.0.2-cp312-cp312-manylinux_2_17_x86_64.whl", hash = "sha256:344a4596e2a7792425419a0fba6d4e7590e6bb79cf3b35b332089810f27a16b0", size = 1000 },
+]

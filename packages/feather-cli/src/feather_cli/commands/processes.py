@@ -239,6 +239,10 @@ def create_token(
         str | None,
         typer.Option(help="The user whose token it is: it never acts above their role. None for automation."),
     ] = None,
+    scope: Annotated[
+        str,
+        typer.Option(help="all, or publish: a token that may only upload packages to the built-in registry."),
+    ] = "all",
     env: Env = "dev",
     database_url: DatabaseUrl = None,
     json_mode: Json = False,
@@ -250,7 +254,7 @@ def create_token(
         fail(str(error), hint="write the lifetime like 90d, 12h or 30m", json_mode=json_mode)
     with _store(database_url, json_mode) as store:
         try:
-            token = _accounts(store).create_token(CLI, name, lifetime, role, user=user)
+            token = _accounts(store).create_token(CLI, name, lifetime, role, user=user, scope=scope)
         except KeyError:
             fail(f"there is no user {user!r}", json_mode=json_mode)
         except ValueError as error:
@@ -262,7 +266,11 @@ def create_token(
         typer.echo(data["token"])
         typer.echo(f"a {given} token; it is not shown again: store it now", err=True)
 
-    emit({"name": name, "token": token, "ttl": ttl, "role": given}, json_mode=json_mode, human=show)
+    emit(
+        {"name": name, "token": token, "ttl": ttl, "role": given, "scope": scope},
+        json_mode=json_mode,
+        human=show,
+    )
 
 
 def worker(

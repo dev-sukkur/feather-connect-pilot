@@ -32,6 +32,8 @@ from feather_connect.storage.port import (
     CatalogStore,
     Delivery,
     DeliveryStatus,
+    DuplicateFile,
+    DuplicateRegistry,
     DuplicateUser,
     FailureGroup,
     FlowRow,
@@ -49,6 +51,9 @@ from feather_connect.storage.port import (
     QuarantineStore,
     ReadStore,
     RecordStateStore,
+    RegistryFile,
+    RegistryRow,
+    RegistryStore,
     ResponseRow,
     ResponseStore,
     Role,
@@ -62,6 +67,7 @@ from feather_connect.storage.port import (
     Store,
     TaskRow,
     TokenRow,
+    TokenScope,
     UserRow,
     UserStore,
     Version,
@@ -75,6 +81,7 @@ from feather_connect.storage.port import (
     WorkerState,
     check_transition,
     split_error,
+    version_key,
 )
 from feather_connect.storage.postgres.spool import from_signed, index_keys
 from feather_connect.storage.postgres.support import Pool, ensure_partition, guard_version
@@ -1933,14 +1940,20 @@ class _Users(UserStore):
             raise KeyError(username)
 
     def create_token(
-        self, name: str, token_hash: str, expires_at: datetime | None, role: Role, created_by: str | None
+        self,
+        name: str,
+        token_hash: str,
+        expires_at: datetime | None,
+        role: Role,
+        created_by: str | None,
+        scope: TokenScope = "all",
     ) -> str:
         token_id = new_id()
         with self._db.tx() as conn:
             conn.execute(
                 """insert into feather.api_token
-                       (tenant_id, token_id, name, token_hash, created_at, expires_at, role, created_by)
-                   values (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                       (tenant_id, token_id, name, token_hash, created_at, expires_at, role, created_by, scope)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     self._db.tenant,
                     token_id,
@@ -1950,6 +1963,7 @@ class _Users(UserStore):
                     expires_at,
                     role,
                     created_by,
+                    scope,
                 ),
             )
         return token_id
@@ -1971,6 +1985,7 @@ class _Users(UserStore):
             row["revoked_at"],
             row["role"],
             row["created_by"],
+            row["scope"],
         )
 
     def revoke_token(self, token_id: str) -> None:
@@ -1980,6 +1995,138 @@ class _Users(UserStore):
                    where tenant_id = %s and token_id = %s and revoked_at is null""",
                 (self._db.clock.now(), self._db.tenant, token_id),
             )
+
+
+class _Registry(RegistryStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    _COLUMNS = """project, version, filename, sha256, size, manifest, uploaded_by, uploaded_at, yanked_at,
+                  yanked_reason"""
+
+    @staticmethod
+    def _file(row: Mapping[str, Any]) -> RegistryFile:
+        return RegistryFile(
+            row["project"],
+            row["version"],
+            row["filename"],
+            row["sha256"],
+            row["size"],
+            row["manifest"],
+            row["uploaded_by"],
+            row["uploaded_at"],
+            row["yanked_at"],
+            row["yanked_reason"],
+        )
+
+    def put_file(self, file: RegistryFile, content: bytes) -> None:
+        try:
+            with self._db.tx() as conn:
+                conn.execute(
+                    """insert into feather.registry_file (tenant_id, project, version, version_key, filename,
+                           sha256, size, manifest, content, uploaded_by, uploaded_at)
+                       values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        self._db.tenant,
+                        file.project,
+                        file.version,
+                        version_key(file.version),
+                        file.filename,
+                        file.sha256,
+                        file.size,
+                        _json(dict(file.manifest)),
+                        content,
+                        file.uploaded_by,
+                        file.uploaded_at,
+                    ),
+                )
+        except psycopg.errors.UniqueViolation:
+            raise DuplicateFile(f"{file.project} {file.version}") from None
+
+    def projects(self) -> list[str]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                'select distinct project collate "C" as project from feather.registry_file where tenant_id = %s order by 1',
+                (self._db.tenant,),
+            ).fetchall()
+        return [row["project"] for row in rows]
+
+    def files(self, project: str) -> list[RegistryFile]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                f"""select {self._COLUMNS} from feather.registry_file where tenant_id = %s and project = %s
+                    order by uploaded_at, filename""",
+                (self._db.tenant, project),
+            ).fetchall()
+        return [self._file(row) for row in rows]
+
+    def file(self, filename: str) -> RegistryFile | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                f"select {self._COLUMNS} from feather.registry_file where tenant_id = %s and filename = %s",
+                (self._db.tenant, filename),
+            ).fetchone()
+        return None if row is None else self._file(row)
+
+    def content(self, filename: str) -> bytes | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                "select content from feather.registry_file where tenant_id = %s and filename = %s",
+                (self._db.tenant, filename),
+            ).fetchone()
+        return None if row is None else bytes(row["content"])
+
+    def yank(self, project: str, version: str, reason: str | None) -> bool:
+        with self._db.tx() as conn:
+            conn.execute(
+                """update feather.registry_file set yanked_at = %s, yanked_reason = %s
+                   where tenant_id = %s and project = %s and version = %s and yanked_at is null""",
+                (self._db.clock.now(), reason, self._db.tenant, project, version),
+            )
+            found = conn.execute(
+                "select 1 from feather.registry_file where tenant_id = %s and project = %s and version = %s",
+                (self._db.tenant, project, version),
+            ).fetchone()
+        return found is not None
+
+    @staticmethod
+    def _registry(row: Mapping[str, Any]) -> RegistryRow:
+        return RegistryRow(row["name"], row["index_url"], row["token_ref"], row["added_by"], row["added_at"])
+
+    def add_registry(self, name: str, index_url: str, token_ref: str | None, added_by: str) -> RegistryRow:
+        row = RegistryRow(name, index_url, token_ref, added_by, self._db.clock.now())
+        try:
+            with self._db.tx() as conn:
+                conn.execute(
+                    """insert into feather.registry (tenant_id, name, index_url, token_ref, added_by, added_at)
+                       values (%s, %s, %s, %s, %s, %s)""",
+                    (self._db.tenant, name, index_url, token_ref, added_by, row.added_at),
+                )
+        except psycopg.errors.UniqueViolation:
+            raise DuplicateRegistry(name) from None
+        return row
+
+    def registries(self) -> list[RegistryRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                'select * from feather.registry where tenant_id = %s order by name collate "C"',
+                (self._db.tenant,),
+            ).fetchall()
+        return [self._registry(row) for row in rows]
+
+    def get_registry(self, name: str) -> RegistryRow | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                "select * from feather.registry where tenant_id = %s and name = %s", (self._db.tenant, name)
+            ).fetchone()
+        return None if row is None else self._registry(row)
+
+    def remove_registry(self, name: str) -> bool:
+        with self._db.tx() as conn:
+            gone = conn.execute(
+                "delete from feather.registry where tenant_id = %s and name = %s", (self._db.tenant, name)
+            )
+        return gone.rowcount > 0
 
 
 class _Audit(AuditStore):
@@ -2408,6 +2555,7 @@ class PostgresStore(Store):
             reads=_Reads(db),
             inbox=_Inbox(db, versions),
             responses=_Responses(db),
+            registry=_Registry(db),
         )
         object.__setattr__(self, "_pool", pool)  # `Store` is frozen
 

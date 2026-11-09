@@ -459,6 +459,14 @@ curl -H "Authorization: Bearer fc_..." http://127.0.0.1:8080/api/v1/runs</code><
   url: https://feather.example.com
   token: "${secret:env:FEATHER_PROD_TOKEN}"</code></pre>
   <p class="prose">The file's token is sent only to the file's own server. With <code>--server</code> naming another one, pass <code>--token</code> too. <code>backfill</code> and <code>replay</code> show their preview, and go ahead only with <code>--yes</code> or when you type <code>yes</code>.</p>
+  <h3 id="packages">Flow packages and the registry (M1.1, in progress)</h3>
+  <p class="prose">A project with a <code>version:</code> in its <code>feather.yaml</code> builds into a flow package, a Python wheel holding the project and a manifest, <code>feather-package.json</code>. Building the same tree twice gives the same sha256. Installing and activating packages come in the next stages; for now you can build, publish and search. <code>examples/packages/acme-invoices</code> is a sample.</p>
+  <pre><code>uv run feather package build                                  # dist/acme_invoices-1.0.0-py3-none-any.whl
+uv run feather server create-token ci --scope publish --database-url postgresql://...
+uv run feather package publish --url https://feather-qa.example.com --token "$FEATHER_PUBLISH_TOKEN"
+feather package search invoices --server https://feather-qa.example.com</code></pre>
+  <p class="prose">Every <code>feather-server</code> serves a <b>built-in registry</b> at <code>/registry/simple/</code>, a standard Python package index, and takes uploads at <code>/registry/</code>, so <code>uv publish --publish-url https://…/registry/ --token …</code> and <code>twine</code> work too. Wheels are kept in Postgres. A version is published once and never replaced; an admin can yank it (<code>POST /api/v1/registries/feather/packages/{name}/versions/{v}:yank</code>), which marks it in the index and keeps the file. Reading the index needs any valid token, for example <code>uv pip install --index-url https://__token__:fc_…@host/registry/simple/</code>. Uploading needs an admin or a token with the <code>publish</code> scope, which can do nothing else and stops working when its user is no longer an admin. A version can't have a local part (<code>1.0.0+build</code>), and <code>1.0</code> is the same version as <code>1.0.0</code>. <code>FEATHER_REGISTRY=0</code> turns it off.</p>
+  <p class="prose">An admin can add a company registry beside it; its token is a secret reference, resolved on the server only when the registry is called: <code>feather registry add acme https://pkgs.example.com/simple/ --token '${secret:env:ACME_REGISTRY_TOKEN}'</code> (the server's own token goes in <code>--api-token</code> or <code>FEATHER_TOKEN</code>), then <code>feather registry list</code>, <code>test acme</code> and <code>remove acme</code>. Every wheel fetched from a registry has its sha256 checked.</p>
 </section>
 
 <section id="deploy">

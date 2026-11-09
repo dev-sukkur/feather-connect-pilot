@@ -23,9 +23,12 @@ from feather_connect.storage.port import (
     TRANSITIONS,
     BudgetSpec,
     DeliveryStatus,
+    DuplicateFile,
+    DuplicateRegistry,
     DuplicateUser,
     InboxDay,
     InvalidTransition,
+    RegistryFile,
     ResponseRow,
     Role,
     SliceFinished,
@@ -1399,6 +1402,77 @@ class StoreContract(
             ("ann", "admin"),
             ("cy", "operator"),
         ]
+
+    def test_a_token_keeps_its_scope(self, store: Store):
+        store.users.create_token("ci", "h1", None, "operator", None, "publish")
+        store.users.create_token("ops", "h2", None, "admin", None)
+        assert [store.users.find_token(h).scope for h in ("h1", "h2")] == ["publish", "all"]  # type: ignore[union-attr]
+
+    # the built-in registry
+
+    @staticmethod
+    def _wheel(project: str, version: str, at: datetime = T0) -> RegistryFile:
+        module = project.replace("-", "_")
+        return RegistryFile(
+            project,
+            version,
+            f"{module}-{version}-py3-none-any.whl",
+            f"sha-{version}",
+            3,
+            {"v": version},
+            "ci",
+            at,
+        )
+
+    def test_registry_files_are_kept_once_and_read_back(self, store: Store, clock: FrozenClock):
+        first = self._wheel("acme-invoices", "1.0.0")
+        store.registry.put_file(first, b"one")
+        store.registry.put_file(self._wheel("acme-invoices", "1.1.0", T0 + timedelta(minutes=1)), b"two")
+        store.registry.put_file(self._wheel("Zed", "0.1"), b"zed")
+        assert store.registry.projects() == ["Zed", "acme-invoices"]
+        assert [f.version for f in store.registry.files("acme-invoices")] == ["1.0.0", "1.1.0"]
+        assert store.registry.file(first.filename) == first and store.registry.file("nope.whl") is None
+        assert store.registry.content(first.filename) == b"one" and store.registry.content("nope.whl") is None
+        with pytest.raises(DuplicateFile):  # the same version, another file: a version is never replaced
+            store.registry.put_file(replace(first, filename="acme_invoices-1.0.0-py3-none-other.whl"), b"x")
+        with pytest.raises(DuplicateFile):
+            store.registry.put_file(first, b"changed")
+        with pytest.raises(DuplicateFile):  # 1.0 is 1.0.0 to every installer
+            store.registry.put_file(
+                replace(first, version="1.0", filename="acme_invoices-1.0-py3-none-any.whl"), b"x"
+            )
+        assert store.registry.content(first.filename) == b"one"
+
+    def test_a_version_is_yanked_once(self, store: Store, clock: FrozenClock):
+        store.registry.put_file(self._wheel("acme-invoices", "1.0.0"), b"one")
+        clock.advance(timedelta(hours=1))
+        assert store.registry.yank("acme-invoices", "1.0.0", "broken totals") is True
+        clock.advance(timedelta(hours=1))
+        assert store.registry.yank("acme-invoices", "1.0.0", "again") is True
+        assert store.registry.yank("acme-invoices", "9.9.9", None) is False
+        (found,) = store.registry.files("acme-invoices")
+        assert (found.yanked_at, found.yanked_reason) == (T0 + timedelta(hours=1), "broken totals")
+        assert store.registry.content(found.filename) == b"one"  # yanked, not deleted
+
+    def test_registries_are_added_listed_and_removed(self, store: Store):
+        store.registry.add_registry("zeta", "https://z.example.com/simple/", None, "root")
+        added = store.registry.add_registry(
+            "acme", "https://pkgs.example.com/simple/", "${secret:env:T}", "root"
+        )
+        assert (added.name, added.token_ref, added.added_by, added.added_at) == (
+            "acme",
+            "${secret:env:T}",
+            "root",
+            T0,
+        )
+        with pytest.raises(DuplicateRegistry):
+            store.registry.add_registry("acme", "https://other.example.com/simple/", None, "root")
+        assert [r.name for r in store.registry.registries()] == ["acme", "zeta"]
+        assert store.registry.get_registry("acme") == added and store.registry.get_registry("nope") is None
+        assert (
+            store.registry.remove_registry("acme") is True and store.registry.remove_registry("acme") is False
+        )
+        assert [r.name for r in store.registry.registries()] == ["zeta"]
 
     def test_audit_rows_list_newest_first_with_a_cursor(self, store: Store, clock: FrozenClock):
         ids: list[str] = []

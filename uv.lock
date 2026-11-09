@@ -971,6 +971,8 @@ source = { editable = "packages/feather-connect" }
 dependencies = [
     { name = "cronsim" },
     { name = "httpx" },
+    { name = "jsonschema" },
+    { name = "packaging" },
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pyyaml" },
@@ -988,6 +990,8 @@ requires-dist = [
     { name = "alembic", marker = "extra == 'postgres'" },
     { name = "cronsim" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "jsonschema", specifier = ">=4" },
+    { name = "packaging" },
     { name = "psycopg", extras = ["binary", "pool"], marker = "extra == 'postgres'" },
     { name = "pyarrow" },
     { name = "pydantic", specifier = ">=2" },

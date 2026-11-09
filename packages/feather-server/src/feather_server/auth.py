@@ -10,6 +10,7 @@ needs no CSRF token: a browser doesn't add that header on its own. A request aut
 session's CSRF token, in the `csrf_token` form field or the `X-CSRF-Token` header.
 """
 
+import base64
 import hashlib
 import hmac
 import logging
@@ -32,7 +33,7 @@ from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from feather_connect.clock import Clock, SystemClock
-from feather_connect.storage.port import ROLES, Role, Store
+from feather_connect.storage.port import ROLES, Role, Store, TokenScope
 
 if TYPE_CHECKING:
     from feather_server.app import AppState
@@ -40,6 +41,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 SESSION_COOKIE = "feather_session"
+REGISTRY_PREFIX = (
+    "/registry/"  # the built-in package registry, which package tools call with Basic credentials
+)
 SESSION_TTL = timedelta(hours=12)
 TOKEN_PREFIX = "fc_"
 MAX_FAILURES = 5  # failed logins per user and address before the next one is refused
@@ -67,6 +71,7 @@ class Actor:
     name: str
     role: Role = "operator"
     user: str | None = None
+    scope: TokenScope = "all"  # `publish`: a token that may only upload to the built-in registry
 
 
 class AuthError(Exception):
@@ -116,32 +121,53 @@ def issue_token(
     *,
     role: Role,
     created_by: str | None = None,
+    scope: TokenScope = "all",
     clock: Clock | None = None,
 ) -> str:
     """Create an API token that lasts `ttl` (for ever when None) and return it. This is the only time it is seen:
     the store keeps its SHA-256. That `role` is no higher than `created_by`'s is the caller's to check."""
     token = TOKEN_PREFIX + secrets.token_urlsafe(32)
     now = (clock or SystemClock()).now()
-    store.users.create_token(name, token_digest(token), None if ttl is None else now + ttl, role, created_by)
+    expires = None if ttl is None else now + ttl
+    store.users.create_token(name, token_digest(token), expires, role, created_by, scope)
     return token
 
 
+def _sent_token(header: str) -> str | None:
+    """The token of an `Authorization` header: `Bearer <token>`, or HTTP Basic with the token as the password, as
+    `uv`, `pip` and `twine` send it to a package index (the user name, often `__token__`, is not looked at)."""
+    scheme, _, value = header.partition(" ")
+    value = value.strip()
+    if scheme.lower() == "bearer":
+        return value or None
+    if scheme.lower() == "basic":
+        try:
+            _, _, password = base64.b64decode(value, validate=True).decode("utf-8").partition(":")
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return password or None
+    return None
+
+
 def _bearer_actor(request: Request, state: "AppState") -> Actor:
-    scheme, _, token = request.headers["authorization"].partition(" ")
-    token = token.strip()
-    if scheme.lower() != "bearer" or not token:
+    token = _sent_token(request.headers["authorization"])
+    if token is None:
         raise AuthError(401, "Unauthorized", "send the token as 'Authorization: Bearer <token>'")
     row = state.store.users.find_token(token_digest(token))
     now = state.clock.now()
     if row is None or row.revoked_at is not None or (row.expires_at is not None and row.expires_at <= now):
         raise AuthError(401, "Unauthorized", "the token is not valid")
     if row.created_by is None:
-        return Actor("token", row.name, row.role)
+        return Actor("token", row.name, row.role, scope=row.scope)
     user = state.store.users.get_user(row.created_by)
     if user is None:  # its user is gone, and with them what the token may do
         raise AuthError(401, "Unauthorized", "the token is not valid")
+    if row.scope == "publish" and user.role != "admin":  # publishing is an admin's, checked at each use
+        raise AuthError(
+            403, "Forbidden", f"this publish token's user, {user.username}, is no longer an admin"
+        )
     role = row.role if ROLES.index(row.role) >= ROLES.index(user.role) else user.role  # the lower
-    return Actor("token", row.name, role, user.username)
+    return Actor("token", row.name, role, user.username, row.scope)
 
 
 # Sessions. The cookie holds a random id and, once signed in, the user name; it is signed, not encrypted.
@@ -207,7 +233,10 @@ def current_actor(request: Request) -> Actor:
     """The caller, from the bearer token or else the session cookie. Raises `AuthError` (401) when there is none."""
     state: AppState = request.app.state.feather
     if "authorization" in request.headers:
-        return _bearer_actor(request, state)
+        actor = _bearer_actor(request, state)
+        if actor.scope == "publish" and not request.url.path.startswith(REGISTRY_PREFIX):
+            raise AuthError(403, "Forbidden", "a publish token can only upload packages to the registry")
+        return actor
     session = _session(request)
     if session is not None and session.user is not None:
         user = state.store.users.get_user(session.user)
@@ -329,7 +358,8 @@ def me(actor: CurrentActor) -> dict[str, str | None]:
 
 
 def _is_api(request: Request) -> bool:
-    return request.url.path.startswith("/api/") or "authorization" in request.headers
+    path = request.url.path
+    return path.startswith(("/api/", REGISTRY_PREFIX)) or "authorization" in request.headers
 
 
 def _refuse(request: Request, error: AuthError) -> Response:
@@ -340,7 +370,10 @@ def _refuse(request: Request, error: AuthError) -> Response:
             "status": error.status,
             "detail": error.detail,
         }
-        headers = {"WWW-Authenticate": "Bearer"} if error.status == 401 else None
+        challenge = (
+            'Basic realm="feather registry"' if request.url.path.startswith(REGISTRY_PREFIX) else "Bearer"
+        )
+        headers = {"WWW-Authenticate": challenge} if error.status == 401 else None
         return JSONResponse(problem, error.status, headers, media_type="application/problem+json")
     if error.status == 401:
         return RedirectResponse("/login", status_code=303)

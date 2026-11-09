@@ -255,6 +255,11 @@ def test_a_token_is_an_operator_unless_told_and_never_above_its_user(cli, databa
     assert nobody.exit_code == 1 and "nobody" in nobody.stderr
     row = open_store(database).users.find_token(hashlib.sha256(mine["token"].encode()).hexdigest())
     assert row is not None and (row.role, row.created_by) == ("admin", "root")
+    ci = json.loads(cli("server", "create-token", "ci", "--scope", "publish", "--json").stdout)
+    found = open_store(database).users.find_token(hashlib.sha256(ci["token"].encode()).hexdigest())
+    assert ci["scope"] == "publish" and found is not None and found.scope == "publish"
+    wrong = cli("server", "create-token", "x", "--scope", "everything")
+    assert wrong.exit_code == 1 and "not a token scope" in wrong.stderr
 
 
 def test_worker_starts_and_appears_on_the_server(spawn, migrated, project, open_store):

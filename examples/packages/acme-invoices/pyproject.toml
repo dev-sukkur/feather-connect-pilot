@@ -1,0 +1,7 @@
+# The package's Python metadata. `feather package build` takes the name and version from feather.yaml and checks they
+# agree with these; any dependency besides feather-connect needs a uv.lock, which the wheel then carries.
+[project]
+name = "acme-invoices"
+version = "1.0.0"
+requires-python = ">=3.12"
+dependencies = ["feather-connect"]
