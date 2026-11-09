@@ -388,6 +388,33 @@ def test_installed_packages_belong_to_their_tenant(pg: Pg, pg_url: str, clock: F
     assert [a.flow for a in second.packages.activations("acme")] == ["acme/invoices"]
 
 
+def test_environment_config_secrets_and_webhook_events_belong_to_their_tenant(
+    pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any
+):  # ADR-0013 rule 6
+    from feather_connect.storage.port import EnvEntry, SealedSecret, WebhookEvent
+
+    first, _ = pg_connect(pg_url, clock=clock, tenant="default")
+    second, _ = pg_connect(pg_url, clock=clock, tenant="t2")
+    first.env_config.put(EnvEntry("prod", "connection", "zakya", {"connector": "zakya"}, "root", T0))
+    first.secrets.put(SealedSecret("prod", "s", b"c", b"n" * 12, "k", "root", T0))
+    first.webhooks.add(WebhookEvent("acme", "orders", "o-1", None, b"{}", {}, T0))
+    assert (
+        second.env_config.entries("prod") == []
+        and second.env_config.entry("prod", "connection", "zakya") is None
+    )
+    assert second.secrets.names("prod") == [] and second.secrets.get("prod", "s") is None
+    assert second.webhooks.events("acme", "orders") == []
+    assert second.webhooks.add(
+        WebhookEvent("acme", "orders", "o-1", None, b"{}", {}, T0)
+    )  # its own key space
+    assert second.env_config.remove("prod", "connection", "zakya") is None and not second.secrets.remove(
+        "prod", "s"
+    )
+    assert first.env_config.entry("prod", "connection", "zakya") is not None and first.secrets.get(
+        "prod", "s"
+    )
+
+
 def test_a_vendor_account_budget_is_shared_by_tenants_and_no_other_is(
     pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any
 ):  # ADR-0013 rules 6 and 8

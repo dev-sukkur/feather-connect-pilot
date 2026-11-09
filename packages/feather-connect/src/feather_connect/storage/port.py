@@ -6,7 +6,7 @@ dataclasses so that they pickle, which the engine needs for step results.
 
 import json
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -1347,6 +1347,28 @@ class PackageStore(Protocol):
         `MAX_PACKAGE_ROWS`."""
         ...
 
+    def activate(
+        self, flow: str, name: str, version: str, by: str, at: datetime, reason: str | None = None
+    ) -> FlowActivation:
+        """Make `version` the active one of `flow`, and any other version of it inactive, in one transaction, and
+        tell every listener that the catalogue changed (NOTIFY). Raises `KeyError` when the version has no such
+        flow."""
+        ...
+
+    def deactivate(self, flow: str, by: str, at: datetime, reason: str | None = None) -> FlowActivation:
+        """Make the active version of `flow` inactive, and tell the listeners. Raises `KeyError` when no version of
+        it is active."""
+        ...
+
+    def active(self) -> list[FlowActivation]:
+        """Every active flow, by name, at most `MAX_PACKAGE_ROWS`."""
+        ...
+
+    def listen(self, callback: "Callable[[], None]") -> "Callable[[], None]":
+        """Call `callback` whenever a flow of this tenant is activated or deactivated, from this process or another.
+        Returns what stops listening."""
+        ...
+
 
 @dataclass(frozen=True)
 class AuditRow:
@@ -1384,6 +1406,104 @@ class AuditStore(Protocol):
         ...
 
 
+# Environment-level configuration (flow packages §8) and the secret store.
+
+EnvKind = Literal["connection", "budget", "setting"]
+ENV_KINDS: tuple[EnvKind, ...] = ("connection", "budget", "setting")
+MAX_ENV_ROWS = 1000  # the most entries of an environment a listing returns
+
+
+@dataclass(frozen=True)
+class EnvEntry:
+    """One entry of an environment's own configuration: a connection, a budget or a setting, by name. `value` holds
+    no secret: a connection's secret fields are references."""
+
+    env: str
+    kind: EnvKind
+    name: str
+    value: Any
+    changed_by: str
+    changed_at: datetime
+
+
+class EnvConfigStore(Protocol):
+    """The environment-level configuration of this tenant, per environment."""
+
+    def entries(self, env: str, kind: EnvKind | None = None) -> list[EnvEntry]:
+        """The entries of `env`, of one kind or all, by kind and name, at most `MAX_ENV_ROWS`."""
+        ...
+
+    def entry(self, env: str, kind: EnvKind, name: str) -> EnvEntry | None: ...
+
+    def put(self, entry: EnvEntry) -> EnvEntry | None:
+        """Set an entry, and return the one it replaced, if any."""
+        ...
+
+    def remove(self, env: str, kind: EnvKind, name: str) -> EnvEntry | None:
+        """Remove an entry, and return it, if there was one."""
+        ...
+
+
+@dataclass(frozen=True)
+class SealedSecret:
+    """A secret as stored: only its ciphertext, the nonce it was sealed with, and the id of the master key, never the
+    value."""
+
+    env: str
+    name: str
+    ciphertext: bytes
+    nonce: bytes
+    key_id: str
+    updated_by: str
+    updated_at: datetime
+
+
+class SecretStore(Protocol):
+    """The encrypted secrets of this tenant, per environment. Nothing here can decrypt them."""
+
+    def put(self, secret: SealedSecret) -> bool:
+        """Set or replace a secret. Returns whether it replaced one."""
+        ...
+
+    def get(self, env: str, name: str) -> SealedSecret | None: ...
+
+    def names(self, env: str) -> list[SealedSecret]:
+        """The secrets of `env` by name, at most `MAX_ENV_ROWS`. A caller shows only names, times and who."""
+        ...
+
+    def remove(self, env: str, name: str) -> bool: ...
+
+    def replace_all(self, env: str, secrets: Sequence[SealedSecret]) -> None:
+        """Write every one of `secrets` over the stored ones in one transaction: a key rotation."""
+        ...
+
+
+@dataclass(frozen=True)
+class WebhookEvent:
+    """A webhook event a package declared, verified by the server and kept raw until a worker parses it with the
+    package's transform. `key` is what it is deduplicated by."""
+
+    package: str
+    webhook: str
+    key: str
+    stamp: str | None
+    body: bytes
+    headers: Mapping[str, str]
+    received_at: datetime
+
+
+class WebhookEventStore(Protocol):
+    """The raw events of declared webhooks (flow packages §7.2), once each by key."""
+
+    def add(self, event: WebhookEvent) -> bool:
+        """Keep the event. Returns False, and keeps nothing, when an event of that webhook has its key already."""
+        ...
+
+    def events(self, package: str, webhook: str, limit: int = 100) -> list[WebhookEvent]:
+        """The webhook's events, oldest first."""
+        ...
+
+
 @dataclass(frozen=True)
 class Store:
     """The ports together. A backend provides one of these."""
@@ -1405,6 +1525,9 @@ class Store:
     responses: ResponseStore
     registry: RegistryStore
     packages: PackageStore
+    env_config: EnvConfigStore
+    secrets: SecretStore
+    webhooks: WebhookEventStore
 
     def is_unavailable(self, error: BaseException) -> bool:
         """Whether `error` says that the store can't be reached, or can't keep up, just now, so that the same call may

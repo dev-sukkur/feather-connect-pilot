@@ -6,8 +6,10 @@ made with that row factory; `connect` does.
 
 import atexit
 import json
+import logging
 import math
-from collections.abc import Generator, Iterable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from fractions import Fraction
@@ -23,6 +25,7 @@ from feather_connect.core.connector import InboundRequest
 from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
+    MAX_ENV_ROWS,
     MAX_PACKAGE_ROWS,
     SHARED_TENANT,
     STREAM_TRIGGER,
@@ -38,6 +41,9 @@ from feather_connect.storage.port import (
     DuplicateRegistry,
     DuplicateUser,
     DuplicateVersion,
+    EnvConfigStore,
+    EnvEntry,
+    EnvKind,
     FailureGroup,
     FlowActivation,
     FlowRow,
@@ -67,6 +73,8 @@ from feather_connect.storage.port import (
     Run,
     RunJournal,
     ScheduleStore,
+    SealedSecret,
+    SecretStore,
     SliceFinished,
     StaleWriter,
     StateRow,
@@ -80,6 +88,8 @@ from feather_connect.storage.port import (
     VersionDraft,
     VersionSealed,
     VersionStore,
+    WebhookEvent,
+    WebhookEventStore,
     Window,
     WindowUsage,
     WorkerRegistry,
@@ -95,6 +105,9 @@ from feather_connect.storage.port import (
 from feather_connect.storage.postgres.spool import from_signed, index_keys
 from feather_connect.storage.postgres.support import Pool, ensure_partition, guard_version
 from feather_connect.storage.spool import decode_json_value, encode_json_value
+
+log = logging.getLogger(__name__)
+CATALOG_CHANNEL = "feather_catalog"  # NOTIFY payload: the tenant whose flows were activated or deactivated
 
 # The oldest delivery of a partition that is still open (I2). `status <> 'applied'` is repeated outside the
 # list of closed statuses so that Postgres can see that the partial index `delivery_open_idx` applies.
@@ -2301,6 +2314,21 @@ class _Packages(PackageStore):
             ).fetchone()
         return None if row is None else bytes(row["content"])
 
+    _ACTIVATION = "flow, package, version, state, changed_by, changed_at, reason, error"
+
+    @staticmethod
+    def _activation(r: Mapping[str, Any]) -> FlowActivation:
+        return FlowActivation(
+            r["flow"],
+            r["package"],
+            r["version"],
+            r["state"],
+            r["changed_by"],
+            r["changed_at"],
+            r["reason"],
+            r["error"],
+        )
+
     def activations(self, name: str, version: str | None = None) -> list[FlowActivation]:
         key = None if version is None else version_key(version)
         with self._db.tx() as conn:
@@ -2324,6 +2352,75 @@ class _Packages(PackageStore):
             )
             for r in rows
         ]
+
+    def activate(
+        self, flow: str, name: str, version: str, by: str, at: datetime, reason: str | None = None
+    ) -> FlowActivation:
+        tenant, key = self._db.tenant, version_key(version)
+        with self._db.tx() as conn:
+            conn.execute(
+                """update feather.flow_activation set state = 'inactive', changed_by = %s, changed_at = %s, reason = %s
+                   where tenant_id = %s and flow = %s and state = 'active'
+                     and not (package = %s and version_key = %s)""",
+                (by, at, reason, tenant, flow, name, key),
+            )
+            row = conn.execute(
+                f"""update feather.flow_activation set state = 'active', changed_by = %s, changed_at = %s,
+                        reason = %s, error = null
+                    where tenant_id = %s and flow = %s and package = %s and version_key = %s
+                    returning {self._ACTIVATION}""",
+                (by, at, reason, tenant, flow, name, key),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"{name} {version} has no flow {flow}")
+            conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, tenant))
+        return self._activation(row)
+
+    def deactivate(self, flow: str, by: str, at: datetime, reason: str | None = None) -> FlowActivation:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                f"""update feather.flow_activation set state = 'inactive', changed_by = %s, changed_at = %s,
+                        reason = %s
+                    where tenant_id = %s and flow = %s and state = 'active'
+                    returning {self._ACTIVATION}""",
+                (by, at, reason, self._db.tenant, flow),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"no version of {flow} is active")
+            conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, self._db.tenant))
+        return self._activation(row)
+
+    def active(self) -> list[FlowActivation]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                f"""select {self._ACTIVATION} from feather.flow_activation
+                    where tenant_id = %s and state = 'active' order by flow collate "C" limit %s""",
+                (self._db.tenant, MAX_PACKAGE_ROWS),
+            ).fetchall()
+        return [self._activation(r) for r in rows]
+
+    def listen(self, callback: Callable[[], None]) -> Callable[[], None]:
+        stop = threading.Event()
+        given = self._db.pool.conninfo
+        conninfo = given() if callable(given) else given
+        tenant = self._db.tenant
+
+        def run() -> None:
+            while not stop.is_set():
+                try:
+                    with psycopg.connect(conninfo, autocommit=True) as conn:
+                        conn.execute(sql.SQL("listen {}").format(sql.Identifier(CATALOG_CHANNEL)))
+                        callback()  # anything missed while not listening
+                        while not stop.is_set():
+                            for note in conn.notifies(timeout=1.0, stop_after=1):
+                                if note.payload == tenant:
+                                    callback()
+                except psycopg.Error:
+                    log.warning("listening for catalogue changes failed; trying again", exc_info=True)
+                    stop.wait(5)
+
+        threading.Thread(target=run, name="catalog-listen", daemon=True).start()
+        return stop.set
 
 
 class _Audit(AuditStore):
@@ -2728,6 +2825,188 @@ class _Inbox(InboxStore):
         return True
 
 
+class _EnvConfig(EnvConfigStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    @staticmethod
+    def _entry(row: Mapping[str, Any]) -> EnvEntry:
+        return EnvEntry(
+            row["env"], row["kind"], row["name"], _unjson(row["value"]), row["changed_by"], row["changed_at"]
+        )
+
+    def entries(self, env: str, kind: EnvKind | None = None) -> list[EnvEntry]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select env, kind, name, value, changed_by, changed_at from feather.env_config
+                   where tenant_id = %s and env = %s and (%s::text is null or kind = %s)
+                   order by array_position(array['connection', 'budget', 'setting'], kind), name collate "C"
+                   limit %s""",
+                (self._db.tenant, env, kind, kind, MAX_ENV_ROWS),
+            ).fetchall()
+        return [self._entry(r) for r in rows]
+
+    def entry(self, env: str, kind: EnvKind, name: str) -> EnvEntry | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select env, kind, name, value, changed_by, changed_at from feather.env_config
+                   where tenant_id = %s and env = %s and kind = %s and name = %s""",
+                (self._db.tenant, env, kind, name),
+            ).fetchone()
+        return None if row is None else self._entry(row)
+
+    def put(self, entry: EnvEntry) -> EnvEntry | None:
+        with self._db.tx() as conn:
+            old = conn.execute(
+                """select env, kind, name, value, changed_by, changed_at from feather.env_config
+                   where tenant_id = %s and env = %s and kind = %s and name = %s for update""",
+                (self._db.tenant, entry.env, entry.kind, entry.name),
+            ).fetchone()
+            conn.execute(
+                """insert into feather.env_config (tenant_id, env, kind, name, value, changed_by, changed_at)
+                   values (%s, %s, %s, %s, %s, %s, %s)
+                   on conflict (tenant_id, env, kind, name) do update
+                   set value = excluded.value, changed_by = excluded.changed_by, changed_at = excluded.changed_at""",
+                (
+                    self._db.tenant,
+                    entry.env,
+                    entry.kind,
+                    entry.name,
+                    _json(entry.value),
+                    entry.changed_by,
+                    entry.changed_at,
+                ),
+            )
+        return None if old is None else self._entry(old)
+
+    def remove(self, env: str, kind: EnvKind, name: str) -> EnvEntry | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """delete from feather.env_config where tenant_id = %s and env = %s and kind = %s and name = %s
+                   returning env, kind, name, value, changed_by, changed_at""",
+                (self._db.tenant, env, kind, name),
+            ).fetchone()
+        return None if row is None else self._entry(row)
+
+
+class _Secrets(SecretStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    _COLUMNS = "env, name, ciphertext, nonce, key_id, updated_by, updated_at"
+
+    @staticmethod
+    def _secret(row: Mapping[str, Any]) -> SealedSecret:
+        return SealedSecret(
+            row["env"],
+            row["name"],
+            bytes(row["ciphertext"]),
+            bytes(row["nonce"]),
+            row["key_id"],
+            row["updated_by"],
+            row["updated_at"],
+        )
+
+    def _upsert(self, conn: psycopg.Connection[DictRow], secret: SealedSecret) -> bool:
+        row = conn.execute(
+            f"""insert into feather.secret (tenant_id, {self._COLUMNS}) values (%s, %s, %s, %s, %s, %s, %s, %s)
+                on conflict (tenant_id, env, name) do update
+                set ciphertext = excluded.ciphertext, nonce = excluded.nonce, key_id = excluded.key_id,
+                    updated_by = excluded.updated_by, updated_at = excluded.updated_at
+                returning (xmax <> 0) as replaced""",
+            (
+                self._db.tenant,
+                secret.env,
+                secret.name,
+                secret.ciphertext,
+                secret.nonce,
+                secret.key_id,
+                secret.updated_by,
+                secret.updated_at,
+            ),
+        ).fetchone()
+        return bool(row and row["replaced"])
+
+    def put(self, secret: SealedSecret) -> bool:
+        with self._db.tx() as conn:
+            return self._upsert(conn, secret)
+
+    def get(self, env: str, name: str) -> SealedSecret | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                f"select {self._COLUMNS} from feather.secret where tenant_id = %s and env = %s and name = %s",
+                (self._db.tenant, env, name),
+            ).fetchone()
+        return None if row is None else self._secret(row)
+
+    def names(self, env: str) -> list[SealedSecret]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                f"""select {self._COLUMNS} from feather.secret where tenant_id = %s and env = %s
+                    order by name collate "C" limit %s""",
+                (self._db.tenant, env, MAX_ENV_ROWS),
+            ).fetchall()
+        return [self._secret(r) for r in rows]
+
+    def remove(self, env: str, name: str) -> bool:
+        with self._db.tx() as conn:
+            done = conn.execute(
+                "delete from feather.secret where tenant_id = %s and env = %s and name = %s",
+                (self._db.tenant, env, name),
+            )
+        return done.rowcount > 0
+
+    def replace_all(self, env: str, secrets: Sequence[SealedSecret]) -> None:
+        with self._db.tx() as conn:
+            for secret in secrets:
+                self._upsert(conn, secret)
+
+
+class _Webhooks(WebhookEventStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def add(self, event: WebhookEvent) -> bool:
+        with self._db.tx() as conn:
+            done = conn.execute(
+                """insert into feather.webhook_event (tenant_id, package, webhook, event_key, stamp, body, headers,
+                       received_at)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s)
+                   on conflict (tenant_id, package, webhook, event_key) do nothing""",
+                (
+                    self._db.tenant,
+                    event.package,
+                    event.webhook,
+                    event.key,
+                    event.stamp,
+                    event.body,
+                    _json(dict(event.headers)),
+                    event.received_at,
+                ),
+            )
+        return done.rowcount > 0
+
+    def events(self, package: str, webhook: str, limit: int = 100) -> list[WebhookEvent]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select package, webhook, event_key, stamp, body, headers, received_at from feather.webhook_event
+                   where tenant_id = %s and package = %s and webhook = %s order by received_at, event_key limit %s""",
+                (self._db.tenant, package, webhook, max(0, min(limit, MAX_ENV_ROWS))),
+            ).fetchall()
+        return [
+            WebhookEvent(
+                r["package"],
+                r["webhook"],
+                r["event_key"],
+                r["stamp"],
+                bytes(r["body"]),
+                _unjson(r["headers"]),
+                r["received_at"],
+            )
+            for r in rows
+        ]
+
+
 class PostgresStore(Store):
     """A `Store` that keeps everything in Postgres, for one tenant. `clock` defaults to the system clock."""
 
@@ -2754,6 +3033,9 @@ class PostgresStore(Store):
             responses=_Responses(db),
             registry=_Registry(db),
             packages=_Packages(db),
+            env_config=_EnvConfig(db),
+            secrets=_Secrets(db),
+            webhooks=_Webhooks(db),
         )
         object.__setattr__(self, "_pool", pool)  # `Store` is frozen
 

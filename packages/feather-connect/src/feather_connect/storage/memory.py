@@ -5,7 +5,7 @@ import json
 import math
 import threading
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from fractions import Fraction
@@ -16,6 +16,8 @@ from feather_connect.core.connector import InboundRequest
 from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
+    ENV_KINDS,
+    MAX_ENV_ROWS,
     MAX_PACKAGE_ROWS,
     STREAM_TRIGGER,
     Attempt,
@@ -30,6 +32,9 @@ from feather_connect.storage.port import (
     DuplicateRegistry,
     DuplicateUser,
     DuplicateVersion,
+    EnvConfigStore,
+    EnvEntry,
+    EnvKind,
     FailureGroup,
     FlowActivation,
     FlowRow,
@@ -59,6 +64,8 @@ from feather_connect.storage.port import (
     Run,
     RunJournal,
     ScheduleStore,
+    SealedSecret,
+    SecretStore,
     SliceFinished,
     StaleWriter,
     StateRow,
@@ -72,6 +79,8 @@ from feather_connect.storage.port import (
     VersionDraft,
     VersionSealed,
     VersionStore,
+    WebhookEvent,
+    WebhookEventStore,
     WindowUsage,
     WorkerRegistry,
     WorkerRow,
@@ -134,6 +143,14 @@ class _Data:
     activations: dict[tuple[str, str, str], FlowActivation] = field(
         default_factory=dict[tuple[str, str, str], FlowActivation]
     )  # by (flow, package, version_key)
+    catalog_listeners: list[Callable[[], None]] = field(default_factory=list[Callable[[], None]])
+    env_config: dict[tuple[str, str, str], EnvEntry] = field(
+        default_factory=dict[tuple[str, str, str], EnvEntry]
+    )
+    secrets: dict[tuple[str, str], SealedSecret] = field(default_factory=dict[tuple[str, str], SealedSecret])
+    webhook_events: dict[tuple[str, str, str], WebhookEvent] = field(
+        default_factory=dict[tuple[str, str, str], WebhookEvent]
+    )  # by (package, webhook, key), in arrival order
     audit: list[AuditRow] = field(default_factory=list[AuditRow])
     # The key index, by (dataset, key): (version, partition, op, row hash, chunk), in seal order.
     keys: dict[tuple[str, str], list[tuple[str, str, str, int, int]]] = field(
@@ -1373,6 +1390,129 @@ class _Packages(PackageStore):
         found.sort(key=lambda a: (a.flow, a.changed_at, a.version))
         return found[:MAX_PACKAGE_ROWS]
 
+    def activate(
+        self, flow: str, name: str, version: str, by: str, at: datetime, reason: str | None = None
+    ) -> FlowActivation:
+        wanted = (flow, name, version_key(version))
+        with self._d.lock:
+            row = self._d.activations.get(wanted)
+            if row is None:
+                raise KeyError(f"{name} {version} has no flow {flow}")
+            for key, other in self._d.activations.items():
+                if key[0] == flow and key != wanted and other.state == "active":
+                    self._d.activations[key] = replace(
+                        other, state="inactive", changed_by=by, changed_at=at, reason=reason
+                    )
+            done = replace(row, state="active", changed_by=by, changed_at=at, reason=reason, error=None)
+            self._d.activations[wanted] = done
+            listeners = list(self._d.catalog_listeners)
+        for listener in listeners:
+            listener()
+        return done
+
+    def deactivate(self, flow: str, by: str, at: datetime, reason: str | None = None) -> FlowActivation:
+        with self._d.lock:
+            found = [(k, a) for k, a in self._d.activations.items() if k[0] == flow and a.state == "active"]
+            if not found:
+                raise KeyError(f"no version of {flow} is active")
+            key, row = found[0]
+            done = replace(row, state="inactive", changed_by=by, changed_at=at, reason=reason)
+            self._d.activations[key] = done
+            listeners = list(self._d.catalog_listeners)
+        for listener in listeners:
+            listener()
+        return done
+
+    def active(self) -> list[FlowActivation]:
+        with self._d.lock:
+            found = [a for a in self._d.activations.values() if a.state == "active"]
+        return sorted(found, key=lambda a: a.flow)[:MAX_PACKAGE_ROWS]
+
+    def listen(self, callback: Callable[[], None]) -> Callable[[], None]:
+        with self._d.lock:
+            self._d.catalog_listeners.append(callback)
+
+        def stop() -> None:
+            with self._d.lock:
+                if callback in self._d.catalog_listeners:
+                    self._d.catalog_listeners.remove(callback)
+
+        return stop
+
+
+class _EnvConfig(EnvConfigStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def entries(self, env: str, kind: EnvKind | None = None) -> list[EnvEntry]:
+        with self._d.lock:
+            found = [e for (en, k, _), e in self._d.env_config.items() if en == env and kind in (None, k)]
+        found.sort(key=lambda e: (ENV_KINDS.index(e.kind), e.name))
+        return found[:MAX_ENV_ROWS]
+
+    def entry(self, env: str, kind: EnvKind, name: str) -> EnvEntry | None:
+        with self._d.lock:
+            return self._d.env_config.get((env, kind, name))
+
+    def put(self, entry: EnvEntry) -> EnvEntry | None:
+        with self._d.lock:
+            old = self._d.env_config.get((entry.env, entry.kind, entry.name))
+            self._d.env_config[(entry.env, entry.kind, entry.name)] = replace(
+                entry, value=copy.deepcopy(entry.value)
+            )
+            return old
+
+    def remove(self, env: str, kind: EnvKind, name: str) -> EnvEntry | None:
+        with self._d.lock:
+            return self._d.env_config.pop((env, kind, name), None)
+
+
+class _Secrets(SecretStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def put(self, secret: SealedSecret) -> bool:
+        with self._d.lock:
+            replaced = (secret.env, secret.name) in self._d.secrets
+            self._d.secrets[(secret.env, secret.name)] = secret
+            return replaced
+
+    def get(self, env: str, name: str) -> SealedSecret | None:
+        with self._d.lock:
+            return self._d.secrets.get((env, name))
+
+    def names(self, env: str) -> list[SealedSecret]:
+        with self._d.lock:
+            found = [s for (e, _), s in self._d.secrets.items() if e == env]
+        return sorted(found, key=lambda s: s.name)[:MAX_ENV_ROWS]
+
+    def remove(self, env: str, name: str) -> bool:
+        with self._d.lock:
+            return self._d.secrets.pop((env, name), None) is not None
+
+    def replace_all(self, env: str, secrets: Sequence[SealedSecret]) -> None:
+        with self._d.lock:
+            for secret in secrets:
+                self._d.secrets[(env, secret.name)] = secret
+
+
+class _Webhooks(WebhookEventStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def add(self, event: WebhookEvent) -> bool:
+        key = (event.package, event.webhook, event.key)
+        with self._d.lock:
+            if key in self._d.webhook_events:
+                return False
+            self._d.webhook_events[key] = event
+            return True
+
+    def events(self, package: str, webhook: str, limit: int = 100) -> list[WebhookEvent]:
+        with self._d.lock:
+            found = [e for (p, w, _), e in self._d.webhook_events.items() if (p, w) == (package, webhook)]
+        return found[: max(0, min(limit, MAX_ENV_ROWS))]
+
 
 class _Audit(AuditStore):
     def __init__(self, data: _Data) -> None:
@@ -1667,4 +1807,7 @@ class MemoryStore(Store):
             responses=_Responses(data),
             registry=_Registry(data),
             packages=_Packages(data),
+            env_config=_EnvConfig(data),
+            secrets=_Secrets(data),
+            webhooks=_Webhooks(data),
         )
