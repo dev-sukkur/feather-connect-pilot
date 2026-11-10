@@ -87,16 +87,43 @@ M1.1 holds everything brought forward from M2 or later, after M1 closed (sponsor
 |---|---|---|---|
 | **Record trace** and the run page's **Records** panel | M2 | Done: PR 10 (`/trace`, migration 0013) and PR 15 (Records panel, migration 0014) | — |
 | **Readiness** (`fc.ready`, `fc.on_ready`) | M2 (FR-B7, FR-D3) | Designed, awaiting review (ADR-0012 proposed) | [Readiness design](02-design/2026-11-08-readiness.md) |
-| **A full Zoho Zakya connector** (`feather-zakya`) | M2 (FR-J2) | Not started; added 9 Nov 2026 | [Design §8.3–§8.4](02-design/2026-10-30-feather-connect-design.md#83-v1-catalogue) |
-| **Flow packages**, with the `admin` and `operator` roles | M2 (promotion, part of RBAC) | Design accepted (ADR-0011) | [Flow packages design](02-design/2026-11-08-flow-packages.md) |
+| **A full Zoho Zakya connector** (`feather-zakya`) | M2 (FR-J2) | Done: PR 21 (the live run is deferred, see below) | [Design §8.3–§8.4](02-design/2026-10-30-feather-connect-design.md#83-v1-catalogue) |
+| **Flow packages**, with the `admin` and `operator` roles | M2 (promotion, part of RBAC) | In progress: P1–P3 merged (PRs 20, 22, 23) | [Flow packages design](02-design/2026-11-08-flow-packages.md) |
 
 Order (sponsor, 8 Nov 2026): **flow packages first, then readiness.** The Zakya connector (added 9 Nov 2026) can go before, between or after them; it touches neither.
+
+### Stages
+
+M1.1 is built in stages. Each stage is one branch and one pull request: build, full test run, review, fixes, CI green, merge.
+
+| Stage | Covers | Status |
+|---|---|---|
+| **P1** | Flow packages tasks 1–2: `feather package build`; the built-in registry at `/registry/simple/` with uploads, yanking and publish-only tokens; `feather package publish` and `search`; `feather registry add/list/test/remove` | Merged, PR 20 |
+| **Z** | The Zakya connector (below) | Merged, PR 21 |
+| **P2** | Tasks 3–4: installed-package tables; `feather package install/list/show/fetch` and the API; 11 named install checks; the load check in a child process | Merged, PR 22 |
+| **P3** | Task 5a (environment config in the database, package prefixes, `feather config import`); connection settings visible and editable; encrypted secrets; webhooks declared in packages; task 5 (the scheduler reads active flows from the catalogue; `feather flow activate/deactivate`) | Merged, PR 23 |
+| **U** | The dashboard redesign (§4.3) | In review |
+| **P4** | Tasks 6–8: worker supervisor and package hosts; version switch and rollback; one Python environment per package, cached by lock hash | Not started |
+| **P5** | Tasks 9–11: dashboard Packages pages and Activate/Deactivate; promotion qa → prod by sha256; uninstall; optional signing | Not started |
+| **P6** | Task 12: retire the project mode; M1 environments upgrade in place | Not started |
+| **R1–R3** | Readiness tasks 1–10, and hard cases H13, H16 and H17 (§4.2) | Not started |
+| **D** | The design docs, the Operating Guide, the Feather Connect Guide, the code guide, and the M1.1 exit report | Not started |
+
+Order (sponsor, 9 Nov 2026): P1, Z, P2, P3, U, P4, P5, P6, R1–R3, D. Stage U comes before any further dashboard work, so the Packages pages are built in the new layout.
+
+### Decisions made while building (sponsor, 9–10 Nov 2026)
+
+- **Connections in the database.** Settings that aren't secret (URL, accounts domain, organisation id, client id, budgets, timezone) are stored as plain values, visible and editable, and each change is audited with its old and new value. Secrets (client secret, refresh token, passwords, API keys) are encrypted with one master key per environment, kept outside the database. Once set, a secret can be replaced or removed but never shown again.
+- **Webhooks in packages.** A package declares its webhooks in YAML: path, signature scheme (HMAC, Shopify, Stripe, Zoho, bearer), secret, key and stamp. The server's built-in receiver checks the signature, deduplicates and stores the raw event, and the package's own code parses it on workers. A package may not bring a webhook receiver written as code.
+- **Dashboard layout.** The dashboard follows the layout of Docker Desktop's container list, not its branding. It is built in plain HTML and JavaScript, with a richer framework only if needed later.
+- **The live Zakya test is deferred.** The connector is tested against a simulator and the conformance kit. The run against a real Zakya test organisation waits for the sponsor. It will also settle five open points: the eu host, which lists honour `last_modified_time`, the rate-limit codes, the `reference_number` filter on stock adjustments, and the sign-in lockout time.
+- **The repository was renamed** to `dev-sukkur/feather-connect-pilot` on 9 Nov 2026.
 
 ### Zakya connector
 
 **Scope:** a `feather-zakya` connector package in place of the demo's generic REST setup: Zoho OAuth with token refresh, the organisation id, the per-minute and per-day budgets, and pagination. Datasets: invoices, credit notes, payments, items and price lists, read by `last_modified_time` or in full. Writes: items, prices and stock. The retail template `zakya_invoices_to_erp` moves onto it.
 
-**Exit criteria:** the conformance kit passes; Zakya invoices → MotherDuck runs against a Zakya test organisation (discovery Q4: the organisation's daily API cap).
+**Exit criteria:** the conformance kit passes (met, PR 21); Zakya invoices → MotherDuck runs against a Zakya test organisation (discovery Q4: the organisation's daily API cap). *Deferred by the sponsor on 9 Nov 2026: run `uv run pytest packages/connectors/feather-zakya/tests/test_live.py -m live` with the variables in the connector's README.*
 
 ### 4.1 Flow packages
 
@@ -125,6 +152,15 @@ Order (sponsor, 8 Nov 2026): **flow packages first, then readiness.** The Zakya 
 **Plan:** tasks 1–10 in [design §10](02-design/2026-11-08-readiness.md#10-plan).
 
 **Exit criteria:** the Zakya chain runs with SAP and the warehouse starting only after an ingest run is in staging; a store-day posting waits for all three of its datasets, store by store; H13 passes, and new hard cases H16 (leader killed while firing) and H17 (late data reruns once) pass.
+
+### 4.3 Dashboard redesign (stage U)
+
+**Scope:**
+- An app shell: dark theme first, with light too; a left sidebar of icons with labels; a top bar with a Ctrl+K command palette, help, theme and user menus; a bottom status bar showing server, database, workers, environment and version.
+- Every list page follows one pattern: summary tiles with optional charts; a toolbar with search, a column chooser and an "only active" toggle; a dense table with select boxes, expandable rows, status dots, row actions and bulk actions; a "Showing N items" footer.
+- Plain HTML and JavaScript on the server-rendered pages, with no framework, build step or CDN, and the strict CSP kept.
+
+**Exit criteria:** accessibility checks report no violations in light or dark; every page works by keyboard; pages work at 360 px wide; screenshots are in `docs/04-plan/screenshots/`.
 
 ## 5. M2: business connectors and operations (~8 weeks)
 
