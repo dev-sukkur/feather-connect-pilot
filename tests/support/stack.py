@@ -11,6 +11,7 @@ from typing import Any
 import psycopg
 from real_stack import (
     free_port,
+    install_project,
     kill_abruptly,
     scratch_database,
     server_is_ready,
@@ -65,6 +66,12 @@ class Stack:
                 self.project, self.pg_url, "w-perf", env=self.env, log=log, poll_s=self.poll_s
             )
         wait_until(lambda: "w-perf" in [w.worker_id for w in self.store.workers.list_workers()], STARTING)
+        package = install_project(self.project, self.pg_url)  # installed already, by start_worker: its name
+        wait_until(lambda: self._active(package), STARTING)  # its host took its flows over: they can run
+
+    def _active(self, package: str) -> bool:
+        found = self.store.packages.activations(package)
+        return bool(found) and all(a.state == "active" for a in found if a.version == found[-1].version)
 
     def close(self) -> None:
         if self.server is not None:

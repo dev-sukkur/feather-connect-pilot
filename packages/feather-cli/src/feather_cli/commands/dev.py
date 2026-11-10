@@ -261,6 +261,7 @@ class Stack:
                     worker_id=worker_id,
                     poll_s=self._settings.engine_poll_s,
                     stop=self._worker_stop,
+                    workdir=self._root,  # relative paths in the project's files mean the project folder, as before
                 )
             except Exception as error:  # noqa: BLE001  (kept, and raised by start() in the main thread)
                 self._worker_error = error

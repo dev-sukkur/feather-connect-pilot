@@ -10,7 +10,14 @@ from textwrap import dedent
 from typing import Any
 
 import pytest
-from real_stack import install_project, scratch_database, server_url, start_worker, stop_gracefully, wait_until
+from real_stack import (
+    install_project,
+    scratch_database,
+    server_url,
+    start_worker,
+    stop_gracefully,
+    wait_until,
+)
 
 from feather_connect.project import ProjectError
 from feather_connect.storage.postgres.migrate import migrate
@@ -73,7 +80,9 @@ def sim_sink_rows(project: Path) -> list[dict[str, Any]]:
 
 def queue(store: Any, pg_url: str, project: Path) -> str:
     """A run of the flow as the scheduler writes one: queued, tagged with the installed version."""
-    version = store.packages.versions("demo-project")[-1]  # this test's: the newest, as the database is shared
+    version = store.packages.versions("demo-project")[
+        -1
+    ]  # this test's: the newest, as the database is shared
     params = {"due_at": datetime.now(UTC).isoformat(), "package": "demo-project", "version": version.version}
     return store.runs.create_run(FLOW, "manual", "test", params)
 
@@ -93,7 +102,9 @@ def test_the_worker_installs_the_flow_and_heartbeats_as_a_supervisor(demo_projec
     [mine] = [w for w in store.workers.list_workers() if w.worker_id == wid]
     assert mine.labels.get("role") == "supervisor"
     first = mine.last_seen
-    wait_until(lambda: next(w for w in store.workers.list_workers() if w.worker_id == wid).last_seen > first, 20)
+    wait_until(
+        lambda: next(w for w in store.workers.list_workers() if w.worker_id == wid).last_seen > first, 20
+    )
 
 
 def test_a_run_completes_through_a_real_worker(demo_project, pg_url, db, workers):

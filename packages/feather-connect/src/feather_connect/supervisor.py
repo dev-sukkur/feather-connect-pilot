@@ -172,7 +172,8 @@ class Supervisor:
     runs (all by default). `host_database_url` is what hosts connect with (the database's host role; by default
     `database_url`), and `pass_env` names variables of this process that hosts get besides the ones they always do.
     `spawn` starts a host's process from its command, environment and id, for tests; it must give the process its
-    stdin and stdout as pipes."""
+    stdin and stdout as pipes. `workdir` is for `feather dev`: hosts run in it, and a relative `${secret:file:…}` is
+    read against it, so the project's own relative paths mean the project folder."""
 
     def __init__(
         self,
@@ -196,8 +197,10 @@ class Supervisor:
         pass_env: Sequence[str] = (),
         db_secrets: Callable[[str], str] | None = None,
         partitions: Callable[[], None] | None = None,
+        workdir: Path | None = None,
     ) -> None:
         self._store = store
+        self._workdir = workdir
         self._env = env
         self._worker_id = worker_id
         self._url = database_url
@@ -574,7 +577,7 @@ class Supervisor:
                 if self._db_secrets is None:
                     raise LinkError(f"secret {ref}: this worker has no master key to open db secrets with")
                 return {"value": self._db_secrets(found.group(2))}
-            return {"value": resolve_secret(ref, config.root)}
+            return {"value": resolve_secret(ref, self._workdir or config.root)}
         except ProjectError as error:
             raise LinkError(str(error)) from None
         except LinkError:
@@ -595,7 +598,13 @@ class Supervisor:
             out = path.open("ab")
         try:
             return ProcessTree(
-                command, env=environ, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=out, bufsize=0
+                command,
+                env=environ,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=out,
+                bufsize=0,
+                cwd=self._workdir,
             )
         finally:
             if out is not None and not isinstance(out, int):
@@ -695,6 +704,7 @@ def run_supervisor(
     poll_s: float = 0.5,
     tenant: str = "default",
     stop: threading.Event | None = None,
+    workdir: Path | None = None,
 ) -> int:
     """Run a supervisor until told to stop (SIGTERM, SIGINT or SIGBREAK, or `stop`), and return the exit code."""
     from feather_connect.storage.postgres.connect import connect
@@ -752,6 +762,7 @@ def run_supervisor(
         pass_env=[n for n in os.environ.get("FEATHER_HOST_ENV_PASS", "").split(",") if n.strip()],
         db_secrets=Vault(store.secrets, env, keyring).open if keyring is not None else None,
         partitions=lambda: ensure_partitions_ahead(store, spool),
+        workdir=workdir,
     )
     log.info("supervisor %s runs the packages %s of %s", worker_id, ", ".join(packages), env)
     # The supervisor shows as a worker of its own, so the fleet view and `feather.worker` see it before any package is
@@ -784,6 +795,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--slots", type=int, default=8)
     parser.add_argument("--tenant", default="default")
     parser.add_argument("--poll-s", type=float, default=float(os.environ.get("FEATHER_ENGINE_POLL_S", "0.5")))
+    parser.add_argument(
+        "--workdir", type=Path, help="for development: where hosts run and relative paths point"
+    )
     args = parser.parse_args(argv)
     if not args.database_url:
         parser.error("give --database-url or set FEATHER_DATABASE_URL")
@@ -796,6 +810,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         slots=args.slots,
         poll_s=args.poll_s,
         tenant=args.tenant,
+        workdir=args.workdir,
     )
 
 

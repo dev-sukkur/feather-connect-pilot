@@ -102,7 +102,10 @@ def demo(tmp_path: Path, http_echo: Echo, duckdb_file: Path) -> Path:
             "erp": {
                 "base_url": http_echo.url,
                 "retry_attempts": 1,
-                "auth": {"token": "${secret:file:secrets/erp-token.txt}"},
+                # absolute: the installed package runs elsewhere, and secret files are never packaged
+                "auth": {
+                    "token": "${secret:file:" + (project / "secrets" / "erp-token.txt").as_posix() + "}"
+                },
             },
         }
     }
@@ -122,7 +125,7 @@ class Demo:
         )
 
     def start_run(self) -> str:
-        answer = self.api.post("/flows/orders:run")
+        answer = self.api.post("/flows/demo/orders:run")
         assert answer.status_code == 202, answer.text
         return answer.json()["run_id"]
 
@@ -132,6 +135,10 @@ class Demo:
             lambda: self.stack.store.runs.get_run(run_id).status in ("succeeded", "failed"), SETTLE, "the run"
         )
         return run_id
+
+    def errors(self, run_id: str) -> list[tuple[str, str | None]]:
+        """What the run's tasks failed with, for an assertion's message."""
+        return [(t.kind, t.error) for t in self.stack.store.runs.list_tasks(run_id) if t.error]
 
     def pg_rows(self) -> dict[str, dict[str, Any]]:
         rows = self.stack.conn.execute("select order_id, status, total from demo.orders").fetchall()
@@ -143,10 +150,10 @@ class Demo:
         return {r[0]: {"status": r[1], "total": str(r[2])} for r in rows}
 
     def deliveries(self, route: str, status: str) -> list[Any]:
-        return self.stack.store.ledger.list_deliveries(route=route, status=status)
+        return self.stack.store.ledger.list_deliveries(route=f"demo/{route}", status=status)
 
     def retry_failed(self, route: str) -> None:
-        preview = self.api.post("/deliveries:retry:preview", json={"route": route})
+        preview = self.api.post("/deliveries:retry:preview", json={"route": f"demo/{route}"})
         assert preview.status_code == 200, preview.text
         token = preview.json()["confirmation_token"]
         done = self.api.post("/deliveries:retry", json={"confirmation_token": token})
@@ -160,7 +167,7 @@ def running(stack: Callable[..., Any], demo: Path, duckdb_file: Path) -> Demo:
 
 def test_demo_fans_out_to_postgres_duckdb_and_http(running: Demo, http_echo: Echo):  # M1 exit criterion
     run = running.run_and_wait()
-    assert running.stack.store.runs.get_run(run).status == "succeeded"
+    assert running.stack.store.runs.get_run(run).status == "succeeded", running.errors(run)
     wait_until(lambda: len(running.deliveries("erp", "applied")) >= 1, SETTLE, "the ERP's delivery")
     assert set(running.pg_rows()) == set(running.duck_rows()) == http_echo.received_keys() == EXPECTED
 
