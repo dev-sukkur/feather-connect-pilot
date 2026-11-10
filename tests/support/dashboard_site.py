@@ -87,4 +87,44 @@ def open_site(root: Path) -> Iterator[Site]:
         assert answer.status_code == 202, answer.text
         wait_until(lambda: len(site.deliveries("lake", "applied")) == len(DAYS), "the lake's deliveries")
         wait_until(lambda: len(site.deliveries("flaky", "failed")) == len(DAYS), "the flaky route to fail")
+        seed_package(stack.store, root / "wheels")
         yield site
+
+
+PACKAGE = "acme-invoices"
+
+
+def seed_package(store: Any, out: Path) -> None:
+    """Two versions of the sample package for the Packages pages: 1.0.0 in service, 1.1.0 ready, a worker's
+    environment, a host of 1.1.0 in a crash loop, and a version that failed its load check. No package code runs:
+    the load checks are recorded as a worker would."""
+    from feather_connect.clock import SystemClock
+    from feather_server.auth import Actor
+    from feather_server.services.packages import Packages
+    from feather_server.services.registries import Registries
+    from feather_server.testing import sample_wheel
+
+    clock = SystemClock()
+    admin = Actor("human", USER, "admin", USER)
+    registries = Registries(store, clock)
+    packages = Packages(store, clock, registries, env="dev")
+    for version in ("1.0.0", "1.1.0", "1.2.0"):
+        wheel = sample_wheel(out / version, version)
+        registries.publish(admin, wheel.name, wheel.read_bytes())
+        packages.install(admin, PACKAGE, version, reason="the dashboard tests")
+    loaded = {"ok": True, "flows": ["invoices"], "seconds": 1.2, "worker": "w1"}
+    store.packages.prepared(PACKAGE, "1.0.0", "ready", loaded)
+    store.packages.prepared(PACKAGE, "1.1.0", "ready", loaded)
+    store.packages.prepared(
+        PACKAGE,
+        "1.2.0",
+        "failed",
+        {"ok": False, "check": "load_check", "error": "ImportError: no module named x"},
+    )
+    now = clock.now()
+    store.packages.activate(f"{PACKAGE}/invoices", PACKAGE, "1.0.0", USER, now, "go live")
+    store.packages.promote(PACKAGE, "1.0.0", now)
+    lock = store.packages.version(PACKAGE, "1.0.0").lock_hash
+    store.packages.record_env("w1", lock, "ready", now)
+    store.packages.record_host("w1", PACKAGE, "1.0.0", "ready", 0, now)
+    store.packages.record_host("w1", PACKAGE, "1.1.0", "crash_loop", 5, now, "boom: the package fell over")

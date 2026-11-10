@@ -285,8 +285,6 @@ class Supervisor:
     def remove_unneeded_envs(self) -> list[str]:
         """Remove the environments that no installed version needs any more, its last one uninstalled (task 10), and
         that no process holds in use. Returns the lock hashes removed."""
-        if self._envs is None:
-            return []
         needed = {v.lock_hash for v in self._store.packages.versions() if v.state != "uninstalled"}
         removed: list[str] = []
         for lock_hash in self._envs.built():
@@ -331,7 +329,7 @@ class Supervisor:
         ):
             self._partitions()  # before a host needs one: a host role can't make them
             self._partitions_at = now
-        if self._envs is not None and (self._swept_at is None or now - self._swept_at > SWEEP_ENVS_S):
+        if self._swept_at is None or now - self._swept_at > SWEEP_ENVS_S:
             self._swept_at = now
             self.remove_unneeded_envs()
         with self._lock:

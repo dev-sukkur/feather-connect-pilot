@@ -28,6 +28,10 @@ PATHS = [
     "/trace?dataset=demo.items&key=2026-11-01-0",  # a record's trace: a version, two routes, a failure
     "{records:extract}",  # a task's Records: what a read sealed
     "{records:apply:flaky}",  # and what a route answered, turned down
+    "/packages",  # task 9: the Packages pages and the Registries page
+    "/packages/acme-invoices",
+    "/packages/acme-invoices/flows/invoices",
+    "/registries",
 ]
 WCAG_AA = {"runOnly": {"type": "tag", "values": ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]}}
 

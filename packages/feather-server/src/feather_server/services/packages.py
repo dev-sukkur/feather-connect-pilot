@@ -544,7 +544,9 @@ class Packages:
 
     # Uninstalling (§6).
 
-    def uninstall(self, actor: Actor, name: str, version: str, *, reason: str | None = None) -> dict[str, Any]:
+    def uninstall(
+        self, actor: Actor, name: str, version: str, *, reason: str | None = None
+    ) -> dict[str, Any]:
         """Take a version out of this environment, audited: refused (`InUse`) while a flow of it is active or
         activating, or a run of it is queued or running. Its history stays; its wheel goes unless another installed
         version has the same bytes. Raises `KeyError` when it isn't installed."""
@@ -558,8 +560,12 @@ class Packages:
                 raise KeyError(f"{project} {version} is not installed here")
             request["version"] = row.version
             if (project, row.version) in self._store.runs.tagged_versions(("queued", "running")):
-                raise InUse(f"{project} {row.version} has queued or running runs: let them finish, or cancel them")
-            deleted = self._store.packages.uninstall(project, row.version, actor.name, self._clock.now(), reason)
+                raise InUse(
+                    f"{project} {row.version} has queued or running runs: let them finish, or cancel them"
+                )
+            deleted = self._store.packages.uninstall(
+                project, row.version, actor.name, self._clock.now(), reason
+            )
         except (KeyError, InUse) as error:
             text = error.args[0] if error.args else str(error)
             self._audit(actor, "uninstall_package", target, request, f"refused: {redact(str(text))}")

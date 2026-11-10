@@ -1,0 +1,27 @@
+{# What an operator can do with one flow of a package: activate, switch, roll back, deactivate. `f` is a FlowView and
+   `back` says which page to come back to. Each asks first. #}
+{% if can(actor, "flows.activate") %}
+<div class="actions">
+  {% if f.rollback_to %}
+  <form method="post" action="/packages/{{ name | urlencode }}/flows/{{ f.short | urlencode }}/activate">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="back" value="{{ back }}"><input type="hidden" name="kind" value="rollback"><input type="hidden" name="version" value="{{ f.rollback_to }}">
+    <button type="submit" data-confirm="Roll {{ f.name }} back to {{ f.rollback_to }}? Its triggers move once a host of {{ f.rollback_to }} is up; runs in progress finish on the code they started with." data-confirm-field="confirm">Roll back to {{ f.rollback_to }}<span class="sr-only"> ({{ f.name }})</span></button>
+  </form>
+  {% endif %}
+  {% if f.switch_to %}
+  <form method="post" action="/packages/{{ name | urlencode }}/flows/{{ f.short | urlencode }}/activate" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="back" value="{{ back }}"><input type="hidden" name="kind" value="{{ 'switch' if f.active else 'activate' }}">
+    <label for="ver-{{ back }}-{{ f.short }}">{{ "Switch to" if f.active else "Version" }}</label>
+    <select id="ver-{{ back }}-{{ f.short }}" name="version">{% for v in f.switch_to %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select>
+    <button type="submit" class="primary" data-confirm="{{ 'Switch' if f.active else 'Activate' }} {{ f.name }} to the version chosen? A worker starts its host, and the triggers move once it is up." data-confirm-field="confirm">{{ "Switch version" if f.active else "Activate" }}<span class="sr-only"> {{ f.name }}</span></button>
+  </form>
+  {% endif %}
+  {% if f.active or f.activating %}
+  <form method="post" action="/packages/{{ name | urlencode }}/flows/{{ f.short | urlencode }}/deactivate">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="back" value="{{ back }}">
+    <button type="submit" class="danger" data-confirm="Deactivate {{ f.name }}? Its triggers stop within seconds; runs in progress finish." data-confirm-field="confirm">Deactivate<span class="sr-only"> {{ f.name }}</span></button>
+  </form>
+  {% endif %}
+  {% if not f.switch_to and not f.active and not f.activating %}<p class="muted">No version of it is ready to activate yet.</p>{% endif %}
+</div>
+{% endif %}

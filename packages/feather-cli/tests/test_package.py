@@ -280,7 +280,9 @@ def _installed_ready(cli, sample: Path, base: str, tokens: dict[str, str], state
     assert cli("package", "build", "--project", str(sample)).exit_code == 0
     publish = ("--project", str(sample), "--url", base, "--token", tokens["publish"])
     assert cli("package", "publish", *publish).exit_code == 0
-    installed = cli("package", "install", "acme-invoices==1.0.0", "--server", base, "--token", tokens["admin"])
+    installed = cli(
+        "package", "install", "acme-invoices==1.0.0", "--server", base, "--token", tokens["admin"]
+    )
     assert installed.exit_code == 0, installed.output
 
 
@@ -325,7 +327,10 @@ def test_a_promotion_whose_bytes_dont_match_the_sha256_is_refused(qa_and_prod, s
         f"{prod}/api/v1/packages:promote",
         params={"filename": tested.filename, "sha256": "0" * 64, "from": "qa"},
         content=content,
-        headers={"Authorization": f"Bearer {prod_tokens['admin']}", "Content-Type": "application/octet-stream"},
+        headers={
+            "Authorization": f"Bearer {prod_tokens['admin']}",
+            "Content-Type": "application/octet-stream",
+        },
     )
     assert answer.status_code == 422 and answer.json()["check"] == "sha256"
     assert prod_state.store.packages.version("acme-invoices", "1.0.0") is None

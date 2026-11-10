@@ -21,6 +21,10 @@ READ_ONLY = [
     "/secrets",
     "/users",
     "/search?q=demo",
+    "/packages",
+    "/packages/acme-invoices",
+    "/packages/acme-invoices/flows/invoices",
+    "/registries",
 ]
 FIRST = f"day={DAYS[0]}"
 
@@ -209,3 +213,18 @@ def test_a_tasks_records_without_javascript(no_script_page: Page, site: Site):
     assert answer is not None and answer.status == 200
     expect(no_script_page.locator("h1")).to_have_text("Records of an extract task")
     expect(no_script_page.locator("#records-panel tbody tr")).to_have_count(2)
+
+
+def test_keyboard_only_switch_of_a_packaged_flow(signed_in_fresh: Page, fresh_site: Site):  # task 9
+    page, site = signed_in_fresh, fresh_site
+    page.goto(f"{site.url}/packages/acme-invoices/flows/invoices")
+    _tab_to(page, "Switch version")
+    page.keyboard.press("Enter")
+    dialog = page.get_by_role("dialog", name="Are you sure?")
+    expect(dialog).to_be_visible()
+    expect(dialog).to_contain_text("Switch acme-invoices/invoices")
+    _tab_to(page, "Switch version")  # the dialog's own button, named for the action
+    page.keyboard.press("Enter")
+    expect(page.get_by_role("status").filter(has_text="Asked for")).to_be_visible()
+    activating = site.stack.store.packages.activating()
+    assert [(a.flow, a.version) for a in activating] == [("acme-invoices/invoices", "1.1.0")]

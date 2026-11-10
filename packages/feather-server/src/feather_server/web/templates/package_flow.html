@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% set f = flow %}
+{% block content %}
+<h1>{{ f.name }}
+  {% if f.active %}{{ m.status_badge("active") }}{% elif f.activating %}{{ m.status_badge("activating") }}{% else %}{{ m.status_badge("inactive") }}{% endif %}</h1>
+<p><a href="/packages/{{ name | urlencode }}">&larr; The package {{ name }}</a></p>
+{{ m.notice_of(notice) }}
+{% if ask %}{{ m.ask_form(ask) }}{% endif %}
+<dl class="facts">
+  <dt>In service</dt><dd>{% if f.active %}<code>{{ f.active }}</code>{% else %}<span class="muted">no version</span>{% endif %}</dd>
+  {% if f.activating %}<dt>Moving to</dt><dd><code>{{ f.activating }}</code>, once its host is up</dd>{% endif %}
+  {% if f.rollback_to %}<dt>Before it</dt><dd><code>{{ f.rollback_to }}</code></dd>{% endif %}
+</dl>
+{% if f.failed %}<p class="notice notice-bad" role="status">Activating <code>{{ f.failed.version }}</code> failed: {{ f.failed.error or "its host didn't come up" }}</p>{% endif %}
+
+<section aria-labelledby="h-actions">
+  <h2 id="h-actions">Actions</h2>
+  {% set back = "flow" %}{% include "_package_flow_actions.html" %}
+</section>
+
+<section aria-labelledby="h-versions">
+  <h2 id="h-versions">Its versions</h2>
+  <div class="table-wrap"><table>
+    <caption class="sr-only">The versions of {{ f.name }}</caption>
+    <thead><tr><th scope="col">Version</th><th scope="col">Package version</th><th scope="col">Flow</th><th scope="col">Changed</th><th scope="col">Reason</th></tr></thead>
+    <tbody>
+    {% for a in f.rows %}
+      <tr><th scope="row"><code>{{ a.version }}</code></th><td>{% if states.get(a.version) %}{{ m.version_state(states[a.version]) }}{% endif %}</td><td>{{ m.status_dot(a.state) }}{% if a.error %}<div class="error-text">{{ a.error }}</div>{% endif %}</td><td>{{ m.time_ago(a.changed_at) }} by {{ a.changed_by }}</td><td>{% if a.reason %}{{ a.reason }}{% else %}<span class="muted">none</span>{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+
+<section aria-labelledby="h-runs">
+  <h2 id="h-runs">Recent runs</h2>
+  {% if runs %}
+  <div class="table-wrap"><table>
+    <caption class="sr-only">Recent runs of {{ f.name }}</caption>
+    <thead><tr><th scope="col">Run</th><th scope="col">Version</th><th scope="col">Status</th><th scope="col">Started</th></tr></thead>
+    <tbody>{% for r in runs %}<tr><th scope="row"><a href="/runs/{{ r.run_id | urlencode }}"><code>{{ r.run_id[:8] }}</code></a></th><td><code>{{ r.params.get("version", "") }}</code></td><td>{{ m.status_dot(r.status) }}</td><td>{{ m.time_ago(r.created_at) }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% else %}<p class="empty">No run of it yet.</p>{% endif %}
+</section>
+{% endblock %}

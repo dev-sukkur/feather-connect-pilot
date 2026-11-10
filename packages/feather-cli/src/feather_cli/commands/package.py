@@ -353,7 +353,11 @@ def keygen(
         out.chmod(0o600)  # on Windows, only the read-only bit: the file's ACL is the folder's
     except OSError:
         pass
-    document = {"private_key": str(out), "public_key": public_key_text(signer.public), "key_id": signer.key_id}
+    document = {
+        "private_key": str(out),
+        "public_key": public_key_text(signer.public),
+        "key_id": signer.key_id,
+    }
     emit(
         document,
         json_mode=json_mode,
@@ -419,7 +423,9 @@ def promote(
         fail(f"{target} installed sha256 {installed.get('sha256')}, not {sha256}", json_mode=json_mode)
 
     def human(doc: dict[str, Any]) -> None:
-        typer.echo(f"promoted {doc['name']} {doc['version']} from {source} to {target}, sha256 {doc['sha256']}")
+        typer.echo(
+            f"promoted {doc['name']} {doc['version']} from {source} to {target}, sha256 {doc['sha256']}"
+        )
         typer.echo(f"it is {doc['state']} in {target}: a worker there prepares it; then activate its flows")
 
     emit({**installed, "from": source, "to": target}, json_mode=json_mode, human=human)

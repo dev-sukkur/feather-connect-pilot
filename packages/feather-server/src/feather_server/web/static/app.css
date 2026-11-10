@@ -470,3 +470,8 @@ main h1, main h2, main p, main dd, .records-panel .filters p { overflow-wrap: an
 .card h3 { font-size: 1rem; color: var(--text); margin: 0.1rem 0 0.6rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
 .card .table-wrap { border-radius: 8px; }
 .setting-form { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.6rem; margin: 0.75rem 0 0.25rem; }
+
+/* The Packages pages: a version's checks, step by step, and a digest that wraps on a phone. */
+.checks { list-style: none; margin: 0 0 0.75rem; padding: 0; display: flex; flex-wrap: wrap; gap: 0.35rem 1rem; }
+code.wrap { overflow-wrap: anywhere; word-break: break-all; }
+.card h4 { font-size: 0.9rem; margin: 0.75rem 0 0.35rem; }

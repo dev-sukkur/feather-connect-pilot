@@ -605,8 +605,8 @@ def _forget(state: AppState) -> None:
 
 def test_requiring_signed_packages_needs_trusted_keys_and_keys_must_be_ed25519(state: AppState):
     from feather_connect.packages.signing import Signer, public_key_text
-    from feather_server.services.environment import ConfigProblem, Environment
     from feather_connect.vault import MasterKey, Vault, new_master_key
+    from feather_server.services.environment import ConfigProblem, Environment
 
     vault = Vault(state.store.secrets, "dev", MasterKey.parse(new_master_key()))
     environment = Environment(state.store, state.clock, "dev", vault)

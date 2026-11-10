@@ -46,7 +46,9 @@ __all__ = [
 SIGNATURE_FILE = "feather-signature.json"  # in the wheel's .dist-info, beside RECORD and not listed in it
 PREFIX = "ed25519:"
 _ALG = "ed25519"
-_MAX_TOTAL = 200 * 1024 * 1024  # bytes a wheel may unzip to while its RECORD is checked: a zip bomb stops here
+_MAX_TOTAL = (
+    200 * 1024 * 1024
+)  # bytes a wheel may unzip to while its RECORD is checked: a zip bomb stops here
 
 
 class SignatureError(ValueError):

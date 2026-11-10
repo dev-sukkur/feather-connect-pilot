@@ -76,8 +76,9 @@ NAV: list[NavItem] = [
     NavItem("Connections", "/connections", "connections"),
     NavItem("Secrets", "/secrets", "secrets"),
     NavItem("Users", "/users", "users", needs="users.manage"),
+    NavItem("Packages", "/packages", "packages"),
+    NavItem("Registries", "/registries", "registries"),
     NavItem("Trace a record", "/trace", "trace"),
-    # P5 adds Packages and Registries here, with the "packages" icon.
 ]  # a page that exists adds itself here
 
 
@@ -144,6 +145,19 @@ _STATUSES: dict[str, tuple[str, str, str]] = {  # status: (icon, word, tone)
     "never": ("○", "Never run", "idle"),
     "disabled": ("⊘", "Disabled", "idle"),
     "active": ("●", "Active", "ok"),
+    # flow packages: versions, flows, environments and hosts
+    "installed": ("…", "Installed", "idle"),
+    "preparing": ("…", "Preparing", "info"),
+    "ready": ("✓", "Ready", "ok"),
+    "uninstalled": ("⊘", "Uninstalled", "idle"),
+    "inactive": ("○", "Inactive", "idle"),
+    "activating": ("◐", "Activating", "info"),
+    "deactivating": ("◐", "Deactivating", "warn"),
+    "building": ("…", "Building", "info"),
+    "starting": ("…", "Starting", "info"),
+    "crash_loop": ("✕", "Crash loop", "bad"),
+    "stopped": ("○", "Stopped", "idle"),
+    "passed": ("✓", "Passed", "ok"),
 }
 
 

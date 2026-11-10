@@ -931,7 +931,11 @@ async def promote_package(
     hashes to `sha256`. The body is refused past the 50 MiB a package may have, as it comes."""
     if not _SHA256.match(sha256):
         raise ApiProblem(422, "Unprocessable Content", "sha256 is 64 hex digits")
-    call(lambda: require(actor, "packages.promote", request.app.state.feather.store.audit, f"package:{filename}"))
+    call(
+        lambda: require(
+            actor, "packages.promote", request.app.state.feather.store.audit, f"package:{filename}"
+        )
+    )
     length = request.headers.get("content-length", "")
     too_big = ApiProblem(413, "Content Too Large", f"a package may have at most {MAX_WHEEL} bytes")
     if length.isdigit() and int(length) > MAX_WHEEL:
