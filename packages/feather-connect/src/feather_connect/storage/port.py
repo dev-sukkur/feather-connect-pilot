@@ -1371,6 +1371,11 @@ class PackageEnv:
     built_at: datetime
 
 
+class InUse(Exception):
+    """A version can't be uninstalled while a flow of it is active or activating, or runs of it are queued or
+    running."""
+
+
 class DuplicateVersion(Exception):
     """That version of the package is installed already, by `version_key`: a version always means the same code."""
 
@@ -1402,6 +1407,13 @@ class PackageStore(Protocol):
 
     def wheel(self, sha256: str) -> bytes | None:
         """The wheel's bytes, or None when the store has no wheel of that sha256."""
+        ...
+
+    def uninstall(self, name: str, version: str, by: str, at: datetime, reason: str | None = None) -> bool:
+        """Mark the version `uninstalled` (§6) in one transaction, its flows' rows staying, inactive, as its history
+        does, and delete its wheel unless a version still installed has the same sha256. Returns whether the wheel was
+        deleted. Raises `KeyError` when the version isn't installed (or is uninstalled already), and `InUse` when a
+        flow of it is active or activating; it changes nothing then."""
         ...
 
     def activations(self, name: str, version: str | None = None) -> list[FlowActivation]:

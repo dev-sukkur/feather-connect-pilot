@@ -79,6 +79,7 @@ BACKOFF_MAX_S = 60.0
 TAKEN_RETRY_S = 1.0  # a host whose id another host still holds is started again this soon
 CRASH_LOOP = 5
 CRASH_WINDOW_S = 300.0
+SWEEP_ENVS_S = 600.0  # how often environments no installed version needs are removed
 PARTITIONS_EVERY_S = 600.0  # how often the partitions hosts write to are made ahead
 PREPARE_BACKOFF_S = 5.0
 PREPARE_BACKOFF_MAX_S = 600.0
@@ -214,6 +215,7 @@ class Supervisor:
         self._db_secrets = db_secrets
         self._partitions = partitions
         self._partitions_at: float | None = None
+        self._swept_at: float | None = None
         self._hosts: dict[tuple[str, str], _Host] = {}
         self._crashes: dict[tuple[str, str], _Crashes] = {}
         self._built: dict[tuple[str, str], EnvUse] = {}  # environments built for a host, held until it starts
@@ -280,6 +282,21 @@ class Supervisor:
             done.append(f"{row.name} {row.version}")
         return done
 
+    def remove_unneeded_envs(self) -> list[str]:
+        """Remove the environments that no installed version needs any more, its last one uninstalled (task 10), and
+        that no process holds in use. Returns the lock hashes removed."""
+        if self._envs is None:
+            return []
+        needed = {v.lock_hash for v in self._store.packages.versions() if v.state != "uninstalled"}
+        removed: list[str] = []
+        for lock_hash in self._envs.built():
+            if lock_hash in needed or self._envs.in_use(lock_hash):
+                continue
+            if self._envs.remove(lock_hash):
+                log.info("removed the environment of lock %s: no installed version needs it", lock_hash[:12])
+                removed.append(lock_hash)
+        return removed
+
     # Hosts.
 
     def wanted(self) -> set[tuple[str, str]]:
@@ -314,6 +331,9 @@ class Supervisor:
         ):
             self._partitions()  # before a host needs one: a host role can't make them
             self._partitions_at = now
+        if self._envs is not None and (self._swept_at is None or now - self._swept_at > SWEEP_ENVS_S):
+            self._swept_at = now
+            self.remove_unneeded_envs()
         with self._lock:
             for key, host in list(self._hosts.items()):
                 if host.tree.process.poll() is not None:  # it ended: drained, or died

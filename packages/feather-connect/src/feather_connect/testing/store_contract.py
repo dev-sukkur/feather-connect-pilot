@@ -27,6 +27,7 @@ from feather_connect.storage.port import (
     DuplicateRegistry,
     DuplicateUser,
     DuplicateVersion,
+    InUse,
     InboxDay,
     InvalidTransition,
     KeyMismatch,
@@ -1589,6 +1590,34 @@ class StoreContract(
         with pytest.raises(ValueError, match="sha256"):
             store.packages.install(self._installed("acme-invoices", "1.0.0"), b"tampered", [])
         assert store.packages.packages() == [] and store.packages.wheel(_sha(b"tampered")) is None
+
+    def test_an_uninstalled_version_keeps_its_rows_and_loses_its_wheel_unless_shared(self, store: Store):
+        one, two = self._installed("acme", "1.0.0"), self._installed("acme", "1.1.0", b"newer")
+        same = self._installed("zed", "0.1")  # the same bytes as acme 1.0.0
+        store.packages.install(one, b"wheel", ["acme/invoices"])
+        store.packages.install(two, b"newer", ["acme/invoices"])
+        store.packages.install(same, b"wheel", [])
+        store.packages.activate("acme/invoices", "acme", "1.1.0", "ops", T0)
+        with pytest.raises(InUse, match="activating"):
+            store.packages.uninstall("acme", "1.1.0", "root", T0)
+        store.packages.promote("acme", "1.1.0", T0)
+        with pytest.raises(InUse, match="active"):
+            store.packages.uninstall("acme", "1.1", "root", T0)
+        assert store.packages.version("acme", "1.1.0") == two  # refused: nothing changed
+        assert store.packages.uninstall("acme", "1.0", "root", T0, "old") is False  # zed has its bytes
+        assert store.packages.wheel(_sha(b"wheel")) == b"wheel"
+        gone = store.packages.version("acme", "1.0.0")
+        assert gone is not None and gone.state == "uninstalled" and gone.sha256 == one.sha256
+        assert [a.state for a in store.packages.activations("acme", "1.0.0")] == ["inactive"]
+        with pytest.raises(KeyError):
+            store.packages.uninstall("acme", "1.0.0", "root", T0)  # once
+        with pytest.raises(KeyError):
+            store.packages.uninstall("acme", "9.0", "root", T0)
+        store.packages.deactivate("acme/invoices", "ops", T0)
+        assert store.packages.uninstall("acme", "1.1.0", "root", T0) is True
+        assert store.packages.wheel(_sha(b"newer")) is None
+        assert store.packages.uninstall("zed", "0.1", "root", T0) is True
+        assert store.packages.wheel(_sha(b"wheel")) is None
 
     def test_a_flow_is_activated_in_one_version_at_a_time_once_its_host_is_up(self, store: Store):
         import threading

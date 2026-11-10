@@ -53,6 +53,7 @@ from feather_connect.storage.port import (
     InboxDay,
     InboxEvent,
     InboxStore,
+    InUse,
     KeyMismatch,
     KeySighting,
     Ledger,
@@ -2399,6 +2400,42 @@ class _Packages(PackageStore):
                 (self._db.tenant, sha256),
             ).fetchone()
         return None if row is None else bytes(row["content"])
+
+    def uninstall(self, name: str, version: str, by: str, at: datetime, reason: str | None = None) -> bool:
+        tenant, key = self._db.tenant, version_key(version)
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select version, sha256, state from feather.package_version
+                   where tenant_id = %s and name = %s and version_key = %s for update""",
+                (tenant, name, key),
+            ).fetchone()
+            if row is None or row["state"] == "uninstalled":
+                raise KeyError(f"{name} {version} is not installed here")
+            busy = conn.execute(
+                """select flow, state from feather.flow_activation
+                   where tenant_id = %s and package = %s and version_key = %s and state in ('active', 'activating')
+                   order by flow collate "C" limit 1 for update""",
+                (tenant, name, key),
+            ).fetchone()
+            if busy is not None:
+                raise InUse(f"{name} {row['version']}: its flow {busy['flow']} is {busy['state']}")
+            conn.execute(
+                """update feather.package_version set state = 'uninstalled'
+                   where tenant_id = %s and name = %s and version_key = %s""",
+                (tenant, name, key),
+            )
+            shared = conn.execute(
+                """select 1 from feather.package_version
+                   where tenant_id = %s and sha256 = %s and state <> 'uninstalled' limit 1""",
+                (tenant, row["sha256"]),
+            ).fetchone()
+            if shared is None:
+                conn.execute(
+                    "delete from feather.package_wheel where tenant_id = %s and sha256 = %s",
+                    (tenant, row["sha256"]),
+                )
+            conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, tenant))
+        return shared is None
 
     _ACTIVATION = "flow, package, version, state, changed_by, changed_at, reason, error"
 

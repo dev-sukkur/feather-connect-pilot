@@ -892,6 +892,28 @@ def check_environment(environment: Mapping[str, Any]) -> None:
         raise ProjectError(
             f"{_where(layers, 'settings.timezone')}: {timezone!r} is not a time zone"
         ) from None
+    _check_signing(_mapping(config, "settings", layers), layers)
+
+
+def _check_signing(settings: Mapping[str, Any], layers: Mapping[str, str]) -> None:
+    """`require_signed_packages` is a boolean, and `trusted_package_keys` a list of ed25519 public keys (task 11);
+    requiring signed packages needs a key to trust."""
+    from feather_connect.packages.signing import SignatureError, check_trusted_keys
+
+    required = settings.get("require_signed_packages", False)
+    if not isinstance(required, bool):
+        where = _where(layers, "settings.require_signed_packages")
+        raise ProjectError(f"{where}: {required!r} is not true or false")
+    keys = settings.get("trusted_package_keys", [])
+    try:
+        trusted = check_trusted_keys(keys)
+    except SignatureError as error:
+        raise ProjectError(f"{_where(layers, 'settings.trusted_package_keys')}: {error}") from None
+    if required and not trusted:
+        raise ProjectError(
+            f"{_where(layers, 'settings.require_signed_packages')}: requiring signed packages needs "
+            "trusted_package_keys, the public keys they may be signed with"
+        )
 
 
 def _entry_value(kind: str, value: Any) -> Any:

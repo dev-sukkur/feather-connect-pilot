@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from feather_connect.core.errors import PermanentError
 from feather_connect.logs import redact
 from feather_connect.runtime.runtime import FlowPaused
-from feather_connect.storage.port import DuplicateUser, InvalidTransition
+from feather_connect.storage.port import DuplicateUser, InUse, InvalidTransition
 from feather_connect.vault import KeyConflict, NoMasterKey, VaultError
 from feather_server.services.access import Forbidden
 from feather_server.services.packages import Busy, InstallFailed, NotReady
@@ -68,6 +68,8 @@ def translate(error: Exception) -> ApiProblem | None:
         return ApiProblem(status, title, _message(error), check=error.check)
     if isinstance(error, NotReady):
         return ApiProblem(409, "Conflict", str(error), check="not_ready", state=error.state)
+    if isinstance(error, InUse):  # a version with active flows or runs in progress
+        return ApiProblem(409, "Conflict", _message(error), check="in_use")
     if isinstance(error, VersionExists):
         return ApiProblem(409, "Conflict", str(error))
     if isinstance(error, DuplicateUser):

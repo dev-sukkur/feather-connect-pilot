@@ -87,6 +87,9 @@ class ApiClient:
             raise ApiError(f"the server at {url} did not answer within {self._http.timeout.read}s") from None
         except httpx.HTTPError as error:
             raise ApiError(f"can't reach the server at {url}: {error}") from None
+        return self._answer(method, url, answer)
+
+    def _answer(self, method: str, url: str, answer: httpx.Response) -> Any:
         if answer.is_success:
             return answer.json()
         try:
@@ -263,10 +266,57 @@ class ApiClient:
     def fetch_wheel(self, registry: str, name: str, version: str, out_dir: Path) -> tuple[Path, str]:
         """Download a version's wheel from one of the environment's registries into `out_dir`, at most `MAX_WHEEL`
         bytes, and check it against the sha256 the server sends. Returns the file and its sha256."""
-        path = (
+        filename, data, digest = self._wheel(
             f"{API}/registries/{quote(registry, safe='')}/packages/{quote(name, safe='')}"
             f"/versions/{quote(version, safe='')}/wheel"
         )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        target = out_dir / filename
+        target.write_bytes(data)
+        return target, digest
+
+    def export_wheel(self, name: str, version: str) -> tuple[str, bytes, str]:
+        """The wheel an installed, ready version was tested with, checked against the sha256 the server sends:
+        its file name, bytes and sha256, to promote to another environment."""
+        return self._wheel(f"{API}/packages/{quote(name, safe='')}/versions/{quote(version, safe='')}/wheel")
+
+    def promote_package(
+        self,
+        filename: str,
+        content: bytes,
+        sha256: str,
+        source: str,
+        reason: str | None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Give the server another environment's wheel and the sha256 it was exported with, to install."""
+        url = f"{self.base_url}{API}/packages:promote"
+        params = {"filename": filename, "sha256": sha256, "from": source}
+        if reason:
+            params["reason"] = reason
+        headers = {"Content-Type": "application/octet-stream"}
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        try:
+            answer = self._http.post(
+                f"{API}/packages:promote",
+                params=params,
+                content=content,
+                headers=headers,
+                timeout=httpx.Timeout(INSTALL_TIMEOUT_S),
+            )
+        except httpx.HTTPError as error:
+            raise ApiError(f"can't reach the server at {url}: {error}") from None
+        return self._answer("POST", url, answer)
+
+    def uninstall_package(self, name: str, version: str, reason: str | None) -> dict[str, Any]:
+        return self._call(
+            "DELETE",
+            f"/packages/{quote(name, safe='')}/versions/{quote(version, safe='')}",
+            body={"reason": reason},
+        )
+
+    def _wheel(self, path: str) -> tuple[str, bytes, str]:
         url = f"{self.base_url}{path}"
         try:
             with self._http.stream("GET", path, timeout=httpx.Timeout(INSTALL_TIMEOUT_S)) as answer:
@@ -293,10 +343,7 @@ class ApiClient:
             raise ApiError(
                 f"GET {url}: the wheel's sha256 is {digest}, not the {expected or 'none'} the server sent"
             )
-        out_dir.mkdir(parents=True, exist_ok=True)
-        target = out_dir / filename
-        target.write_bytes(bytes(data))
-        return target, digest
+        return filename, bytes(data), digest
 
     def publish(self, path: Path) -> None:
         """Upload a wheel to the built-in registry, as `uv publish` does: the legacy upload form at `/registry/`."""

@@ -10,6 +10,8 @@ The checks run in order and an install stops at the first that fails, which `Ins
 - `size`, `sha256`, `manifest`, `name_version`: the wheel is at most 50 MiB, has the sha256 the registry recorded, holds
   a manifest that matches the schema, and names the package and version asked for.
 - `not_yanked`: the registry hasn't yanked the version, as it says at the fetch, unless `allow_yanked` says to take it.
+- `signature`: where the environment's `require_signed_packages` setting is on, the wheel is signed by one of its
+  `trusted_package_keys`, and its files are the ones the signed RECORD lists (`feather_connect.packages.signing`).
 - `compatibility`: the manifest's `fc_versions` takes this Feather Connect.
 - `lock`: the locked requirements in the wheel are the ones the manifest's `lock_hash` names, and each is pinned with
   `==` and has its sha256 hashes: no index options, direct URLs or paths.
@@ -21,6 +23,17 @@ too, with its check, or as `internal` for an error that is a bug.
 The server never runs package code. The steps that do run on a worker, as its user, in the version's own environment:
 `environment`, `load_check` and `webhook_connector` (`PREPARE_STEPS`), and the version's load check names the one that
 failed. A flow can be activated only once its version is `ready` (`NotReady` otherwise); nothing runs until then (§6).
+
+Promotion (§6, task 10) installs in this environment exactly the wheel another one tested: `export` gives a `ready`
+version's stored wheel, and `promote` takes those bytes with the sha256 the source gave, refuses them unless they hash
+to it, keeps a copy in the built-in registry (or refuses if the registry has other bytes of that version), and installs
+them through the same checks, with `sha256` and `manifest` checked on the bytes in hand instead of a fetch. The two
+environments never talk to each other: the admin's CLI carries the bytes, so neither needs a token for, or a network
+path to, the other.
+
+`uninstall` takes a version out (§6): refused while a flow of it is active or activating, or a run of it is queued or
+running. Its row and its flows' rows stay, as its history does; its wheel is deleted unless another installed version
+has the same bytes, and workers remove its environment once no installed version needs its lock.
 
 At most `MAX_BUSY` installs and wheel fetches run at once, for each holds a worker thread while it fetches; one more
 raises `Busy`, which the API answers 503 with Retry-After.
@@ -43,12 +56,13 @@ from feather_connect.packages import manifest as m
 from feather_connect.packages.build import LOCK_FILE, WHEELS_NOTE
 from feather_connect.packages.manifest import ManifestError
 from feather_connect.packages.prepare import PREPARE_STEPS
-from feather_connect.packages.wheel import read_entry
+from feather_connect.packages.signing import SignatureError, check_trusted_keys, verify_wheel
+from feather_connect.packages.wheel import read_entry, read_wheel
 from feather_connect.runtime.catalogue import restart_ticks, sync_package_catalog
-from feather_connect.storage.port import DuplicateVersion, FlowActivation, PackageVersion, Store
+from feather_connect.storage.port import DuplicateVersion, FlowActivation, InUse, PackageVersion, Store
 from feather_server.auth import Actor
 from feather_server.services.access import require
-from feather_server.services.registries import BUILT_IN, Fetched, Registries, RegistryProblem
+from feather_server.services.registries import BUILT_IN, Fetched, Registries, RegistryProblem, VersionExists
 
 __all__ = [
     "CHECKS",
@@ -59,6 +73,7 @@ __all__ = [
     "NotReady",
     "Packages",
     "check_lock",
+    "check_wheels",
 ]
 
 MAX_BUSY = 2  # installs and wheel fetches at once
@@ -72,6 +87,7 @@ CHECKS = (
     "manifest",
     "name_version",
     "not_yanked",
+    "signature",
     "compatibility",
     "lock",
     "wheels",
@@ -171,6 +187,18 @@ class Installed:
     flows: list[str]
     checks: list[str]
     load_check: Mapping[str, Any]
+    signed_by: str | None = None  # the id of the trusted key that signed it, where signing is required
+
+
+@dataclass(frozen=True)
+class Exported:
+    """A `ready` version's stored wheel, for a promotion to another environment."""
+
+    name: str
+    version: str
+    filename: str
+    sha256: str
+    content: bytes
 
 
 class Packages:
@@ -280,6 +308,23 @@ class Packages:
                 f"registry {registry} has yanked {project} {wanted}: allow a yanked version to take it anyway",
             )
         passed.append("not_yanked")
+        return self._checked_and_kept(actor, fetched, project, wanted, reason, request, passed)
+
+    def _checked_and_kept(
+        self,
+        actor: Actor,
+        fetched: Fetched,
+        project: str,
+        wanted: str,
+        reason: str | None,
+        request: dict[str, Any],
+        passed: list[str],
+    ) -> Installed:
+        """The checks after the fetch, from `signature` on, then the version stored with its flows inactive."""
+        signed_by = self._check_signature(fetched.content)
+        if signed_by is not None:
+            request["signed_by"] = signed_by
+        passed.append("signature")
         manifest = fetched.manifest
         try:
             m.check_fc_versions(manifest["fc_versions"])
@@ -288,6 +333,7 @@ class Packages:
         passed.append("compatibility")
         self._check_lock(fetched)
         passed += ["lock", "wheels"]
+        registry = fetched.registry
         named = cast(list[dict[str, Any]], manifest.get("flows") or [])
         flows = [f"{project}/{flow}" for flow in sorted(str(f["name"]) for f in named)]
         row = PackageVersion(
@@ -309,7 +355,32 @@ class Packages:
             self._store.packages.install(row, fetched.content, flows, reason)
         except DuplicateVersion:  # installed meanwhile, by another request
             raise InstallFailed("not_installed", f"{project} {wanted} is installed here already") from None
-        return Installed(project, row.version, row.sha256, registry, row.state, flows, passed, row.load_check)
+        return Installed(
+            project, row.version, row.sha256, registry, row.state, flows, passed, row.load_check, signed_by
+        )
+
+    def signing(self) -> tuple[bool, list[str]]:
+        """Whether this environment takes only signed packages, and the ids of the keys it trusts."""
+        settings = self._settings()
+        try:
+            keys = sorted(check_trusted_keys(settings.get("trusted_package_keys", [])))
+        except SignatureError:
+            keys = []
+        return settings.get("require_signed_packages") is True, keys
+
+    def _settings(self) -> dict[str, Any]:
+        return {e.name: e.value for e in self._store.env_config.entries(self._env, "setting")}
+
+    def _check_signature(self, content: bytes) -> str | None:
+        """Where the environment requires signed packages, the id of the trusted key that signed the wheel; None where
+        it doesn't. Raises `InstallFailed` at `signature`."""
+        settings = self._settings()
+        if settings.get("require_signed_packages") is not True:
+            return None
+        try:
+            return verify_wheel(content, check_trusted_keys(settings.get("trusted_package_keys", [])))
+        except SignatureError as error:
+            raise InstallFailed("signature", str(error)) from None
 
     def _version_of(self, project: str, version: str | None, registry: str, *, pre: bool) -> str:
         """The version asked for, in its normal form, or the registry's newest that isn't yanked, nor a pre-release
@@ -367,6 +438,135 @@ class Packages:
             check_wheels(lock)
         except ValueError as error:
             raise InstallFailed("wheels", f"{where}: {error}") from None
+
+    # Promoting (§6, task 10): another environment's tested wheel, byte for byte.
+
+    def export(self, actor: Actor, name: str, version: str) -> Exported:
+        """A version's stored wheel, to promote to another environment: only a `ready` one, which a worker here built
+        and load-checked. An admin's (`packages.promote`), audited. Raises `KeyError` when it isn't installed and
+        `NotReady` when it isn't ready."""
+        project = canonicalize_name(name)
+        target = f"package:{project}"
+        require(actor, "packages.promote", self._store.audit, target)
+        row = self._store.packages.version(project, version)
+        if row is None or row.state == "uninstalled":
+            raise KeyError(f"{project} {version} is not installed here")
+        if row.state != "ready":
+            raise NotReady(
+                f"{project} {row.version} is {row.state} here: only a version that is ready, built and "
+                "load-checked, can be promoted",
+                row.state,
+            )
+        content = self._store.packages.wheel(row.sha256)
+        if content is None:
+            raise KeyError(f"the wheel of {project} {row.version} is not kept here")
+        self._audit(actor, "export_package", target, {"version": row.version, "sha256": row.sha256}, "ok")
+        return Exported(project, row.version, row.filename, row.sha256, content)
+
+    def promote(
+        self,
+        actor: Actor,
+        filename: str,
+        content: bytes,
+        *,
+        sha256: str,
+        source: str,
+        reason: str | None = None,
+    ) -> Installed:
+        """Install here the wheel that environment `source` exported, which must hash to `sha256`, the digest the
+        source gave: so this environment runs exactly the bytes tested there. A copy goes in the built-in registry
+        when it is on. An admin's (`packages.promote`), audited. Raises `InstallFailed` naming the check that
+        failed."""
+        target = f"package:{filename}"
+        require(actor, "packages.promote", self._store.audit, target)
+        request: dict[str, Any] = {"filename": filename, "sha256": sha256, "from": source, "reason": reason}
+        with self._slot():
+            try:
+                installed = self._promote(actor, filename, content, sha256, reason, request)
+            except InstallFailed as error:
+                self._audit(actor, "promote_package", target, request, f"failed: {redact(str(error))}")
+                raise
+            except Exception:
+                self._audit(actor, "promote_package", target, request, "failed: internal")
+                raise
+        self._audit(actor, "promote_package", f"package:{installed.name}", request, "ok")
+        return installed
+
+    def _promote(
+        self,
+        actor: Actor,
+        filename: str,
+        content: bytes,
+        sha256: str,
+        reason: str | None,
+        request: dict[str, Any],
+    ) -> Installed:
+        passed: list[str] = []
+        actual = hashlib.sha256(content).hexdigest()
+        if actual != sha256.lower():
+            raise InstallFailed(
+                "sha256", f"the wheel's sha256 is {actual}, not the {sha256} the source environment gave"
+            )
+        try:
+            info = read_wheel(filename, content)
+        except ManifestError as error:
+            raise InstallFailed("manifest", str(error)) from None
+        project = canonicalize_name(info.name)
+        request["version"] = info.version
+        if self._store.packages.version(project, info.version) is not None:
+            raise InstallFailed(
+                "not_installed", f"{project} {info.version} is installed here already: install a new version"
+            )
+        passed += ["not_installed", "size", "sha256", "manifest", "name_version"]
+        registry = self._registry_copy(actor, filename, content, actual)
+        fetched = Fetched(registry, filename, actual, content, dict(info.manifest))
+        return self._checked_and_kept(actor, fetched, project, info.version, reason, request, passed)
+
+    def _registry_copy(self, actor: Actor, filename: str, content: bytes, sha256: str) -> str:
+        """Keep the promoted wheel in the built-in registry, when it is on, so this environment has it as any other
+        package. A registry that has other bytes of the version refuses it at `sha256`. Returns where the version came
+        from: the registry's name, or `promotion`."""
+        if not self._registries.enabled:
+            return "promotion"
+        try:
+            self._registries.publish(actor, filename, content, sha256)
+        except VersionExists:
+            try:
+                kept, _ = self._registries.content(filename)
+            except KeyError:
+                kept = None
+            if kept is None or kept.sha256 != sha256:
+                raise InstallFailed(
+                    "sha256",
+                    f"the built-in registry has other bytes of {filename}: a version always means the same code",
+                ) from None
+        return BUILT_IN
+
+    # Uninstalling (§6).
+
+    def uninstall(self, actor: Actor, name: str, version: str, *, reason: str | None = None) -> dict[str, Any]:
+        """Take a version out of this environment, audited: refused (`InUse`) while a flow of it is active or
+        activating, or a run of it is queued or running. Its history stays; its wheel goes unless another installed
+        version has the same bytes. Raises `KeyError` when it isn't installed."""
+        project = canonicalize_name(name)
+        target = f"package:{project}"
+        require(actor, "packages.uninstall", self._store.audit, target)
+        request: dict[str, Any] = {"version": version, "reason": reason}
+        try:
+            row = self._store.packages.version(project, version)
+            if row is None or row.state == "uninstalled":
+                raise KeyError(f"{project} {version} is not installed here")
+            request["version"] = row.version
+            if (project, row.version) in self._store.runs.tagged_versions(("queued", "running")):
+                raise InUse(f"{project} {row.version} has queued or running runs: let them finish, or cancel them")
+            deleted = self._store.packages.uninstall(project, row.version, actor.name, self._clock.now(), reason)
+        except (KeyError, InUse) as error:
+            text = error.args[0] if error.args else str(error)
+            self._audit(actor, "uninstall_package", target, request, f"refused: {redact(str(text))}")
+            raise
+        request["wheel_deleted"] = deleted
+        self._audit(actor, "uninstall_package", target, request, "ok")
+        return {"name": project, "version": row.version, "state": "uninstalled", "wheel_deleted": deleted}
 
     # Activating (§6): each worker supervisor starts a host for an active version, and drains it when no flow of it is
     # active and its runs are over.

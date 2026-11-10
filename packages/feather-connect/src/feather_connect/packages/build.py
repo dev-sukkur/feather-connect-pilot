@@ -28,6 +28,7 @@ from packaging.utils import canonicalize_name
 
 from feather_connect.packages import manifest as m
 from feather_connect.packages.manifest import ManifestError
+from feather_connect.packages.signing import SIGNATURE_FILE, Signer
 from feather_connect.project import ProjectError, is_secret_ref, load_project, validate_project
 
 PROJECT_DIRS = (
@@ -81,9 +82,12 @@ def wheel_name(name: str, version: str) -> str:
     return f"{m.module_of(name)}-{version}-{_TAG}.whl"
 
 
-def build_package(root: Path, out_dir: Path | None = None, *, env: str = "dev") -> Built:
+def build_package(
+    root: Path, out_dir: Path | None = None, *, env: str = "dev", signer: Signer | None = None
+) -> Built:
     """Build the project in `root` into `out_dir` (`root/dist` by default). Checks the project as `feather validate
-    --env <env>` does first. Raises `ManifestError` saying what to fix."""
+    --env <env>` does first. With a `signer`, the wheel carries its signature of the RECORD (`signing`). Raises
+    `ManifestError` saying what to fix."""
     root = root.resolve()
     config = _feather_yaml(root)
     name = m.check_name(config.get("name"))
@@ -114,7 +118,7 @@ def build_package(root: Path, out_dir: Path | None = None, *, env: str = "dev") 
     target = (out_dir or root / "dist").resolve()
     target.mkdir(parents=True, exist_ok=True)
     path = target / wheel_name(name, version)
-    _write_wheel(path, manifest, files, lock, dependencies)
+    _write_wheel(path, manifest, files, lock, dependencies, signer)
     data = path.read_bytes()
     return Built(path, hashlib.sha256(data).hexdigest(), len(data), manifest, _secret_warnings(root))
 
@@ -376,6 +380,7 @@ def _write_wheel(
     files: Sequence[tuple[str, Path]],
     lock: bytes,
     dependencies: Sequence[str],
+    signer: Signer | None = None,
 ) -> None:
     name, version, module = manifest["name"], manifest["version"], manifest["module"]
     info = f"{module}-{version}.dist-info"
@@ -407,6 +412,8 @@ def _write_wheel(
     ]
     record = "".join(f"{p},{_record_hash(d)},{len(d)}\n" for p, d in entries) + f"{info}/RECORD,,\n"
     entries.append((f"{info}/RECORD", record.encode()))
+    if signer is not None:  # not in RECORD, which it signs
+        entries.append((f"{info}/{SIGNATURE_FILE}", signer.sign(record.encode())))
     partial = path.with_suffix(".whl.part")
     with zipfile.ZipFile(partial, "w") as archive:
         for arcname, data in entries:

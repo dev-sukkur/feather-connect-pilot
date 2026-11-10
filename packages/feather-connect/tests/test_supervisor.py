@@ -68,6 +68,8 @@ class _Envs:
         self.tmp = tmp
         self.fail = fail
         self.used = 0
+        self.built_here: list[str] = []
+        self.held: set[str] = set()
 
     def use(self, lock: bytes, lock_hash: str, *, keep: Any = ()) -> EnvUse:
         self.used += 1
@@ -76,6 +78,16 @@ class _Envs:
         mark = FileLock(self.tmp / f"use-{self.used}.lock")
         mark.try_acquire()
         return EnvUse(Path(sys.executable), mark)
+
+    def built(self) -> list[str]:
+        return sorted(self.built_here)
+
+    def in_use(self, lock_hash: str) -> bool:
+        return lock_hash in self.held
+
+    def remove(self, lock_hash: str) -> bool:
+        self.built_here = [h for h in self.built_here if h != lock_hash]
+        return True
 
 
 class _World:
@@ -267,3 +279,16 @@ def test_a_version_whose_environment_cant_be_built_stays_preparing_and_is_tried_
     world.now[0] += 10
     world.supervisor._checker = lambda *a, **k: LoadCheck(True)  # pyright: ignore[reportPrivateUsage]
     assert world.supervisor.prepare_pending() == ["acme 2.0.0"]
+
+
+def test_environments_no_installed_version_needs_are_removed_unless_in_use(tmp_path: Path):
+    envs = _Envs(tmp_path)
+    acme, stale, held = hashlib.sha256(b"").hexdigest(), "f" * 64, "e" * 64
+    envs.built_here, envs.held = [acme, stale, held], {held}
+    world = _World(tmp_path, READY, envs)
+    _installed(world.store)
+    assert world.supervisor.remove_unneeded_envs() == [stale]  # acme 1.0.0 needs its lock; one is in use
+    assert envs.built() == sorted([acme, held])
+    world.store.packages.uninstall("acme", "1.0.0", "root", T0)
+    assert world.supervisor.remove_unneeded_envs() == [acme]  # its last version was uninstalled
+    assert envs.built() == [held]

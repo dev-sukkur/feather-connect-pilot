@@ -16,15 +16,18 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi import Path as Path_
+from fastapi.concurrency import run_in_threadpool
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from feather_connect.packages.wheel import MAX_WHEEL
 from feather_connect.storage.port import DeliveryStatus, EnvEntry, EnvKind, delivery_cursor
 from feather_server.api.errors import ApiProblem, translate
 from feather_server.api.paging import check_limit, decode, page
 from feather_server.auth import Actor, CurrentActor, require_csrf
 from feather_server.services import task_records as records
+from feather_server.services.access import require
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.environment import Environment
@@ -866,6 +869,84 @@ def package(name: str, installs: Installs, _: CurrentActor) -> JSONResponse:
 @router.get("/packages/{name}/versions/{version}")
 def package_version(name: str, version: str, installs: Installs, _: CurrentActor) -> JSONResponse:
     return ok(call(lambda: installs.version(name, version)))
+
+
+@router.delete("/packages/{name}/versions/{version}")
+def uninstall_package(
+    name: str,
+    version: str,
+    request: Request,
+    installs: Installs,
+    actor: CurrentActor,
+    key: IdempotencyKey = None,
+    body: Reason | None = None,
+) -> JSONResponse:
+    """Uninstall a version (§6): refused 409 (`check: in_use`) while a flow of it is active or a run of it is queued
+    or running."""
+    reason = (body or Reason()).reason
+    return _once(request, actor, key, lambda: installs.uninstall(actor, name, version, reason=reason))
+
+
+# Promotion (§6, task 10): the admin's CLI takes a ready version's wheel from one environment and gives it, with its
+# sha256, to another, which installs it only if the bytes hash to it.
+
+
+@router.get("/packages/{name}/versions/{version}/wheel")
+def export_package(name: str, version: str, installs: Installs, actor: CurrentActor) -> Response:
+    """A ready version's stored wheel, the bytes this environment tested, with their sha256 in `X-Feather-Sha256`.
+    An admin's (`packages.promote`), audited."""
+    found = call(lambda: installs.export(actor, name, version))
+    content = found.content
+
+    def chunks() -> Iterator[bytes]:
+        for start in range(0, len(content), _CHUNK):
+            yield content[start : start + _CHUNK]
+
+    return StreamingResponse(
+        chunks(),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": attachment(found.filename),
+            "Content-Length": str(len(content)),
+            "X-Feather-Sha256": found.sha256,
+        },
+    )
+
+
+_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+@router.post("/packages:promote", status_code=201)
+async def promote_package(
+    request: Request,
+    installs: Installs,
+    actor: CurrentActor,
+    filename: Annotated[str, Query(max_length=200)],
+    sha256: Annotated[str, Query(min_length=64, max_length=64)],
+    source: Annotated[str, Query(alias="from", max_length=64)],
+    reason: Annotated[str | None, Query(max_length=500)] = None,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    """Install the wheel in the body (`application/octet-stream`), which another environment exported, only if it
+    hashes to `sha256`. The body is refused past the 50 MiB a package may have, as it comes."""
+    if not _SHA256.match(sha256):
+        raise ApiProblem(422, "Unprocessable Content", "sha256 is 64 hex digits")
+    call(lambda: require(actor, "packages.promote", request.app.state.feather.store.audit, f"package:{filename}"))
+    length = request.headers.get("content-length", "")
+    too_big = ApiProblem(413, "Content Too Large", f"a package may have at most {MAX_WHEEL} bytes")
+    if length.isdigit() and int(length) > MAX_WHEEL:
+        raise too_big
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > MAX_WHEEL:
+            raise too_big
+    content = bytes(body)
+
+    def promote() -> Any:
+        return installs.promote(actor, filename, content, sha256=sha256, source=source, reason=reason)
+
+    return await run_in_threadpool(_once, request, actor, key, promote, 201)
 
 
 # The environment's own configuration and secrets (flow packages §8): reading needs any role, changing an admin.

@@ -537,3 +537,84 @@ def test_requests_with_one_idempotency_key_at_once_install_once(
         first, second = (a.result() for a in answers)
     assert first.status_code == second.status_code == 201 and first.json() == second.json()
     assert len([a for a in state.store.audit.list_audit() if a.action == "install_package"]) == 1
+
+
+# Signing (task 11): an environment may take only packages signed with a key it trusts.
+
+
+def _require_signed(state: AppState, *keys: str) -> None:
+    from feather_connect.storage.port import EnvEntry
+
+    now = state.clock.now()
+    state.store.env_config.put(EnvEntry("dev", "setting", "trusted_package_keys", list(keys), "root", now))
+    state.store.env_config.put(EnvEntry("dev", "setting", "require_signed_packages", True, "root", now))
+
+
+def _signed_wheel(out: Path, signer: Any) -> Path:
+    from feather_connect.packages.build import build_package
+    from feather_server.testing import SAMPLE_PACKAGE
+
+    return build_package(SAMPLE_PACKAGE, out, signer=signer).path
+
+
+def test_an_unsigned_package_is_refused_where_signing_is_required(
+    state: AppState, registries: Registries, wheel: Path
+):
+    from feather_connect.packages.signing import Signer, public_key_text
+
+    _require_signed(state, public_key_text(Signer.generate().public))
+    registries.publish(ADMIN, wheel.name, wheel.read_bytes())
+    with pytest.raises(InstallFailed, match="not signed") as failed:
+        _packages(state, registries).install(ADMIN, NAME, "1.0.0")
+    assert failed.value.check == "signature"
+    assert state.store.packages.version(NAME, "1.0.0") is None
+    [row] = [a for a in state.store.audit.list_audit() if a.action == "install_package"]
+    assert row.result.startswith("failed: signature:")
+
+
+def test_a_package_signed_with_a_trusted_key_installs_and_another_key_or_a_changed_file_is_refused(
+    state: AppState, registries: Registries, tmp_path: Path
+):
+    from feather_connect.packages.signing import Signer, public_key_text
+
+    trusted, other = Signer.generate(), Signer.generate()
+    _require_signed(state, public_key_text(trusted.public))
+    good = _signed_wheel(tmp_path / "good", trusted).read_bytes()
+    by_other = _signed_wheel(tmp_path / "other", other).read_bytes()
+    changed = _rewheel(good, {f"{MODULE}/__init__.py": lambda b: b + b"print('changed')\n"})
+    packages = _packages(state, registries)
+    for content, why in ((by_other, "doesn't trust"), (changed, "not the file its signed RECORD names")):
+        _put(state, content, "1.0.0")
+        with pytest.raises(InstallFailed, match=why) as failed:
+            packages.install(ADMIN, NAME, "1.0.0")
+        assert failed.value.check == "signature"
+        assert state.store.packages.version(NAME, "1.0.0") is None
+        _forget(state)
+    _put(state, good, "1.0.0")
+    installed = packages.install(ADMIN, NAME, "1.0.0")
+    assert installed.signed_by == trusted.key_id and "signature" in installed.checks
+    assert packages.signing() == (True, [trusted.key_id])
+
+
+def _forget(state: AppState) -> None:
+    """Drop the built-in registry's files of the sample, so the next test wheel takes their place."""
+    files = state.store.registry._d.registry_files  # pyright: ignore[reportAttributeAccessIssue] # the memory store's
+    for name in [n for n in files if n.startswith(MODULE)]:
+        del files[name]
+
+
+def test_requiring_signed_packages_needs_trusted_keys_and_keys_must_be_ed25519(state: AppState):
+    from feather_connect.packages.signing import Signer, public_key_text
+    from feather_server.services.environment import ConfigProblem, Environment
+    from feather_connect.vault import MasterKey, Vault, new_master_key
+
+    vault = Vault(state.store.secrets, "dev", MasterKey.parse(new_master_key()))
+    environment = Environment(state.store, state.clock, "dev", vault)
+    with pytest.raises(ConfigProblem, match="needs trusted_package_keys"):
+        environment.put(ADMIN, "setting", "require_signed_packages", True)
+    with pytest.raises(ConfigProblem, match="not a public key"):
+        environment.put(ADMIN, "setting", "trusted_package_keys", ["ssh-rsa AAAA"])
+    with pytest.raises(ConfigProblem, match="true or false"):
+        environment.put(ADMIN, "setting", "require_signed_packages", "yes")
+    environment.put(ADMIN, "setting", "trusted_package_keys", [public_key_text(Signer.generate().public)])
+    environment.put(ADMIN, "setting", "require_signed_packages", True)

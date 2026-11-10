@@ -243,8 +243,20 @@ class Environments:
             finally:
                 shared.release()
 
-    def remove(self, lock_hash: str) -> None:
-        self._evict(self.path(lock_hash))
+    def remove(self, lock_hash: str) -> bool:
+        """Remove the environment of `lock_hash` unless a process has it in use or is building it. Returns whether
+        it is gone."""
+        shared = FileLock(self._root / _LOCKS / f"{_checked_hash(lock_hash)}.lock")
+        if not shared.try_acquire():
+            return False
+        try:
+            return not self.in_use(lock_hash) and self._evict(self.path(lock_hash))
+        finally:
+            shared.release()
+
+    def built(self) -> list[str]:
+        """The lock hashes of the environments built here, ready to use."""
+        return sorted(b.path.name for b in self._built())
 
     def _build(self, lock: bytes, lock_hash: str, keep: set[str]) -> Path:
         if self._uv is None:

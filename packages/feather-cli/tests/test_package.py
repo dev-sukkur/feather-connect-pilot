@@ -1,7 +1,9 @@
 """`feather package build`, `publish` and `search`, and `feather registry` (flow packages §4 and §10)."""
 
+import hashlib
 import json
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 from textwrap import dedent
 
@@ -40,6 +42,19 @@ def test_build_explains_a_project_without_a_version(cli, sample: Path):
 
 @pytest.fixture
 def server():
+    with _server("dev") as found:
+        yield found
+
+
+@pytest.fixture
+def qa_and_prod():
+    """Two environments, each its own server and store: what a promotion goes between."""
+    with _server("qa") as qa, _server("prod") as prod:
+        yield qa, prod
+
+
+@contextmanager
+def _server(env: str):
     from datetime import UTC, datetime, timedelta
 
     from feather_connect.clock import FrozenClock
@@ -56,19 +71,19 @@ def server():
     clock = FrozenClock(datetime(2026, 11, 9, tzinfo=UTC))
     store, spool, engine = MemoryStore(clock), MemorySpool(clock), LocalEngine(clock)
     runtime = Runtime([], store, spool, engine, code_sha="sha", clock=clock)
-    project = Project("p", Path("."), "dev", (), {}, {}, {"timezone": "UTC"}, "sha")
+    project = Project("p", Path("."), env, (), {}, {}, {"timezone": "UTC"}, "sha")
     from feather_connect.vault import MasterKey, Vault, new_master_key
 
     key = MasterKey.parse(new_master_key())
     state = AppState(
-        Settings(secret_key="k"),
+        Settings(secret_key="k", env=env),
         project,
         store,
         spool,
         engine,
         runtime,
         clock=clock,
-        vault=Vault(store.secrets, "dev", key),
+        vault=Vault(store.secrets, env, key),
     )
     tokens = {
         role: issue_token(store, role, timedelta(days=1), role="admin" if role == "admin" else "operator",
@@ -253,3 +268,115 @@ def test_connections_and_secrets_of_the_environment(cli, server, tmp_path: Path)
     assert rotated.exit_code == 0 and "sealed 1 secrets" in rotated.stdout
     assert cli("secret", "delete", "zakya/client_secret", *admin).exit_code == 0
     assert "no secret is set" in cli("secret", "list", *operator).stdout
+
+
+# Promotion, uninstall and signing (tasks 10 and 11).
+
+
+def _installed_ready(cli, sample: Path, base: str, tokens: dict[str, str], state) -> None:
+    qa = sample / "env" / "qa.yaml"  # the sample has dev and prod: qa is like dev
+    if not qa.exists():
+        shutil.copyfile(sample / "env" / "dev.yaml", qa)
+    assert cli("package", "build", "--project", str(sample)).exit_code == 0
+    publish = ("--project", str(sample), "--url", base, "--token", tokens["publish"])
+    assert cli("package", "publish", *publish).exit_code == 0
+    installed = cli("package", "install", "acme-invoices==1.0.0", "--server", base, "--token", tokens["admin"])
+    assert installed.exit_code == 0, installed.output
+
+
+def test_promote_installs_in_prod_the_bytes_tested_in_qa(cli, sample: Path, qa_and_prod):
+    (qa, qa_tokens, qa_state), (prod, prod_tokens, prod_state) = qa_and_prod
+    _installed_ready(cli, sample, qa, qa_tokens, qa_state)
+    ends = ("--from-server", qa, "--from-token", qa_tokens["admin"], "--to-server", prod)
+    promote = ("package", "promote", "acme-invoices==1.0.0", "--from", "qa", "--to", "prod", *ends)
+    early = cli(*promote, "--to-token", prod_tokens["admin"])
+    assert early.exit_code == 1 and "only a version that is ready" in early.stderr  # not tested in qa yet
+    prepare(qa_state, "acme-invoices")
+    denied = cli(*promote, "--to-token", prod_tokens["operator"])
+    assert denied.exit_code == 1 and "403" in denied.stderr
+    done = cli(*promote, "--to-token", prod_tokens["admin"], "--reason", "release 1.0", "--json")
+    assert done.exit_code == 0, done.output
+    doc = json.loads(done.stdout)
+    tested = qa_state.store.packages.version("acme-invoices", "1.0.0")
+    assert doc["sha256"] == tested.sha256 and doc["state"] == "preparing" and doc["from"] == "qa"
+    installed = prod_state.store.packages.version("acme-invoices", "1.0.0")
+    assert installed is not None and installed.sha256 == tested.sha256
+    prod_bytes = prod_state.store.packages.wheel(installed.sha256)
+    assert prod_bytes == qa_state.store.packages.wheel(tested.sha256)  # byte for byte
+    assert hashlib.sha256(prod_bytes).hexdigest() == tested.sha256
+    kept = prod_state.store.registry.file(installed.filename)  # and prod's own registry has the copy
+    assert kept is not None and kept.sha256 == tested.sha256
+    [row] = [a for a in prod_state.store.audit.list_audit() if a.action == "promote_package"]
+    assert row.result == "ok" and row.request["from"] == "qa" and row.request["sha256"] == tested.sha256
+    assert any(a.action == "export_package" for a in qa_state.store.audit.list_audit())
+    again = cli(*promote, "--to-token", prod_tokens["admin"])
+    assert again.exit_code == 1 and "install a new version" in again.stderr
+
+
+def test_a_promotion_whose_bytes_dont_match_the_sha256_is_refused(qa_and_prod, sample: Path, cli):
+    import httpx
+
+    (qa, qa_tokens, qa_state), (prod, prod_tokens, prod_state) = qa_and_prod
+    _installed_ready(cli, sample, qa, qa_tokens, qa_state)
+    prepare(qa_state, "acme-invoices")
+    tested = qa_state.store.packages.version("acme-invoices", "1.0.0")
+    content = qa_state.store.packages.wheel(tested.sha256)
+    answer = httpx.post(
+        f"{prod}/api/v1/packages:promote",
+        params={"filename": tested.filename, "sha256": "0" * 64, "from": "qa"},
+        content=content,
+        headers={"Authorization": f"Bearer {prod_tokens['admin']}", "Content-Type": "application/octet-stream"},
+    )
+    assert answer.status_code == 422 and answer.json()["check"] == "sha256"
+    assert prod_state.store.packages.version("acme-invoices", "1.0.0") is None
+
+
+def test_uninstall_is_refused_while_a_flow_is_active_then_removes_the_wheel(cli, sample: Path, server):
+    base, tokens, state = server
+    _installed_ready(cli, sample, base, tokens, state)
+    prepare(state, "acme-invoices")
+    admin = ("--server", base, "--token", tokens["admin"])
+    operator = ("--server", base, "--token", tokens["operator"])
+    flow = "acme-invoices/invoices"
+    assert cli("flow", "activate", flow, "--version", "1.0.0", *operator).exit_code == 0
+    host_up(state, "acme-invoices")
+    denied = cli("package", "uninstall", "acme-invoices==1.0.0", "--yes", *operator)
+    assert denied.exit_code == 1 and "403" in denied.stderr
+    busy = cli("package", "uninstall", "acme-invoices==1.0.0", "--yes", *admin)
+    assert busy.exit_code == 1 and "is active" in busy.stderr and "deactivate its flows first" in busy.stderr
+    assert cli("flow", "deactivate", flow, *operator).exit_code == 0
+    sha = state.store.packages.version("acme-invoices", "1.0.0").sha256
+    done = cli("package", "uninstall", "acme-invoices==1.0.0", "--yes", "--reason", "old", *admin, "--json")
+    assert done.exit_code == 0, done.output
+    assert json.loads(done.stdout) == {
+        "name": "acme-invoices",
+        "version": "1.0.0",
+        "state": "uninstalled",
+        "wheel_deleted": True,
+    }
+    assert state.store.packages.version("acme-invoices", "1.0.0").state == "uninstalled"  # its history stays
+    assert state.store.packages.wheel(sha) is None
+    assert state.store.packages.activations("acme-invoices")  # and its flows' rows
+    rows = [a.result for a in state.store.audit.list_audit() if a.action == "uninstall_package"]
+    assert "ok" in rows and any(r.startswith("refused:") for r in rows)
+    gone = cli("package", "uninstall", "acme-invoices==1.0.0", "--yes", *admin)
+    assert gone.exit_code == 1 and "not installed" in gone.stderr
+
+
+def test_keygen_writes_a_key_that_signs_a_build(cli, sample: Path, tmp_path: Path):
+    from feather_connect.packages.signing import check_trusted_keys, verify_wheel
+
+    key = tmp_path / "signing.pem"
+    made = cli("package", "keygen", "--out", str(key), "--json")
+    assert made.exit_code == 0, made.output
+    doc = json.loads(made.stdout)
+    assert doc["public_key"].startswith("ed25519:") and key.is_file()
+    assert cli("package", "keygen", "--out", str(key)).exit_code == 1  # never over a key
+    built = cli("package", "build", "--project", str(sample), "--sign-key", str(key), "--json")
+    assert built.exit_code == 0, built.output
+    wheel = json.loads(built.stdout)
+    assert wheel["signed_by"] == doc["key_id"]
+    content = Path(wheel["wheel"]).read_bytes()
+    assert verify_wheel(content, check_trusted_keys([doc["public_key"]])) == doc["key_id"]
+    again = cli("package", "build", "--project", str(sample), "--sign-key", str(key), "--json")
+    assert json.loads(again.stdout)["sha256"] == wheel["sha256"]  # still reproducible

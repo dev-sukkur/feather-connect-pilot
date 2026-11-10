@@ -1,5 +1,6 @@
-"""`feather package`: build a flow package from the project, publish it to a registry, search a registry, fetch a
-wheel from one, and install a version into an environment, list what is installed and show it."""
+"""`feather package`: build a flow package from the project (signed, with a key from `keygen`), publish it to a
+registry, search a registry, fetch a wheel from one, install a version into an environment, list what is installed and
+show it, promote a tested version from one environment to another by sha256, and uninstall a version."""
 
 import hashlib
 from pathlib import Path
@@ -13,6 +14,7 @@ from feather_cli.options import Env, Json, ProjectDir
 from feather_cli.output import emit, fail
 from feather_connect.packages.build import build_package
 from feather_connect.packages.manifest import ManifestError
+from feather_connect.packages.signing import SignatureError, Signer, public_key_text
 
 package_app = typer.Typer(help="Build, publish, find and install flow packages.", no_args_is_help=True)
 
@@ -22,17 +24,38 @@ OutDir = Annotated[
 ]
 
 
+SignKey = Annotated[
+    Path | None,
+    typer.Option(
+        "--sign-key",
+        envvar="FEATHER_SIGNING_KEY_FILE",
+        help="An ed25519 private key (PEM, from feather package keygen) to sign the wheel with.",
+        show_default=False,
+    ),
+]
+
+
 @package_app.command()
 def build(
     project: ProjectDir = Path("."),
     env: Env = "dev",
     out: OutDir = None,
+    sign_key: SignKey = None,
     json_mode: Json = False,
 ) -> None:
     """Build the project into a flow package's wheel. feather.yaml needs a name and a version; the project is checked
-    as `feather validate` checks it. Building the same tree twice gives the same sha256."""
+    as `feather validate` checks it. Building the same tree twice gives the same sha256. With --sign-key, the wheel
+    carries a signature that an environment requiring signed packages checks at install."""
+    signer = None
+    if sign_key is not None:
+        try:
+            signer = Signer.from_pem(sign_key.read_bytes())
+        except OSError as error:
+            fail(f"can't read the signing key {sign_key}: {error}", json_mode=json_mode)
+        except SignatureError as error:
+            fail(str(error), hint="make one with: feather package keygen", json_mode=json_mode)
     try:
-        built = build_package(project, out, env=env)
+        built = build_package(project, out, env=env, signer=signer)
     except ManifestError as error:
         fail(str(error), hint="fix it, then build again", json_mode=json_mode)
     document = {
@@ -43,6 +66,7 @@ def build(
         "version": built.manifest["version"],
         "flows": [f["name"] for f in built.manifest["flows"]],
         "warnings": list(built.warnings),
+        "signed_by": None if signer is None else signer.key_id,
     }
     for warning in built.warnings:
         typer.echo(f"warning: {warning}", err=True)
@@ -305,4 +329,140 @@ def fetch(
         {"wheel": str(path), "sha256": sha256, "registry": registry},
         json_mode=json_mode,
         human=lambda d: typer.echo(f"fetched {d['wheel']}\nsha256 {d['sha256']}"),
+    )
+
+
+@package_app.command()
+def keygen(
+    out: Annotated[Path, typer.Option("--out", help="Where the private key goes, as PEM.")] = Path(
+        "feather-signing-key.pem"
+    ),
+    json_mode: Json = False,
+) -> None:
+    """Make an ed25519 key to sign packages with. The private key goes to --out, which must not exist yet: keep it in
+    the CI's secrets. The public key is printed: list it in the environment's trusted_package_keys setting."""
+    signer = Signer.generate()
+    try:
+        with out.open("xb") as file:  # never over a key that is there
+            file.write(signer.pem())
+    except FileExistsError:
+        fail(f"{out} exists already", hint="choose another --out, or remove it first", json_mode=json_mode)
+    except OSError as error:
+        fail(f"can't write {out}: {error}", json_mode=json_mode)
+    try:
+        out.chmod(0o600)  # on Windows, only the read-only bit: the file's ACL is the folder's
+    except OSError:
+        pass
+    document = {"private_key": str(out), "public_key": public_key_text(signer.public), "key_id": signer.key_id}
+    emit(
+        document,
+        json_mode=json_mode,
+        human=lambda d: typer.echo(
+            f"wrote the private key to {d['private_key']}\npublic key {d['public_key']} (id {d['key_id']})"
+        ),
+    )
+
+
+FromEnv = Annotated[str, typer.Option("--from", help="The environment the version was tested in.")]
+ToEnv = Annotated[str, typer.Option("--to", help="The environment to install it in.")]
+FromServer = Annotated[
+    str | None, typer.Option("--from-server", help="The source environment's server URL.", show_default=False)
+]
+FromToken = Annotated[
+    str | None, typer.Option("--from-token", help="An admin's token for the source.", show_default=False)
+]
+ToServer = Annotated[
+    str | None, typer.Option("--to-server", help="The target environment's server URL.", show_default=False)
+]
+ToToken = Annotated[
+    str | None, typer.Option("--to-token", help="An admin's token for the target.", show_default=False)
+]
+
+
+@package_app.command()
+def promote(
+    spec: Annotated[str, typer.Argument(help="The package and version: acme-invoices==1.4.0.")],
+    source: FromEnv,
+    target: ToEnv,
+    reason: Reason = None,
+    from_server: FromServer = None,
+    from_token: FromToken = None,
+    to_server: ToServer = None,
+    to_token: ToToken = None,
+    project: ProjectDir = Path("."),
+    json_mode: Json = False,
+) -> None:
+    """Install in --to exactly the wheel that --from tested, matched by sha256: the version must be ready in --from,
+    and --to installs the bytes only if they hash to the sha256 --from gave. The wheel goes through this command, so
+    neither environment needs a token for, or a network path to, the other. Each server is found as for any remote
+    command (env/<env>.yaml's server:, or --from-server and --to-server), and needs an admin's token."""
+    name, version = _wanted(spec, json_mode)
+    if version is None:
+        fail("promote needs a version", hint="write it as acme-invoices==1.4.0", json_mode=json_mode)
+    if source == target:
+        fail("--from and --to are the same environment", json_mode=json_mode)
+    with remote.client(project, source, from_server, from_token, json_mode) as qa:
+        filename, content, sha256 = remote.call(lambda: qa.export_wheel(name, version), json_mode)
+    with remote.client(project, target, to_server, to_token, json_mode) as prod:
+
+        def attempt() -> dict[str, Any]:
+            try:
+                return prod.promote_package(filename, content, sha256, source, reason)
+            except ApiError as error:
+                hint = _INSTALL_HINTS.get(str(error.problem.get("check") or ""))
+                if hint is None:
+                    raise
+                fail(str(error), hint=hint, json_mode=json_mode)
+
+        installed = remote.call(attempt, json_mode)
+    if installed.get("sha256") != sha256:  # the server says what it installed: it must be these bytes
+        fail(f"{target} installed sha256 {installed.get('sha256')}, not {sha256}", json_mode=json_mode)
+
+    def human(doc: dict[str, Any]) -> None:
+        typer.echo(f"promoted {doc['name']} {doc['version']} from {source} to {target}, sha256 {doc['sha256']}")
+        typer.echo(f"it is {doc['state']} in {target}: a worker there prepares it; then activate its flows")
+
+    emit({**installed, "from": source, "to": target}, json_mode=json_mode, human=human)
+
+
+@package_app.command()
+def uninstall(
+    spec: Annotated[str, typer.Argument(help="The package and version: acme-invoices==1.3.0.")],
+    reason: Reason = None,
+    yes: remote.Yes = False,
+    project: ProjectDir = Path("."),
+    env: Env = "dev",
+    server: remote.Server = None,
+    token: remote.Token = None,
+    json_mode: Json = False,
+) -> None:
+    """Uninstall a version: refused while a flow of it is active or a run of it is queued or running. Its history
+    stays; its wheel is deleted unless another installed version has the same bytes, and workers remove its
+    environment once nothing installed needs it."""
+    name, version = _wanted(spec, json_mode)
+    if version is None:
+        fail("uninstall needs a version", hint="write it as acme-invoices==1.3.0", json_mode=json_mode)
+    if not yes and not json_mode and not typer.confirm(f"Uninstall {name} {version} from {env}?"):
+        fail("nothing was uninstalled", json_mode=json_mode)
+    with remote.client(project, env, server, token, json_mode) as api:
+
+        def attempt() -> dict[str, Any]:
+            try:
+                return api.uninstall_package(name, version, reason)
+            except ApiError as error:
+                if error.problem.get("check") != "in_use":
+                    raise
+                fail(
+                    str(error),
+                    hint="deactivate its flows first (feather flow deactivate), and let its runs finish",
+                    json_mode=json_mode,
+                )
+
+        done = remote.call(attempt, json_mode)
+    emit(
+        done,
+        json_mode=json_mode,
+        human=lambda d: typer.echo(
+            f"uninstalled {d['name']} {d['version']}" + ("" if d["wheel_deleted"] else " (its wheel is kept)")
+        ),
     )

@@ -45,6 +45,7 @@ from feather_connect.storage.port import (
     InboxDay,
     InboxEvent,
     InboxStore,
+    InUse,
     KeyMismatch,
     KeySighting,
     Ledger,
@@ -1453,6 +1454,30 @@ class _Packages(PackageStore):
     def wheel(self, sha256: str) -> bytes | None:
         with self._d.lock:
             return self._d.wheels.get(sha256)
+
+    def uninstall(self, name: str, version: str, by: str, at: datetime, reason: str | None = None) -> bool:
+        key = (name, version_key(version))
+        with self._d.lock:
+            row = self._d.package_versions.get(key)
+            if row is None or row.state == "uninstalled":
+                raise KeyError(f"{name} {version} is not installed here")
+            busy = [
+                a
+                for (_, package, vkey), a in self._d.activations.items()
+                if package == name and vkey == key[1] and a.state in ("active", "activating")
+            ]
+            if busy:
+                raise InUse(f"{name} {row.version}: its flow {busy[0].flow} is {busy[0].state}")
+            self._d.package_versions[key] = replace(row, state="uninstalled")
+            shared = any(
+                v.sha256 == row.sha256 and v.state != "uninstalled" for v in self._d.package_versions.values()
+            )
+            if not shared:
+                self._d.wheels.pop(row.sha256, None)
+            listeners = list(self._d.catalog_listeners)
+        for listener in listeners:
+            listener()
+        return not shared
 
     def activations(self, name: str, version: str | None = None) -> list[FlowActivation]:
         wanted = None if version is None else version_key(version)
