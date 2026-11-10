@@ -15,6 +15,9 @@ from feather_connect.clock import Clock, SystemClock
 from feather_connect.core.connector import InboundRequest
 from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
+    ActivationState,
+    HostState,
+    PackageHost,
     CLOSED,
     ENV_KINDS,
     MAX_ENV_ROWS,
@@ -149,6 +152,9 @@ class _Data:
     )  # by (flow, package, version_key)
     catalog_listeners: list[Callable[[], None]] = field(default_factory=list[Callable[[], None]])
     package_envs: dict[tuple[str, str], PackageEnv] = field(default_factory=dict[tuple[str, str], PackageEnv])
+    package_hosts: dict[tuple[str, str, str], PackageHost] = field(
+        default_factory=dict[tuple[str, str, str], PackageHost]
+    )
     env_config: dict[tuple[str, str, str], EnvEntry] = field(
         default_factory=dict[tuple[str, str, str], EnvEntry]
     )
@@ -211,6 +217,27 @@ class _Runs(RunJournal):
             and (cursor is None or r.run_id < cursor)
         ]
         return runs[:limit]
+
+    def tagged_versions(self, statuses: Sequence[str] = ("queued", "running")) -> set[tuple[str, str]]:
+        with self._d.lock:
+            runs = list(self._d.runs.values())
+        found: set[tuple[str, str]] = set()
+        for r in runs:
+            package, version = r.params.get("package"), r.params.get("version")
+            if r.status in statuses and isinstance(package, str) and isinstance(version, str):
+                found.add((package, version))
+        return found
+
+    def queued_of(self, package: str, version: str, limit: int = 50) -> list[Run]:
+        with self._d.lock:
+            runs = sorted(self._d.runs.values(), key=lambda r: (r.created_at, r.run_id))
+        return [
+            r
+            for r in runs
+            if r.status == "queued"
+            and r.params.get("package") == package
+            and r.params.get("version") == version
+        ][:limit]
 
     def count_runs(self, status: str | None = None, since: datetime | None = None) -> int:
         with self._d.lock:
@@ -1447,28 +1474,73 @@ class _Packages(PackageStore):
             if row is None:
                 raise KeyError(f"{name} {version} has no flow {flow}")
             for key, other in self._d.activations.items():
-                if key[0] == flow and key != wanted and other.state == "active":
+                if key[0] == flow and key != wanted and other.state == "activating":
                     self._d.activations[key] = replace(
                         other, state="inactive", changed_by=by, changed_at=at, reason=reason
                     )
-            done = replace(row, state="active", changed_by=by, changed_at=at, reason=reason, error=None)
+            state = "active" if row.state == "active" else "activating"
+            done = replace(row, state=state, changed_by=by, changed_at=at, reason=reason, error=None)
             self._d.activations[wanted] = done
             listeners = list(self._d.catalog_listeners)
         for listener in listeners:
             listener()
         return done
 
+    def _settle(
+        self, name: str, version: str, to: ActivationState, at: datetime, error: str | None
+    ) -> list[FlowActivation]:
+        key = version_key(version)
+        done: list[FlowActivation] = []
+        with self._d.lock:
+            for (flow, package, vkey), row in list(self._d.activations.items()):
+                if package != name or vkey != key or row.state != "activating":
+                    continue
+                if to == "active":
+                    for other_key, other in list(self._d.activations.items()):
+                        if (
+                            other_key[0] == flow
+                            and other_key != (flow, package, vkey)
+                            and other.state == "active"
+                        ):
+                            self._d.activations[other_key] = replace(other, state="inactive", changed_at=at)
+                settled = replace(row, state=to, changed_at=at, error=error)
+                self._d.activations[(flow, package, vkey)] = settled
+                done.append(settled)
+            listeners = list(self._d.catalog_listeners) if done else []
+        for listener in listeners:
+            listener()
+        return sorted(done, key=lambda a: a.flow)
+
+    def promote(self, name: str, version: str, at: datetime) -> list[FlowActivation]:
+        return self._settle(name, version, "active", at, None)
+
+    def activation_failed(self, name: str, version: str, error: str, at: datetime) -> list[FlowActivation]:
+        return self._settle(name, version, "failed", at, error)
+
+    def activating(self) -> list[FlowActivation]:
+        with self._d.lock:
+            found = [a for a in self._d.activations.values() if a.state == "activating"]
+        return sorted(found, key=lambda a: a.flow)[:MAX_PACKAGE_ROWS]
+
     def deactivate(self, flow: str, by: str, at: datetime, reason: str | None = None) -> FlowActivation:
         with self._d.lock:
-            found = [(k, a) for k, a in self._d.activations.items() if k[0] == flow and a.state == "active"]
+            found = [
+                (k, a)
+                for k, a in self._d.activations.items()
+                if k[0] == flow and a.state in ("active", "activating")
+            ]
             if not found:
                 raise KeyError(f"no version of {flow} is active")
-            key, row = found[0]
-            done = replace(row, state="inactive", changed_by=by, changed_at=at, reason=reason)
-            self._d.activations[key] = done
+            found.sort(key=lambda item: item[1].state != "active")  # the active one first
+            done: FlowActivation | None = None
+            for key, row in found:
+                settled = replace(row, state="inactive", changed_by=by, changed_at=at, reason=reason)
+                self._d.activations[key] = settled
+                done = done or settled
             listeners = list(self._d.catalog_listeners)
         for listener in listeners:
             listener()
+        assert done is not None
         return done
 
     def active(self) -> list[FlowActivation]:
@@ -1516,6 +1588,26 @@ class _Packages(PackageStore):
         with self._d.lock:
             found = [e for (w, _), e in self._d.package_envs.items() if worker_id in (None, w)]
         return sorted(found, key=lambda e: (e.worker_id, e.lock_hash))[:MAX_PACKAGE_ROWS]
+
+    def record_host(
+        self,
+        worker_id: str,
+        name: str,
+        version: str,
+        state: HostState,
+        restarts: int,
+        at: datetime,
+        error: str | None = None,
+    ) -> None:
+        with self._d.lock:
+            self._d.package_hosts[(worker_id, name, version)] = PackageHost(
+                worker_id, name, version, state, restarts, error, at
+            )
+
+    def hosts(self, worker_id: str | None = None) -> list[PackageHost]:
+        with self._d.lock:
+            found = [h for (w, _, _), h in self._d.package_hosts.items() if worker_id in (None, w)]
+        return sorted(found, key=lambda h: (h.worker_id, h.package, h.version))[:MAX_PACKAGE_ROWS]
 
 
 class _EnvConfig(EnvConfigStore):

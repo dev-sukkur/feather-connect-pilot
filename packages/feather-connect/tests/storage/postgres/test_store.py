@@ -483,6 +483,7 @@ def test_a_deactivated_flow_stops_firing_within_seconds_over_listen_notify(store
     spec = {"name": "acme/invoices", "datasets": [], "triggers": [{"kind": "every", "seconds": 1.0}]}
     store.packages.install(_package_version({"specs": {"acme/invoices": spec}}), b"wheel", ["acme/invoices"])
     store.packages.activate("acme/invoices", "acme", "1.0.0", "ops", T0)
+    store.packages.promote("acme", "1.0.0", T0)  # its host is up
     catalogue = Catalogue(store, monotonic=lambda: 0.0)  # no poll: only NOTIFY makes it read again
     catalogue.listen()
     try:
@@ -525,7 +526,8 @@ def test_a_notify_during_a_read_isnt_lost(store: Store):
         first.start()
         assert reading.wait(5)
         object.__setattr__(store.packages, "active", real)
-        store.packages.activate("acme/invoices", "acme", "1.0.0", "ops", T0)  # NOTIFY while the read runs
+        store.packages.activate("acme/invoices", "acme", "1.0.0", "ops", T0)
+        store.packages.promote("acme", "1.0.0", T0)  # NOTIFY while the read runs
         deadline = time.monotonic() + 5
         while catalogue._generation == 0 and time.monotonic() < deadline:  # pyright: ignore[reportPrivateUsage]
             time.sleep(0.02)

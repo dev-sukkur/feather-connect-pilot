@@ -24,6 +24,8 @@ from feather_connect.clock import Clock, SystemClock
 from feather_connect.core.connector import InboundRequest
 from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
+    HostState,
+    PackageHost,
     CLOSED,
     MAX_ENV_ROWS,
     MAX_PACKAGE_ROWS,
@@ -301,6 +303,27 @@ class _Runs(RunJournal):
                      and (%(cursor)s::text is null or run_id < %(cursor)s)
                    order by run_id desc limit %(limit)s""",
                 {"tenant": self._db.tenant, "flow": flow, "status": status, "cursor": cursor, "limit": limit},
+            ).fetchall()
+        return [_run(r) for r in rows]
+
+    def tagged_versions(self, statuses: Sequence[str] = ("queued", "running")) -> set[tuple[str, str]]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select distinct params->>'package' as package, params->>'version' as version from feather.run
+                   where tenant_id = %s and status = any(%s)
+                     and params ? 'package' and params ? 'version'""",  # run_tagged_idx
+                (self._db.tenant, list(statuses)),
+            ).fetchall()
+        return {(r["package"], r["version"]) for r in rows if r["package"] and r["version"]}
+
+    def queued_of(self, package: str, version: str, limit: int = 50) -> list[Run]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.run
+                   where tenant_id = %s and status = 'queued'
+                     and params->>'package' = %s and params->>'version' = %s
+                   order by created_at, run_id limit %s""",  # run_tagged_idx
+                (self._db.tenant, package, version, limit),
             ).fetchall()
         return [_run(r) for r in rows]
 
@@ -2423,13 +2446,14 @@ class _Packages(PackageStore):
         with self._db.tx() as conn:
             conn.execute(
                 """update feather.flow_activation set state = 'inactive', changed_by = %s, changed_at = %s, reason = %s
-                   where tenant_id = %s and flow = %s and state = 'active'
+                   where tenant_id = %s and flow = %s and state = 'activating'
                      and not (package = %s and version_key = %s)""",
                 (by, at, reason, tenant, flow, name, key),
             )
             row = conn.execute(
-                f"""update feather.flow_activation set state = 'active', changed_by = %s, changed_at = %s,
-                        reason = %s, error = null
+                f"""update feather.flow_activation
+                    set state = case when state = 'active' then 'active' else 'activating' end,
+                        changed_by = %s, changed_at = %s, reason = %s, error = null
                     where tenant_id = %s and flow = %s and package = %s and version_key = %s
                     returning {self._ACTIVATION}""",
                 (by, at, reason, tenant, flow, name, key),
@@ -2440,18 +2464,73 @@ class _Packages(PackageStore):
         return self._activation(row)
 
     def deactivate(self, flow: str, by: str, at: datetime, reason: str | None = None) -> FlowActivation:
+        tenant = self._db.tenant
         with self._db.tx() as conn:
-            row = conn.execute(
+            found = conn.execute(
+                """select package, version_key, state from feather.flow_activation
+                   where tenant_id = %s and flow = %s and state in ('active', 'activating')
+                   order by (state <> 'active') for update""",
+                (tenant, flow),
+            ).fetchall()
+            if not found:
+                raise KeyError(f"no version of {flow} is active")
+            rows = conn.execute(
                 f"""update feather.flow_activation set state = 'inactive', changed_by = %s, changed_at = %s,
                         reason = %s
-                    where tenant_id = %s and flow = %s and state = 'active'
+                    where tenant_id = %s and flow = %s and state in ('active', 'activating')
+                    returning {self._ACTIVATION}, version_key""",
+                (by, at, reason, tenant, flow),
+            ).fetchall()
+            conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, tenant))
+        first = (found[0]["package"], found[0]["version_key"])  # the active one, if there is one
+        return self._activation(next(r for r in rows if (r["package"], r["version_key"]) == first))
+
+    def _settle(
+        self, name: str, version: str, to: str, at: datetime, error: str | None
+    ) -> list[FlowActivation]:
+        tenant, key = self._db.tenant, version_key(version)
+        with self._db.tx() as conn:
+            flows = [
+                r["flow"]
+                for r in conn.execute(
+                    """select flow from feather.flow_activation
+                       where tenant_id = %s and package = %s and version_key = %s and state = 'activating'
+                       for update""",
+                    (tenant, name, key),
+                ).fetchall()
+            ]
+            if not flows:
+                return []
+            if to == "active":
+                conn.execute(
+                    """update feather.flow_activation set state = 'inactive', changed_at = %s
+                       where tenant_id = %s and flow = any(%s) and state = 'active'
+                         and not (package = %s and version_key = %s)""",
+                    (at, tenant, flows, name, key),
+                )
+            rows = conn.execute(
+                f"""update feather.flow_activation set state = %s, changed_at = %s, error = %s
+                    where tenant_id = %s and package = %s and version_key = %s and state = 'activating'
                     returning {self._ACTIVATION}""",
-                (by, at, reason, self._db.tenant, flow),
-            ).fetchone()
-            if row is None:
-                raise KeyError(f"no version of {flow} is active")
-            conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, self._db.tenant))
-        return self._activation(row)
+                (to, at, error, tenant, name, key),
+            ).fetchall()
+            conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, tenant))
+        return sorted((self._activation(r) for r in rows), key=lambda a: a.flow)
+
+    def promote(self, name: str, version: str, at: datetime) -> list[FlowActivation]:
+        return self._settle(name, version, "active", at, None)
+
+    def activation_failed(self, name: str, version: str, error: str, at: datetime) -> list[FlowActivation]:
+        return self._settle(name, version, "failed", at, error)
+
+    def activating(self) -> list[FlowActivation]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                f"""select {self._ACTIVATION} from feather.flow_activation
+                    where tenant_id = %s and state = 'activating' order by flow collate "C" limit %s""",
+                (self._db.tenant, MAX_PACKAGE_ROWS),
+            ).fetchall()
+        return [self._activation(r) for r in rows]
 
     def active(self) -> list[FlowActivation]:
         with self._db.tx() as conn:
@@ -2526,6 +2605,48 @@ class _Packages(PackageStore):
             ).fetchall()
         return [
             PackageEnv(r["worker_id"], r["lock_hash"], r["state"], r["error"], r["built_at"]) for r in rows
+        ]
+
+    def record_host(
+        self,
+        worker_id: str,
+        name: str,
+        version: str,
+        state: HostState,
+        restarts: int,
+        at: datetime,
+        error: str | None = None,
+    ) -> None:
+        with self._db.tx() as conn:
+            conn.execute(
+                """insert into feather.package_host
+                       (tenant_id, worker_id, package, version, state, restarts, error, changed_at)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s)
+                   on conflict (tenant_id, worker_id, package, version)
+                   do update set state = excluded.state, restarts = excluded.restarts, error = excluded.error,
+                                 changed_at = excluded.changed_at""",
+                (self._db.tenant, worker_id, name, version, state, restarts, error, at),
+            )
+
+    def hosts(self, worker_id: str | None = None) -> list[PackageHost]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select worker_id, package, version, state, restarts, error, changed_at from feather.package_host
+                   where tenant_id = %s and (%s::text is null or worker_id = %s)
+                   order by worker_id collate "C", package collate "C", version collate "C" limit %s""",
+                (self._db.tenant, worker_id, worker_id, MAX_PACKAGE_ROWS),
+            ).fetchall()
+        return [
+            PackageHost(
+                r["worker_id"],
+                r["package"],
+                r["version"],
+                r["state"],
+                r["restarts"],
+                r["error"],
+                r["changed_at"],
+            )
+            for r in rows
         ]
 
 

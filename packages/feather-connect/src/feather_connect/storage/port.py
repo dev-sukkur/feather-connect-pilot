@@ -245,6 +245,15 @@ class RunJournal(Protocol):
         """Newest first. `cursor` is the `run_id` of the last run of the previous page."""
         ...
 
+    def tagged_versions(self, statuses: Sequence[str] = ("queued", "running")) -> set[tuple[str, str]]:
+        """The package versions that runs with one of `statuses` are tagged with (`params.package` and
+        `params.version`, as the catalogue's scheduler writes them), however many runs there are (flow packages §7.1)."""
+        ...
+
+    def queued_of(self, package: str, version: str, limit: int = 50) -> list[Run]:
+        """The queued runs tagged with the package version, oldest first."""
+        ...
+
     def count_runs(self, status: str | None = None, since: datetime | None = None) -> int:
         """How many runs have `status` (any, when None) and were created at `since` or later (any time, when None)."""
         ...
@@ -1334,6 +1343,23 @@ def check_wheel(version: "PackageVersion", content: bytes) -> None:
         )
 
 
+HostState = Literal["starting", "ready", "crash_loop", "failed", "stopped"]
+
+
+@dataclass(frozen=True)
+class PackageHost:
+    """How a worker's package host of a version stands (flow packages §7.1, task 9's Packages page): `restarts` counts
+    its ends in the crash window, and `error` is the last thing it died of."""
+
+    worker_id: str
+    package: str
+    version: str
+    state: HostState
+    restarts: int
+    error: str | None
+    changed_at: datetime
+
+
 @dataclass(frozen=True)
 class PackageEnv:
     """A dependency environment that a worker built for a lock hash (flow packages §5 step 3, task 8)."""
@@ -1386,14 +1412,29 @@ class PackageStore(Protocol):
     def activate(
         self, flow: str, name: str, version: str, by: str, at: datetime, reason: str | None = None
     ) -> FlowActivation:
-        """Make `version` the active one of `flow`, and any other version of it inactive, in one transaction, and
-        tell every listener that the catalogue changed (NOTIFY). Raises `KeyError` when the version has no such
-        flow."""
+        """Ask for `version` to be the active one of `flow` (§6): it is `activating`, and the version active now stays
+        active, until a host of the new one is up and `promote` makes the switch. A version already active stays so,
+        and another one activating is dropped (inactive). Tells every listener (NOTIFY). Raises `KeyError` when the
+        version has no such flow."""
+        ...
+
+    def promote(self, name: str, version: str, at: datetime) -> list[FlowActivation]:
+        """Make every flow that the version is `activating` active, and the version active before inactive, in one
+        transaction, and tell the listeners: a host of it is up. Returns the flows it made active."""
+        ...
+
+    def activation_failed(self, name: str, version: str, error: str, at: datetime) -> list[FlowActivation]:
+        """Mark every flow that the version is `activating` failed, saying why: its host didn't come up, and the
+        version active before stays active. Tells the listeners, and returns those flows."""
+        ...
+
+    def activating(self) -> list[FlowActivation]:
+        """Every flow waiting for a host of the version asked for, by name, at most `MAX_PACKAGE_ROWS`."""
         ...
 
     def deactivate(self, flow: str, by: str, at: datetime, reason: str | None = None) -> FlowActivation:
-        """Make the active version of `flow` inactive, and tell the listeners. Raises `KeyError` when no version of
-        it is active."""
+        """Make the active version of `flow` inactive, and one activating too, and tell the listeners. Returns the
+        active one, or else the one activating. Raises `KeyError` when no version of it is either."""
         ...
 
     def active(self) -> list[FlowActivation]:
@@ -1426,6 +1467,23 @@ class PackageStore(Protocol):
 
     def envs(self, worker_id: str | None = None) -> list[PackageEnv]:
         """The environments of one worker or of all, by worker and lock hash, at most `MAX_PACKAGE_ROWS`."""
+        ...
+
+    def record_host(
+        self,
+        worker_id: str,
+        name: str,
+        version: str,
+        state: HostState,
+        restarts: int,
+        at: datetime,
+        error: str | None = None,
+    ) -> None:
+        """Note how the worker's host of the version stands."""
+        ...
+
+    def hosts(self, worker_id: str | None = None) -> list[PackageHost]:
+        """The hosts of one worker or of all, by worker, package and version, at most `MAX_PACKAGE_ROWS`."""
         ...
 
 
