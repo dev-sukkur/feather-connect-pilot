@@ -42,7 +42,7 @@ class Site:
         return self.stack.url
 
     def deliveries(self, route: str, status: str | None = None) -> list[Any]:
-        return self.stack.store.ledger.list_deliveries(route=route, status=status)
+        return self.stack.store.ledger.list_deliveries(route=f"dashboard/{route}", status=status)
 
     def captured(self) -> list[dict[str, Any]]:
         if not self.capture.exists():
@@ -55,7 +55,9 @@ class Site:
         task = next(
             t
             for t in self.stack.store.runs.list_tasks(version.run_id)
-            if t.kind == kind and t.partition == version.partition and (route is None or t.route == route)
+            if t.kind == kind
+            and t.partition == version.partition
+            and (route is None or t.route == f"dashboard/{route}")
         )
         return f"/runs/{version.run_id}/tasks/{task.task_id}/records"
 
@@ -79,7 +81,7 @@ def open_site(root: Path) -> Iterator[Site]:
         stack.store.users.create_user(USER, hash_password(PASSWORD), "admin")
         token = issue_token(stack.store, "dashboard-tests", timedelta(hours=1), role="operator")
         answer = httpx.post(
-            f"{stack.url}/api/v1/flows/demo:run",
+            f"{stack.url}/api/v1/flows/dashboard/demo:run",
             json={"partitions": [f"day={day}" for day in DAYS]},
             headers={"Authorization": f"Bearer {token}"},
             timeout=30,

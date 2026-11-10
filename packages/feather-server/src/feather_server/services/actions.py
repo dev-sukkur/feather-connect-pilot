@@ -27,6 +27,7 @@ from feather_connect.runtime.extract import VerifyResult
 from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.storage.port import Delivery, DeliveryStatus, InvalidTransition, split_error
 from feather_server.auth import Actor
+from feather_server.catalog_view import CatalogDataset, dataset_of
 from feather_server.services.access import Capability, require
 from feather_server.services.previews import (
     Impact,
@@ -347,6 +348,8 @@ class Actions:
         reason: str | None,
         partitions: Sequence[str] | None,
         max_concurrent: int | None,
+        *,
+        trigger: str = "manual",
     ) -> str:
         if self._rt.is_flow_paused(flow.name):
             raise FlowPaused(f"flow {flow.name!r} is paused")
@@ -355,7 +358,7 @@ class Actions:
             params["partitions"] = list(dict.fromkeys(partitions))
         if max_concurrent is not None:
             params["max_concurrent"] = max_concurrent
-        return self._store.runs.create_run(flow.name, "manual", actor.name, params, reason=reason)
+        return self._store.runs.create_run(flow.name, trigger, actor.name, params, reason=reason)
 
     def _pause_target(self, flow: str) -> None:
         """Raises `KeyError` for a flow that is neither the runtime's nor an installed package's."""
@@ -363,8 +366,32 @@ class Actions:
         if package is None or not any(a.flow == flow for a in self._store.packages.activations(package)):
             self._rt.flow(flow)
 
+    def _packaged_dataset(self, dataset: str) -> tuple[ActiveFlow, CatalogDataset] | None:
+        """The active flow and catalogue entry of a packaged dataset; None when the runtime here has the dataset.
+        Raises `KeyError` for a dataset neither has."""
+        try:
+            self._rt.dataset(dataset)
+        except KeyError:
+            found = dataset_of(self._state, dataset)
+            active = self._packaged(found.flow)
+            if active is None:
+                raise KeyError(f"no dataset is named {dataset!r}") from None
+            return active, found
+        return None
+
     def preview_rerun(self, actor: Actor, dataset: str, partitions: Sequence[str]) -> Preview:
         """Say what reading these partitions of the dataset again would touch."""
+        packaged = self._packaged_dataset(dataset)
+        if packaged is not None:  # its host checks the partitions as it plans; its read cost is in its code
+            chosen = list(dict.fromkeys(partitions))
+            if not chosen:
+                raise ValueError("choose at least one partition")
+            selection = {"dataset": dataset, "partitions": chosen}
+            token = self._issue(actor, "rerun", selection, self._rerun_print(selection))
+            impact = Impact(
+                len(chosen), len(chosen) * len(packaged[1].routes), None, tuple(chosen[:_SAMPLES])
+            )
+            return Preview(token, "rerun", impact)
         flow, found = self._dataset_flow(dataset)
         chosen = self._check_partitions(found, partitions)
         selection = {"dataset": dataset, "partitions": chosen}
@@ -378,6 +405,19 @@ class Actions:
     def rerun(self, actor: Actor, token: str, *, reason: str | None = None) -> str:
         """Read the previewed partitions again, in a run of their flow. Returns the run."""
         selection = self._redeem(actor, "rerun", token, reason, self._rerun_print)
+        packaged = self._packaged_dataset(selection["dataset"])
+        if packaged is not None:
+            active = packaged[0]
+            return self._do(
+                actor,
+                "rerun",
+                f"dataset:{selection['dataset']}",
+                {"reason": reason, "partitions": selection["partitions"]},
+                lambda: self._queue_packaged(
+                    active, actor, reason, selection["partitions"], None, trigger="rerun"
+                ),
+                lambda run_id: f"ok: run {run_id}",
+            )
         flow, _ = self._dataset_flow(selection["dataset"])
         return self._do(
             actor,

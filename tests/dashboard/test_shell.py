@@ -28,7 +28,7 @@ def test_the_palette_finds_a_flow_a_run_by_id_and_a_page(signed_in: Page, site: 
     page.keyboard.press("Tab")  # the focus stays in the dialog
     expect(box).to_be_focused()
     page.keyboard.press("Enter")
-    expect(page).to_have_url(f"{site.url}/flows/demo")
+    expect(page).to_have_url(f"{site.url}/flows/dashboard/demo")
 
     run_id = site.stack.store.runs.list_runs(limit=1)[0].run_id
     page.keyboard.press("Control+k")
@@ -141,7 +141,7 @@ def test_ticking_rows_and_moving_with_the_keyboard(signed_in: Page, site: Site):
     page.get_by_role("checkbox", name="Tick every run shown").check()
     expect(page.locator("[data-bulk-count]")).to_contain_text("ticked")
     expect(cancel).to_be_enabled()
-    page.goto(f"{site.url}/routes/lake/deliveries")
+    page.goto(f"{site.url}/routes/dashboard/lake/deliveries")
     rows = page.locator("table[data-table=deliveries] > tbody > tr")
     assert rows.count() >= 2
     page.get_by_role("checkbox", name="Pick every delivery shown").check()

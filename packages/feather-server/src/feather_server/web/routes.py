@@ -31,7 +31,7 @@ from feather_connect.vault import KeyConflict, VaultError
 from feather_server.api.errors import ApiProblem
 from feather_server.api.paging import decode, encode
 from feather_server.auth import Actor, CurrentActor, csrf_token, current_actor, require_csrf
-from feather_server.catalog_view import route_of
+from feather_server.catalog_view import dataset_of, route_of
 from feather_server.services import actions as action_limits
 from feather_server.services.access import Capability, Forbidden, can
 from feather_server.services.accounts import Accounts
@@ -644,7 +644,7 @@ def _flow_of(request: Request, dataset: str) -> str:
     for flow in request.app.state.feather.runtime.flows():
         if any(d.name == dataset for d in flow.datasets):
             return flow.name
-    raise KeyError(dataset)
+    return dataset_of(request.app.state.feather, dataset).flow  # a packaged dataset, from the catalogue
 
 
 def _grid_page(

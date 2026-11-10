@@ -10,8 +10,8 @@ pytestmark = [pytest.mark.postgres, pytest.mark.timeout(600)]
 READ_ONLY = [
     "/",
     "/flows",
-    "/flows/demo",
-    "/datasets/demo.items/partitions",
+    "/flows/dashboard/demo",
+    "/datasets/dashboard/demo.items/partitions",
     "/runs",
     "/failures",
     "/connections",
@@ -32,14 +32,14 @@ FIRST = f"day={DAYS[0]}"
 def test_rerun_from_the_dashboard(signed_in_fresh: Page, fresh_site: Site):  # M1 exit criterion
     page, site = signed_in_fresh, fresh_site
     site.write_rows({DAYS[0]: 3, DAYS[1]: 2, DAYS[2]: 2})  # the source now has a third item on the first day
-    page.goto(f"{site.url}/datasets/demo.items/partitions")
+    page.goto(f"{site.url}/datasets/dashboard/demo.items/partitions")
     page.locator(f'input[name="partition"][value="{FIRST}"]').check()
     page.get_by_role("button", name="Read the selected partitions again").click()
     expect(page.get_by_role("heading", name="Check before you confirm")).to_be_visible()
     page.get_by_role("button", name="Read them again").click()
 
     def cell_updated() -> bool:
-        page.goto(f"{site.url}/datasets/demo.items/partitions")
+        page.goto(f"{site.url}/datasets/dashboard/demo.items/partitions")
         row = page.locator("tr", has=page.locator(f'input[value="{FIRST}"]'))
         return row.locator("td.num").first.inner_text().strip() == "3"
 
@@ -52,7 +52,7 @@ def test_rerun_from_the_dashboard(signed_in_fresh: Page, fresh_site: Site):  # M
 def test_replay_from_the_dashboard(signed_in_fresh: Page, fresh_site: Site):  # M1 exit criterion
     page, site = signed_in_fresh, fresh_site
     before = sum(row["key"].startswith(DAYS[0]) for row in site.captured())
-    page.goto(f"{site.url}/routes/lake/deliveries?partition={FIRST}")
+    page.goto(f"{site.url}/routes/dashboard/lake/deliveries?partition={FIRST}")
     page.locator('input[name="version_id"]').first.check()
     page.get_by_role("button", name="Replay picked").click()
     expect(page.get_by_role("heading", name="Check before you confirm")).to_be_visible()
@@ -84,7 +84,7 @@ def test_read_only_pages_work_with_javascript_disabled(no_script_page: Page, sit
 
 
 def test_no_console_errors_or_csp_violations(signed_in: Page, site: Site, console: list[str]):
-    for path in [*READ_ONLY, "/routes/lake/deliveries", "/quarantine"]:
+    for path in [*READ_ONLY, "/routes/dashboard/lake/deliveries", "/quarantine"]:
         signed_in.goto(f"{site.url}{path}")
         signed_in.wait_for_load_state("networkidle")
     assert console == []
@@ -130,7 +130,7 @@ def test_pages_fit_a_phone_without_scrolling_sideways(
 def test_from_a_delivery_to_what_was_read(signed_in: Page, site: Site):
     page = signed_in
     version = site.deliveries("lake", "applied")[0].version_id
-    page.goto(f"{site.url}/routes/lake/deliveries/{version}")
+    page.goto(f"{site.url}/routes/dashboard/lake/deliveries/{version}")
     page.get_by_role("link", name="What was read").click()
     expect(page).to_have_url(f"{site.url}/versions/{version}")
     rows = page.locator("#records tbody tr")
@@ -162,7 +162,7 @@ def test_the_sidebar_opens_on_a_narrow_screen(signed_in: Page, site: Site):
 def test_trace_a_record_from_a_failed_delivery(signed_in: Page, site: Site):
     page = signed_in
     version = site.deliveries("flaky", "failed")[0].version_id
-    page.goto(f"{site.url}/routes/flaky/deliveries/{version}")
+    page.goto(f"{site.url}/routes/dashboard/flaky/deliveries/{version}")
     answers = page.locator("#h-responses ~ .table-wrap tbody tr")
     key = answers.first.locator("th code").inner_text().strip()
     answers.first.get_by_role("link", name=f"Trace {key}").click()

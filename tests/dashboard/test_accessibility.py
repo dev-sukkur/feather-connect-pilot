@@ -10,8 +10,8 @@ pytestmark = [pytest.mark.postgres, pytest.mark.timeout(300)]
 PATHS = [
     "/",
     "/flows",
-    "/flows/demo",
-    "/datasets/demo.items/partitions",
+    "/flows/dashboard/demo",
+    "/datasets/dashboard/demo.items/partitions",
     "/runs",
     "/failures",
     "/connections",
@@ -23,7 +23,7 @@ PATHS = [
     "/search?q=demo",
     "/flows?q=demo&active=1",
     "/versions/{version}",  # a version page, of the lake's first delivery
-    "/routes/lake/deliveries/{version}",
+    "/routes/dashboard/lake/deliveries/{version}",
     "/trace",
     "/trace?dataset=demo.items&key=2026-11-01-0",  # a record's trace: a version, two routes, a failure
     "{records:extract}",  # a task's Records: what a read sealed
