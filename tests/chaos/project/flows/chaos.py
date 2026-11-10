@@ -178,7 +178,9 @@ too_big = _flow("too_big", "big_source", ["big_sink"], rows=5)  # five calls, an
 # Feather's own simulation source: a package may not bring a push source of its own, which the server would run.
 hooks = fc.Dataset(
     "hooks",
-    source=simulation.Source("hooks", generator={"id": simulation.seq()}, rows_per_partition=0, unsigned=True),
+    source=simulation.Source(
+        "hooks", generator={"id": simulation.seq()}, rows_per_partition=0, unsigned=True
+    ),
     key="id",
     strategy=fc.strategy.push(),
 )
