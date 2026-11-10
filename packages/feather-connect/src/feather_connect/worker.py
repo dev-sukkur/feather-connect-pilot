@@ -22,6 +22,7 @@ from types import FrameType
 from typing import Any
 
 from feather_connect.core.errors import PermanentError
+from feather_connect.engine.port import TaskFn
 from feather_connect.logs import configure_logging, install_task_logs, register_secrets
 from feather_connect.project import Project, ProjectError, environment_layer, load_project, use_db_secrets
 from feather_connect.runtime.runtime import Runtime
@@ -141,9 +142,10 @@ def _work(
     stop: threading.Event | None,
     code_sha: str,
     background: "Callable[[threading.Event], None] | None" = None,
+    tasks: "Mapping[str, TaskFn] | None" = None,
 ) -> int:
     """Execute tasks and heartbeat until told to stop, and drain. `background`, if given, runs on a thread of its own
-    from when the worker takes tasks, and is given the event that says to stop."""
+    from when the worker takes tasks, and is given the event that says to stop. `tasks` replaces the runtime's."""
     from feather_engine_dbos import DbosWorkerRuntime
 
     told_to_stop = threading.Event() if stop is None else stop
@@ -161,7 +163,7 @@ def _work(
     # a restarted container keeps its hostname, the default id, and its last process left the row draining.
     store.workers.mark(worker_id, "alive")
     handle = DbosWorkerRuntime(database_url, poll_s=poll_s, drain_s=DRAIN_S).run(
-        runtime.tasks(), worker_id, labels, slots
+        runtime.tasks() if tasks is None else tasks, worker_id, labels, slots
     )
     stop_beating = _heartbeats(store, worker_id, labels, code_sha, slots)
     if background is not None:

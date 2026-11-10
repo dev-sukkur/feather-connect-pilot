@@ -25,9 +25,9 @@ from typing import Any, cast
 from feather_connect.core.triggers import Cron, Every, Trigger
 from feather_connect.packages.webhooks import Webhook, parse_webhooks
 from feather_connect.runtime.scheduler import MAX_CATCH_UP, _due, trigger_id  # pyright: ignore[reportPrivateUsage]
-from feather_connect.storage.port import Store
+from feather_connect.storage.port import PackageVersion, Store
 
-__all__ = ["REFRESH_S", "ActiveFlow", "Catalogue", "restart_ticks", "triggers_of"]
+__all__ = ["REFRESH_S", "ActiveFlow", "Catalogue", "restart_ticks", "sync_package_catalog", "triggers_of"]
 
 log = logging.getLogger(__name__)
 REFRESH_S = 2.0  # the poll that backs NOTIFY up (§7.2)
@@ -75,6 +75,15 @@ def restart_ticks(store: Store, flow: str, spec: Mapping[str, Any], now: datetim
         last = store.schedules.last_tick(flow, tid)
         if last is not None and last < now:
             store.schedules.advance_tick(flow, tid, last, now)
+
+
+def sync_package_catalog(store: Store, package: str, version: PackageVersion) -> None:
+    """Show the package's active flows of `version` in the catalogue, as the dashboard reads it."""
+    active = {
+        a.flow for a in store.packages.active() if a.package == package and a.version == version.version
+    }
+    specs = cast(dict[str, Any], version.load_check.get("specs") or {})
+    store.catalog.sync(package, version.sha256, {f: specs[f] for f in sorted(active) if f in specs})
 
 
 class Catalogue:
