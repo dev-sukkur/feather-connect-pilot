@@ -40,11 +40,11 @@ from packaging.version import InvalidVersion, Version
 from feather_connect.clock import Clock
 from feather_connect.logs import redact
 from feather_connect.packages import manifest as m
-from feather_connect.packages.build import LOCK_FILE
+from feather_connect.packages.build import LOCK_FILE, WHEELS_NOTE
 from feather_connect.packages.manifest import ManifestError
 from feather_connect.packages.prepare import PREPARE_STEPS
 from feather_connect.packages.wheel import read_entry
-from feather_connect.runtime.catalogue import restart_ticks
+from feather_connect.runtime.catalogue import restart_ticks, sync_package_catalog
 from feather_connect.storage.port import DuplicateVersion, FlowActivation, PackageVersion, Store
 from feather_server.auth import Actor
 from feather_server.services.access import require
@@ -74,6 +74,7 @@ CHECKS = (
     "not_yanked",
     "compatibility",
     "lock",
+    "wheels",
 )
 _PINNED = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._, -]+\])?==[A-Za-z0-9.+!_-]+(\s*;.*)?")
 _HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}")
@@ -125,6 +126,37 @@ def check_lock(lock: bytes) -> None:
             raise ValueError(
                 f"line {number}: {shown!r} has no --hash=sha256:<64 hex digits> for each of its files"
             )
+
+
+def check_wheels(lock: bytes) -> None:
+    """Every requirement of a lock has a wheel among its hashes, as the `# wheels:` comment under it says: a worker
+    installs wheels only (`--only-binary :all:`), since building a source distribution runs its code. Raises
+    `ValueError` naming the first requirement that has only a source distribution."""
+    text = re.sub(r"\\\r?\n", " ", lock.decode("utf-8", "replace"))
+    requirement: str | None = None
+    hashes: set[str] = set()
+    wheels: set[str] | None = None
+
+    def close() -> None:
+        if requirement is not None and not (wheels and wheels & hashes):
+            raise ValueError(
+                f"{requirement} has no wheel in the lock, only a source distribution: a worker installs wheels "
+                "only, so publish a wheel of it, or pin a version that has one"
+            )
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith(WHEELS_NOTE):
+            wheels = set(line.removeprefix(WHEELS_NOTE).split())
+            continue
+        if not line or line.startswith("#"):
+            continue
+        close()
+        parts = line.split(" #", 1)[0].split()
+        requirement = parts[0]
+        hashes = {p.removeprefix("--hash=") for p in parts if p.startswith("--hash=")}
+        wheels = None
+    close()
 
 
 @dataclass(frozen=True)
@@ -255,7 +287,7 @@ class Packages:
             raise InstallFailed("compatibility", str(error)) from None
         passed.append("compatibility")
         self._check_lock(fetched)
-        passed.append("lock")
+        passed += ["lock", "wheels"]
         named = cast(list[dict[str, Any]], manifest.get("flows") or [])
         flows = [f"{project}/{flow}" for flow in sorted(str(f["name"]) for f in named)]
         row = PackageVersion(
@@ -331,6 +363,10 @@ class Packages:
             check_lock(lock)
         except ValueError as error:
             raise InstallFailed("lock", f"{where}: {error}") from None
+        try:
+            check_wheels(lock)
+        except ValueError as error:
+            raise InstallFailed("wheels", f"{where}: {error}") from None
 
     # Activating (§6): each worker supervisor starts a host for an active version, and drains it when no flow of it is
     # active and its runs are over.
@@ -374,13 +410,7 @@ class Packages:
 
     def _sync(self, package: str, version: PackageVersion) -> None:
         """Show the package's active flows of `version` in the catalogue, as the dashboard reads it."""
-        active = {
-            a.flow
-            for a in self._store.packages.active()
-            if a.package == package and a.version == version.version
-        }
-        specs = cast(dict[str, Any], version.load_check.get("specs") or {})
-        self._store.catalog.sync(package, version.sha256, {f: specs[f] for f in sorted(active) if f in specs})
+        sync_package_catalog(self._store, package, version)
 
     # Reading.
 

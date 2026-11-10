@@ -25,7 +25,7 @@ from feather_server.services.access import Forbidden
 from feather_server.services.environment import ConfigProblem, Environment, coerce_setting
 from feather_server.services.packages import Packages
 from feather_server.services.registries import Registries, VersionExists
-from feather_server.testing import prepare, sample_wheel, sign_in
+from feather_server.testing import host_up, prepare, sample_wheel, sign_in
 
 API = "/api/v1"
 ADMIN = Actor("human", "root", "admin", "root")
@@ -354,7 +354,8 @@ def test_a_declared_webhook_is_verified_deduplicated_and_kept_raw(
     body = b'{"id": "inv-1", "updated_at": "2026-11-09T09:00:00Z"}'
     signed = {"X-Signature": hmac.new(b"whsec", body, hashlib.sha256).hexdigest(), "X-Trace": "t-1"}
     assert client.post(url, content=body, headers=signed).status_code == 404  # its flow isn't active
-    packages.activate(OPERATOR, FLOW, "1.0.0", reason="live")  # the catalogue hears of it at once
+    packages.activate(OPERATOR, FLOW, "1.0.0", reason="live")
+    host_up(keyed, PACKAGE)  # a worker's host of it is up: the catalogue hears of it at once
     first = client.post(url, content=body, headers=signed)
     assert (first.status_code, first.json()) == (200, {"status": "accepted"})
     again = client.post(url, content=body, headers=signed)
@@ -378,6 +379,7 @@ def test_a_bearer_webhook_keeps_no_token_and_an_unbound_secret_isnt_used(
     unbound = {**HOOK, "verify": {"scheme": "bearer"}, "secret": "${secret:db:zakya/client_secret}"}
     packages = _installed(keyed, tmp_path, {"invoice-paid": bearer, "stolen": unbound})
     packages.activate(OPERATOR, FLOW, "1.0.0")
+    host_up(keyed, PACKAGE)
     envs.set_secret(ADMIN, HOOK_SECRET, "tok")
     envs.set_secret(ADMIN, "zakya/client_secret", "zakya-value")
     client = TestClient(create_app(state=keyed, loops=lambda s: []))
@@ -433,7 +435,9 @@ def test_a_flow_activated_while_the_server_runs_fires_on_time_with_no_restart(
     catalogue.listen()
     assert catalogue.tick(clock.now()) == []
     done = packages.activate(OPERATOR, FLOW, "1.0.0", reason="go live")
-    assert done["state"] == "active"
+    assert done["state"] == "activating"  # until a worker's host of the version is up (§6)
+    assert catalogue.tick(clock.now()) == [] and keyed.store.catalog.flows() == []
+    assert host_up(keyed, PACKAGE) == [FLOW]
     assert [f.name for f in keyed.store.catalog.flows()] == [FLOW]  # the dashboard shows it
     assert catalogue.tick(clock.now()) == []  # the first tick only marks the start
     clock.advance(timedelta(minutes=59))
@@ -452,6 +456,7 @@ def test_a_flow_activated_while_the_server_runs_fires_on_time_with_no_restart(
     assert catalogue.tick(clock.now()) == []
     # Activated again: it fires an hour from now, with nothing caught up for the five hours it was off.
     packages.activate(OPERATOR, FLOW, "1.0.0", reason="back")
+    host_up(keyed, PACKAGE)
     assert catalogue.tick(clock.now()) == []
     clock.advance(timedelta(hours=1))
     assert len(catalogue.tick(clock.now())) == 1
@@ -465,6 +470,7 @@ def test_overlap_skip_counts_a_running_run(keyed: AppState, tmp_path: Path):
     assert isinstance(clock, FrozenClock)
     packages = _installed(keyed, tmp_path, overlap="skip")
     packages.activate(OPERATOR, FLOW, "1.0.0")
+    host_up(keyed, PACKAGE)
     catalogue = Catalogue(keyed.store, monotonic=lambda: 0.0)
     catalogue.tick(clock.now())
     clock.advance(timedelta(hours=1))
@@ -483,6 +489,7 @@ def test_a_disabled_flow_writes_no_run(keyed: AppState, tmp_path: Path):
     assert isinstance(clock, FrozenClock)
     packages = _installed(keyed, tmp_path, enabled=False)
     packages.activate(OPERATOR, FLOW, "1.0.0")
+    host_up(keyed, PACKAGE)
     catalogue = Catalogue(keyed.store, monotonic=lambda: 0.0)
     for _ in range(3):
         clock.advance(timedelta(hours=1))
@@ -494,7 +501,7 @@ def test_the_api_activates_and_deactivates(keyed: AppState, tmp_path: Path):
     _installed(keyed, tmp_path)
     operator = _client(keyed, "operator")
     done = operator.post(f"{API}/flows/{FLOW}:activate", json={"version": "1.0.0", "reason": "live"})
-    assert done.status_code == 200 and done.json()["state"] == "active"
+    assert done.status_code == 200 and done.json()["state"] == "activating"
     assert operator.post(f"{API}/flows/{FLOW}:activate", json={"version": "9.0.0"}).status_code == 404
     off = operator.post(f"{API}/flows/{FLOW}:deactivate", json={})
     assert off.status_code == 200 and off.json()["state"] == "inactive"

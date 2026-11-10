@@ -7,7 +7,7 @@ from textwrap import dedent
 
 import pytest
 
-from feather_server.testing import prepare
+from feather_server.testing import host_up, prepare
 
 SAMPLE = Path(__file__).resolve().parents[3] / "examples" / "packages" / "acme-invoices"
 
@@ -198,7 +198,8 @@ def test_activate_and_deactivate_a_flow_of_an_installed_version(cli, sample: Pat
     prepare(state, "acme-invoices")
     done = cli("flow", "activate", flow, "--version", "1.0.0", "--reason", "go live", *operator)
     assert done.exit_code == 0, done.output
-    assert f"{flow} 1.0.0: active" in done.stdout
+    assert f"{flow} 1.0.0: activating" in done.stdout and "once a worker's host" in done.stdout
+    assert host_up(state, "acme-invoices") == [flow]  # as a worker supervisor does when its host is up
     assert "1 flows active" in cli("package", "list", *operator).stdout
     missing = cli("flow", "activate", flow, "--version", "9.9.9", *operator)
     assert missing.exit_code == 1 and "not installed" in missing.stderr

@@ -183,6 +183,18 @@ def prepare(state: AppState, name: str, version: str = "1.0.0", checker: Any = N
     )
 
 
+def host_up(state: AppState, name: str, version: str = "1.0.0") -> list[str]:
+    """Say that a host of the version is up, as a worker supervisor does when its host says ready: the flows
+    activating move to it, and show in the catalogue. Returns those flows."""
+    from feather_connect.runtime.catalogue import sync_package_catalog
+
+    promoted = state.store.packages.promote(name, version, state.clock.now())
+    row = state.store.packages.version(name, version)
+    if promoted and row is not None:
+        sync_package_catalog(state.store, name, row)
+    return [a.flow for a in promoted]
+
+
 def sample_wheel(out_dir: Path, version: str | None = None) -> Path:
     """The sample flow package acme-invoices, built into `out_dir`, at `version` if given (from a copy of it)."""
     from feather_connect.packages.build import build_package

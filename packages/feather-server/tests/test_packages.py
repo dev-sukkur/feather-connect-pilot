@@ -23,7 +23,7 @@ from feather_connect.storage.port import RegistryFile, Role
 from feather_server.app import AppState, create_app
 from feather_server.auth import Actor, issue_token
 from feather_server.services.access import Forbidden
-from feather_server.services.packages import CHECKS, Busy, InstallFailed, NotReady, Packages, check_lock
+from feather_server.services.packages import CHECKS, Busy, InstallFailed, NotReady, Packages, check_lock, check_wheels
 from feather_server.services.registries import Registries
 from feather_server.testing import prepare, sample_wheel, static_index
 
@@ -357,6 +357,39 @@ def test_only_pinned_hashed_requirements_pass_the_lock_check():
     ]:
         with pytest.raises(ValueError, match=why):
             check_lock(bad.encode())
+
+
+def test_only_requirements_with_a_wheel_pass_the_wheels_check():
+    wheel, sdist = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    check_wheels(b"")
+    check_wheels(
+        f"httpx==0.28.1 \\\n    --hash={wheel} \\\n    --hash={sdist}\n    # wheels: {wheel}\n    # via acme\n".encode()
+    )
+    for bad in (
+        f"httpx==0.28.1 --hash={sdist}\n    # wheels:\n",  # only a source distribution
+        f"httpx==0.28.1 --hash={sdist}\n",  # nothing says which is a wheel
+        f"httpx==0.28.1 --hash={sdist}\n    # wheels: {wheel}\n",  # a wheel it doesn't pin
+    ):
+        with pytest.raises(ValueError, match="only a source distribution"):
+            check_wheels(bad.encode())
+
+
+def test_a_lock_with_only_a_source_distribution_fails_the_wheels_check(
+    state: AppState, registries: Registries, wheel: Path
+):
+    lock = f"httpx==0.28.1 --hash=sha256:{'b' * 64}\n    # wheels:\n".encode()
+    _put(
+        state,
+        _rewheel(
+            wheel.read_bytes(),
+            {
+                f"{MODULE}-1.0.0.dist-info/feather-lock.txt": lambda _: lock,
+                f"{MODULE}/feather-package.json": _manifest_edit(lock_hash=hashlib.sha256(lock).hexdigest()),
+            },
+        ),
+    )
+    error = _refused(state, _packages(state, registries), "wheels", "1.0.0")
+    assert "httpx==0.28.1 has no wheel" in str(error)
 
 
 def test_a_lock_with_an_index_option_fails_the_lock_check(
