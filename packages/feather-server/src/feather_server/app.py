@@ -75,8 +75,9 @@ def build_state(settings: Settings) -> AppState:
     environment = environment_layer(
         store.env_config.entries(settings.env)
     )  # a bad entry is left out, with a warning
-    # TODO(flow packages task 6, P4 package hosts; task 8, P6 retiring project mode): the server stops loading a
-    # project here. Installed packages already run from the catalogue (`Catalogue`), never through load_project.
+    # TODO(flow packages task 12, P6 retiring project mode): the server stops loading a project here. Installed
+    # packages never load in the server: it reads their specs from the catalogue (`Catalogue`), workers load-check them
+    # (`feather_connect.packages.prepare`) and package hosts run them (`feather_connect.host`).
     project = load_project(settings.project, settings.env, environment=environment)
     configure_logging(os.environ.get("FEATHER_LOG_LEVEL", "INFO"), secrets=[settings.secret_key])
     closers: list[Callable[[], None]] = [store.close, install_task_logs(store)]

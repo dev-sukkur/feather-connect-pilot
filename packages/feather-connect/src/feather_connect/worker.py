@@ -16,7 +16,7 @@ import os
 import signal
 import socket
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -101,8 +101,8 @@ def run_worker(
     store, spool = connect(database_url)
     keyring = keyring_from_env()
     use_db_secrets(Vault(store.secrets, env, keyring).open)  # one vault for the process
-    # TODO(flow packages task 6, P4 package hosts; task 8, P6 retiring project mode): workers stop loading a project
-    # here and run installed packages' flows from the catalogue on package hosts.
+    # TODO(flow packages task 12, P6 retiring project mode): the project mode goes. Installed packages already run on
+    # package hosts (`feather_connect.host`), started by the supervisor (`feather_connect.supervisor`), never here.
     project = load_project(project_root, env, environment=environment_layer(store.env_config.entries(env)))
     _check_connections(project)
     remove_task_logs = install_task_logs(store)
@@ -140,8 +140,10 @@ def _work(
     poll_s: float,
     stop: threading.Event | None,
     code_sha: str,
+    background: "Callable[[threading.Event], None] | None" = None,
 ) -> int:
-    """Execute tasks and heartbeat until told to stop, and drain."""
+    """Execute tasks and heartbeat until told to stop, and drain. `background`, if given, runs on a thread of its own
+    from when the worker takes tasks, and is given the event that says to stop."""
     from feather_engine_dbos import DbosWorkerRuntime
 
     told_to_stop = threading.Event() if stop is None else stop
@@ -162,6 +164,8 @@ def _work(
         runtime.tasks(), worker_id, labels, slots
     )
     stop_beating = _heartbeats(store, worker_id, labels, code_sha, slots)
+    if background is not None:
+        threading.Thread(target=background, args=(told_to_stop,), name="background", daemon=True).start()
     try:
         while not told_to_stop.wait(
             0.5

@@ -283,10 +283,27 @@ def worker(
     labels: Annotated[
         list[str] | None, typer.Option(help="A label such as site=hq. Repeat for more.")
     ] = None,
+    packages: Annotated[
+        list[str] | None,
+        typer.Option(
+            help="Run installed packages instead of a project: a glob of their names, such as 'acme-*'. Repeat "
+            "for more."
+        ),
+    ] = None,
     json_mode: Json = False,
 ) -> None:
-    """Run a worker: it runs the tasks of the project's flows until told to stop."""
+    """Run a worker: it runs the tasks of the project's flows until told to stop. With --packages it is a supervisor
+    instead, and runs a package host for each installed package version that has work."""
     url = _database(database_url, json_mode)
+    if packages:
+        from feather_connect.supervisor import run_supervisor
+
+        _reachable(url, json_mode)
+        try:
+            code = run_supervisor(env, database_url=url, packages=packages, slots=slots)
+        except (psycopg.Error, SQLAlchemyError) as error:
+            _unreachable(error, json_mode)
+        raise typer.Exit(code)
     pairs: dict[str, str] = {}
     for label in labels or []:
         key, sep, value = label.partition("=")
