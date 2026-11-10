@@ -1284,6 +1284,7 @@ class RegistryStore(Protocol):
 
 PackageState = Literal["installed", "preparing", "ready", "failed", "uninstalled"]
 ActivationState = Literal["inactive", "activating", "active", "deactivating", "failed"]
+EnvState = Literal["building", "ready", "failed"]
 MAX_PACKAGE_ROWS = 500  # the most rows a package listing returns
 
 
@@ -1331,6 +1332,17 @@ def check_wheel(version: "PackageVersion", content: bytes) -> None:
         raise ValueError(
             f"the wheel stored for {version.name} {version.version} is not the one its sha256 names"
         )
+
+
+@dataclass(frozen=True)
+class PackageEnv:
+    """A dependency environment that a worker built for a lock hash (flow packages §5 step 3, task 8)."""
+
+    worker_id: str
+    lock_hash: str
+    state: EnvState
+    error: str | None
+    built_at: datetime
 
 
 class DuplicateVersion(Exception):
@@ -1389,8 +1401,31 @@ class PackageStore(Protocol):
         ...
 
     def listen(self, callback: "Callable[[], None]") -> "Callable[[], None]":
-        """Call `callback` whenever a flow of this tenant is activated or deactivated, from this process or another.
-        Returns what stops listening."""
+        """Call `callback` whenever a flow of this tenant is activated or deactivated, or a version is prepared, from
+        this process or another. Returns what stops listening."""
+        ...
+
+    def prepared(
+        self,
+        name: str,
+        version: str,
+        state: PackageState,
+        load_check: Mapping[str, Any],
+        expect: Sequence[PackageState] = ("installed", "preparing"),
+    ) -> bool:
+        """Record what preparing the version found, its state (`ready` or `failed`) and its load check, if its state
+        is still one of `expect`, and tell the listeners. Returns whether it did: a worker that prepared it too, later,
+        changes nothing."""
+        ...
+
+    def record_env(
+        self, worker_id: str, lock_hash: str, state: EnvState, at: datetime, error: str | None = None
+    ) -> None:
+        """Note the state of the environment that `worker_id` keeps for `lock_hash`."""
+        ...
+
+    def envs(self, worker_id: str | None = None) -> list[PackageEnv]:
+        """The environments of one worker or of all, by worker and lock hash, at most `MAX_PACKAGE_ROWS`."""
         ...
 
 

@@ -398,6 +398,10 @@ def test_installed_packages_belong_to_their_tenant(pg: Pg, pg_url: str, clock: F
     )  # the other tenant's to have
     assert first.packages.wheel(one) == b"one" and second.packages.wheel(two) == b"two"
     assert first.packages.wheel(two) is None and second.packages.wheel(one) is None
+    assert first.packages.prepared("acme", "1.0.0", "ready", {"ok": True})
+    assert second.packages.version("acme", "1.0.0").state == "installed"  # type: ignore[union-attr]
+    first.packages.record_env("w-1", "b" * 64, "ready", T0)
+    assert second.packages.envs() == [] and len(first.packages.envs()) == 1
     assert [a.flow for a in second.packages.activations("acme")] == ["acme/invoices"]
 
 

@@ -35,6 +35,7 @@ from feather_connect.storage.port import (
     EnvConfigStore,
     EnvEntry,
     EnvKind,
+    EnvState,
     FailureGroup,
     FlowActivation,
     FlowRow,
@@ -47,6 +48,8 @@ from feather_connect.storage.port import (
     Ledger,
     Override,
     OverrideStore,
+    PackageEnv,
+    PackageState,
     PackageStore,
     PackageVersion,
     PartitionRow,
@@ -145,6 +148,7 @@ class _Data:
         default_factory=dict[tuple[str, str, str], FlowActivation]
     )  # by (flow, package, version_key)
     catalog_listeners: list[Callable[[], None]] = field(default_factory=list[Callable[[], None]])
+    package_envs: dict[tuple[str, str], PackageEnv] = field(default_factory=dict[tuple[str, str], PackageEnv])
     env_config: dict[tuple[str, str, str], EnvEntry] = field(
         default_factory=dict[tuple[str, str, str], EnvEntry]
     )
@@ -1482,6 +1486,36 @@ class _Packages(PackageStore):
                     self._d.catalog_listeners.remove(callback)
 
         return stop
+
+    def prepared(
+        self,
+        name: str,
+        version: str,
+        state: PackageState,
+        load_check: Mapping[str, Any],
+        expect: Sequence[PackageState] = ("installed", "preparing"),
+    ) -> bool:
+        key = (name, version_key(version))
+        with self._d.lock:
+            row = self._d.package_versions.get(key)
+            if row is None or row.state not in expect:
+                return False
+            self._d.package_versions[key] = replace(row, state=state, load_check=dict(load_check))
+            listeners = list(self._d.catalog_listeners)
+        for listener in listeners:
+            listener()
+        return True
+
+    def record_env(
+        self, worker_id: str, lock_hash: str, state: EnvState, at: datetime, error: str | None = None
+    ) -> None:
+        with self._d.lock:
+            self._d.package_envs[(worker_id, lock_hash)] = PackageEnv(worker_id, lock_hash, state, error, at)
+
+    def envs(self, worker_id: str | None = None) -> list[PackageEnv]:
+        with self._d.lock:
+            found = [e for (w, _), e in self._d.package_envs.items() if worker_id in (None, w)]
+        return sorted(found, key=lambda e: (e.worker_id, e.lock_hash))[:MAX_PACKAGE_ROWS]
 
 
 class _EnvConfig(EnvConfigStore):

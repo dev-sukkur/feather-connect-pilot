@@ -44,6 +44,7 @@ from feather_connect.storage.port import (
     EnvConfigStore,
     EnvEntry,
     EnvKind,
+    EnvState,
     FailureGroup,
     FlowActivation,
     FlowRow,
@@ -56,6 +57,8 @@ from feather_connect.storage.port import (
     Ledger,
     Override,
     OverrideStore,
+    PackageEnv,
+    PackageState,
     PackageStore,
     PackageVersion,
     PartitionRow,
@@ -2481,6 +2484,49 @@ class _Packages(PackageStore):
 
         threading.Thread(target=run, name="catalog-listen", daemon=True).start()
         return stop.set
+
+    def prepared(
+        self,
+        name: str,
+        version: str,
+        state: PackageState,
+        load_check: Mapping[str, Any],
+        expect: Sequence[PackageState] = ("installed", "preparing"),
+    ) -> bool:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """update feather.package_version set state = %s, load_check = %s
+                   where tenant_id = %s and name = %s and version_key = %s and state = any(%s)
+                   returning name""",
+                (state, _json(dict(load_check)), self._db.tenant, name, version_key(version), list(expect)),
+            ).fetchone()
+            if row is not None:
+                conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, self._db.tenant))
+        return row is not None
+
+    def record_env(
+        self, worker_id: str, lock_hash: str, state: EnvState, at: datetime, error: str | None = None
+    ) -> None:
+        with self._db.tx() as conn:
+            conn.execute(
+                """insert into feather.package_env (tenant_id, worker_id, lock_hash, state, error, built_at)
+                   values (%s, %s, %s, %s, %s, %s)
+                   on conflict (tenant_id, worker_id, lock_hash)
+                   do update set state = excluded.state, error = excluded.error, built_at = excluded.built_at""",
+                (self._db.tenant, worker_id, lock_hash, state, error, at),
+            )
+
+    def envs(self, worker_id: str | None = None) -> list[PackageEnv]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select worker_id, lock_hash, state, error, built_at from feather.package_env
+                   where tenant_id = %s and (%s::text is null or worker_id = %s)
+                   order by worker_id collate "C", lock_hash collate "C" limit %s""",
+                (self._db.tenant, worker_id, worker_id, MAX_PACKAGE_ROWS),
+            ).fetchall()
+        return [
+            PackageEnv(r["worker_id"], r["lock_hash"], r["state"], r["error"], r["built_at"]) for r in rows
+        ]
 
 
 class _Audit(AuditStore):

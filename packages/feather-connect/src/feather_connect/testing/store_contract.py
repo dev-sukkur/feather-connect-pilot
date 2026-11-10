@@ -1622,6 +1622,37 @@ class StoreContract(
         finally:
             stop()
 
+    def test_a_version_is_prepared_once_and_environments_are_kept_per_worker(self, store: Store):
+        import threading
+
+        store.packages.install(self._installed("acme", "1.0.0"), b"wheel", ["acme/invoices"])
+        heard = threading.Event()
+        stop = store.packages.listen(heard.set)
+        try:
+            heard.wait(5)
+            heard.clear()
+            check = {"ok": True, "flows": ["invoices"], "specs": {"acme/invoices": {"name": "acme/invoices"}}}
+            assert store.packages.prepared("acme", "1.0", "ready", check)
+            assert heard.wait(10)  # a supervisor waiting for it hears that it is ready
+            row = store.packages.version("acme", "1.0.0")
+            assert row is not None and row.state == "ready" and row.load_check == check
+            assert not store.packages.prepared("acme", "1.0.0", "failed", {"ok": False})  # another worker, later
+            assert store.packages.version("acme", "1.0.0") == row
+            assert not store.packages.prepared("zed", "1.0.0", "ready", {})
+        finally:
+            stop()
+        store.packages.record_env("w-2", "b" * 64, "building", T0)
+        store.packages.record_env("w-1", "b" * 64, "building", T0)
+        store.packages.record_env("w-1", "b" * 64, "ready", T0 + timedelta(seconds=5))
+        store.packages.record_env("w-1", "a" * 64, "failed", T0, "uv: no such version")
+        assert [(e.worker_id, e.lock_hash[0], e.state, e.error) for e in store.packages.envs()] == [
+            ("w-1", "a", "failed", "uv: no such version"),
+            ("w-1", "b", "ready", None),
+            ("w-2", "b", "building", None),
+        ]
+        assert [e.lock_hash[0] for e in store.packages.envs("w-2")] == ["b"]
+        assert store.packages.envs("w-1")[1].built_at == T0 + timedelta(seconds=5)
+
     def test_environment_entries_are_kept_per_environment_and_return_what_they_replace(self, store: Store):
         from feather_connect.storage.port import EnvEntry
 
