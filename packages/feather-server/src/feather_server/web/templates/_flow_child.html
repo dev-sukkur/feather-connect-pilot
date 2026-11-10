@@ -1,0 +1,22 @@
+{% import "_macros.html" as m with context %}
+{% set flow = detail.summary %}
+<div class="child-grid">
+  <section aria-label="Datasets and routes of {{ flow.name }}">
+    <h3>Datasets</h3>
+    <ul class="plain-list">
+      {% for d in flow.datasets %}<li>{{ icon("datasets") }} <a href="/datasets/{{ d.name | urlencode }}/partitions">{{ d.name }}</a> <span class="muted">from {{ d.connection }}, {{ d.strategy }}</span></li>{% else %}<li class="muted">none</li>{% endfor %}
+    </ul>
+    <h3>Routes</h3>
+    <ul class="plain-list">
+      {% for r in flow.routes %}<li>{{ icon("deliveries") }} <a href="/routes/{{ r.name | urlencode }}/deliveries">{{ r.name }}</a> <span class="muted">to {{ r.connection }}</span>{% if r.paused %} {{ m.status_dot("paused") }}{% endif %}</li>{% else %}<li class="muted">none</li>{% endfor %}
+    </ul>
+  </section>
+  <section aria-label="Recent runs of {{ flow.name }}">
+    <h3>Recent runs</h3>
+    {% if detail.recent_runs %}
+    <ul class="plain-list">
+      {% for run in detail.recent_runs[:5] %}<li><a href="/runs/{{ run.run_id | urlencode }}"><code>{{ run.run_id[:8] }}</code></a> {{ m.status_dot(run.status) }} <span class="muted">{{ run.trigger }}, {{ m.time_ago(run.created_at) }}</span></li>{% endfor %}
+    </ul>
+    {% else %}<p class="muted">No runs yet.</p>{% endif %}
+  </section>
+</div>

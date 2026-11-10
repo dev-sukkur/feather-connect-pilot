@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{{ m.page_head("Datasets", tiles, "What each flow reads, and when it last got a version. Open a dataset for its partitions, to read them again or replay them.") }}
+{% call m.toolbar("/datasets", q, "datasets", columns=[("flow", "Flow"), ("source", "Source"), ("strategy", "Strategy"), ("priority", "Priority"), ("sealed", "Last version")], table="datasets") %}{% endcall %}
+<div id="live">
+{% if rows %}
+<div class="table-wrap scroll"><table class="data" data-table="datasets">
+  <caption class="sr-only">Datasets</caption>
+  <thead><tr><th scope="col" data-col="state" data-sort>Status</th><th scope="col" data-sort>Dataset</th><th scope="col" data-col="flow" data-sort>Flow</th><th scope="col" data-col="source" data-sort>Source</th><th scope="col" data-col="strategy" data-sort>Strategy</th><th scope="col" data-col="priority" data-sort>Priority</th><th scope="col" data-col="sealed" data-sort>Last version</th></tr></thead>
+  <tbody>
+  {% for d in rows %}
+    {% set state = "never" if d.last_sealed_at is none else ("held" if d.name in late else "sealed") %}
+    <tr>
+      <td data-col="state" data-value="{{ state }}">{% if d.last_sealed_at is none %}<span class="state tone-warn"><span class="dot" aria-hidden="true"></span>Never read</span>{% elif d.name in late %}<span class="state tone-warn"><span class="dot" aria-hidden="true"></span>Late</span>{% else %}<span class="state tone-ok"><span class="dot" aria-hidden="true"></span>Fresh</span>{% endif %}</td>
+      <th scope="row"><a href="/datasets/{{ d.name | urlencode }}/partitions">{{ d.name }}</a></th>
+      <td data-col="flow"><a href="/flows/{{ d.flow | urlencode }}">{{ d.flow }}</a></td>
+      <td data-col="source">{{ d.connection }}</td>
+      <td data-col="strategy">{{ d.strategy }}</td>
+      <td data-col="priority">{{ d.priority }}</td>
+      <td data-col="sealed">{{ m.time_ago(d.last_sealed_at) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{{ m.table_foot(rows | length, "dataset", "datasets") }}
+{% else %}
+<p class="empty">No datasets match.</p>
+{% endif %}
+</div>
+{% endblock %}

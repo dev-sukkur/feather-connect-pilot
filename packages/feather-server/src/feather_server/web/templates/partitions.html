@@ -2,8 +2,9 @@
 {% import "_macros.html" as m with context %}
 {% set ds = grid.dataset | urlencode %}
 {% block content %}
-<h1>{{ grid.dataset }} <span class="muted">partitions</span></h1>
-<p><a href="/flows/{{ flow | urlencode }}">&larr; Flow {{ flow }}</a></p>
+<div class="page-head"><h1>{{ grid.dataset }} <span class="muted">partitions</span></h1></div>
+<p class="crumbs"><a href="/datasets">Datasets</a> / <a href="/flows/{{ flow | urlencode }}">Flow {{ flow }}</a></p>
+<ul class="tiles" aria-label="Summary">{% for t in tiles %}<li class="tile{% if t.tone %} tile-{{ t.tone }}{% endif %}"><h3>{{ t.label }}</h3><p class="n">{{ t.value }}</p></li>{% endfor %}</ul>
 
 {% if notice %}<p class="notice notice-{{ notice[0] }}" role="{{ 'alert' if notice[0] == 'bad' else 'status' }}">{{ notice[1] }}</p>{% endif %}
 {% if replayed %}<p class="notice notice-ok" role="status">Replay started for {{ replayed | int }} {{ "delivery" if replayed | int == 1 else "deliveries" }}.</p>{% endif %}
@@ -12,32 +13,33 @@
 {{ m.confirm_form(preview, confirm_action, url(), confirm_label) }}
 {% endif %}
 
-<form class="filters" method="get" action="/datasets/{{ ds }}/partitions">
-  <p><label for="since">Sealed since</label><br><input id="since" name="since" type="date" value="{{ since }}"></p>
-  <p><button type="submit">Filter</button>{% if since %} <a class="button" href="/datasets/{{ ds }}/partitions">Clear</a>{% endif %}</p>
-</form>
+{% call m.toolbar("/datasets/" ~ ds ~ "/partitions", q, "partitions on this page", columns=[("records", "Records"), ("sealed", "Sealed")], table="partitions") %}
+  <p><label for="since" class="sr-only">Sealed since</label><input id="since" name="since" type="date" value="{{ since }}" title="Sealed since"></p>
+  {% if since or q %}<p><a class="button" href="/datasets/{{ ds }}/partitions">Clear</a></p>{% endif %}
+{% endcall %}
+<div id="live">
 
-{% if grid.rows %}
+{% if rows %}
 <form method="post" action="/datasets/{{ ds }}/partitions/rerun/preview">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input type="hidden" name="dataset" value="{{ grid.dataset }}">
   <p class="actions"><button type="submit" class="primary">Read the selected partitions again&hellip;</button>
     <span class="muted">You see what it would touch before anything starts.</span></p>
-  <div class="table-wrap scroll"><table>
+  <div class="table-wrap scroll"><table class="data" data-table="partitions">
     <caption>Newest first. Each cell is the latest version of the partition, on that route.</caption>
     <thead><tr>
-      <th scope="col"><span class="visually-hidden">Select</span></th>
-      <th scope="col">Partition</th><th scope="col" class="num">Records</th><th scope="col">Sealed</th>
+      <th scope="col" class="select"><span class="visually-hidden">Select</span><input type="checkbox" data-select-all aria-label="Tick every partition shown" hidden></th>
+      <th scope="col" data-sort>Partition</th><th scope="col" class="num" data-col="records" data-sort>Records</th><th scope="col" data-col="sealed" data-sort>Sealed</th>
       {% for route in grid.routes %}<th scope="col">{{ route }}</th>{% endfor %}
       <th scope="col">Check</th>
     </tr></thead>
     <tbody>
-    {% for row in grid.rows %}
+    {% for row in rows %}
       <tr>
-        <td><input type="checkbox" name="partition" value="{{ row.partition }}" id="p-{{ loop.index }}" aria-label="Select {{ row.label }}"></td>
+        <td class="select"><input type="checkbox" name="partition" value="{{ row.partition }}" id="p-{{ loop.index }}" aria-label="Select {{ row.label }}" data-select></td>
         <th scope="row"><label for="p-{{ loop.index }}" class="plain">{{ m.partition_label(grid.dataset, row.partition) }}</label></th>
-        <td class="num"><a href="/versions/{{ row.version_id | urlencode }}" title="The records of the latest version of {{ row.label }}">{{ row.records }}</a></td>
-        <td>{{ m.time_ago(row.sealed_at) }}</td>
+        <td class="num" data-col="records"><a href="/versions/{{ row.version_id | urlencode }}" title="The records of the latest version of {{ row.label }}">{{ row.records }}</a></td>
+        <td data-col="sealed">{{ m.time_ago(row.sealed_at) }}</td>
         {% for cell in row.cells %}
         <td class="cell">
           {% if cell.status %}
@@ -54,8 +56,10 @@
     </tbody>
   </table></div>
 </form>
+{{ m.table_foot(rows | length, "partition", "partitions", grid.next_cursor) }}
 {{ m.pagination(grid.next_cursor) }}
 {% else %}
-<p class="empty">No partitions{% if since %} sealed since {{ since }}{% endif %}.</p>
+<p class="empty">No partitions{% if since %} sealed since {{ since }}{% endif %}{% if q %} match {{ q }}{% endif %}.</p>
 {% endif %}
+</div>
 {% endblock %}

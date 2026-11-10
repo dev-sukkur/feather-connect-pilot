@@ -7,7 +7,7 @@ import threading
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from fractions import Fraction
 from typing import Any
 
@@ -206,6 +206,34 @@ class _Runs(RunJournal):
             and (status is None or r.status == status)
             and (cursor is None or r.run_id < cursor)
         ]
+        return runs[:limit]
+
+    def count_runs(self, status: str | None = None, since: datetime | None = None) -> int:
+        with self._d.lock:
+            return sum(
+                1
+                for r in self._d.runs.values()
+                if (status is None or r.status == status) and (since is None or r.created_at >= since)
+            )
+
+    def runs_by_day(self, since: datetime) -> dict[date, tuple[int, int]]:
+        found: dict[date, tuple[int, int]] = {}
+        with self._d.lock:
+            for r in self._d.runs.values():
+                if r.created_at >= since:
+                    day = r.created_at.astimezone(UTC).date()
+                    made, failed = found.get(day, (0, 0))
+                    found[day] = (made + 1, failed + (r.status == "failed"))
+        return found
+
+    def find_runs(self, prefix: str, limit: int = 5) -> list[Run]:
+        wanted = prefix.upper()
+        with self._d.lock:
+            runs = sorted(
+                (r for r in self._d.runs.values() if r.run_id.startswith(wanted)),
+                key=lambda r: r.run_id,
+                reverse=True,
+            )
         return runs[:limit]
 
     def start_task(
@@ -551,6 +579,10 @@ class _Versions(VersionStore):
             sealed = [v.sealed_at for v in self._d.versions.values() if v.dataset == dataset and v.sealed_at]
             return sealed[-1] if sealed else None  # by staging, as the versions are kept in that order
 
+    def last_sealed_many(self, datasets: Sequence[str]) -> dict[str, datetime]:
+        found = {d: self.last_sealed_at(d) for d in datasets}
+        return {d: at for d, at in found.items() if at is not None}
+
     def latest_watermark(self, dataset: str) -> Any | None:
         with self._d.lock:
             marks = [v.watermark for v in self._sealed(dataset, None) if v.watermark is not None]
@@ -768,6 +800,16 @@ class _Ledger(Ledger):
             and (after is None or (d.seal_seq, d.route) > after)
         ]
         return found[:limit]
+
+    def count_by_status(
+        self, routes: Sequence[str], statuses: Sequence[DeliveryStatus]
+    ) -> dict[tuple[str, DeliveryStatus], int]:
+        found: dict[tuple[str, DeliveryStatus], int] = {}
+        with self._d.lock:
+            for d in self._d.deliveries.values():
+                if d.route in routes and d.status in statuses:
+                    found[(d.route, d.status)] = found.get((d.route, d.status), 0) + 1
+        return found
 
     def all_applied(self) -> bool:
         with self._d.lock:

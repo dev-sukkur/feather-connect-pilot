@@ -1,45 +1,48 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m with context %}
 {% block content %}
-<h1>Connections</h1>
-<p class="muted">The systems flows read from and deliver to. A check asks the connector to reach its system; it waits at most {{ timeout }} seconds. Secrets are never shown: only the names of the settings that hold them.</p>
-{% if notice %}<p class="notice notice-{{ notice[0] }}" role="{{ 'alert' if notice[0] == 'bad' else 'status' }}">{{ notice[1] }}</p>{% endif %}
-
+{{ m.page_head("Connections", tiles) }}
+<p class="muted lead">The systems flows read from and deliver to. A check asks the connector to reach its system; it waits at most {{ timeout }} seconds. Secrets are never shown: only the names of the settings that hold them.</p>
+{{ m.notice_of(notice) }}
+{% call m.toolbar("/connections", q, "connections", columns=[("connector", "Connector"), ("site", "Site"), ("budget", "Budget"), ("flows", "Used by"), ("secrets", "Secret settings"), ("check", "Last check")], table="connections") %}{% endcall %}
+<div id="live">
 {% if connections %}
-<div class="table-wrap"><table>
+<div class="table-wrap scroll"><table class="data" data-table="connections">
   <caption class="sr-only">Connections of the project</caption>
-  <thead><tr><th scope="col">Connection</th><th scope="col">Connector</th><th scope="col">Site</th><th scope="col">Budget</th><th scope="col">Used by</th><th scope="col">Secret settings</th><th scope="col">Last check</th><th scope="col">Check</th></tr></thead>
+  <thead><tr><th scope="col" data-sort>Connection</th><th scope="col" data-col="connector" data-sort>Connector</th><th scope="col" data-col="site" data-sort>Site</th><th scope="col" data-col="budget">Budget</th><th scope="col" data-col="flows">Used by</th><th scope="col" data-col="secrets">Secret settings</th><th scope="col" data-col="check" data-sort>Last check</th>{% if can(actor, "connections.check") %}<th scope="col">Check</th>{% endif %}</tr></thead>
   <tbody>
   {% for c in connections %}
-    <tr id="connection-{{ c.name }}">
+    <tr id="{{ connection_anchor(c.name) }}">
       <th scope="row">{{ c.name }}</th>
-      <td><code>{{ c.connector }}</code></td>
-      <td>{% if c.site %}{{ c.site }}{% else %}<span class="muted">none</span>{% endif %}</td>
-      <td>{% if c.budget %}{{ c.budget }}{% else %}<span class="muted">none</span>{% endif %}</td>
-      <td>{% for f in c.flows %}<a href="/flows/{{ f | urlencode }}">{{ f }}</a>{% if not loop.last %}, {% endif %}{% else %}<span class="muted">no flow</span>{% endfor %}</td>
-      <td>{% for name in c.credentials %}<code>{{ name }}</code> <span class="secret">***</span>{% if not loop.last %}, {% endif %}{% else %}<span class="muted">none</span>{% endfor %}</td>
-      <td>
+      <td data-col="connector"><code>{{ c.connector }}</code></td>
+      <td data-col="site">{% if c.site %}{{ c.site }}{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td data-col="budget">{% if c.budget %}{{ c.budget }}{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td data-col="flows">{% for f in c.flows %}<a href="/flows/{{ f | urlencode }}">{{ f }}</a>{% if not loop.last %}, {% endif %}{% else %}<span class="muted">no flow</span>{% endfor %}</td>
+      <td data-col="secrets">{% for name in c.credentials %}<code>{{ name }}</code> <span class="secret">***</span>{% if not loop.last %}, {% endif %}{% else %}<span class="muted">none</span>{% endfor %}</td>
+      <td data-col="check">
         {% if c.last_check_at %}
-          {% if c.last_check_ok %}<span class="badge tone-ok"><span class="icon" aria-hidden="true">✓</span> OK</span>{% else %}<span class="badge tone-bad"><span class="icon" aria-hidden="true">✕</span> Failed</span>{% endif %}
+          {% if c.last_check_ok %}<span class="state tone-ok"><span class="dot" aria-hidden="true"></span>OK</span>{% else %}<span class="state tone-bad"><span class="dot" aria-hidden="true"></span>Failed</span>{% endif %}
           {{ m.time_ago(c.last_check_at) }}
           {% if c.last_check_message %}<div class="error-text">{{ c.last_check_message }}</div>{% endif %}
         {% else %}
-          <span class="badge tone-idle"><span class="icon" aria-hidden="true">○</span> Never checked</span>
+          <span class="state tone-idle"><span class="dot" aria-hidden="true"></span>Never checked</span>
         {% endif %}
       </td>
-      <td>
+      {% if can(actor, "connections.check") %}<td>
         <form method="post" action="/connections/{{ c.name | urlencode }}/check">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit">Check now</button>
+          <button type="submit">Check now<span class="sr-only"> {{ c.name }}</span></button>
         </form>
-      </td>
+      </td>{% endif %}
     </tr>
   {% endfor %}
   </tbody>
 </table></div>
+{{ m.table_foot(connections | length, "connection", "connections") }}
 {% else %}
-<p class="empty">The project defines no connections.</p>
+<p class="empty">{% if q %}No connections match {{ q }}.{% else %}The project defines no connections.{% endif %}</p>
 {% endif %}
+</div>
 <h2 id="environment">Environment connections</h2>
 <p class="muted">Kept for environment <code>{{ env }}</code>, outside any package, and shared by every package installed here. Settings are plain values you can check and change; a secret field is set once and never shown again.</p>
 {% if environment %}
@@ -56,9 +59,9 @@
     {% for key, secret in c.secrets.items() %}
       <tr><th scope="row"><code>{{ key }}</code> <span class="muted">(secret)</span></th>
         <td>
-          {% if secret.set %}set, updated {{ secret.updated_at }} by {{ secret.updated_by }}{% elif secret.needs_reentry %}<span class="badge tone-bad">needs re-entry</span> <span class="muted">(cleared when where it goes changed)</span>{% elif secret.set is defined %}<span class="badge tone-bad">not set</span>{% else %}<code>{{ secret.ref }}</code>{% endif %}
-          {% if secret.ref.startswith('${secret:db:') %}
-          <form method="post" action="/secrets/{{ secret.ref[12:-1] | urlencode }}" class="inline" aria-label="Replace the secret {{ key }} of {{ c.name }}">
+          {% if secret.set %}<span class="state tone-ok"><span class="dot" aria-hidden="true"></span></span>set, updated <time datetime="{{ secret.updated_at }}">{{ secret.updated_at[:16] | replace("T", " ") }}</time> by {{ secret.updated_by }}{% elif secret.needs_reentry %}<span class="badge tone-bad">needs re-entry</span> <span class="muted">(cleared when where it goes changed)</span>{% elif secret.set is defined %}<span class="badge tone-bad">not set</span>{% else %}<code>{{ secret.ref }}</code>{% endif %}
+          {% if secret.ref.startswith('${secret:db:') and can(actor, "secrets.manage") %}
+          <form method="post" action="/secrets/{{ secret.ref[12:-1] | urlencode }}" class="inline-form" aria-label="Replace the secret {{ key }} of {{ c.name }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="back" value="/connections#env-{{ c.name }}">
             <label for="secret-{{ c.name }}-{{ key }}">New value for {{ key }} of {{ c.name }}</label>
@@ -70,7 +73,8 @@
     {% endfor %}
     </tbody>
   </table></div>
-  <form method="post" action="/connections/{{ c.name | urlencode }}/settings" aria-label="Change a setting of {{ c.name }}">
+  {% if can(actor, "environment.manage") %}
+  <form method="post" action="/connections/{{ c.name | urlencode }}/settings" class="setting-form" aria-label="Change a setting of {{ c.name }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label for="key-{{ c.name }}">Setting of {{ c.name }}</label>
     <input id="key-{{ c.name }}" name="key" required>
@@ -80,6 +84,7 @@
     <input id="reason-{{ c.name }}" name="reason">
     <button type="submit" aria-label="Save the setting of {{ c.name }}">Save</button>
   </form>
+  {% endif %}
   <p class="muted">Changed {{ c.changed_at }} by {{ c.changed_by }}.</p>
 </section>
 {% endfor %}

@@ -15,6 +15,12 @@ READ_ONLY = [
     "/runs",
     "/failures",
     "/connections",
+    "/datasets",
+    "/deliveries",
+    "/quarantine",
+    "/secrets",
+    "/users",
+    "/search?q=demo",
 ]
 FIRST = f"day={DAYS[0]}"
 

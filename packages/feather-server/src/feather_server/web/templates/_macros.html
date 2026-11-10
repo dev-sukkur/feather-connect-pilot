@@ -1,18 +1,64 @@
 {# Shared pieces. Every value reaches the page through autoescape. #}
 
 {% macro status_badge(status) -%}
-  {%- set known = {
-    "succeeded": ("✓", "Succeeded", "ok"), "applied": ("✓", "Applied", "ok"), "alive": ("●", "Alive", "ok"),
-    "failed": ("✕", "Failed", "bad"), "dead": ("✕", "Dead", "bad"), "rejected": ("✕", "Rejected", "bad"),
-    "running": ("▶", "Running", "info"), "claimed": ("▶", "Applying", "info"), "draining": ("◐", "Draining", "warn"),
-    "queued": ("…", "Queued", "idle"), "pending": ("…", "Pending", "idle"),
-    "held": ("⏸", "Held", "warn"), "paused": ("⏸", "Paused", "warn"), "open": ("!", "Open", "warn"),
-    "skipped": ("⤼", "Skipped", "idle"), "cancelled": ("⊘", "Cancelled", "idle"),
-    "superseded": ("⤼", "Superseded", "idle"), "sealed": ("✓", "Sealed", "ok"), "staged": ("…", "Staged", "idle"),
-    "never": ("○", "Never run", "idle"), "disabled": ("⊘", "Disabled", "idle"),
-  } -%}
-  {%- set found = known.get(status, ("•", status | capitalize, "idle")) -%}
-  <span class="badge badge-{{ status if status in known else 'other' }} tone-{{ found[2] }}"><span class="icon" aria-hidden="true">{{ found[0] }}</span> {{ found[1] }}</span>
+  {%- set found = status_info(status) -%}
+  <span class="badge badge-{{ found[3] }} tone-{{ found[2] }}"><span class="icon" aria-hidden="true">{{ found[0] }}</span> {{ found[1] }}</span>
+{%- endmacro %}
+
+{# The status of a row of a dense table: a coloured dot and its word. #}
+{% macro status_dot(status) -%}
+  {%- set found = status_info(status) -%}
+  <span class="state tone-{{ found[2] }}"><span class="dot" aria-hidden="true"></span>{{ found[1] }}</span>
+{%- endmacro %}
+
+{# The top of a list page: its title, the button that shows the tiles' charts, and the tiles. #}
+{% macro page_head(title, tiles=[], lead="") -%}
+  <div class="page-head">
+    <h1>{{ title }}</h1>
+    {% if tiles | selectattr("trend") | list %}<button type="button" class="charts-toggle" aria-pressed="false" hidden>{{ icon("chart") }} Show charts</button>{% endif %}
+  </div>
+  {% if lead %}<p class="muted lead">{{ lead }}</p>{% endif %}
+  {% if tiles %}
+  <ul class="tiles" aria-label="Summary">
+  {% for t in tiles %}
+    <li class="tile{% if t.tone %} tile-{{ t.tone }}{% endif %}"><h3>{{ t.label }}</h3><p class="n">{{ t.value }}</p>{% if t.trend | length > 1 %}<div class="spark">{{ sparkline(t.trend) }}<span class="muted">{{ t.note }}, last {{ t.trend | length }} days</span></div>{% endif %}</li>
+  {% endfor %}
+  </ul>
+  {% endif %}
+{%- endmacro %}
+
+{# The search box of a list page, with what the caller adds (its filters) and the "only active" switch. With
+   JavaScript it asks as you type and swaps in the table (#live); without, it is a plain form. #}
+{% macro toolbar(action, q, noun, active=none, active_label="", columns=[], table="") -%}
+  <div class="toolbar">
+    <form class="filters" method="get" action="{{ action }}" hx-get="{{ action }}" hx-target="#live" hx-select="#live" hx-swap="outerHTML" hx-trigger="submit, input changed delay:300ms from:find input[name=q], change" hx-replace-url="true">
+      <p class="search-field"><label for="list-q" class="sr-only">Search the {{ noun }}</label>
+        <input id="list-q" name="q" type="search" value="{{ q }}" placeholder="Search the {{ noun }}" maxlength="200" data-list-search aria-keyshortcuts="/"></p>
+      {% if caller %}{{ caller() }}{% endif %}
+      {% if active is not none %}<p class="switch-field"><label class="switch plain"><input type="checkbox" name="active" value="1"{% if active %} checked{% endif %}> {{ active_label }}</label></p>{% endif %}
+      <p><button type="submit">Filter</button></p>
+    </form>
+    {% if columns %}
+    <details class="columns" data-columns-for="{{ table }}" hidden>
+      <summary>{{ icon("columns") }} Columns</summary>
+      <div class="menu-panel">
+        <fieldset><legend>Columns to show</legend>
+        {% for key, name in columns %}<label class="plain"><input type="checkbox" data-col-toggle="{{ key }}" checked> {{ name }}</label>{% endfor %}
+        </fieldset>
+      </div>
+    </details>
+    {% endif %}
+  </div>
+{%- endmacro %}
+
+{# The line under a table. #}
+{% macro table_foot(count, one, many, more=false) -%}
+  <p class="table-foot" role="status">Showing {{ count }} {{ one if count == 1 else many }}{% if more %} on this page{% endif %}.<span class="live-note" hidden> Live updates are paused while rows are ticked or open.</span></p>
+{%- endmacro %}
+
+{# A notice above a list. #}
+{% macro notice_of(notice) -%}
+  {%- if notice %}<p class="notice notice-{{ notice[0] }}" role="{{ 'alert' if notice[0] == 'bad' else 'status' }}">{{ notice[1] }}</p>{% endif -%}
 {%- endmacro %}
 
 {% macro time_ago(moment) -%}

@@ -26,7 +26,7 @@ def test_lists_status_last_check_and_site(client: TestClient, world: World, csrf
     assert "hq" in page and "shop.api" in page  # the site and the connector
     assert "Never checked" in page and "orders" in page  # nothing has checked yet, and the flow that uses it
     assert 'href="/flows/orders"' in page
-    assert "<td>api</td>" in page  # the budget the warehouse spends from
+    assert '<td data-col="budget">api</td>' in page  # the budget the warehouse spends from
     assert 'href="/connections"' in page.split("<main")[0]  # in the navigation
     client.post("/connections/warehouse/check", data={"csrf_token": csrf()})
     after = client.get("/connections").text

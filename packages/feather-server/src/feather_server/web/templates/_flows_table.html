@@ -1,26 +1,70 @@
 {% import "_macros.html" as m with context %}
+{% set bulk = can(actor, "runs.start") or can(actor, "flows.pause") %}
 <div id="live" hx-get="{{ url() }}" hx-trigger="every 10s" hx-swap="outerHTML">
   {% if flows %}
-  <div class="table-wrap"><table>
+  <div class="table-wrap scroll"><table class="data" data-table="flows">
+    <caption class="sr-only">Flows</caption>
     <thead><tr>
-      <th scope="col">Flow</th><th scope="col">Status</th><th scope="col">Last run</th><th scope="col">Data fresh</th>
-      <th scope="col">Owner</th><th scope="col">Tags</th><th scope="col">Starts</th><th scope="col">Code</th>
+      {% if bulk %}<th scope="col" class="select"><input type="checkbox" data-select-all aria-label="Tick every flow shown" hidden></th>{% endif %}
+      <th scope="col" class="expand-col"><span class="sr-only">Open</span></th>
+      <th scope="col" data-col="status" data-sort>Status</th>
+      <th scope="col" data-sort>Flow</th>
+      <th scope="col" data-col="schedule" data-sort>Starts</th>
+      <th scope="col" data-col="last_run" data-sort>Last run</th>
+      <th scope="col" data-col="started" data-sort>Last started</th>
+      <th scope="col" data-col="fresh" data-sort>Data fresh</th>
+      <th scope="col" data-col="owner" data-sort>Owner</th>
+      <th scope="col" data-col="tags">Tags</th>
+      <th scope="col" data-col="code">Code</th>
+      <th scope="col" class="row-actions-col"><span class="sr-only">Actions</span></th>
     </tr></thead>
     <tbody>
     {% for flow in flows %}
+      {% set state = state_of(flow) %}
       <tr>
+        {% if bulk %}<td class="select"><input type="checkbox" name="name" value="{{ flow.name }}" form="bulk" data-select aria-label="Tick {{ flow.name }}"></td>{% endif %}
+        <td class="expand-col"><button type="button" class="expand" aria-expanded="false" aria-controls="child-{{ loop.index }}" data-child-src="/flows/{{ flow.name | urlencode }}/row" hidden>{{ icon("chevron") }}<span class="sr-only">Show the routes and runs of {{ flow.name }}</span></button></td>
+        <td data-col="status" data-value="{{ state }}">{{ m.status_dot(state) }}</td>
         <th scope="row"><a href="/flows/{{ flow.name | urlencode }}">{{ flow.name }}</a></th>
-        <td>{{ m.status_badge(state_of(flow)) }}</td>
-        <td>{% if flow.last_run %}{{ m.time_ago(flow.last_run.created_at) }}{% else %}<span class="muted">never</span>{% endif %}</td>
-        <td>{{ m.time_ago(flow.last_sealed_at) }}</td>
-        <td>{% if flow.owner %}{{ flow.owner }}{% else %}<span class="muted">none</span>{% endif %}</td>
-        <td><span class="tags">{% for tag in flow.tags %}<span class="tag">{{ tag }}</span>{% endfor %}</span></td>
-        <td>{{ flow.triggers | join(", ") }}</td>
-        <td><code>{{ sha }}</code></td>
+        <td data-col="schedule">{{ flow.triggers | join(", ") }}</td>
+        <td data-col="last_run">{% if flow.last_run %}{{ m.status_dot(flow.last_run.status) }} {{ m.time_ago(flow.last_run.updated_at) }}{% else %}<span class="muted">never</span>{% endif %}</td>
+        <td data-col="started">{% if flow.last_run %}{{ m.time_ago(flow.last_run.created_at) }}{% else %}<span class="muted">never</span>{% endif %}</td>
+        <td data-col="fresh">{{ m.time_ago(flow.last_sealed_at) }}</td>
+        <td data-col="owner">{% if flow.owner %}{{ flow.owner }}{% else %}<span class="muted">none</span>{% endif %}</td>
+        <td data-col="tags"><span class="tags">{% for tag in flow.tags %}<span class="tag">{{ tag }}</span>{% endfor %}</span></td>
+        <td data-col="code"><code>{{ sha }}</code></td>
+        <td class="row-actions-col"><div class="row-actions">
+          {% if can(actor, "runs.start") %}
+          <form method="post" action="/flows/bulk">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="name" value="{{ flow.name }}">
+            <button type="submit" name="action" value="run" class="icon-button" title="Run {{ flow.name }} now"{% if flow.paused or not flow.enabled %} disabled{% endif %}>{{ icon("play") }}<span class="sr-only">Run {{ flow.name }} now</span></button>
+          </form>
+          {% endif %}
+          {% if can(actor, "flows.pause") %}
+          <form method="post" action="/flows/bulk">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="name" value="{{ flow.name }}">
+            {% if flow.paused %}<button type="submit" name="action" value="resume" class="icon-button" title="Resume {{ flow.name }}">{{ icon("play") }}<span class="sr-only">Resume {{ flow.name }}</span></button>
+            {% else %}<button type="submit" name="action" value="pause" class="icon-button" title="Pause {{ flow.name }}" data-confirm="Pause {{ flow.name }}? Nothing new of it starts until it is resumed.">{{ icon("pause") }}<span class="sr-only">Pause {{ flow.name }}</span></button>{% endif %}
+          </form>
+          {% endif %}
+          <details class="row-menu">
+            <summary class="icon-button" title="More for {{ flow.name }}">{{ icon("more") }}<span class="sr-only">More for {{ flow.name }}</span></summary>
+            <div class="menu-panel">
+              <ul>
+                {% for d in flow.datasets %}<li><a href="/datasets/{{ d.name | urlencode }}/partitions">{{ icon("replay") }} Re-read or replay {{ d.name }}</a></li>{% endfor %}
+                <li><a href="/runs?flow={{ flow.name | urlencode }}">{{ icon("runs") }} Its runs</a></li>
+                <li><a href="/trace">{{ icon("trace") }} Trace a record</a></li>
+                <li><button type="button" class="link" data-copy="{{ flow.name }}" hidden>{{ icon("copy") }} Copy the name</button></li>
+              </ul>
+            </div>
+          </details>
+        </div></td>
       </tr>
+      <tr class="child" id="child-{{ loop.index }}" hidden><td colspan="12"><div class="child-body"></div></td></tr>
     {% endfor %}
     </tbody>
   </table></div>
+  {{ m.table_foot(flows | length, "flow", "flows") }}
   {% else %}
   <p class="empty">No flows match.</p>
   {% endif %}

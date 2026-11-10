@@ -5,7 +5,7 @@ appears as `***` or not at all.
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
@@ -81,6 +81,30 @@ class FlowSummary:
     last_sealed_at: datetime | None = (
         None  # when any of its datasets last got a version: how fresh the flow is
     )
+
+
+@dataclass(frozen=True)
+class DatasetRow:
+    """A dataset of a flow, with when it last got a version."""
+
+    name: str
+    flow: str
+    connection: str
+    strategy: str
+    priority: str
+    last_sealed_at: datetime | None
+
+
+@dataclass(frozen=True)
+class RouteRow:
+    """A route of a flow, with how many of its deliveries are failed and held, each counted up to a cap."""
+
+    name: str
+    flow: str
+    connection: str
+    paused: bool
+    failed: int
+    held: int
 
 
 @dataclass(frozen=True)
@@ -427,6 +451,10 @@ class Reads:
     ) -> list[Run]:
         return self._store.runs.list_runs(flow=flow, status=status, limit=limit, cursor=cursor)
 
+    def has_active_run(self, flow: str) -> bool:
+        """Whether the flow has a run queued or running, which a second start would only repeat."""
+        return any(self._store.runs.list_runs(flow=flow, status=s, limit=1) for s in ("queued", "running"))
+
     def retried_tasks(self, run_ids: list[str]) -> dict[str, int]:
         """For each run, how many of its tasks took more than one attempt. Runs with none are left out."""
         return self._store.reads.retried_tasks(run_ids)
@@ -634,3 +662,60 @@ class Reads:
                 )
             )
         return found
+
+    # The dashboard's tiles, sparklines and search: each one query, counted or grouped in the database.
+
+    def count_runs(self, status: str | None = None, since: datetime | None = None) -> int:
+        """How many runs have `status` (any, when None) and were created at `since` or later."""
+        return self._store.runs.count_runs(status, since)
+
+    def run_activity(self, days: int = 7) -> tuple[list[int], list[int]]:
+        """Runs created and runs failed on each of the last `days` UTC days, oldest first."""
+        today = self._state.clock.now().astimezone(UTC).date()
+        first = today - timedelta(days=days - 1)
+        found = self._store.runs.runs_by_day(datetime.combine(first, time.min, UTC))
+        span_ = [first + timedelta(days=n) for n in range(days)]
+        return [found.get(d, (0, 0))[0] for d in span_], [found.get(d, (0, 0))[1] for d in span_]
+
+    def find_runs(self, prefix: str, limit: int = 5) -> list[Run]:
+        """The newest runs whose id starts with `prefix`."""
+        return self._store.runs.find_runs(prefix, limit)
+
+    def workers(self) -> list[WorkerRow]:
+        return self._store.workers.list_workers()
+
+    def run(self, run_id: str) -> Run:
+        """One run. Raises `KeyError` for an unknown one."""
+        return self._store.runs.get_run(run_id)
+
+    def datasets(self) -> list[DatasetRow]:
+        flows = self._rt.flows()
+        sealed = self._store.versions.last_sealed_many([d.name for f in flows for d in f.datasets])
+        return [
+            DatasetRow(
+                d.name, flow.name, d.source.connection, d.strategy.name, d.priority, sealed.get(d.name)
+            )
+            for flow in flows
+            for d in flow.datasets
+        ]
+
+    def stale_datasets(self) -> list[StaleDataset]:
+        return self._stale()
+
+    def routes(self) -> list[RouteRow]:
+        flows = self._rt.flows()
+        counts = self._store.ledger.count_by_status(
+            [r.name for f in flows for r in f.routes], ["failed", "held"]
+        )
+        return [
+            RouteRow(
+                r.name,
+                flow.name,
+                r.sink.connection,
+                self._rt.is_route_paused(r.name),
+                counts.get((r.name, "failed"), 0),
+                counts.get((r.name, "held"), 0),
+            )
+            for flow in flows
+            for r in flow.routes
+        ]

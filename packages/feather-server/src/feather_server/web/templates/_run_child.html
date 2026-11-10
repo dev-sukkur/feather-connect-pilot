@@ -1,0 +1,17 @@
+{% import "_macros.html" as m with context %}
+{% set run = detail.run %}
+<section aria-label="Tasks of run {{ run.run_id[:8] }}">
+  <h3>Tasks{% if detail.task_total > detail.tasks | length %} <span class="muted">(the first {{ detail.tasks | length }} of {{ detail.task_total }})</span>{% endif %}</h3>
+  {% if detail.tasks %}
+  <ul class="plain-list tasks">
+    {% for task in detail.tasks %}
+    <li>{{ m.status_dot(task.status) }} <strong>{{ task.kind }}</strong>
+      <span class="muted">{% if task.dataset and task.partition %}{{ m.partition_label(task.dataset, task.partition) }}{% elif task.dataset %}{{ task.dataset }}{% endif %}{% if task.route %} &rarr; {{ task.route }}{% endif %}, {{ m.time_ago(task.started_at) }}{% if task.attempt > 1 %}, {{ task.attempt }} attempts{% endif %}</span>
+      <a href="/tasks/{{ task.task_id | urlencode }}/logs?run={{ run.run_id | urlencode }}">Log<span class="sr-only"> of this {{ task.kind }}</span></a>
+      {% if task.kind in ("extract", "apply") %}&middot; <a href="/runs/{{ run.run_id | urlencode }}/tasks/{{ task.task_id | urlencode }}/records">Records<span class="sr-only"> of this {{ task.kind }}</span></a>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="muted">No task has started yet.</p>{% endif %}
+  <p><a href="/runs/{{ run.run_id | urlencode }}">The whole run</a></p>
+</section>

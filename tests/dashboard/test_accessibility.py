@@ -15,6 +15,13 @@ PATHS = [
     "/runs",
     "/failures",
     "/connections",
+    "/datasets",
+    "/deliveries",
+    "/quarantine",
+    "/secrets",
+    "/users",
+    "/search?q=demo",
+    "/flows?q=demo&active=1",
     "/versions/{version}",  # a version page, of the lake's first delivery
     "/routes/lake/deliveries/{version}",
     "/trace",

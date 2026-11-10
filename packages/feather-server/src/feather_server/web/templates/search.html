@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Search</h1>
+<form class="filters" method="get" action="/search" role="search">
+  <p class="search-field"><label for="search-q">Flows, runs by id, datasets, routes, connections and pages</label><br>
+    <input id="search-q" name="q" type="search" value="{{ q }}" maxlength="200"></p>
+  <p><button type="submit">Search</button></p>
+</form>
+{% if found %}
+<ul class="results">
+  {% for f in found %}<li><a href="{{ f.href }}">{{ f.label }}</a> <span class="muted">{{ f.detail }}</span></li>{% endfor %}
+</ul>
+{% else %}
+<p class="empty">Nothing matches {{ q }}.</p>
+{% endif %}
+{% endblock %}

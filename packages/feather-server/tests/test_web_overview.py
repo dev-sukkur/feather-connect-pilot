@@ -64,6 +64,7 @@ def test_every_page_sends_the_csp_header_and_has_no_inline_script(client: TestCl
     html = response.text
     assert "<script>" not in html and " onclick=" not in html and "style=" not in html
     assert re.findall(r"<script[^>]*>", html) == [
+        '<script src="/static/theme.js">',  # the theme, before the page draws: a file, not inline
         '<script src="/static/htmx.min.js" defer>',
         '<script src="/static/app.js" defer>',
     ]
@@ -113,8 +114,8 @@ def test_status_is_never_colour_alone(client: TestClient, world: World) -> None:
 def test_pages_have_a_skip_link_a_main_landmark_and_a_current_nav_item(client: TestClient) -> None:
     html = client.get("/").text
     assert 'class="skip" href="#main"' in html and '<main id="main"' in html
-    assert re.search(r'<a href="/" aria-current="page">Overview</a>', html)
-    assert '<html lang="en">' in html and "<title>Overview" in html
+    assert re.search(r'<a href="/" aria-current="page"[^>]*>.*?<span class="label">Overview</span></a>', html)
+    assert '<html lang="en" data-user="op">' in html and "<title>Overview" in html
 
 
 def test_static_files_are_served_and_the_vendored_htmx_is_pinned(client: TestClient) -> None:
@@ -124,7 +125,8 @@ def test_static_files_are_served_and_the_vendored_htmx_is_pinned(client: TestCli
     assert "Zero-Clause BSD" in (STATIC / "LICENSE-htmx.txt").read_text(encoding="utf-8")
     css = client.get("/static/app.css")
     assert css.status_code == 200 and "text/css" in css.headers["content-type"]
-    assert "prefers-color-scheme: dark" in css.text and "@import" not in css.text
+    assert "prefers-color-scheme: light" in css.text and "@import" not in css.text  # dark first
+    assert ':root[data-theme="light"]' in css.text  # and the light theme a user picks
 
 
 def test_htmx_is_told_not_to_use_inline_styles_or_eval(client: TestClient) -> None:

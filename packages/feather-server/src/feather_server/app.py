@@ -110,7 +110,7 @@ def build_state(settings: Settings) -> AppState:
     return AppState(settings, project, store, spool, engine, runtime, clock, closers, vault)
 
 
-def _readiness(state: AppState) -> dict[str, str]:
+def readiness(state: AppState) -> dict[str, str]:
     """Report whether the database answers and its schema is at head. A state with no database URL has neither to
     check, and counts as ready."""
     url = state.settings.database_url
@@ -181,7 +181,7 @@ def create_app(
 
     @app.get("/readyz")
     def readyz(response: Response) -> dict[str, Any]:
-        report = _readiness(state)
+        report = readiness(state)
         if report["database"] != "ok" or report.get("schema", "current") != "current":
             response.status_code = 503
         return report

@@ -1,14 +1,15 @@
 <!doctype html>
-<html lang="en">
+<html lang="en"{% if actor %} data-user="{{ actor.user or actor.name }}"{% endif %}>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="dark light">
   <meta name="csrf-token" content="{{ csrf_token }}">
   <meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "allowScriptTags": false}'>
   <title>{% block title %}{{ title }}{% endblock %} · Feather Connect</title>
   <link rel="stylesheet" href="/static/app.css">
-  {% block scripts %}<script src="/static/htmx.min.js" defer></script>
+  {% block scripts %}<script src="/static/theme.js"></script>
+  <script src="/static/htmx.min.js" defer></script>
   <script src="/static/app.js" defer></script>{% endblock %}
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
@@ -18,32 +19,93 @@
   <header class="sidebar" id="sidebar">
     <div class="sidebar-inner">
     <div class="sidebar-top">
-      <a class="brand" href="/"><span aria-hidden="true">&#9670;</span> Feather Connect</a>
+      <a class="brand" href="/">{{ icon("logo") }}<span class="label">Feather Connect</span></a>
       <button type="button" class="menu-toggle" aria-controls="sidebar-menu" aria-expanded="true" hidden>
-        <span aria-hidden="true">&#9776;</span> Menu
+        {{ icon("menu") }} Menu
       </button>
     </div>
     <div class="sidebar-menu" id="sidebar-menu">
       <nav aria-label="Main">
         <ul>
-        {% for label, target in nav %}<li><a href="{{ target }}"{% if (target == "/" and path == "/") or (target != "/" and path.startswith(target)) %} aria-current="page"{% endif %}>{{ label }}</a></li>{% endfor %}
-        {% if actor and actor.role == "admin" %}<li><a href="/users"{% if path.startswith("/users") %} aria-current="page"{% endif %}>Users</a></li>{% endif %}
+        {% for item in nav %}{% if item.needs is none or (actor and can(actor, item.needs)) %}
+          <li><a href="{{ item.path }}"{% if item.current(path) %} aria-current="page"{% endif %} title="{{ item.label }}">{{ icon(item.icon) }}<span class="label">{{ item.label }}</span></a></li>
+        {% endif %}{% endfor %}
+        {# P5: Packages and Registries join the list here. #}
         </ul>
       </nav>
-      {% if actor %}
-      <form class="who" method="post" action="/logout">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <span class="who-name"><span class="muted">Signed in as</span> {{ actor.name }} <span class="muted">· {{ actor.role }}</span></span>
-        <button type="submit" class="link">Sign out</button>
-      </form>
-      {% endif %}
     </div>
     </div>
   </header>
   {% endblock %}
-  <main id="main" tabindex="-1">
-    {% block content %}{% endblock %}
-  </main>
+  <div class="frame">
+    {% if actor %}
+    <header class="topbar">
+      <form class="search" role="search" method="get" action="/search">
+        <label class="sr-only" for="global-search">Search flows, runs, datasets and connections</label>
+        {{ icon("search") }}
+        <input id="global-search" name="q" type="search" placeholder="Search" autocomplete="off" maxlength="200" aria-keyshortcuts="Control+K Meta+K">
+        <kbd class="hint" aria-hidden="true">Ctrl K</kbd>
+      </form>
+      <div class="topbar-end">
+        <button type="button" class="icon-button" id="help-open" aria-haspopup="dialog" hidden>{{ icon("help") }}<span class="sr-only">Help and keyboard shortcuts</span></button>
+        <button type="button" class="icon-button" id="theme-toggle" hidden>{{ icon("sun") }}{{ icon("moon") }}<span class="sr-only">Switch the theme</span></button>
+        <details class="user-menu">
+          <summary>{{ icon("user") }}<span class="user-name">{{ actor.name }}</span><span class="sr-only">, {{ actor.role }}: account menu</span></summary>
+          <div class="menu-panel">
+            <p><strong>{{ actor.name }}</strong> <span class="muted">· {{ actor.role }}</span><br><span class="muted">in environment {{ env }}</span></p>
+            <button type="button" class="link" id="theme-system" hidden>Follow the system theme</button>
+            <form method="post" action="/logout">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit">Sign out</button>
+            </form>
+          </div>
+        </details>
+      </div>
+    </header>
+    {% endif %}
+    <main id="main" tabindex="-1">
+      {% block content %}{% endblock %}
+    </main>
+    {% if actor %}
+    <footer class="statusbar" id="statusbar" hx-get="/status" hx-trigger="load, every 15s" hx-swap="innerHTML" aria-label="Server status">
+      <span class="muted">Checking the server&hellip;</span>
+    </footer>
+    {% endif %}
   </div>
+  </div>
+  {% if actor %}
+  <dialog id="palette" class="palette" aria-labelledby="palette-title">
+    <h2 id="palette-title" class="sr-only">Search</h2>
+    <div class="palette-box">
+      {{ icon("search") }}
+      <input id="palette-input" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="palette-list" aria-label="Search flows, runs by id, datasets, connections and pages" autocomplete="off" maxlength="200">
+      <kbd aria-hidden="true">Esc</kbd>
+    </div>
+    <ul id="palette-list" role="listbox" aria-label="Results"></ul>
+    <p class="palette-empty muted" id="palette-empty" hidden>Nothing matches.</p>
+    <p class="sr-only" id="palette-said" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="help" class="sheet" aria-labelledby="help-title">
+    <h2 id="help-title">Keyboard shortcuts</h2>
+    <dl class="keys">
+      <div><dt><kbd>Ctrl</kbd> <kbd>K</kbd> or <kbd>&#8984;</kbd> <kbd>K</kbd></dt><dd>Search flows, runs, datasets, connections and pages</dd></div>
+      <div><dt><kbd>/</kbd></dt><dd>Search this list</dd></div>
+      <div><dt><kbd>&uarr;</kbd> <kbd>&darr;</kbd></dt><dd>Move between the rows of a table</dd></div>
+      <div><dt><kbd>Space</kbd></dt><dd>Tick the row, on its checkbox</dd></div>
+      <div><dt><kbd>Esc</kbd></dt><dd>Close a dialog or a menu</dd></div>
+      <div><dt><kbd>?</kbd></dt><dd>Show these shortcuts</dd></div>
+    </dl>
+    <p class="muted">Every page works without JavaScript too. A list refreshes itself while nothing on it is ticked or open.</p>
+    <form method="dialog"><button type="submit" class="primary">Close</button></form>
+  </dialog>
+  <dialog id="confirm-dialog" class="sheet" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-text">
+    <h2 id="confirm-dialog-title">Are you sure?</h2>
+    <p id="confirm-dialog-text"></p>
+    <div class="dialog-actions">
+      <button type="button" class="primary" id="confirm-dialog-yes">Confirm</button>
+      <button type="button" id="confirm-dialog-no">Cancel</button>
+    </div>
+  </dialog>
+  {% endif %}
 </body>
 </html>

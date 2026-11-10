@@ -22,7 +22,7 @@ def test_runs_list_filters_by_flow_and_status(client: TestClient, world: World) 
     assert f'href="/runs/{bad}"' in failed and f'href="/runs/{good}"' not in failed
     assert f'href="/runs/{good}"' in client.get("/runs?flow=orders&status=succeeded").text
     assert "No runs match" in client.get("/runs?flow=nothing").text
-    assert '<form class="filters" method="get" action="/runs">' in html  # works without JavaScript
+    assert '<form class="filters" method="get" action="/runs" ' in html  # works without JavaScript
     assert 'href="/runs"' in html and "Runs" in html.split("<main")[0]  # in the navigation
 
 
@@ -117,7 +117,7 @@ def test_active_run_refreshes_through_htmx(client: TestClient, world: World) -> 
     world.engine.run_until_idle()
     done = client.get(f"/runs/{run_id}", headers={"HX-Request": "true"}).text
     assert "Succeeded" in done and "hx-trigger" not in done  # a finished run stops polling
-    assert "hx-trigger" not in client.get(f"/runs/{run_id}").text
+    assert 'hx-trigger="every 3s"' not in client.get(f"/runs/{run_id}").text  # the status bar still polls
     assert 'hx-trigger="every 5s"' in client.get("/runs").text
     assert "<html" not in client.get("/runs", headers={"HX-Request": "true"}).text
 
