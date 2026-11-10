@@ -85,6 +85,7 @@ from feather_connect.storage.port import (
     UserStore,
     Version,
     VersionDraft,
+    VersionNotReady,
     VersionSealed,
     VersionStore,
     WebhookEvent,
@@ -1468,6 +1469,17 @@ class _Packages(PackageStore):
             ]
             if busy:
                 raise InUse(f"{name} {row.version}: its flow {busy[0].flow} is {busy[0].state}")
+            runs = [
+                r
+                for r in self._d.runs.values()
+                if r.status in ("queued", "running")
+                and r.params.get("package") == name
+                and r.params.get("version") == row.version
+            ]
+            if runs:
+                raise InUse(
+                    f"{name} {row.version} has {runs[0].status} runs: let them finish, or cancel them"
+                )
             self._d.package_versions[key] = replace(row, state="uninstalled")
             shared = any(
                 v.sha256 == row.sha256 and v.state != "uninstalled" for v in self._d.package_versions.values()
@@ -1478,6 +1490,10 @@ class _Packages(PackageStore):
         for listener in listeners:
             listener()
         return not shared
+
+    def needed_lock_hashes(self) -> set[str]:
+        with self._d.lock:
+            return {v.lock_hash for v in self._d.package_versions.values() if v.state != "uninstalled"}
 
     def activations(self, name: str, version: str | None = None) -> list[FlowActivation]:
         wanted = None if version is None else version_key(version)
@@ -1498,6 +1514,12 @@ class _Packages(PackageStore):
             row = self._d.activations.get(wanted)
             if row is None:
                 raise KeyError(f"{name} {version} has no flow {flow}")
+            installed = self._d.package_versions.get((name, wanted[2]))
+            if installed is None or installed.state != "ready":
+                state = "uninstalled" if installed is None else installed.state
+                raise VersionNotReady(
+                    f"{name} {version} is {state}: only a ready version can be activated", state
+                )
             for key, other in self._d.activations.items():
                 if key[0] == flow and key != wanted and other.state == "activating":
                     self._d.activations[key] = replace(
@@ -1527,8 +1549,11 @@ class _Packages(PackageStore):
                             and other_key != (flow, package, vkey)
                             and other.state == "active"
                         ):
-                            self._d.activations[other_key] = replace(other, state="inactive", changed_at=at)
-                settled = replace(row, state=to, changed_at=at, error=error)
+                            self._d.activations[other_key] = replace(
+                                other, state="inactive", changed_at=at, last_active_at=at
+                            )
+                served = at if to == "active" else row.last_active_at
+                settled = replace(row, state=to, changed_at=at, error=error, last_active_at=served)
                 self._d.activations[(flow, package, vkey)] = settled
                 done.append(settled)
             listeners = list(self._d.catalog_listeners) if done else []
@@ -1559,7 +1584,10 @@ class _Packages(PackageStore):
             found.sort(key=lambda item: item[1].state != "active")  # the active one first
             done: FlowActivation | None = None
             for key, row in found:
-                settled = replace(row, state="inactive", changed_by=by, changed_at=at, reason=reason)
+                served = at if row.state == "active" else row.last_active_at
+                settled = replace(
+                    row, state="inactive", changed_by=by, changed_at=at, reason=reason, last_active_at=served
+                )
                 self._d.activations[key] = settled
                 done = done or settled
             listeners = list(self._d.catalog_listeners)

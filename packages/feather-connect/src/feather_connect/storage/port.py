@@ -1316,6 +1316,10 @@ class PackageVersion:
     load_check: Mapping[str, Any]
     installed_by: str
     installed_at: datetime
+    checks: Sequence[str] = ()  # the install checks it passed, in order
+    promoted_from: str | None = None  # the environment it was promoted from, by sha256
+    promoted_by: str | None = None
+    signed_by: str | None = None  # the id of the trusted key that signed it, where signing was required
 
 
 @dataclass(frozen=True)
@@ -1331,6 +1335,7 @@ class FlowActivation:
     changed_at: datetime
     reason: str | None = None
     error: str | None = None
+    last_active_at: datetime | None = None  # when it last served: became active, or stopped being so
 
 
 def check_wheel(version: "PackageVersion", content: bytes) -> None:
@@ -1369,6 +1374,15 @@ class PackageEnv:
     state: EnvState
     error: str | None
     built_at: datetime
+
+
+class VersionNotReady(Exception):
+    """A flow of a version that isn't `ready` can't be activated: it is being prepared, failed, or was uninstalled.
+    `state` is the version's."""
+
+    def __init__(self, message: str, state: str) -> None:
+        super().__init__(message)
+        self.state = state
 
 
 class InUse(Exception):
@@ -1413,7 +1427,12 @@ class PackageStore(Protocol):
         """Mark the version `uninstalled` (§6) in one transaction, its flows' rows staying, inactive, as its history
         does, and delete its wheel unless a version still installed has the same sha256. Returns whether the wheel was
         deleted. Raises `KeyError` when the version isn't installed (or is uninstalled already), and `InUse` when a
-        flow of it is active or activating; it changes nothing then."""
+        flow of it is active or activating, or a run tagged with it is queued or running; it changes nothing then."""
+        ...
+
+    def needed_lock_hashes(self) -> set[str]:
+        """The lock hashes of every version that isn't uninstalled, however many there are: the environments a
+        worker must keep."""
         ...
 
     def activations(self, name: str, version: str | None = None) -> list[FlowActivation]:
@@ -1427,7 +1446,8 @@ class PackageStore(Protocol):
         """Ask for `version` to be the active one of `flow` (§6): it is `activating`, and the version active now stays
         active, until a host of the new one is up and `promote` makes the switch. A version already active stays so,
         and another one activating is dropped (inactive). Tells every listener (NOTIFY). Raises `KeyError` when the
-        version has no such flow."""
+        version has no such flow, and `VersionNotReady` when the version isn't `ready`, checked in the same
+        transaction, so that an uninstall can't slip in between."""
         ...
 
     def promote(self, name: str, version: str, at: datetime) -> list[FlowActivation]:

@@ -41,6 +41,7 @@ from feather_connect.storage.port import (
     Store,
     TokenRow,
     VersionDraft,
+    VersionNotReady,
     VersionSealed,
     delivery_cursor,
     failure_cursor,
@@ -1539,7 +1540,7 @@ class StoreContract(
             manifest,
             ">=0.1,<1",
             "b" * 64,
-            "installed",
+            "ready",  # prepared: only a ready version's flows can be activated
             {"flows": ["invoices"], "seconds": 1.5},
             "root",
             at,
@@ -1618,6 +1619,56 @@ class StoreContract(
         assert store.packages.wheel(_sha(b"newer")) is None
         assert store.packages.uninstall("zed", "0.1", "root", T0) is True
         assert store.packages.wheel(_sha(b"wheel")) is None
+
+    def test_a_version_that_isnt_ready_or_is_uninstalled_cant_be_activated(self, store: Store):
+        store.packages.install(
+            replace(self._installed("acme", "1.0.0"), state="preparing"), b"wheel", ["acme/invoices"]
+        )
+        with pytest.raises(VersionNotReady) as early:
+            store.packages.activate("acme/invoices", "acme", "1.0.0", "ops", T0)
+        assert early.value.state == "preparing"
+        store.packages.prepared("acme", "1.0.0", "ready", {"ok": True})
+        store.packages.uninstall("acme", "1.0.0", "root", T0)
+        with pytest.raises(
+            VersionNotReady
+        ) as late:  # the race the P5 review found: activate after an uninstall
+            store.packages.activate("acme/invoices", "acme", "1.0.0", "ops", T0)
+        assert late.value.state == "uninstalled" and store.packages.activating() == []
+
+    def test_an_uninstall_is_refused_while_a_run_of_the_version_is_queued_or_running(self, store: Store):
+        store.packages.install(self._installed("acme", "1.0.0"), b"wheel", ["acme/invoices"])
+        run = store.runs.create_run(
+            "acme/invoices", "cron", "scheduler", {"package": "acme", "version": "1.0.0"}
+        )
+        with pytest.raises(InUse, match="queued runs"):
+            store.packages.uninstall("acme", "1.0.0", "root", T0)
+        store.runs.set_run_status(run, "running")
+        with pytest.raises(InUse, match="running runs"):
+            store.packages.uninstall("acme", "1.0.0", "root", T0)
+        store.runs.set_run_status(run, "succeeded")
+        assert store.packages.uninstall("acme", "1.0.0", "root", T0) is True
+
+    def test_the_lock_hashes_still_needed_are_all_there_past_500_versions(self, store: Store):
+        for n in range(505):
+            row = replace(self._installed("acme", f"1.0.{n}", f"w{n}".encode()), lock_hash=f"{n:064x}")
+            store.packages.install(row, f"w{n}".encode(), [])
+        store.packages.uninstall("acme", "1.0.504", "root", T0)
+        needed = store.packages.needed_lock_hashes()
+        assert len(needed) == 504 and f"{503:064x}" in needed and f"{504:064x}" not in needed
+
+    def test_a_flow_remembers_when_each_version_last_served(self, store: Store):
+        one, two = self._installed("acme", "1.0.0"), self._installed("acme", "1.1.0", b"newer")
+        store.packages.install(one, b"wheel", ["acme/invoices"])
+        store.packages.install(two, b"newer", ["acme/invoices"])
+        store.packages.activate("acme/invoices", "acme", "1.0.0", "ops", T0)
+        store.packages.promote("acme", "1.0.0", T0 + timedelta(seconds=1))
+        store.packages.activate("acme/invoices", "acme", "1.1.0", "ops", T0 + timedelta(seconds=2))
+        store.packages.promote("acme", "1.1.0", T0 + timedelta(seconds=3))
+        served = {a.version: a.last_active_at for a in store.packages.activations("acme")}
+        assert served == {"1.0.0": T0 + timedelta(seconds=3), "1.1.0": T0 + timedelta(seconds=3)}
+        store.packages.deactivate("acme/invoices", "ops", T0 + timedelta(seconds=9))
+        served = {a.version: a.last_active_at for a in store.packages.activations("acme")}
+        assert served["1.1.0"] == T0 + timedelta(seconds=9) and served["1.0.0"] == T0 + timedelta(seconds=3)
 
     def test_a_flow_is_activated_in_one_version_at_a_time_once_its_host_is_up(self, store: Store):
         import threading
@@ -1721,7 +1772,9 @@ class StoreContract(
     def test_a_version_is_prepared_once_and_environments_are_kept_per_worker(self, store: Store):
         import threading
 
-        store.packages.install(self._installed("acme", "1.0.0"), b"wheel", ["acme/invoices"])
+        store.packages.install(
+            replace(self._installed("acme", "1.0.0"), state="installed"), b"wheel", ["acme/invoices"]
+        )
         heard = threading.Event()
         stop = store.packages.listen(heard.set)
         try:

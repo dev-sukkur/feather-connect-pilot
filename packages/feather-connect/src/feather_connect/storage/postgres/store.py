@@ -93,6 +93,7 @@ from feather_connect.storage.port import (
     UserStore,
     Version,
     VersionDraft,
+    VersionNotReady,
     VersionSealed,
     VersionStore,
     WebhookEvent,
@@ -2288,7 +2289,7 @@ class _Packages(PackageStore):
         self._db = db
 
     _COLUMNS = """name, version, sha256, registry, filename, size, manifest, fc_versions, lock_hash, state, load_check,
-                  installed_by, installed_at"""
+                  installed_by, installed_at, checks, promoted_from, promoted_by, signed_by"""
 
     @staticmethod
     def _version(row: Mapping[str, Any]) -> PackageVersion:
@@ -2306,6 +2307,10 @@ class _Packages(PackageStore):
             row["load_check"],
             row["installed_by"],
             row["installed_at"],
+            tuple(row["checks"] or ()),
+            row["promoted_from"],
+            row["promoted_by"],
+            row["signed_by"],
         )
 
     def install(
@@ -2327,7 +2332,7 @@ class _Packages(PackageStore):
                 )
                 conn.execute(
                     f"""insert into feather.package_version (tenant_id, version_key, {self._COLUMNS})
-                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         tenant,
                         key,
@@ -2344,6 +2349,10 @@ class _Packages(PackageStore):
                         _json(dict(version.load_check)),
                         version.installed_by,
                         version.installed_at,
+                        _json(list(version.checks)),
+                        version.promoted_from,
+                        version.promoted_by,
+                        version.signed_by,
                     ),
                 )
                 for flow in flows:
@@ -2419,6 +2428,17 @@ class _Packages(PackageStore):
             ).fetchone()
             if busy is not None:
                 raise InUse(f"{name} {row['version']}: its flow {busy['flow']} is {busy['state']}")
+            runs = conn.execute(
+                """select status from feather.run
+                   where tenant_id = %s and status in ('queued', 'running')
+                     and params->>'package' = %s and params->>'version' = %s
+                   limit 1""",  # run_tagged_idx
+                (tenant, name, row["version"]),
+            ).fetchone()
+            if runs is not None:
+                raise InUse(
+                    f"{name} {row['version']} has {runs['status']} runs: let them finish, or cancel them"
+                )
             conn.execute(
                 """update feather.package_version set state = 'uninstalled'
                    where tenant_id = %s and name = %s and version_key = %s""",
@@ -2437,7 +2457,7 @@ class _Packages(PackageStore):
             conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, tenant))
         return shared is None
 
-    _ACTIVATION = "flow, package, version, state, changed_by, changed_at, reason, error"
+    _ACTIVATION = "flow, package, version, state, changed_by, changed_at, reason, error, last_active_at"
 
     @staticmethod
     def _activation(r: Mapping[str, Any]) -> FlowActivation:
@@ -2450,37 +2470,47 @@ class _Packages(PackageStore):
             r["changed_at"],
             r["reason"],
             r["error"],
+            r["last_active_at"],
         )
+
+    def needed_lock_hashes(self) -> set[str]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select distinct lock_hash from feather.package_version
+                   where tenant_id = %s and state <> 'uninstalled'""",
+                (self._db.tenant,),
+            ).fetchall()
+        return {r["lock_hash"] for r in rows}
 
     def activations(self, name: str, version: str | None = None) -> list[FlowActivation]:
         key = None if version is None else version_key(version)
         with self._db.tx() as conn:
             rows = conn.execute(
-                """select flow, package, version, state, changed_by, changed_at, reason, error
+                f"""select {self._ACTIVATION}
                    from feather.flow_activation
                    where tenant_id = %s and package = %s and (%s::text is null or version_key = %s)
                    order by flow collate "C", changed_at, version collate "C" limit %s""",
                 (self._db.tenant, name, key, key, MAX_PACKAGE_ROWS),
             ).fetchall()
-        return [
-            FlowActivation(
-                r["flow"],
-                r["package"],
-                r["version"],
-                r["state"],
-                r["changed_by"],
-                r["changed_at"],
-                r["reason"],
-                r["error"],
-            )
-            for r in rows
-        ]
+        return [self._activation(r) for r in rows]
 
     def activate(
         self, flow: str, name: str, version: str, by: str, at: datetime, reason: str | None = None
     ) -> FlowActivation:
         tenant, key = self._db.tenant, version_key(version)
         with self._db.tx() as conn:
+            installed = (
+                conn.execute(  # shared: an uninstall, which takes it for update, waits or makes this wait
+                    """select state from feather.package_version
+                   where tenant_id = %s and name = %s and version_key = %s for share""",
+                    (tenant, name, key),
+                ).fetchone()
+            )
+            if installed is None or installed["state"] != "ready":
+                state = "uninstalled" if installed is None else installed["state"]
+                raise VersionNotReady(
+                    f"{name} {version} is {state}: only a ready version can be activated", state
+                )
             conn.execute(
                 """update feather.flow_activation set state = 'inactive', changed_by = %s, changed_at = %s, reason = %s
                    where tenant_id = %s and flow = %s and state = 'activating'
@@ -2513,10 +2543,10 @@ class _Packages(PackageStore):
                 raise KeyError(f"no version of {flow} is active")
             rows = conn.execute(
                 f"""update feather.flow_activation set state = 'inactive', changed_by = %s, changed_at = %s,
-                        reason = %s
+                        reason = %s, last_active_at = case when state = 'active' then %s else last_active_at end
                     where tenant_id = %s and flow = %s and state in ('active', 'activating')
                     returning {self._ACTIVATION}, version_key""",
-                (by, at, reason, tenant, flow),
+                (by, at, reason, at, tenant, flow),
             ).fetchall()
             conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, tenant))
         first = (found[0]["package"], found[0]["version_key"])  # the active one, if there is one
@@ -2540,16 +2570,17 @@ class _Packages(PackageStore):
                 return []
             if to == "active":
                 conn.execute(
-                    """update feather.flow_activation set state = 'inactive', changed_at = %s
+                    """update feather.flow_activation set state = 'inactive', changed_at = %s, last_active_at = %s
                        where tenant_id = %s and flow = any(%s) and state = 'active'
                          and not (package = %s and version_key = %s)""",
-                    (at, tenant, flows, name, key),
+                    (at, at, tenant, flows, name, key),
                 )
             rows = conn.execute(
-                f"""update feather.flow_activation set state = %s, changed_at = %s, error = %s
+                f"""update feather.flow_activation set state = %s, changed_at = %s, error = %s,
+                        last_active_at = case when %s::text = 'active' then %s else last_active_at end
                     where tenant_id = %s and package = %s and version_key = %s and state = 'activating'
                     returning {self._ACTIVATION}""",
-                (to, at, error, tenant, name, key),
+                (to, at, error, to, at, tenant, name, key),
             ).fetchall()
             conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, tenant))
         return sorted((self._activation(r) for r in rows), key=lambda a: a.flow)

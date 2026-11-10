@@ -292,3 +292,15 @@ def test_environments_no_installed_version_needs_are_removed_unless_in_use(tmp_p
     world.store.packages.uninstall("acme", "1.0.0", "root", T0)
     assert world.supervisor.remove_unneeded_envs() == [acme]  # its last version was uninstalled
     assert envs.built() == [held]
+
+
+def test_a_queued_run_of_an_uninstalled_version_is_failed_with_the_reason(tmp_path: Path):
+    world = _World(tmp_path, READY)
+    _installed(world.store)
+    world.store.packages.uninstall("acme", "1.0.0", "root", T0)
+    late = world.store.runs.create_run(
+        "acme/feed", "cron", "scheduler", {"package": "acme", "version": "1.0.0"}
+    )
+    assert world.supervisor.wanted() == set()
+    run = world.store.runs.get_run(late)
+    assert run.status == "failed" and "uninstalled" in (run.reason or "")

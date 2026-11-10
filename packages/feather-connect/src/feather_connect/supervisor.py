@@ -285,7 +285,7 @@ class Supervisor:
     def remove_unneeded_envs(self) -> list[str]:
         """Remove the environments that no installed version needs any more, its last one uninstalled (task 10), and
         that no process holds in use. Returns the lock hashes removed."""
-        needed = {v.lock_hash for v in self._store.packages.versions() if v.state != "uninstalled"}
+        needed = self._store.packages.needed_lock_hashes()  # every one: a list of versions stops at 500
         removed: list[str] = []
         for lock_hash in self._envs.built():
             if lock_hash in needed or self._envs.in_use(lock_hash):
@@ -310,7 +310,17 @@ class Supervisor:
             row = self._store.packages.version(package, version)
             if row is not None and row.state == "ready":
                 ready.add((package, row.version))
+            elif row is None or row.state == "uninstalled":
+                self._fail_orphans(package, version)
         return ready
+
+    def _fail_orphans(self, package: str, version: str) -> None:
+        """Fail the queued runs tagged with a version that isn't installed (any more): no host will ever take them.
+        One can be written after an uninstall by a scheduler that hadn't heard of it yet."""
+        for run in self._store.runs.queued_of(package, version, limit=100):
+            why = f"{package} {version} is not installed here (uninstalled): no host can run it"
+            log.warning("failing run %s: %s", run.run_id, why)
+            self._store.runs.set_run_status(run.run_id, "failed", why)
 
     def hosts(self) -> dict[tuple[str, str], str]:
         """The hosts running, by version, with their worker ids."""

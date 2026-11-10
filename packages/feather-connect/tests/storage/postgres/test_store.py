@@ -471,7 +471,7 @@ def _package_version(load_check: dict[str, Any]) -> Any:
     sha = hashlib.sha256(b"wheel").hexdigest()
     return PackageVersion(
         "acme", "1.0.0", sha, "feather", "acme-1.0.0-py3-none-any.whl", 5, manifest, ">=0.1", "b" * 64,
-        "installed", load_check, "root", T0,
+        "ready", load_check, "root", T0,
     )  # fmt: skip
 
 
