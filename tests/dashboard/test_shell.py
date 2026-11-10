@@ -28,7 +28,7 @@ def test_the_palette_finds_a_flow_a_run_by_id_and_a_page(signed_in: Page, site: 
     page.keyboard.press("Tab")  # the focus stays in the dialog
     expect(box).to_be_focused()
     page.keyboard.press("Enter")
-    expect(page).to_have_url(f"{site.url}/flows/dashboard/demo")
+    expect(page).to_have_url(f"{site.url}/flows/dashboard%2Fdemo")
 
     run_id = site.stack.store.runs.list_runs(limit=1)[0].run_id
     page.keyboard.press("Control+k")
@@ -116,7 +116,7 @@ def test_a_row_opened_after_the_session_ends_goes_to_sign_in(signed_in: Page, si
     page = signed_in
     page.goto(f"{site.url}/flows")
     page.context.clear_cookies()
-    page.get_by_role("button", name="Show the routes and runs of demo").click()
+    page.get_by_role("button", name="Show the routes and runs of dashboard/demo").click()
     expect(page).to_have_url(f"{site.url}/login")
     expect(page.locator("tr.child")).to_have_count(0)  # the sign-in page was not put into the table
 
@@ -124,7 +124,7 @@ def test_a_row_opened_after_the_session_ends_goes_to_sign_in(signed_in: Page, si
 def test_a_flow_row_opens_to_its_routes_and_runs_and_the_search_asks_the_server(signed_in: Page, site: Site):
     page = signed_in
     page.goto(f"{site.url}/flows")
-    page.get_by_role("button", name="Show the routes and runs of demo").click()
+    page.get_by_role("button", name="Show the routes and runs of dashboard/demo").click()
     child = page.locator("tr.child").first
     expect(child.get_by_role("link", name="lake")).to_be_visible()
     expect(child.get_by_role("link", name="flaky")).to_be_visible()
@@ -178,7 +178,7 @@ def test_take_the_screenshots(signed_in: Page, site: Site, scheme: str):
     page.screenshot(path=str(SHOTS / f"overview-{scheme}.png"))
     page.goto(f"{site.url}/flows")
     page.locator(".charts-toggle").click()
-    page.get_by_role("button", name="Show the routes and runs of demo").click()
+    page.get_by_role("button", name="Show the routes and runs of dashboard/demo").click()
     expect(page.locator("tr.child").first.get_by_role("link", name="lake")).to_be_visible()
     page.wait_for_load_state("networkidle")
     page.screenshot(path=str(SHOTS / f"flows-{scheme}.png"))

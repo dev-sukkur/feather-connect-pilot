@@ -183,7 +183,7 @@ def test_open_a_tasks_records_from_the_run_page(signed_in: Page, site: Site, wid
     page.goto(f"{site.url}{run_path}")
     page.locator(f'a[href="{path}"]').click()
     panel = page.locator("#records-panel")
-    expect(panel.get_by_role("heading", name="Records sent to flaky")).to_be_visible()
+    expect(panel.get_by_role("heading", name="Records sent to dashboard/flaky")).to_be_visible()
     expect(page).to_have_url(f"{site.url}{run_path}")  # opened in place, not as a page of its own
     first = panel.locator("tbody tr").first
     expect(first).to_contain_text("503")

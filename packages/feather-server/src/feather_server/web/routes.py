@@ -1782,11 +1782,11 @@ def _search(request: Request, actor: Actor, q: str) -> list[Found]:
     ]
     if not wanted:
         return found
-    runtime = request.app.state.feather.runtime
-    for flow in runtime.flows():
+    summaries = reads(request).flows()  # the flows here and the active flows of installed packages
+    for flow in summaries:
         if _matches(wanted, flow.name, flow.owner, *flow.tags):
             found.append(Found("flow", flow.name, f"/flows/{quote(flow.name, safe='')}", "Flow"))
-    for flow in runtime.flows():
+    for flow in summaries:
         for dataset in flow.datasets:
             if _matches(wanted, dataset.name):
                 href = f"/datasets/{quote(dataset.name, safe='')}/partitions"
