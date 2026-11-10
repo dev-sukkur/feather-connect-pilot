@@ -175,7 +175,9 @@ def _verified(
     if is_unsigned(source):
         return None
     try:
-        if isinstance(dataset, PackageDataset):  # an installed package's (§13): its connection is the package's
+        if isinstance(
+            dataset, PackageDataset
+        ):  # an installed package's (§13): its connection is the package's
             ctx = dataset.context(request.received_at)
         else:
             ctx = replace(state.runtime.make_context(source.connection), now=request.received_at)

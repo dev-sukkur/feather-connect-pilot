@@ -37,7 +37,14 @@ from feather_server.services.accounts import CLI
 from feather_server.services.packages import Packages
 from feather_server.services.registries import Registries
 
-__all__ = ["UpgradeError", "Upgraded", "m1_names", "upgrade_project"]
+__all__ = [
+    "UpgradeError",
+    "Upgraded",
+    "install_dev_version",
+    "install_version",
+    "m1_names",
+    "upgrade_project",
+]
 
 DEFAULT_VERSION = "1.0.0"  # a project's first package version, when feather.yaml names none
 _ALIVE = timedelta(seconds=30)  # a worker heard from this recently may still be taking tasks
@@ -110,33 +117,18 @@ def upgrade_project(
             "on the package's hosts), then upgrade"
         )
     done = Upgraded(package, chosen)
-    row = store.packages.version(package, chosen)
-    if row is None:
-        note(f"building {package} {chosen} from {root}")
-        with tempfile.TemporaryDirectory(prefix="feather-upgrade-") as out:
-            built = build_package(root, Path(out), env=env, version=chosen)
-            content = built.path.read_bytes()
-            packages = Packages(store, clock, Registries(store, clock), env=env)
-            packages.promote(
-                actor,
-                built.path.name,
-                content,
-                sha256=hashlib.sha256(content).hexdigest(),
-                source="project",
-                reason=reason,
-                keep_in_registry=keep_in_registry,
-            )
-        done.installed = True
-        row = store.packages.version(package, chosen)
-    if row is None or row.state == "uninstalled":
-        raise UpgradeError(f"{package} {chosen} is uninstalled here: upgrade with another version (--version)")
-    if row.state in ("installed", "preparing", "failed"):
-        note(f"load-checking {package} {chosen}")
-        prepare_version(store, row, env=env, envs=None, worker_id="upgrade", clock=clock)
-        row = store.packages.version(package, chosen)
-    if row is None or row.state != "ready":
-        error = (row.load_check.get("error") if row is not None else None) or "see its load check"
-        raise UpgradeError(f"{package} {chosen} didn't pass its load check: {error}")
+    row, done.installed = install_version(
+        root,
+        env=env,
+        store=store,
+        package=package,
+        version=chosen,
+        actor=actor,
+        reason=reason,
+        clock=clock,
+        note=note,
+        keep_in_registry=keep_in_registry,
+    )
     note("renaming the history to the package's names")
     done.renamed = rename_to_package(database_url, package, chosen, m1_names(project, package), clock.now())
     done.moved = (move_tasks or _dbos_mover(database_url))(pool_of(package, chosen))
@@ -175,3 +167,127 @@ def _dbos_mover(database_url: str) -> Callable[[str], int]:
             engine.close()
 
     return move
+
+
+def install_version(
+    root: Path,
+    *,
+    env: str,
+    store: Store,
+    package: str,
+    version: str,
+    actor: Actor = CLI,
+    reason: str | None = None,
+    clock: Clock | None = None,
+    note: Callable[[str], None] = lambda _: None,
+    keep_in_registry: bool = True,
+    source: str = "project",
+) -> tuple[PackageVersion, bool]:
+    """Build the project in `root` as `version` of `package`, install it (every install check but the fetch) and
+    load-check it here, unless that was done before. Returns the ready version, and whether it was installed now."""
+    clock = clock or SystemClock()
+    installed = False
+    row = store.packages.version(package, version)
+    if row is None:
+        note(f"building {package} {version} from {root}")
+        with tempfile.TemporaryDirectory(prefix="feather-upgrade-") as out:
+            built = build_package(root, Path(out), env=env, version=version)
+            content = built.path.read_bytes()
+            packages = Packages(store, clock, Registries(store, clock), env=env)
+            packages.promote(
+                actor,
+                built.path.name,
+                content,
+                sha256=hashlib.sha256(content).hexdigest(),
+                source=source,
+                reason=reason,
+                keep_in_registry=keep_in_registry,
+            )
+        installed = True
+        row = store.packages.version(package, version)
+    if row is None or row.state == "uninstalled":
+        raise UpgradeError(
+            f"{package} {version} is uninstalled here: upgrade with another version (--version)"
+        )
+    if row.state in ("installed", "preparing", "failed"):
+        note(f"load-checking {package} {version}")
+        prepare_version(store, row, env=env, envs=None, worker_id="upgrade", clock=clock)
+        row = store.packages.version(package, version)
+    if row is None or row.state != "ready":
+        error = (row.load_check.get("error") if row is not None else None) or "see its load check"
+        raise UpgradeError(f"{package} {version} didn't pass its load check: {error}")
+    return row, installed
+
+
+DEV_KEEP = (
+    3  # the dev versions `feather dev` keeps installed; older ones are uninstalled once nothing runs on them
+)
+
+
+def install_dev_version(
+    root: Path,
+    *,
+    env: str,
+    database_url: str,
+    store: Store,
+    clock: Clock | None = None,
+    note: Callable[[str], None] = lambda _: None,
+    keep: int = DEV_KEEP,
+) -> Upgraded:
+    """What `feather dev` does on start and on each save: install the project as the next dev version,
+    `<version>.dev<N>`, make every flow of it the active one, and uninstall dev versions older than the last `keep`.
+
+    A database that has M1 history under the project's old names is renamed to the package's first, as the upgrade
+    does (a no-op when there is nothing left to rename). Versions are never replaced, so each save is a new one; the
+    package's environment is built once per lock and reused, so a save that changes only code is quick."""
+    clock = clock or SystemClock()
+    project = load_project(root, env)
+    package = str(canonicalize_name(project.name))
+    base = str(project.config.get("version") or DEFAULT_VERSION)
+    taken = [v.version for v in store.packages.versions(package)]
+    numbers = [
+        int(v.rsplit(".dev", 1)[1])
+        for v in taken
+        if v.startswith(f"{base}.dev") and v.rsplit(".dev", 1)[1].isdigit()
+    ]
+    version = f"{base}.dev{max(numbers, default=0) + 1}"
+    done = Upgraded(package, version)
+    row, done.installed = install_version(
+        root,
+        env=env,
+        store=store,
+        package=package,
+        version=version,
+        reason="feather dev",
+        clock=clock,
+        note=note,
+        keep_in_registry=False,
+        source="dev",
+    )
+    done.renamed = rename_to_package(database_url, package, version, m1_names(project, package), clock.now())
+    for flow in _flows(store, row):
+        store.packages.activate(flow, package, version, CLI.name, clock.now(), "feather dev")
+        done.activated.append(flow)
+    sync_package_catalog(store, package, row)
+    _prune_dev(store, package, base, keep, note, clock, env)
+    return done
+
+
+def _prune_dev(
+    store: Store, package: str, base: str, keep: int, note: Callable[[str], None], clock: Clock, env: str
+) -> None:
+    """Uninstall the dev versions older than the newest `keep`; one still in use is left for a later save."""
+    dev = [
+        v
+        for v in store.packages.versions(package)
+        if v.version.startswith(f"{base}.dev") and v.state != "uninstalled"
+    ]
+    dev.sort(
+        key=lambda v: int(v.version.rsplit(".dev", 1)[1]) if v.version.rsplit(".dev", 1)[1].isdigit() else 0
+    )
+    packages = Packages(store, clock, Registries(store, clock), env=env)
+    for old in dev[:-keep] if keep > 0 else dev:
+        try:
+            packages.uninstall(CLI, package, old.version, reason="feather dev keeps the last few")
+        except Exception as error:  # noqa: BLE001 - in use, or already gone: try again on a later save
+            note(f"kept {package} {old.version} for now: {error}")

@@ -1200,7 +1200,11 @@ def summary(reads: See, _: CurrentActor) -> JSONResponse:
 def _names_last() -> None:
     """Packaged names carry a "/" (`<package>/<name>`), so the name routes take a path. A route that is only a name
     would also take `<name>/partitions` and the like, so those go after every other route."""
-    bare = {f"{PREFIX}/flows/{{flow:path}}", f"{PREFIX}/datasets/{{dataset:path}}", f"{PREFIX}/routes/{{route:path}}"}
+    bare = {
+        f"{PREFIX}/flows/{{flow:path}}",
+        f"{PREFIX}/datasets/{{dataset:path}}",
+        f"{PREFIX}/routes/{{route:path}}",
+    }
     last = [r for r in router.routes if getattr(r, "path", None) in bare]
     router.routes[:] = [r for r in router.routes if r not in last] + last
 

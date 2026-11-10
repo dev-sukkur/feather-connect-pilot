@@ -24,8 +24,8 @@ from feather_connect.storage.spool import Spool
 from feather_connect.vault import Vault, keyring_from_env
 from feather_connect.worker import config_of
 from feather_server import api, auth, ingress, registry, renames, web
-from feather_server.package_push import PackagePushes
 from feather_server.loops import LoopRunner, default_loops
+from feather_server.package_push import PackagePushes
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions
 from feather_server.services.environment import Environment

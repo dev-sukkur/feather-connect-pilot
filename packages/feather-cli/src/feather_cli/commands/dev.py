@@ -43,7 +43,7 @@ from feather_connect.storage.port import Store
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import migrate
 from feather_connect.storage.postgres.store import PostgresStore
-from feather_connect.worker import run_worker
+from feather_connect.supervisor import run_supervisor
 from feather_server.app import create_app
 from feather_server.auth import hash_password
 from feather_server.settings import Settings
@@ -206,10 +206,15 @@ def _code_sha(project: Path) -> str:
 
 
 class Stack:
-    """One worker and one server, in threads of this process. `start` loads the project afresh each time."""
+    """The server and a worker supervisor, in threads of this process, and the project installed as a dev package.
 
-    def __init__(self, settings: Settings) -> None:
+    The project mode is retired (flow packages §13): `start` builds the project, installs it as the next dev version
+    (`<version>.dev<N>`) and activates its flows; the supervisor prepares it and runs it on a package host, as in any
+    environment. A save installs the next dev version the same way, so the server and the worker keep running."""
+
+    def __init__(self, settings: Settings, root: Path) -> None:
         self._settings = settings
+        self._root = root
         self._worker_stop = threading.Event()
         self._worker: threading.Thread | None = None
         self._worker_error: BaseException | None = None
@@ -218,13 +223,29 @@ class Stack:
         self._server_thread: threading.Thread | None = None
 
     def start(self, port: int) -> None:
-        os.environ["FEATHER_CODE_SHA"] = _code_sha(self._settings.project)
+        os.environ["FEATHER_CODE_SHA"] = _code_sha(self._root)
+        self._store = self._store or connect(self._settings.database_url)[0]
+        self.install()
         self._start_worker()
         try:
             self._start_server(port)
         except BaseException:
             self.stop()
             raise
+
+    def install(self) -> str:
+        """Install the project as the next dev version and activate it; returns the version."""
+        from feather_cli.upgrade import install_dev_version
+
+        assert self._store is not None
+        done = install_dev_version(
+            self._root,
+            env=self._settings.env,
+            database_url=self._settings.database_url,
+            store=self._store,
+            note=lambda line: typer.echo(line, err=True),
+        )
+        return done.version
 
     def _start_worker(self) -> None:
         self._worker_stop = threading.Event()
@@ -234,8 +255,7 @@ class Stack:
 
         def work() -> None:
             try:
-                run_worker(
-                    self._settings.project,
+                run_supervisor(
                     self._settings.env,
                     database_url=self._settings.database_url,
                     worker_id=worker_id,
@@ -247,15 +267,11 @@ class Stack:
 
         self._worker = threading.Thread(target=work, name="dev-worker", daemon=True)
         self._worker.start()
-        self._store = self._store or connect(self._settings.database_url)[0]
-        store = self._store
-        deadline = time.monotonic() + 60
-        while not any(w.worker_id == worker_id and w.state == "alive" for w in store.workers.list_workers()):
-            if self._worker_error is not None or not self._worker.is_alive():
-                raise RuntimeError(f"the worker did not start: {self._worker_error}") from self._worker_error
-            if time.monotonic() > deadline:
-                raise RuntimeError("the worker did not register within 60 s")
-            time.sleep(0.2)
+        # The supervisor registers no worker of its own: its package hosts do, once the package's environment is built
+        # (the first time can take a minute). Only a supervisor that dies at once is an error here.
+        self._worker.join(2)
+        if self._worker_error is not None or not self._worker.is_alive():
+            raise RuntimeError(f"the worker did not start: {self._worker_error}") from self._worker_error
 
     def _start_server(self, port: int) -> None:
         config = uvicorn.Config(create_app(self._settings), host=HOST, port=port, log_config=None)
@@ -465,9 +481,8 @@ def _run(
         engine_poll_s=0.5,
         secret_key=os.environ.get("FEATHER_SECRET_KEY") or secrets.token_urlsafe(32),
         base_url=f"http://localhost:{port}",
-        project=root,
     )
-    stack = Stack(settings)
+    stack = Stack(settings, root)
     try:
         stack.start(port)
     except BaseException:
@@ -544,12 +559,10 @@ def _watch(
         except ProjectError as error:
             typer.echo(f"reload failed, the running version stays: {error}", err=True)
             continue
-        typer.echo("files changed: reloading...", err=True)
-        stack.stop()
+        typer.echo("files changed: installing the next dev version...", err=True)
         try:
-            stack.start(port)
-            _wait_ready(port)
-        except Exception as error:  # noqa: BLE001  (whatever it is, keep watching for the fix: M4)
-            typer.echo(f"reload failed, nothing is running now; fix it and save again: {error}", err=True)
+            version = stack.install()
+        except Exception as error:  # noqa: BLE001  (the running version stays; keep watching for the fix: M4)
+            typer.echo(f"reload failed, the running version stays: {error}", err=True)
         else:
-            typer.echo("reloaded", err=True)
+            typer.echo(f"reloaded: {version} is activating", err=True)

@@ -1,7 +1,6 @@
 import time
 import uuid
 from collections.abc import Iterator
-from pathlib import Path
 from urllib.parse import urlsplit
 
 import psycopg
@@ -121,7 +120,9 @@ def test_settings_have_defaults_and_say_what_is_missing_or_wrong() -> None:
     assert len(settings.secret_key) >= 32  # made up for this process when none is set
     with pytest.raises(SettingsError, match="FEATHER_DATABASE_URL"):
         Settings.from_env({"FEATHER_PROJECT": "p"})
-    assert Settings.from_env({"FEATHER_DATABASE_URL": "x"}).legacy_project is None  # no project is needed any more
+    assert (
+        Settings.from_env({"FEATHER_DATABASE_URL": "x"}).legacy_project is None
+    )  # no project is needed any more
     with pytest.raises(SettingsError, match="FEATHER_ENGINE"):
         Settings.from_env({"FEATHER_DATABASE_URL": "x", "FEATHER_PROJECT": "p", "FEATHER_ENGINE": "celery"})
     with pytest.raises(SettingsError, match="FEATHER_SPOOL"):
@@ -141,9 +142,7 @@ def test_the_ingress_queue_and_wait_are_settings() -> None:
 
 @pytest.mark.postgres
 @pytest.mark.parametrize("engine", ["local", "dbos"])
-def test_create_app_builds_its_state_from_settings(
-    engine: str, pg_url: str, pg: object
-) -> None:
+def test_create_app_builds_its_state_from_settings(engine: str, pg_url: str, pg: object) -> None:
     settings = Settings(database_url=pg_url, engine=engine, secret_key="test-secret-key")  # type: ignore[arg-type]
     app = create_app(settings, loops=no_loops)
     with TestClient(app) as client:
