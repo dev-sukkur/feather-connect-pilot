@@ -245,6 +245,19 @@ class RunJournal(Protocol):
         """Newest first. `cursor` is the `run_id` of the last run of the previous page."""
         ...
 
+    def count_runs(self, status: str | None = None, since: datetime | None = None) -> int:
+        """How many runs have `status` (any, when None) and were created at `since` or later (any time, when None)."""
+        ...
+
+    def runs_by_day(self, since: datetime) -> dict[date, tuple[int, int]]:
+        """For each UTC day with runs created at `since` or later: how many were created, and how many of those
+        failed. A day with none is left out."""
+        ...
+
+    def find_runs(self, prefix: str, limit: int = 5) -> list[Run]:
+        """The newest runs whose id starts with `prefix` (taken as upper case, as ids are), at most `limit`."""
+        ...
+
     def start_task(
         self,
         run_id: str,
@@ -414,6 +427,10 @@ class VersionStore(Protocol):
         """When the dataset's newest sealed version, by staging, was sealed, in any partition; None if none is."""
         ...
 
+    def last_sealed_many(self, datasets: Sequence[str]) -> dict[str, datetime]:
+        """`last_sealed_at` of each of `datasets` in one read. A dataset with no sealed version is left out."""
+        ...
+
     def latest_watermark(self, dataset: str) -> Any | None:
         """The greatest watermark of the dataset's sealed versions."""
         ...
@@ -517,6 +534,13 @@ class Ledger(Protocol):
         cursor: str | None = None,
     ) -> list[Delivery]:
         """In seal order. Pass `delivery_cursor(last)` as `cursor` to continue after `last`."""
+        ...
+
+    def count_by_status(
+        self, routes: Sequence[str], statuses: Sequence[DeliveryStatus]
+    ) -> dict[tuple[str, DeliveryStatus], int]:
+        """How many deliveries of each of `routes` have each of `statuses`, in one read. A pair with none is left
+        out."""
         ...
 
     def all_applied(self) -> bool:

@@ -132,6 +132,17 @@ def test_tenants_do_not_see_each_other(pool: ConnectionPool[Pg], pg: Pg, clock: 
         other.runs.get_run(run_id)
 
 
+def test_the_dashboards_counts_see_their_own_tenant(pool: ConnectionPool[Pg], clock: FrozenClock):  # ADR-0013
+    mine, other = PostgresStore(pool, clock, "mine"), PostgresStore(pool, clock, "other")
+    seal(mine, "v1", ["a"])
+    run_id = mine.runs.create_run("f", "manual", "ann", {})
+    assert other.runs.count_runs() == 0 and other.runs.runs_by_day(T0) == {}
+    assert other.runs.find_runs(run_id[:10]) == [] and other.versions.last_sealed_many(["d"]) == {}
+    assert other.ledger.count_by_status(["a"], ["pending"]) == {}
+    assert mine.runs.count_runs() == 1 and [r.run_id for r in mine.runs.find_runs(run_id[:10])] == [run_id]
+    assert mine.ledger.count_by_status(["a"], ["pending"]) == {("a", "pending"): 1}
+
+
 def test_oldest_open_uses_the_partial_index(store: Store, pg: Pg):
     pg.execute(
         """insert into feather.delivery (tenant_id, route, version_id, dataset, partition, seal_seq, status)

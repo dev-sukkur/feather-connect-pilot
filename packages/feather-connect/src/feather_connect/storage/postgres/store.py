@@ -301,6 +301,39 @@ class _Runs(RunJournal):
             ).fetchall()
         return [_run(r) for r in rows]
 
+    def count_runs(self, status: str | None = None, since: datetime | None = None) -> int:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select count(*) as n from feather.run
+                   where tenant_id = %(tenant)s
+                     and (%(status)s::text is null or status = %(status)s)
+                     and (%(since)s::timestamptz is null or created_at >= %(since)s)""",
+                {"tenant": self._db.tenant, "status": status, "since": since},
+            ).fetchone()
+        return 0 if row is None else int(row["n"])
+
+    def runs_by_day(self, since: datetime) -> dict[date, tuple[int, int]]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select (created_at at time zone 'UTC')::date as day, count(*) as made,
+                          count(*) filter (where status = 'failed') as failed
+                   from feather.run where tenant_id = %s and created_at >= %s
+                   group by 1""",  # run_created_idx
+                (self._db.tenant, since),
+            ).fetchall()
+        return {r["day"]: (int(r["made"]), int(r["failed"])) for r in rows}
+
+    def find_runs(self, prefix: str, limit: int = 5) -> list[Run]:
+        escaped = prefix.upper().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.run
+                   where tenant_id = %s and run_id like %s || '%%'
+                   order by run_id desc limit %s""",  # the primary key
+                (self._db.tenant, escaped, limit),
+            ).fetchall()
+        return [_run(r) for r in rows]
+
     def start_task(
         self,
         run_id: str,
@@ -812,6 +845,18 @@ class _Versions(VersionStore):
             ).fetchone()
         return None if row is None else row["at"]
 
+    def last_sealed_many(self, datasets: Sequence[str]) -> dict[str, datetime]:
+        if not datasets:
+            return {}
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select distinct on (dataset) dataset, sealed_at as at from feather.version
+                   where tenant_id = %s and dataset = any(%s) and status = 'sealed'
+                   order by dataset, stage_seq desc""",
+                (self._db.tenant, list(datasets)),
+            ).fetchall()
+        return {r["dataset"]: r["at"] for r in rows}
+
     def latest_watermark(self, dataset: str) -> Any | None:
         with self._db.tx() as conn:
             row = conn.execute(
@@ -1163,6 +1208,20 @@ class _Ledger(Ledger):
                 },
             ).fetchall()
         return [_delivery(r) for r in rows]
+
+    def count_by_status(
+        self, routes: Sequence[str], statuses: Sequence[DeliveryStatus]
+    ) -> dict[tuple[str, DeliveryStatus], int]:
+        if not routes or not statuses:
+            return {}
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select route, status, count(*) as n from feather.delivery
+                   where tenant_id = %s and route = any(%s) and status = any(%s)
+                   group by route, status""",  # delivery_open_idx, for statuses other than applied
+                (self._db.tenant, list(routes), list(statuses)),
+            ).fetchall()
+        return {(r["route"], r["status"]): int(r["n"]) for r in rows}
 
     def all_applied(self) -> bool:
         with self._db.tx() as conn:

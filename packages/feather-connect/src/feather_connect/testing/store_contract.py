@@ -1018,6 +1018,39 @@ class StoreContract(
         page = store.runs.list_runs(limit=2)
         assert [r.run_id for r in store.runs.list_runs(cursor=page[-1].run_id)] == [first]
 
+    def test_runs_are_counted_by_status_and_day_and_found_by_id(self, store: Store, clock: FrozenClock):
+        first = store.runs.create_run("f", "manual", "ann", {})
+        clock.advance(timedelta(days=1))
+        second = store.runs.create_run("f", "manual", "ann", {})
+        third = store.runs.create_run("g", "manual", "ann", {})
+        store.runs.set_run_status(third, "failed", "boom")
+        assert store.runs.count_runs() == 3 and store.runs.count_runs("queued") == 2
+        assert store.runs.count_runs("failed", since=clock.now()) == 1
+        assert store.runs.count_runs(since=clock.now() + timedelta(seconds=1)) == 0
+        assert store.runs.runs_by_day(T0) == {T0.date(): (1, 0), (T0 + timedelta(days=1)).date(): (2, 1)}
+        assert store.runs.runs_by_day(clock.now()) == {clock.now().date(): (2, 1)}
+        assert [r.run_id for r in store.runs.find_runs(second.lower())] == [second]
+        assert {r.run_id for r in store.runs.find_runs("")} == {first, second, third}
+        assert len(store.runs.find_runs("", limit=2)) == 2 and store.runs.find_runs("%") == []
+
+    def test_sealed_times_and_delivery_counts_come_in_one_read(self, store: Store, clock: FrozenClock):
+        seal(store, "v1", ["a", "b"], ds="d1")
+        clock.advance(timedelta(minutes=5))
+        seal(store, "v2", ["a"], ds="d2")
+        assert store.versions.last_sealed_many(["d1", "d2", "nothing"]) == {
+            "d1": store.versions.last_sealed_at("d1"),
+            "d2": T0 + timedelta(minutes=5),
+        }
+        assert store.versions.last_sealed_many([]) == {}
+        store.ledger.transition("a", "v1", "running", actor="t")
+        store.ledger.transition("a", "v1", "failed", actor="t", error="no")
+        assert store.ledger.count_by_status(["a", "b"], ["failed", "pending"]) == {
+            ("a", "failed"): 1,
+            ("a", "pending"): 1,
+            ("b", "pending"): 1,
+        }
+        assert store.ledger.count_by_status(["b"], ["failed"]) == {} and store.ledger.count_by_status([], ["failed"]) == {}
+
     def test_starting_a_task_again_keeps_its_row(self, store: Store):
         rid = store.runs.create_run("f", "manual", "ann", {})
         other = store.runs.create_run("f", "manual", "ann", {})
