@@ -145,6 +145,7 @@
     var input = document.getElementById("palette-input");
     var list = document.getElementById("palette-list");
     var empty = document.getElementById("palette-empty");
+    var said = document.getElementById("palette-said");
     var items = [], active = -1, timer = null, asked = 0;
     trap(dialog);
 
@@ -177,6 +178,8 @@
         list.appendChild(li);
       });
       empty.hidden = found.length > 0;
+      input.setAttribute("aria-expanded", found.length ? "true" : "false");
+      if (said) { said.textContent = found.length === 1 ? "1 result" : found.length + " results"; }
       choose(found.length ? 0 : -1);
     }
     function ask() {
@@ -424,7 +427,14 @@
           body.dataset.loaded = "1";
           body.textContent = "Loading…";
           fetch(button.getAttribute("data-child-src"), { credentials: "same-origin" })
-            .then(function (response) { return response.ok ? response.text() : Promise.reject(response.status); })
+            .then(function (response) {
+              // The session ran out: the fetch followed the redirect to the sign-in page, or was refused.
+              if (response.status === 401 || (response.redirected && new URL(response.url).pathname === "/login")) {
+                window.location.assign("/login");
+                return Promise.reject(401);
+              }
+              return response.ok ? response.text() : Promise.reject(response.status);
+            })
             .then(function (html) { body.innerHTML = html; })
             .catch(function () { body.textContent = "This could not be loaded. Open the row's page instead."; delete body.dataset.loaded; });
         }

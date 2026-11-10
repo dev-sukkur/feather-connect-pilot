@@ -74,6 +74,53 @@ def test_the_column_chooser_hides_a_column_and_remembers(signed_in: Page, site: 
     expect(page.locator("table[data-table=flows] th", has_text="Owner")).to_be_visible()
 
 
+def test_the_palette_moves_with_the_arrows_says_how_many_and_gives_the_focus_back(
+    signed_in: Page, site: Site
+):
+    page = signed_in
+    page.goto(f"{site.url}/flows")
+    top = page.locator("#global-search")
+    top.click()
+    box = page.locator("#palette-input")
+    expect(box).to_be_focused()
+    expect(box).to_have_attribute("aria-expanded", "true")  # every page is listed for an empty search
+    expect(box).to_have_attribute("aria-activedescendant", "palette-option-0")
+    expect(page.locator("#palette-said")).to_have_text(re.compile(r"^\d+ results$"))
+    page.keyboard.press("ArrowDown")
+    expect(box).to_have_attribute("aria-activedescendant", "palette-option-1")
+    expect(page.locator("#palette-option-1")).to_have_attribute("aria-selected", "true")
+    page.keyboard.press("ArrowUp")
+    expect(box).to_have_attribute("aria-activedescendant", "palette-option-0")
+    box.fill("nothing-is-called-this")
+    expect(page.get_by_text("Nothing matches.")).to_be_visible()
+    expect(box).to_have_attribute("aria-expanded", "false")
+    expect(page.locator("#palette-said")).to_have_text("0 results")
+    expect(box).not_to_have_attribute("aria-activedescendant", re.compile(".*"))
+    page.keyboard.press("Escape")
+    expect(page.get_by_role("dialog", name="Search")).to_be_hidden()
+    expect(top).to_be_focused()  # back where it was opened from
+
+
+def test_a_row_menu_closes_on_escape_and_gives_the_focus_back(signed_in: Page, site: Site):
+    page = signed_in
+    page.goto(f"{site.url}/flows")
+    more = page.locator("details.row-menu summary").first
+    more.click()
+    expect(page.locator("details.row-menu[open]")).to_have_count(1)
+    page.keyboard.press("Escape")
+    expect(page.locator("details.row-menu[open]")).to_have_count(0)
+    expect(more).to_be_focused()
+
+
+def test_a_row_opened_after_the_session_ends_goes_to_sign_in(signed_in: Page, site: Site):
+    page = signed_in
+    page.goto(f"{site.url}/flows")
+    page.context.clear_cookies()
+    page.get_by_role("button", name="Show the routes and runs of demo").click()
+    expect(page).to_have_url(f"{site.url}/login")
+    expect(page.locator("tr.child")).to_have_count(0)  # the sign-in page was not put into the table
+
+
 def test_a_flow_row_opens_to_its_routes_and_runs_and_the_search_asks_the_server(signed_in: Page, site: Site):
     page = signed_in
     page.goto(f"{site.url}/flows")
