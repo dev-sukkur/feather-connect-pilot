@@ -56,6 +56,26 @@ def wait_until(check: Callable[[], Any], timeout: float = 30) -> None:
     raise AssertionError("timed out waiting")
 
 
+_INSTALLED: dict[tuple[str, Path], str] = {}
+
+
+def install_project(project: Path, pg_url: str, env: str = "dev") -> str:
+    """Install `project` as a package on `pg_url`'s database and make its flows active, as `feather dev` does; once per
+    project folder and database, so a worker started again runs the same version, and a test of its own on a shared
+    database gets its own. Returns the package's name: flows are `<package>/<name>`."""
+    from feather_cli.upgrade import install_dev_version
+    from feather_connect.storage.postgres.connect import connect
+
+    key = (pg_url, project.resolve())
+    if key not in _INSTALLED:
+        store, _ = connect(pg_url)
+        try:
+            _INSTALLED[key] = install_dev_version(project, env=env, database_url=pg_url, store=store).package
+        finally:
+            store.close()
+    return _INSTALLED[key]
+
+
 def start_worker(
     project: Path,
     pg_url: str,
@@ -66,14 +86,16 @@ def start_worker(
     log: IO[bytes] | None = None,
     poll_s: float = 0.1,
 ) -> subprocess.Popen[bytes]:
-    """Start `python -m feather_connect.worker`. `env` adds to the environment, and `log` takes its output."""
+    """Install `project` as a package (`install_project`) and start a supervisor for it,
+    `python -m feather_connect.supervisor`, under `worker_id`. `env` adds to the environment, and `log` takes its
+    output. The project mode is retired (flow packages §13): a worker runs installed packages."""
+    install_project(project, pg_url)
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0  # type: ignore[attr-defined]
     return subprocess.Popen(
         [
             sys.executable,
             "-m",
-            "feather_connect.worker",
-            str(project),
+            "feather_connect.supervisor",
             "dev",
             "--database-url",
             pg_url,
@@ -85,7 +107,7 @@ def start_worker(
         env={**os.environ, "FEATHER_CODE_SHA": sha, **(env or {})},
         creationflags=flags,
         stdout=log,
-        stderr=log,
+        stderr=subprocess.STDOUT,
     )
 
 
