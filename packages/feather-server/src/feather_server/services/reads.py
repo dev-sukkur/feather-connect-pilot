@@ -5,7 +5,7 @@ appears as `***` or not at all.
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
@@ -47,7 +47,6 @@ _VERSIONS_SHOWN = 50  # of each dataset, on a run's page: a stream run holds a d
 _RECENT_VERSIONS = 15
 _FAILED_RUNS_SHOWN = 100
 _BLOCKED_SHOWN = 2
-COUNT_CAP = 500  # runs a tile or the search looks at, newest first
 _KEPT_DAYS_FOR = timedelta(
     seconds=60
 )  # the page refreshes every 10 s, and working this out reads every old day
@@ -452,6 +451,10 @@ class Reads:
     ) -> list[Run]:
         return self._store.runs.list_runs(flow=flow, status=status, limit=limit, cursor=cursor)
 
+    def has_active_run(self, flow: str) -> bool:
+        """Whether the flow has a run queued or running, which a second start would only repeat."""
+        return any(self._store.runs.list_runs(flow=flow, status=s, limit=1) for s in ("queued", "running"))
+
     def retried_tasks(self, run_ids: list[str]) -> dict[str, int]:
         """For each run, how many of its tasks took more than one attempt. Runs with none are left out."""
         return self._store.reads.retried_tasks(run_ids)
@@ -660,42 +663,23 @@ class Reads:
             )
         return found
 
-    # The dashboard's tiles, sparklines and search. Every one of these reads a bounded number of rows.
+    # The dashboard's tiles, sparklines and search: each one query, counted or grouped in the database.
 
-    def count_runs(
-        self, status: str | None = None, since: datetime | None = None, cap: int = COUNT_CAP
-    ) -> int:
-        """How many runs have `status` (any, when None) and started at `since` or later, counting at most `cap`: a
-        tile shows `cap` as "cap+"."""
-        found = self._store.runs.list_runs(status=status, limit=cap)
-        if since is None:
-            return len(found)
-        return sum(1 for r in found if r.created_at >= since)  # newest first, so these are the first ones
+    def count_runs(self, status: str | None = None, since: datetime | None = None) -> int:
+        """How many runs have `status` (any, when None) and were created at `since` or later."""
+        return self._store.runs.count_runs(status, since)
 
     def run_activity(self, days: int = 7) -> tuple[list[int], list[int]]:
-        """Runs started and runs failed on each of the last `days` days, oldest first, from the newest
-        `COUNT_CAP` runs."""
-        today = self._state.clock.now().date()
-        started, failed = [0] * days, [0] * days
-        for run in self._store.runs.list_runs(limit=COUNT_CAP):
-            age = (today - run.created_at.date()).days
-            if 0 <= age < days:
-                started[days - 1 - age] += 1
-                if run.status == "failed":
-                    failed[days - 1 - age] += 1
-        return started, failed
+        """Runs created and runs failed on each of the last `days` UTC days, oldest first."""
+        today = self._state.clock.now().astimezone(UTC).date()
+        first = today - timedelta(days=days - 1)
+        found = self._store.runs.runs_by_day(datetime.combine(first, time.min, UTC))
+        span_ = [first + timedelta(days=n) for n in range(days)]
+        return [found.get(d, (0, 0))[0] for d in span_], [found.get(d, (0, 0))[1] for d in span_]
 
     def find_runs(self, prefix: str, limit: int = 5) -> list[Run]:
-        """Runs whose id starts with `prefix`, among the newest `COUNT_CAP`."""
-        wanted = prefix.lower()
-        found = [
-            r for r in self._store.runs.list_runs(limit=COUNT_CAP) if r.run_id.lower().startswith(wanted)
-        ]
-        return found[:limit]
-
-    def count_deliveries(self, route: str, status: DeliveryStatus, cap: int = 100) -> int:
-        """How many deliveries of `route` have `status`, counting at most `cap`."""
-        return len(self._store.ledger.list_deliveries(route=route, status=status, limit=cap))
+        """The newest runs whose id starts with `prefix`."""
+        return self._store.runs.find_runs(prefix, limit)
 
     def workers(self) -> list[WorkerRow]:
         return self._store.workers.list_workers()
@@ -705,32 +689,33 @@ class Reads:
         return self._store.runs.get_run(run_id)
 
     def datasets(self) -> list[DatasetRow]:
+        flows = self._rt.flows()
+        sealed = self._store.versions.last_sealed_many([d.name for f in flows for d in f.datasets])
         return [
             DatasetRow(
-                d.name,
-                flow.name,
-                d.source.connection,
-                d.strategy.name,
-                d.priority,
-                self._store.versions.last_sealed_at(d.name),
+                d.name, flow.name, d.source.connection, d.strategy.name, d.priority, sealed.get(d.name)
             )
-            for flow in self._rt.flows()
+            for flow in flows
             for d in flow.datasets
         ]
 
     def stale_datasets(self) -> list[StaleDataset]:
         return self._stale()
 
-    def routes(self, cap: int = 100) -> list[RouteRow]:
+    def routes(self) -> list[RouteRow]:
+        flows = self._rt.flows()
+        counts = self._store.ledger.count_by_status(
+            [r.name for f in flows for r in f.routes], ["failed", "held"]
+        )
         return [
             RouteRow(
                 r.name,
                 flow.name,
                 r.sink.connection,
                 self._rt.is_route_paused(r.name),
-                self.count_deliveries(r.name, "failed", cap),
-                self.count_deliveries(r.name, "held", cap),
+                counts.get((r.name, "failed"), 0),
+                counts.get((r.name, "held"), 0),
             )
-            for flow in self._rt.flows()
+            for flow in flows
             for r in flow.routes
         ]
