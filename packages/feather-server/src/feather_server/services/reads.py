@@ -331,7 +331,58 @@ class Reads:
         return max((at for at in sealed if at is not None), default=None)
 
     def flows(self) -> list[FlowSummary]:
-        return [self._summary(flow) for flow in self._rt.flows()]
+        """The flows here and the active flows of installed packages (§13: every flow, the project mode retired)."""
+        here = [self._summary(flow) for flow in self._rt.flows()]
+        names = {s.name for s in here}
+        return here + [s for s in self._packaged_summaries() if s.name not in names]
+
+    def _packaged_summaries(self) -> list[FlowSummary]:
+        catalogue = self._state.catalogue
+        if catalogue is None:
+            return []
+        found: list[FlowSummary] = []
+        for active in catalogue.flows():
+            summary = self._packaged_summary(active.name, tuple(_describe(t) for t in active.triggers))
+            if summary is not None:
+                found.append(summary)
+        return found
+
+    def _packaged_summary(self, name: str, triggers: tuple[str, ...] | None = None) -> FlowSummary | None:
+        """A packaged flow's summary, from its catalogue spec (`catalog_view`); None for a flow it doesn't have."""
+        try:
+            spec = self._store.catalog.flow(name).spec
+        except KeyError:
+            return None
+        datasets = tuple(
+            DatasetSummary(
+                str(d["name"]),
+                str(d.get("connection", "")),
+                str(d.get("strategy", "")),
+                str(d.get("priority", "normal")),
+            )
+            for d in spec.get("datasets") or []
+        )
+        runs = self._store.runs.list_runs(flow=name, limit=1)
+        sealed = [self._store.versions.last_sealed_at(d.name) for d in datasets]
+        return FlowSummary(
+            name,
+            spec.get("owner"),
+            tuple(spec.get("tags") or ()),
+            triggers
+            if triggers is not None
+            else tuple(str(t.get("kind", t)) for t in spec.get("triggers") or []),
+            bool(spec.get("enabled", True)),
+            self._rt.is_flow_paused(name),
+            datasets,
+            tuple(
+                RouteSummary(
+                    str(r["name"]), str(r.get("connection", "")), self._rt.is_route_paused(str(r["name"]))
+                )
+                for r in spec.get("routes") or []
+            ),
+            runs[0] if runs else None,
+            max((at for at in sealed if at is not None), default=None),
+        )
 
     def _parts(self, flow: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
         """The names of the flow's datasets and routes, from the runtime here or, for a packaged flow, from the
@@ -350,6 +401,8 @@ class Reads:
 
     def flow_detail(self, name: str) -> FlowDetail:
         """Raises `KeyError` for an unknown flow."""
+        if name not in {f.name for f in self._rt.flows()}:
+            return self._packaged_detail(name)
         flow = self._rt.flow(name)
         used = {d.source.connection for d in flow.datasets} | {r.sink.connection for r in flow.routes}
         prefixes = (f"flows.{name}.", "settings.", *(f"connections.{c}." for c in sorted(used)))
@@ -371,6 +424,29 @@ class Reads:
         live = {w.code_sha for w in self._store.workers.list_workers() if w.state != "dead"}
         shas = tuple(sorted(live | {v.code_sha for v in versions}))
         return FlowDetail(self._summary(flow), config, tuple(recent), tuple(versions), shas)
+
+    def _packaged_detail(self, name: str) -> FlowDetail:
+        """A packaged flow's detail, from the catalogue: its configuration is its package's, shown on its page."""
+        catalogue = self._state.catalogue
+        active = (
+            next((f for f in catalogue.flows() if f.name == name), None) if catalogue is not None else None
+        )
+        summary = self._packaged_summary(
+            name, None if active is None else tuple(_describe(x) for x in active.triggers)
+        )
+        if summary is None:
+            raise KeyError(f"no flow is named {name!r}")
+        recent = self._store.runs.list_runs(flow=name, limit=_RECENT_RUNS)
+        versions = sorted(
+            (
+                v
+                for d in summary.datasets
+                for v in self._store.versions.list_versions(d.name, limit=_RECENT_VERSIONS)
+            ),
+            key=lambda v: v.seal_seq or 0,
+            reverse=True,
+        )[:_RECENT_VERSIONS]
+        return FlowDetail(summary, (), tuple(recent), tuple(versions), ())
 
     # Overview.
 

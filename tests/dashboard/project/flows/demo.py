@@ -26,7 +26,7 @@ class Flaky(simulation.Sink):
 
 items = fc.Dataset(
     "demo.items",
-    source=simulation.Source("shop", fixture=os.environ["FEATHER_DASHBOARD_FIXTURE"]),
+    source=simulation.Source("shop", fixture=os.environ.get("FEATHER_DASHBOARD_FIXTURE", "unset")),
     key="id",
     strategy=fc.strategy.replace(),
     partition=fc.partition.by_day("day", tz="UTC"),
@@ -35,7 +35,10 @@ flow = fc.Flow(
     "demo",
     reads=items,
     deliver=[
-        fc.to(simulation.Sink("lake", capture_to=os.environ["FEATHER_DASHBOARD_CAPTURE"]), name="lake"),
+        fc.to(
+            simulation.Sink("lake", capture_to=os.environ.get("FEATHER_DASHBOARD_CAPTURE", "unset")),
+            name="lake",
+        ),
         fc.to(Flaky("flaky", fail_rate=1.0), name="flaky"),
     ],
     triggers=[fc.every("1d")],

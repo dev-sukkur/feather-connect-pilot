@@ -257,7 +257,7 @@ def test_editing_a_flow_reloads_it(database, start_dev, tmp_path, pg_connect):
     running.wait_ready()
     store, _ = pg_connect(database)
     flow_file = project / "flows" / "orders.py"
-    assert store.catalog.flow("demo/orders").spec["owner"] == "demo"
+    wait_until(lambda: store.catalog.flow("demo/orders").spec["owner"] == "demo", 120, "the installed flow")
 
     flow_file.write_text(flow_file.read_text().replace('owner = "demo"', 'owner = "reloaded"'))
     wait_until(lambda: store.catalog.flow("demo/orders").spec["owner"] == "reloaded", 60, "the reloaded flow")

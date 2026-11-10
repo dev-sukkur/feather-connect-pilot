@@ -7,7 +7,7 @@ from pathlib import Path
 import feather_connect as fc
 from feather_connect.connectors import http, postgres, simulation  # pyright: ignore[reportAttributeAccessIssue]
 
-FIXTURES = Path(os.environ["FEATHER_HARD_FIXTURES"])
+FIXTURES = Path(os.environ.get("FEATHER_HARD_FIXTURES", "unset"))
 
 
 def source(case: str) -> simulation.Source:

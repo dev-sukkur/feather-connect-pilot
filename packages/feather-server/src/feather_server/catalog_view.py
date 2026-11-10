@@ -23,7 +23,7 @@ class CatalogDataset:
     connector: str
     key: tuple[str, ...]
     strategy: str
-    priority: int
+    priority: str
     routes: tuple[str, ...]
 
 
@@ -34,7 +34,7 @@ class CatalogRoute:
     connection: str
     connector: str
     mode: str
-    priority: int
+    priority: str
     datasets: tuple[str, ...]
 
 
@@ -64,7 +64,7 @@ def dataset_of(state: "AppState", name: str) -> CatalogDataset:
                     str(d.get("connector", "")),
                     tuple(str(k) for k in d.get("key") or ()),
                     str(d.get("strategy", "")),
-                    int(d.get("priority", 0)),
+                    str(d.get("priority", "normal")),
                     tuple(str(r["name"]) for r in spec.get("routes") or []),
                 )
     raise KeyError(f"no dataset is named {name!r}")
@@ -81,7 +81,7 @@ def route_of(state: "AppState", name: str) -> CatalogRoute:
                     str(r.get("connection", "")),
                     str(r.get("connector", "")),
                     str(r.get("mode", "")),
-                    int(r.get("priority", 0)),
+                    str(r.get("priority", "normal")),
                     tuple(str(d["name"]) for d in spec.get("datasets") or []),
                 )
     raise KeyError(f"no route is named {name!r}")
