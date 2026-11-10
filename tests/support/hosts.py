@@ -2,31 +2,44 @@
 built at the versions a test asks for, a supervisor running real host processes, and what the package reports.
 
 A test installs a version as the server does (`preparing`), and the supervisor prepares it, builds its environment
-with no index (`--no-index --find-links`) and starts its host when it has work. A test queues runs as the scheduler
-does, tagged with the package and version.
+with no index (`--find-links`) and starts its host when it has work. A test queues runs as the scheduler does, tagged
+with the package and version, or runs the scheduler itself (`start_scheduler`).
+
+Hosts connect as a host role of the world's own (`feather_host_<id>`), granted as `host_role` grants `feather_host`,
+and get the sink's credential, `${secret:db:out/token}`, from the supervisor, which holds the vault's master key.
 """
 
 import hashlib
 import os
+import subprocess
+import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import psycopg
+from psycopg import sql
 
 from feather_connect.packages.build import Built
 from feather_connect.packages.envs import Environments
+from feather_connect.runtime.catalogue import Catalogue
 from feather_connect.storage.port import PackageVersion
 from feather_connect.storage.postgres.connect import connect
+from feather_connect.storage.postgres.host_role import grant_host_role
 from feather_connect.storage.postgres.migrate import migrate
 from feather_connect.supervisor import Supervisor
 from feather_connect.testing.packaging import built_with_lock, library_wheel, lock_for
+from feather_connect.vault import MasterKey, Vault, new_master_key
 
 SOURCE = Path(__file__).with_name("hosted_package")
 FLOW = "feed"
+TOKEN = "s3cret-token-of-out"
+TOKEN_DIGEST = hashlib.sha256(TOKEN.encode()).hexdigest()[:12]
 
 DDL = """
 create schema hosted;
@@ -35,11 +48,15 @@ create table hosted.reached (
   id bigserial primary key, point text not null, code text not null, pid int not null,
   released boolean not null default false
 );
-create table hosted.attempts (id bigserial primary key, idempotency_key text not null, code text not null, pid int not null);
+create table hosted.attempts (
+  id bigserial primary key, idempotency_key text not null, code text not null, pid int not null, token text,
+  feather_env text
+);
 create table hosted.rows (
   route text not null, idempotency_key text not null, key text not null, code text not null, lib text,
   primary key (route, idempotency_key, key)
 );
+create table hosted.fail_load (code text primary key);
 """
 
 
@@ -53,6 +70,30 @@ def wait_for(check: Callable[[], Any], timeout: float, what: str) -> Any:
     raise AssertionError(f"timed out after {timeout:g} s waiting for {what}")
 
 
+def pid_alive(pid: int) -> bool:
+    """Whether a process of that id is running."""
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        try:
+            kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        finally:
+            kernel32.CloseHandle(handle)
+        return code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 class HostWorld:
     """A database, a supervisor and its hosts, and the questions a test asks of them."""
 
@@ -62,10 +103,34 @@ class HostWorld:
         migrate(url)
         self.conn = psycopg.connect(url, autocommit=True)
         self.conn.execute(DDL)
+        self.role = f"feather_host_{uuid.uuid4().hex[:8]}"
+        password = uuid.uuid4().hex
+        self.conn.execute(
+            sql.SQL("create role {} login password {}").format(
+                sql.Identifier(self.role), sql.Literal(password)
+            )
+        )
+        grant_host_role(url, self.role)
+        self.conn.execute(sql.SQL("grant usage on schema hosted to {}").format(sql.Identifier(self.role)))
+        self.conn.execute(
+            sql.SQL("grant select, insert, update on all tables in schema hosted to {}").format(
+                sql.Identifier(self.role)
+            )
+        )
+        self.conn.execute(
+            sql.SQL("grant usage on all sequences in schema hosted to {}").format(sql.Identifier(self.role))
+        )
+        parts = urlsplit(url)
+        self.host_url = parts._replace(
+            netloc=f"{self.role}:{password}@{parts.hostname}:{parts.port}"
+        ).geturl()
         self.store, self.spool = connect(url)
+        self.master_key = new_master_key()
+        vault = Vault(self.store.secrets, "dev", MasterKey.parse(self.master_key))
+        vault.set("out/token", TOKEN, "ops", datetime.now(UTC))
         self.wheels = tmp / "wheels"
         self.wheels.mkdir(parents=True, exist_ok=True)
-        self.envs = Environments(tmp / "envs", index=["--no-index", "--find-links", str(self.wheels)])
+        self.envs = Environments(tmp / "envs", index=["--find-links", str(self.wheels)])
         self.logs = tmp / "logs"
         self.supervisor = Supervisor(
             self.store,
@@ -76,9 +141,14 @@ class HostWorld:
             cache=tmp / "cache",
             log_dir=self.logs,
             poll_s=0.1,
+            host_database_url=self.host_url,
+            pass_env=["FEATHER_HOSTED_URL"],
+            db_secrets=vault.open,
         )
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._scheduler: threading.Thread | None = None
+        self._processes: list[subprocess.Popen[bytes]] = []
 
     # Packages.
 
@@ -127,22 +197,99 @@ class HostWorld:
         return "missing" if row is None else row.state
 
     def activate(self, name: str, version: str) -> None:
+        """Ask for the version, as the server's activate does: it is activating until its host says ready."""
         self.store.packages.activate(f"{name}/{FLOW}", name, version, "ops", datetime.now(UTC))
+
+    def activation(self, name: str, version: str) -> str:
+        found = [a for a in self.store.packages.activations(name, version) if a.flow == f"{name}/{FLOW}"]
+        return found[0].state if found else "missing"
+
+    def active(self, name: str) -> str | None:
+        """The version whose triggers fire, if any."""
+        found = [a.version for a in self.store.packages.active() if a.flow == f"{name}/{FLOW}"]
+        return found[0] if found else None
 
     def deactivate(self, name: str) -> None:
         self.store.packages.deactivate(f"{name}/{FLOW}", "ops", datetime.now(UTC))
 
-    # The supervisor.
+    def fail_load(self, version: str) -> None:
+        self.conn.execute("insert into hosted.fail_load (code) values (%s)", (version,))
+
+    # The supervisor and the scheduler.
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self.supervisor.run, args=(self._stop,), name="supervisor")
         self._thread.start()
 
+    def start_scheduler(self, every_s: float = 0.2) -> None:
+        """Fire the active flows' triggers as the server's scheduler does, from the catalogue."""
+        catalogue = Catalogue(self.store)
+        catalogue.listen()
+
+        def run() -> None:
+            try:
+                while not self._stop.wait(every_s):
+                    catalogue.tick(datetime.now(UTC))
+            finally:
+                catalogue.close()
+
+        self._scheduler = threading.Thread(target=run, name="scheduler", daemon=True)
+        self._scheduler.start()
+
+    def supervisor_process(self, cache: Path) -> "subprocess.Popen[bytes]":
+        """A supervisor in a process of its own, as `feather worker --packages '*'` runs one."""
+        env = {
+            **os.environ,
+            "FEATHER_PACKAGE_FIND_LINKS": str(self.wheels),
+            "FEATHER_PACKAGE_NO_INDEX": "1",
+            "FEATHER_HOST_LOG_DIR": str(self.logs),
+            "FEATHER_HOST_ENV_PASS": "FEATHER_HOSTED_URL",
+            "FEATHER_HOST_DATABASE_URL": self.host_url,
+            "FEATHER_MASTER_KEY": self.master_key,
+        }
+        out = (self.tmp / f"supervisor-{len(self._processes)}.log").open("ab")
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "feather_connect.supervisor",
+                "dev",
+                "--database-url",
+                self.url,
+                "--worker-id",
+                "sup",
+                "--cache",
+                str(cache),
+                "--poll-s",
+                "0.1",
+            ],
+            env=env,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+        )
+        out.close()
+        self._processes.append(process)
+        return process
+
     def close(self) -> None:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=180)
+        if self._scheduler is not None:
+            self._scheduler.join(timeout=10)
+        for process in self._processes:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=120)
+                except subprocess.TimeoutExpired:
+                    process.kill()
         self.store.close()
+        self.conn.execute(
+            "select pg_terminate_backend(pid) from pg_stat_activity where usename = %s", (self.role,)
+        )
+        self.conn.execute(sql.SQL("drop owned by {}").format(sql.Identifier(self.role)))
+        self.conn.execute(sql.SQL("drop role {}").format(sql.Identifier(self.role)))
         self.conn.close()
 
     def host_of(self, name: str, version: str) -> str | None:
@@ -179,6 +326,9 @@ class HostWorld:
     def status(self, run_id: str) -> str:
         return self.store.runs.get_run(run_id).status
 
+    def runs(self, name: str) -> list[Any]:
+        return self.store.runs.list_runs(flow=f"{name}/{FLOW}", limit=500)
+
     def wait_for_runs(self, run_ids: list[str], timeout: float = 120) -> dict[str, str]:
         def over() -> dict[str, str] | None:
             found = {r: self.status(r) for r in run_ids}
@@ -194,6 +344,12 @@ class HostWorld:
             query + (" where code = %s" if code else ""), (code,) if code else ()
         ).fetchall()
         return [(r[0], r[1], r[2], r[3]) for r in found]
+
+    def attempts(self) -> list[tuple[str, str, int, str | None, str | None]]:
+        rows = self.conn.execute(
+            "select idempotency_key, code, pid, token, feather_env from hosted.attempts order by id"
+        ).fetchall()
+        return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
 
     def arm(self, point: str, holds: int = 1) -> None:
         self.conn.execute("insert into hosted.holds (point, remaining) values (%s, %s)", (point, holds))

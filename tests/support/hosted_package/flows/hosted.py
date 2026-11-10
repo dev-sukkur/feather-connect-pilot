@@ -1,10 +1,15 @@
 """A flow that reports what ran it: each run reads `ROWS` fresh rows, so each run seals a version and delivers it, and
 the sink writes each record once per idempotency key, with the code's version and featherlib's, to `hosted.rows`.
 
+The sink's connection has a credential, `${secret:db:out/token}`, which the host gets from its supervisor; it notes
+a digest of it with each attempt. A row in `hosted.fail_load` for a version makes that version's code fail to import in
+a host (where `FEATHER_HOSTED_URL` is set), but not in the load check, which has a clean environment.
+
 A *hold point* stops the sink mid-apply for a test to act at a known moment: a row in `hosted.holds` arms one, and the
 process waits until the test releases its row in `hosted.reached`. The tables are made by `tests/support/hosts.py`.
 """
 
+import hashlib
 import os
 import time
 from collections.abc import Iterator
@@ -42,6 +47,14 @@ def _connect() -> psycopg.Connection[Any]:
         connect_timeout=5,
         application_name=f"hosted-{os.getpid()}",
     )
+
+
+def _fail_load_if_told() -> None:
+    if not os.environ.get("FEATHER_HOSTED_URL"):
+        return  # the load check
+    with _connect() as conn:
+        if conn.execute("select 1 from hosted.fail_load where code = %s", (CODE,)).fetchone():
+            raise RuntimeError(f"hosted {CODE} was told not to load")
 
 
 def pass_point(conn: psycopg.Connection[Any], point: str) -> None:
@@ -85,10 +98,18 @@ class HostedSink(memory.Sink):
         return CheckResult(ok=True)
 
     def apply(self, ctx: Context, batch: ApplyBatch) -> ApplyResult:
+        token = str(ctx.config.get("token") or "")
         with _connect() as conn:
             conn.execute(
-                "insert into hosted.attempts (idempotency_key, code, pid) values (%s, %s, %s)",
-                (batch.idempotency_key, CODE, os.getpid()),
+                """insert into hosted.attempts (idempotency_key, code, pid, token, feather_env)
+                   values (%s, %s, %s, %s, %s)""",
+                (
+                    batch.idempotency_key,
+                    CODE,
+                    os.getpid(),
+                    hashlib.sha256(token.encode()).hexdigest()[:12],
+                    ",".join(sorted(k for k in os.environ if k.startswith("FEATHER_"))),
+                ),
             )
             pass_point(conn, f"apply:{CODE}")
             conn.execute(
@@ -100,4 +121,7 @@ class HostedSink(memory.Sink):
 
 
 dataset = fc.Dataset("rows", source=HostedSource("src"), key="id", strategy=fc.strategy.replace())
-flow = fc.Flow("feed", reads=dataset, deliver=[fc.to(HostedSink("out"), name="out")])
+flow = fc.Flow(
+    "feed", reads=dataset, deliver=[fc.to(HostedSink("out"), name="out")], triggers=[fc.every("2s")]
+)
+_fail_load_if_told()

@@ -1,17 +1,23 @@
 """Package hosts on real processes and Postgres (flow packages tasks 6 and 8): the supervisor prepares an installed
-version, starts its host when a flow of it is activated, the host runs the version's queued runs on that version's
-code, and drains when it has no work; two packages that pin two versions of one library run side by side."""
+version, starts its host when a flow of it is activated and moves the flow's triggers to it once it is up, the host
+runs the version's runs on that version's code with credentials the supervisor resolves, and drains when it has no
+work; two packages that pin two versions of one library run side by side."""
 
+import os
 import shutil
+import subprocess
+import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
-from hosts import FLOW, HostWorld, set_url, wait_for
+from hosts import FLOW, TOKEN, TOKEN_DIGEST, HostWorld, set_url, wait_for
 from real_stack import scratch_database, server_url
 
+from feather_connect.packages.link import LinkError
 from feather_connect.runtime.catalogue import Catalogue
+from feather_connect.storage.postgres.leader import PostgresLeaderLock, advisory_key
 
 pytestmark = [
     pytest.mark.postgres,
@@ -32,37 +38,62 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[HostWorld
             found.close()
 
 
-def test_a_flow_activated_gets_a_host_in_30_s_and_runs_and_deactivated_stops_firing_in_5_s(world: HostWorld):
-    world.install(world.build("acme", "1.0.0"))
+def _first_taken(world: HostWorld, version: str, timeout: float) -> str:
+    """The first run the scheduler queued for the version, once its host has taken it."""
+
+    def taken() -> str | None:
+        runs = [r for r in world.runs("acme") if r.params.get("version") == version]
+        return next((r.run_id for r in runs if r.status != "queued"), None)
+
+    return wait_for(taken, timeout, f"a run of {version} from the scheduler, taken by its host")
+
+
+def test_a_flow_activated_runs_through_the_scheduler_and_one_deactivated_queues_nothing_after_5_s(
+    world: HostWorld, record_property: Callable[[str, object], None]
+):
+    world.install(world.build("acme", "1.0.0", lib="1.0"))
     world.start()
+    world.start_scheduler()
     wait_for(lambda: world.state("acme", "1.0.0") == "ready", 120, "the supervisor to prepare acme 1.0.0")
+    row = world.store.packages.version("acme", "1.0.0")
+    assert row is not None
+    world.envs.remove(row.lock_hash)  # an environment not built yet on this worker
     assert world.host_of("acme", "1.0.0") is None  # nothing is active: no host
 
     activated = time.monotonic()
     world.activate("acme", "1.0.0")
-    run = world.queue("acme", "1.0.0")  # the scheduler's first tick
-    host = wait_for(lambda: world.host_of("acme", "1.0.0"), 30, "a host")
-    wait_for(
-        lambda: world.status(run) != "queued", 30 - (time.monotonic() - activated), "the host to take the run"
-    )
-    assert time.monotonic() - activated <= 30, "activate is within 30 s with a ready environment"
-    assert world.wait_for_runs([run])[run] == "succeeded", world.log_of(host)
-    assert {(code, lib) for _, _, code, lib in world.rows()} == {("1.0.0", None)}
-    assert len(world.rows()) == 5  # five records, written once
+    assert world.active("acme") is None  # it fires once its host is up
+    run = _first_taken(world, "1.0.0", 120)
+    record_property("activate_uncached_s", round(time.monotonic() - activated, 1))
+    host = world.host_of("acme", "1.0.0")
+    assert host is not None and world.wait_for_runs([run])[run] == "succeeded", world.log_of(str(host))
+    assert {(code, lib) for _, _, code, lib in world.rows()} == {("1.0.0", "1.0")}
 
-    catalogue = Catalogue(world.store)
-    catalogue.listen()
-    try:
-        assert [f.name for f in catalogue.flows()] == [f"acme/{FLOW}"]
-        stopped = time.monotonic()
-        world.deactivate("acme")
-        wait_for(lambda: catalogue.flows() == [], 5, "its triggers to stop")
-        assert time.monotonic() - stopped <= 5
-    finally:
-        catalogue.close()
+    # Deactivated: the scheduler queues nothing once 5 s have passed.
+    stopped = time.monotonic()
+    world.deactivate("acme")
+    time.sleep(max(0.0, stopped + 5 - time.monotonic()))
+    after = {r.run_id for r in world.runs("acme")}
+    time.sleep(6)  # three ticks of its trigger
+    assert {r.run_id for r in world.runs("acme")} == after, (
+        "the scheduler queued a run 5 s after deactivating"
+    )
     wait_for(lambda: world.host_of("acme", "1.0.0") is None, 120, "the host to drain and stop")
     worker = next(w for w in world.store.workers.list_workers() if w.worker_id == host)
     assert worker.state == "draining"  # it drained, as a worker does on SIGTERM
+
+    # Activated again, on the environment it built: a run within 30 s.
+    world.wait_for_runs([r.run_id for r in world.runs("acme")])
+    seen = {r.run_id for r in world.runs("acme")}
+    activated = time.monotonic()
+    world.activate("acme", "1.0.0")
+
+    def new_taken() -> str | None:
+        found = [r for r in world.runs("acme") if r.run_id not in seen and r.status != "queued"]
+        return found[0].run_id if found else None
+
+    wait_for(new_taken, 30, "a new run taken within 30 s of activating, its environment built")
+    record_property("activate_cached_s", round(time.monotonic() - activated, 1))
 
 
 def test_a_queued_run_of_an_inactive_version_still_runs_on_its_own_code(world: HostWorld):
@@ -72,6 +103,65 @@ def test_a_queued_run_of_an_inactive_version_still_runs_on_its_own_code(world: H
     run = world.queue("acme", "1.0.0")  # queued before a deactivation: it is work of that version still
     assert world.wait_for_runs([run])[run] == "succeeded"
     wait_for(lambda: world.host_of("acme", "1.0.0") is None, 120, "the host to stop once the run is over")
+
+
+def test_a_host_gets_its_connections_credentials_from_the_supervisor_and_no_other_secret(
+    world: HostWorld, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("FEATHER_MASTER_KEY", world.master_key)  # the worker has it; its hosts must not
+    world.install(world.build("acme", "1.0.0"))
+    world.start()
+    wait_for(lambda: world.state("acme", "1.0.0") == "ready", 120, "acme 1.0.0 to be ready")
+    run = world.queue("acme", "1.0.0")
+    assert world.wait_for_runs([run])[run] == "succeeded"
+    [(_, _, _, token, names)] = world.attempts()
+    assert token == TOKEN_DIGEST  # the sink had its credential, resolved by the supervisor's vault
+    assert "FEATHER_MASTER_KEY" not in (names or "").split(",") and "FEATHER_DATABASE_URL" in (names or "")
+
+    key = ("acme", "1.0.0")
+    ask = world.supervisor._secret  # pyright: ignore[reportPrivateUsage]
+    assert ask(key, {"connection": "out", "field": "token", "ref": "${secret:db:out/token}"}) == {
+        "value": TOKEN
+    }
+    for message in (
+        {"connection": "src", "field": "token", "ref": "${secret:db:out/token}"},  # another connection's
+        {"connection": "out", "field": "password", "ref": "${secret:db:out/password}"},  # a field it hasn't
+        {"connection": "other", "field": "token", "ref": "${secret:db:other/token}"},  # not its connection
+        {
+            "connection": "out",
+            "field": "token",
+            "ref": "${secret:env:FEATHER_MASTER_KEY}",
+        },  # not its reference
+    ):
+        with pytest.raises(LinkError):
+            ask(key, message)
+
+
+def test_a_second_host_with_the_same_id_refuses_to_start_while_the_first_holds_it(world: HostWorld):
+    held = PostgresLeaderLock(world.host_url, advisory_key("default", "host:sup/acme@1.0.0"))
+    assert held.try_acquire()  # as the first host does, before it takes work
+    try:
+        done = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "feather_connect.host",
+                "acme",
+                "1.0.0",
+                "dev",
+                "--worker-id",
+                "sup/acme@1.0.0",
+            ]
+            + ["--cache", str(world.tmp / "cache"), "--no-link"],
+            env={**os.environ, "FEATHER_DATABASE_URL": world.host_url},
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+    finally:
+        held.release()
+    assert done.returncode == 3, done.stderr.decode(errors="replace")[-2000:]
+    assert b"another host runs as sup/acme@1.0.0" in done.stderr
 
 
 def test_a_version_that_doesnt_load_fails_preparing_and_gets_no_host(world: HostWorld, tmp_path: Path):
@@ -96,6 +186,30 @@ def test_a_version_that_doesnt_load_fails_preparing_and_gets_no_host(world: Host
     world.queue("broken", "1.0.0")
     time.sleep(3)
     assert world.host_of("broken", "1.0.0") is None  # a version that isn't ready never gets a host
+
+
+def test_activating_a_version_whose_host_cant_load_keeps_the_old_one_firing(world: HostWorld):
+    for version in ("1.0.0", "1.1.0"):
+        world.install(world.build("acme", version))
+    world.start()
+    world.start_scheduler()
+    for version in ("1.0.0", "1.1.0"):
+        wait_for(lambda v=version: world.state("acme", v) == "ready", 120, f"acme {version} to be ready")
+    world.activate("acme", "1.0.0")
+    _first_taken(world, "1.0.0", 60)
+    world.fail_load("1.1.0")  # loads in the load check, but not in a host
+    world.activate("acme", "1.1.0")
+    wait_for(lambda: world.activation("acme", "1.1.0") == "failed", 120, "the activation of 1.1.0 to fail")
+    [failed] = [a for a in world.store.packages.activations("acme", "1.1.0") if a.flow == f"acme/{FLOW}"]
+    assert "was told not to load" in (failed.error or "")
+    assert world.active("acme") == "1.0.0"
+    seen = {r.run_id for r in world.runs("acme")}
+    wait_for(
+        lambda: [r for r in world.runs("acme") if r.run_id not in seen and r.params["version"] == "1.0.0"],
+        30,
+        "the old version to fire again",
+    )
+    assert all(r.params["version"] == "1.0.0" for r in world.runs("acme"))
 
 
 def test_two_packages_pinning_two_versions_of_one_library_run_side_by_side(world: HostWorld):
@@ -123,11 +237,13 @@ def test_a_version_switch_and_a_rollback_finish_each_run_on_the_code_it_started_
     for version in ("1.0.0", "1.1.0"):
         wait_for(lambda v=version: world.state("acme", v) == "ready", 120, f"acme {version} to be ready")
     world.activate("acme", "1.0.0")
+    wait_for(lambda: world.active("acme") == "1.0.0", 60, "1.0.0's host to be up")
     world.arm("apply:1.0.0")  # the 1.0.0 run stops mid-apply, so it is in progress through the switch
     old = world.queue("acme", "1.0.0")
     wait_for(lambda: world.reached("apply:1.0.0"), 60, "the 1.0.0 run to be applying")
 
-    world.activate("acme", "1.1.0")  # the switch: new ticks are 1.1.0's
+    world.activate("acme", "1.1.0")  # the switch: 1.0.0 fires until 1.1.0's host is up
+    wait_for(lambda: world.active("acme") == "1.1.0", 60, "1.1.0's host to be up")
     new = world.queue("acme", "1.1.0")
     wait_for(lambda: world.status(new) == "running", 60, "the 1.1.0 host to take its run")
     assert world.host_of("acme", "1.0.0") is not None  # still running: its run isn't over
@@ -139,6 +255,7 @@ def test_a_version_switch_and_a_rollback_finish_each_run_on_the_code_it_started_
     assert {code: len(keys) for code, keys in world.keys_by_code().items()} == {"1.0.0": 1, "1.1.0": 1}
 
     world.activate("acme", "1.0.0")  # the rollback is a switch back
+    wait_for(lambda: world.active("acme") == "1.0.0", 60, "1.0.0's host to be up again")
     back = world.queue("acme", "1.0.0")
     assert world.wait_for_runs([back])[back] == "succeeded"
     wait_for(lambda: world.host_of("acme", "1.1.0") is None, 120, "the 1.1.0 host to drain")
@@ -148,3 +265,5 @@ def test_a_version_switch_and_a_rollback_finish_each_run_on_the_code_it_started_
         for keys in world.keys_by_code().values()
         for key in keys
     )
+    catalogue = Catalogue(world.store)
+    assert [(f.name, f.version) for f in catalogue.flows()] == [(f"acme/{FLOW}", "1.0.0")]

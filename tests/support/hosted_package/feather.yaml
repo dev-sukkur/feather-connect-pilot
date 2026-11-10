@@ -7,4 +7,4 @@ modules: [flows.hosted]
 settings: {timezone: UTC}
 connections:
   src: {connector: hosted.source}
-  out: {connector: hosted.sink}
+  out: {connector: hosted.sink, auth: {token: '${secret:db:out/token}'}}
