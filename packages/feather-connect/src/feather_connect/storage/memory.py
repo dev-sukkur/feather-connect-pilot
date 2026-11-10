@@ -149,7 +149,9 @@ class _Data:
         default_factory=dict[tuple[str, str], PackageVersion]
     )  # by (name, version_key), in install order
     wheels: dict[str, bytes] = field(default_factory=dict[str, bytes])  # by sha256
-    renames: dict[tuple[str, str], str] = field(default_factory=dict[tuple[str, str], str])  # (kind, old): new
+    renames: dict[tuple[str, str], str] = field(
+        default_factory=dict[tuple[str, str], str]
+    )  # (kind, old): new
     activations: dict[tuple[str, str, str], FlowActivation] = field(
         default_factory=dict[tuple[str, str, str], FlowActivation]
     )  # by (flow, package, version_key)

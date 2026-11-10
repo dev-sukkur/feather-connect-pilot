@@ -31,7 +31,7 @@ HEARTBEAT_S = 5.0
 DRAIN_S = 30.0
 
 
-def _check_connections(project: Project) -> None:
+def check_connections(project: Project) -> None:
     """Fail at startup, not in a task, when a flow uses a connection the project does not define."""
     for flow in project.flows:
         used = {d.source.connection for d in flow.datasets} | {r.sink.connection for r in flow.routes}
@@ -42,7 +42,7 @@ def _check_connections(project: Project) -> None:
             )
 
 
-def _heartbeats(
+def heartbeats(
     store: Store, worker_id: str, labels: Mapping[str, str], sha: str, slots: int
 ) -> threading.Event:
     """Heartbeat every `HEARTBEAT_S` from a daemon thread, until the returned event is set."""
@@ -70,7 +70,7 @@ def config_of(project: Project, connection: str) -> Mapping[str, Any]:
     return resolved
 
 
-def _work(
+def work(
     runtime: Runtime,
     store: Store,
     database_url: str,
@@ -104,7 +104,7 @@ def _work(
     handle = DbosWorkerRuntime(database_url, poll_s=poll_s, drain_s=DRAIN_S).run(
         runtime.tasks() if tasks is None else tasks, worker_id, labels, slots
     )
-    stop_beating = _heartbeats(store, worker_id, labels, code_sha, slots)
+    stop_beating = heartbeats(store, worker_id, labels, code_sha, slots)
     if background is not None:
         threading.Thread(target=background, args=(told_to_stop,), name="background", daemon=True).start()
     try:

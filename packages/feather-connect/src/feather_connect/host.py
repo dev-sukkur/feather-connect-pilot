@@ -259,7 +259,7 @@ def run_host(
 ) -> int:
     """Run the host until told to stop, and return the exit code. With no `link` (a test in one process), the
     credentials are resolved here, from this process's environment."""
-    from feather_connect.worker import _check_connections, _work, config_of  # pyright: ignore[reportPrivateUsage]
+    from feather_connect.worker import check_connections, config_of, work
     from feather_engine_dbos import DbosEngine
 
     configure_logging(os.environ.get("FEATHER_LOG_LEVEL", "INFO"))
@@ -283,7 +283,7 @@ def run_host(
     try:
         try:
             project, sha, version = _project(store, package, version, env, cache)
-            _check_connections(project)
+            check_connections(project)
             for budget in project.budgets.values():
                 store.budgets.define(budget)
             engine = DbosEngine(database_url)
@@ -330,7 +330,7 @@ def run_host(
         tasks = keyed_tasks(runtime.tasks(), locks.hold)
         labels = {"pool": pool, "package": package, "version": version}
         log.info("package host %s runs %s %s", worker_id, package, version)
-        return _work(
+        return work(
             runtime, store, database_url, worker_id, labels, slots, poll_s, told, sha, background, tasks
         )
     finally:

@@ -73,6 +73,8 @@ __all__ = ["POLL_S", "Supervisor", "host_environment", "run_supervisor"]
 
 log = logging.getLogger(__name__)
 
+SUPERVISOR_ROLE = "supervisor"  # the label a supervisor registers with; its package hosts have a `pool`
+
 POLL_S = 2.0  # the poll that backs NOTIFY up (§7.1)
 KILL_AFTER_S = 90.0  # a draining host that hasn't exited by then is killed: its drain waits 30 s for tasks
 BACKOFF_MAX_S = 60.0
@@ -752,9 +754,23 @@ def run_supervisor(
         partitions=lambda: ensure_partitions_ahead(store, spool),
     )
     log.info("supervisor %s runs the packages %s of %s", worker_id, ", ".join(packages), env)
+    # The supervisor shows as a worker of its own, so the fleet view and `feather.worker` see it before any package is
+    # active. It runs no task itself (no slots); its package hosts register as `<worker>/<package>@<version>`.
+    from feather_connect.worker import heartbeats
+
+    labels = {"role": SUPERVISOR_ROLE}
+    sha = os.environ.get("FEATHER_CODE_SHA", "")
+    store.workers.heartbeat(worker_id, labels, sha, 0)
+    store.workers.mark(worker_id, "alive")
+    stop_beating = heartbeats(store, worker_id, labels, sha, 0)
     try:
         return supervisor.run(told)
     finally:
+        stop_beating.set()
+        try:
+            store.workers.mark(worker_id, "draining")
+        except Exception:
+            log.warning("could not mark %s as stopping", worker_id, exc_info=True)
         store.close()
 
 

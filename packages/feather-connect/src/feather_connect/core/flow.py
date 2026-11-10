@@ -3,7 +3,7 @@
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pyarrow as pa
 
@@ -317,5 +317,5 @@ def push_spec(dataset: Dataset) -> dict[str, Any] | None:
     return {
         "source": f"{kind.__module__}:{kind.__qualname__}",
         "connection": dataset.source.connection,
-        "options": dict(options),
+        "options": dict(cast("Mapping[str, Any]", options)),
     }

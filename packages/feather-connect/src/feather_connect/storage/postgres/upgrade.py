@@ -68,7 +68,9 @@ def rename_to_package(
     counts: dict[str, int] = {}
     try:
         with psycopg.connect(url) as conn:
-            conn.execute(sql.SQL("set local lock_timeout = {}").format(sql.Literal(f"{int(lock_timeout_s * 1000)}ms")))
+            conn.execute(
+                sql.SQL("set local lock_timeout = {}").format(sql.Literal(f"{int(lock_timeout_s * 1000)}ms"))
+            )
             # The scheduler and anything that starts a run wait for the commit: no tick or run under an old name.
             conn.execute("lock table feather.schedule, feather.run in exclusive mode")
             for table, column, kind in NAMED:
@@ -84,7 +86,9 @@ def rename_to_package(
                     (olds, news, tenant),
                 )
                 counts[f"{table}.{column}"] = done.rowcount
-            targets = {f"{kind}:{old}": f"{kind}:{new}" for kind in _KINDS for old, new in pairs[kind].items()}
+            targets = {
+                f"{kind}:{old}": f"{kind}:{new}" for kind in _KINDS for old, new in pairs[kind].items()
+            }
             if targets:
                 done = conn.execute(
                     """update feather.override o set target = m.new

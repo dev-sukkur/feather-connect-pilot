@@ -265,7 +265,9 @@ def test_a_token_is_an_operator_unless_told_and_never_above_its_user(cli, databa
 def test_worker_starts_as_a_supervisor_and_keeps_running(spawn, migrated, project):
     # The project mode is retired (§13): a worker is a supervisor. It registers no worker of its own; its package
     # hosts do, once a package is installed and active. With none, it just keeps running.
-    proc = spawn("worker", "--slots", "3", env={**process_env(migrated, project), "FEATHER_WORKER_ID": "w-cli"})
+    proc = spawn(
+        "worker", "--slots", "3", env={**process_env(migrated, project), "FEATHER_WORKER_ID": "w-cli"}
+    )
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         assert proc.poll() is None, "the worker ended"

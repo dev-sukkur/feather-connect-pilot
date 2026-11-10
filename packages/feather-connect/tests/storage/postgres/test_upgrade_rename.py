@@ -12,7 +12,11 @@ from feather_connect.testing.store_contract import T0, seal
 
 pytestmark = pytest.mark.postgres
 Pg = psycopg.Connection[DictRow]
-NAMES = {"flow": {"orders": "acme/orders"}, "dataset": {"shop.items": "acme/shop.items"}, "route": {"lake": "acme/lake"}}
+NAMES = {
+    "flow": {"orders": "acme/orders"},
+    "dataset": {"shop.items": "acme/shop.items"},
+    "route": {"lake": "acme/lake"},
+}
 
 
 @pytest.fixture
@@ -31,7 +35,7 @@ def _m1_history(store: PostgresStore) -> tuple[str, str]:
 def test_the_history_takes_the_package_names_and_running_it_again_changes_nothing(
     store: PostgresStore, pg_url: str, pg: Pg
 ) -> None:
-    done, queued = _m1_history(store)
+    _done, queued = _m1_history(store)
     counts = rename_to_package(pg_url, "acme", "1.0.0", NAMES, T0)
     assert counts["run.flow"] == 2 and counts["schedule.flow"] == 1
     assert counts["version.dataset"] == 1 and counts["delivery.route"] == 1
@@ -48,7 +52,9 @@ def test_the_history_takes_the_package_names_and_running_it_again_changes_nothin
     assert not any(again.values())  # nothing left to rename: safe to run twice
 
 
-def test_a_name_the_package_has_already_is_refused_and_nothing_changes(store: PostgresStore, pg_url: str) -> None:
+def test_a_name_the_package_has_already_is_refused_and_nothing_changes(
+    store: PostgresStore, pg_url: str
+) -> None:
     store.runs.create_run("orders", "manual", "ann", {})
     store.schedules.advance_tick("orders", "t1", None, T0)
     store.schedules.advance_tick("acme/orders", "t1", None, T0)  # the package's flow ticked already

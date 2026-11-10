@@ -27,7 +27,15 @@ from feather_connect.packages.webhooks import Webhook, parse_webhooks
 from feather_connect.runtime.scheduler import MAX_CATCH_UP, _due, trigger_id  # pyright: ignore[reportPrivateUsage]
 from feather_connect.storage.port import PackageVersion, Store
 
-__all__ = ["REFRESH_S", "ActiveFlow", "Catalogue", "PackagePush", "restart_ticks", "sync_package_catalog", "triggers_of"]
+__all__ = [
+    "REFRESH_S",
+    "ActiveFlow",
+    "Catalogue",
+    "PackagePush",
+    "restart_ticks",
+    "sync_package_catalog",
+    "triggers_of",
+]
 
 log = logging.getLogger(__name__)
 REFRESH_S = 2.0  # the poll that backs NOTIFY up (§7.2)

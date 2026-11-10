@@ -86,7 +86,10 @@ def _m1_workers(store: Store, clock: Clock) -> list[str]:
     return [
         w.worker_id
         for w in store.workers.list_workers()
-        if w.state != "dead" and "pool" not in w.labels and now - w.last_seen < _ALIVE
+        if w.state == "alive"
+        and "pool" not in w.labels
+        and w.labels.get("role") != "supervisor"
+        and now - w.last_seen < _ALIVE
     ]
 
 
