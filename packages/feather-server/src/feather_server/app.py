@@ -106,11 +106,15 @@ def build_state(settings: Settings) -> AppState:
     def config(connection: str) -> Mapping[str, Any]:  # webhook sources verify and parse here, in the server
         return config_of(project, connection) if connection in project.connections else {}
 
+    # What the server submits (an operator's retry, replay or skip of a delivery) goes to the pool of the version its
+    # run is tagged with, as a host's own submits do, so that host runs it: no other process has the code (§6).
+    from feather_connect.host import PoolEngine
+
     runtime = Runtime(
         project.flows,
         store,
         spool,
-        engine,
+        engine if local is not None else PoolEngine(engine, "server", store),
         code_sha=project.code_sha,
         clock=clock,
         config_of=config,

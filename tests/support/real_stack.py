@@ -60,15 +60,23 @@ _INSTALLED: dict[tuple[str, Path], str] = {}
 
 
 def install_project(
-    project: Path, pg_url: str, env: str = "dev", environ: Mapping[str, str] | None = None
+    project: Path,
+    pg_url: str,
+    env: str = "dev",
+    environ: Mapping[str, str] | None = None,
+    *,
+    again: bool = False,
 ) -> str:
     """Install `project` as a package on `pg_url`'s database and make its flows active, as `feather dev` does; once per
     project folder and database, so a worker started again runs the same version, and a test of its own on a shared
-    database gets its own. Returns the package's name: flows are `<package>/<name>`."""
+    database gets its own. `again` installs the next dev version, as `feather dev` does on a save. Returns the
+    package's name: flows are `<package>/<name>`."""
     from feather_cli.upgrade import install_dev_version
     from feather_connect.storage.postgres.connect import connect
 
     key = (pg_url, project.resolve())
+    if again:
+        _INSTALLED.pop(key, None)
     if key not in _INSTALLED:
         store, _ = connect(pg_url)
         saved = dict(os.environ)

@@ -196,6 +196,7 @@ def test_new_data_produces_only_the_changes(running: Demo, http_echo: Echo, demo
     changed = [dict(row) for row in FIXTURE]
     changed[0]["status"] = "delivered"
     (demo / "fixtures" / "orders.json").write_text(json.dumps(changed, indent=2), encoding="utf-8")
+    running.stack.reinstall()  # the package carries its fixture: the change goes out as the next version
     running.run_and_wait()
     order = changed[0]["order_id"]
     wait_until(lambda: http_echo.received()[order]["status"] == "delivered", SETTLE, "the change at the ERP")
