@@ -88,15 +88,6 @@ if "FEATHER_CHAOS_URL" in os.environ:
     _hold_the_sealer()
 
 
-class PushSource(simulation.Source):
-    """Takes unsigned webhooks, each a record or a list of them."""
-
-    spec = ConnectorSpec(name="chaos.push_source", strategies=frozenset({"push"}))
-
-    def __init__(self, connection: str) -> None:
-        super().__init__(connection, generator={"id": simulation.seq()}, rows_per_partition=0, unsigned=True)
-
-
 class ChaosSource(simulation.Source):
     """Numbered rows, handed over a chunk at a time, one metered call per row if the connection has a budget.
 
@@ -184,5 +175,11 @@ def _flow(name: str, connection: str, sinks: list[str], rows: int = ROWS) -> fc.
 main = _flow("main", "source", ["slow_a", "slow_b", "slow_c"])
 fits = _flow("fits", "fits_source", ["fits_sink"], rows=2)  # two calls, and its budget holds two
 too_big = _flow("too_big", "big_source", ["big_sink"], rows=5)  # five calls, and its budget holds three
-hooks = fc.Dataset("hooks", source=PushSource("hooks"), key="id", strategy=fc.strategy.push())
+# Feather's own simulation source: a package may not bring a push source of its own, which the server would run.
+hooks = fc.Dataset(
+    "hooks",
+    source=simulation.Source("hooks", generator={"id": simulation.seq()}, rows_per_partition=0, unsigned=True),
+    key="id",
+    strategy=fc.strategy.push(),
+)
 push = fc.Flow("push", reads=hooks, deliver=[fc.to(SlowSink("push_sink"))], triggers=[fc.on_event(hooks)])
