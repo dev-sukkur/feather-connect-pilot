@@ -162,18 +162,22 @@ def test_the_registries_page_lists_adds_tests_and_removes_with_tokens_only_as_se
         index_url="https://pkgs.example.com/simple/",
         token_ref=ref,
     )
-    assert added.status_code == 200 and "The registry acme is added." in added.text
-    assert (
-        ref not in added.text and ">set<" in added.text
-    )  # the reference isn't shown, only that there is one
+    assert added.status_code == 303 and added.headers["location"] == "/registries?added=acme"  # no resubmit
+    shown = admin.get(added.headers["location"]).text
+    assert "The registry acme is added." in shown
+    assert ref not in shown and ">set<" in shown  # the reference isn't shown, only that there is one
     tested = _post(admin, "/registries", "/registries/feather/test")
-    assert "feather answers, with 1 packages." in tested.text
+    assert tested.status_code == 303
+    assert "feather answers" in admin.get(tested.headers["location"]).text
+    failed = _post(admin, "/registries", "/registries/acme/test")  # its token's variable isn't set
+    assert failed.status_code == 303
+    shown = admin.get(failed.headers["location"]).text
+    assert "acme: " in shown and "notice-bad" in shown and "acme answers" not in shown
     asked = _post(admin, "/registries", "/registries/acme/remove")
     assert "Remove the registry acme?" in asked.text and state.store.registry.get_registry("acme") is not None
     removed = _post(admin, "/registries", "/registries/acme/remove", confirm="yes")
-    assert (
-        "The registry acme is removed." in removed.text and state.store.registry.get_registry("acme") is None
-    )
+    assert removed.status_code == 303 and state.store.registry.get_registry("acme") is None
+    assert "The registry acme is removed." in admin.get(removed.headers["location"]).text
     bad = _post(
         admin,
         "/registries",
@@ -190,3 +194,70 @@ def test_a_package_or_flow_that_isnt_installed_is_not_found(app: FastAPI):
     browser = sign_in(app)
     assert browser.get("/packages/nothing").status_code == 404
     assert browser.get(f"/packages/{NAME}/flows/nothing").status_code == 404
+
+
+# The P5 review.
+
+
+def test_an_operator_may_not_uninstall_from_the_page(app: FastAPI, state: AppState):
+    operator = sign_in(app)
+    page = f"/packages/{NAME}"
+    refused = _post(operator, page, f"{page}/versions/1.0.0/uninstall", confirm="yes")
+    assert refused.status_code == 403 and _version(state, "1.0.0").state == "ready"
+
+
+def test_a_hostile_load_check_or_host_error_is_shown_escaped(app: FastAPI, state: AppState, tmp_path: Path):
+    from feather_connect.packages.check import LoadCheck
+
+    hostile = "<script>alert(1)</script>"
+    wheel = sample_wheel(tmp_path / "2.0.0", "2.0.0")
+    app.state.registries.publish(ADMIN, wheel.name, wheel.read_bytes())
+    app.state.packages.install(ADMIN, NAME, "2.0.0")
+
+    def failing(*_: object, **__: object) -> LoadCheck:
+        return LoadCheck(False, [f'{NAME}/<img src=x onerror="alert(2)">'], error=hostile)
+
+    prepare(state, NAME, "2.0.0", checker=failing)
+    state.store.packages.record_host("w1", NAME, "2.0.0", "crash_loop", 1, state.clock.now(), hostile)
+    page = sign_in(app).get(f"/packages/{NAME}").text
+    assert hostile not in page and "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert "<img src=x" not in page
+
+
+def test_the_version_card_shows_where_it_was_promoted_from_and_the_checks_it_passed(
+    app: FastAPI, state: AppState, tmp_path: Path
+):
+    import hashlib
+
+    content = sample_wheel(tmp_path / "3.0.0", "3.0.0")
+    data = content.read_bytes()
+    app.state.packages.promote(
+        ADMIN, content.name, data, sha256=hashlib.sha256(data).hexdigest(), source="qa"
+    )
+    page = sign_in(app).get(f"/packages/{NAME}").text
+    assert "promoted from <b>qa</b> by root" in page
+    assert _version(state, "3.0.0").checks and "not_installed" in page
+
+
+def test_a_rollback_goes_only_to_a_version_that_served(app: FastAPI, state: AppState):
+    operator = sign_in(app)
+    action = f"/packages/{NAME}/flows/invoices"
+    _post(operator, action, f"{action}/activate", version="1.0.0", confirm="yes")  # its host never comes up
+    state.clock.advance(timedelta(minutes=1))  # type: ignore[attr-defined]
+    _post(operator, action, f"{action}/activate", version="1.1.0", kind="switch", back="flow", confirm="yes")
+    host_up(state, NAME, "1.1.0")
+    assert "Roll back to" not in operator.get(action).text  # 1.0.0 never served
+
+
+def test_activating_an_unsigned_version_where_signing_is_now_required_says_so(app: FastAPI, state: AppState):
+    from feather_connect.packages.signing import Signer, public_key_text
+    from feather_connect.storage.port import EnvEntry
+
+    now = state.clock.now()
+    key = public_key_text(Signer.generate().public)
+    state.store.env_config.put(EnvEntry("dev", "setting", "trusted_package_keys", [key], "root", now))
+    state.store.env_config.put(EnvEntry("dev", "setting", "require_signed_packages", True, "root", now))
+    page = f"/packages/{NAME}"
+    refused = _post(sign_in(app), page, f"{page}/flows/invoices/activate", version="1.0.0", confirm="yes")
+    assert refused.status_code == 422 and "The signature check failed" in refused.text
+    assert state.store.packages.active() == []

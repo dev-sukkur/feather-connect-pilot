@@ -12,7 +12,7 @@
   {% if f.activating %}<dt>Moving to</dt><dd><code>{{ f.activating }}</code>, once its host is up</dd>{% endif %}
   {% if f.rollback_to %}<dt>Before it</dt><dd><code>{{ f.rollback_to }}</code></dd>{% endif %}
 </dl>
-{% if f.failed %}<p class="notice notice-bad" role="status">Activating <code>{{ f.failed.version }}</code> failed: {{ f.failed.error or "its host didn't come up" }}</p>{% endif %}
+{% if f.failed %}<p class="notice notice-bad">Activating <code>{{ f.failed.version }}</code> failed: {{ f.failed.error or "its host didn't come up" }}</p>{% endif %}
 
 <section aria-labelledby="h-actions">
   <h2 id="h-actions">Actions</h2>

@@ -14,7 +14,7 @@
     <h3 id="flow-{{ loop.index }}"><a href="/packages/{{ name | urlencode }}/flows/{{ f.short | urlencode }}">{{ f.name }}</a>
       {% if f.active %}{{ m.status_badge("active") }} <code>{{ f.active }}</code>{% elif f.activating %}{{ m.status_badge("activating") }} <code>{{ f.activating }}</code>{% else %}{{ m.status_badge("inactive") }}{% endif %}</h3>
     {% if f.activating and f.active %}<p class="muted">Moving to <code>{{ f.activating }}</code> once its host is up; <code>{{ f.active }}</code> keeps running until then.</p>{% endif %}
-    {% if f.failed %}<p class="notice notice-bad" role="status">Activating <code>{{ f.failed.version }}</code> failed: {{ f.failed.error or "its host didn't come up" }}</p>{% endif %}
+    {% if f.failed %}<p class="notice notice-bad">Activating <code>{{ f.failed.version }}</code> failed: {{ f.failed.error or "its host didn't come up" }}</p>{% endif %}
     {% set back = "package" %}{% include "_package_flow_actions.html" %}
   </section>
   {% else %}
@@ -31,14 +31,16 @@
     <h3 id="v-{{ loop.index }}"><code>{{ row.version }}</code> {{ m.version_state(row) }}</h3>
     <dl class="facts">
       <dt>sha256</dt><dd><code class="wrap">{{ row.sha256 }}</code></dd>
-      <dt>From</dt><dd>{{ row.registry }}</dd>
+      <dt>From</dt><dd>{% if row.promoted_from %}promoted from <b>{{ row.promoted_from }}</b>{% if row.promoted_by %} by {{ row.promoted_by }}{% endif %}, kept in {{ row.registry }}{% else %}{{ row.registry }}{% endif %}</dd>
+      <dt>Signed</dt><dd>{% if row.signed_by %}by key <code>{{ row.signed_by }}</code>{% else %}<span class="muted">not checked: signing wasn't required when it was installed</span>{% endif %}</dd>
       <dt>Installed</dt><dd>{{ m.time_ago(row.installed_at) }} by {{ row.installed_by }}</dd>
       <dt>Feather Connect</dt><dd><code>{{ row.fc_versions }}</code></dd>
       <dt>Active flows</dt><dd>{% if v.active_flows %}{{ v.active_flows | join(", ") }}{% else %}<span class="muted">none</span>{% endif %}</dd>
     </dl>
     {% if row.state != "uninstalled" %}
     <h4>Install checks</h4>
-    <ul class="checks">{% for check in checks %}<li>{{ m.status_dot("passed") }} <code>{{ check }}</code></li>{% endfor %}</ul>
+    {% if row.checks %}<ul class="checks">{% for check in row.checks %}<li>{{ m.status_dot("passed") }} <code>{{ check }}</code></li>{% endfor %}</ul>
+    {% else %}<p class="muted">Not recorded: it was installed before the checks it passed were kept.</p>{% endif %}
     <h4>Preparing on the workers</h4>
     <ul class="checks">{% for step, how in v.steps %}<li>{{ m.status_dot(how) }} <code>{{ step }}</code></li>{% endfor %}</ul>
     {% if row.load_check %}

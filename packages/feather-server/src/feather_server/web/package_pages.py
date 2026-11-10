@@ -9,8 +9,9 @@ package code: what a page shows of a package is what its manifest, its load chec
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Any
-from urllib.parse import quote
+from datetime import datetime, timedelta
+from typing import Annotated, Any, cast
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -21,7 +22,7 @@ from feather_connect.storage.port import FlowActivation, InUse, PackageEnv, Pack
 from feather_server.auth import Actor, CurrentActor, require_csrf
 from feather_server.services.access import can
 from feather_server.services.packages import CHECKS, PREPARE_STEPS, Busy, InstallFailed, NotReady, Packages
-from feather_server.services.registries import Registries, RegistryProblem
+from feather_server.services.registries import BUILT_IN, Registries, RegistryProblem
 from feather_server.web.routes import Tile, render
 
 router = APIRouter()
@@ -110,7 +111,6 @@ def _key(version: str) -> tuple[int, Any]:
 
 def _flows(name: str, versions: Sequence[PackageVersion], rows: Sequence[FlowActivation]) -> list[FlowView]:
     ready = {v.version for v in versions if v.state == "ready"}
-    installed_at = {v.version: v.installed_at for v in versions}
     by_flow: dict[str, list[FlowActivation]] = {}
     for row in rows:
         by_flow.setdefault(row.flow, []).append(row)
@@ -120,8 +120,7 @@ def _flows(name: str, versions: Sequence[PackageVersion], rows: Sequence[FlowAct
         active = next((a.version for a in mine if a.state == "active"), None)
         activating = next((a.version for a in mine if a.state == "activating"), None)
         failed = next((a for a in mine if a.state == "failed"), None)
-        # A version whose row changed after it was installed has been in service: the newest such one, other than
-        # the active one, is what a rollback goes back to.
+        # A rollback goes back to the version that last served, other than the one serving now, if it is ready.
         before = sorted(
             (
                 a
@@ -129,9 +128,9 @@ def _flows(name: str, versions: Sequence[PackageVersion], rows: Sequence[FlowAct
                 if a.state == "inactive"
                 and a.version != active
                 and a.version in ready
-                and a.changed_at > installed_at.get(a.version, a.changed_at)
+                and a.last_active_at is not None
             ),
-            key=lambda a: a.changed_at,
+            key=lambda a: cast(datetime, a.last_active_at),
             reverse=True,
         )
         found.append(
@@ -361,6 +360,9 @@ def activate(
         return _again(request, actor, project, short, back, ask=ask)
     try:
         _packages(request).activate(actor, flow, version, reason=_reason(reason))
+    except InstallFailed as error:  # signed packages are required, and this one isn't, or no longer
+        text = f"The {error.check} check failed: {error}"
+        return _again(request, actor, project, short, back, status=422, notice=("bad", text))
     except NotReady as error:
         return _again(request, actor, project, short, back, status=409, notice=("bad", str(error)))
     except KeyError as error:
@@ -499,6 +501,8 @@ def _registries_page(
     form: Mapping[str, str] | None = None,
 ) -> HTMLResponse:
     found = _registries(request).registries()
+    if notice is None:
+        notice = _registry_notice(request)
     tiles = [
         Tile("Registries", len(found)),
         Tile("Built-in", "on" if _registries(request).enabled else "off"),
@@ -538,10 +542,33 @@ def add_registry(
         "token_ref": token_ref if token_ref.startswith("${") else "",
     }
     try:
-        _registries(request).add(actor, name.strip(), index_url.strip(), token_ref.strip() or None)
+        added = _registries(request).add(actor, name.strip(), index_url.strip(), token_ref.strip() or None)
     except ValueError as error:
         return _registries_page(request, actor, status=422, notice=("bad", redact(str(error))), form=form)
-    return _registries_page(request, actor, notice=("ok", f"The registry {name.strip()} is added."))
+    return RedirectResponse(f"/registries?{urlencode({'added': added.name})}", status_code=303)
+
+
+def _registry_notice(request: Request) -> tuple[str, str] | None:
+    """What the last add or test did, after its redirect: a test's answer is read back from its audit row."""
+    query = request.query_params
+    registries = {r.name for r in _registries(request).registries()}
+    if (name := query.get("added")) in registries:
+        return ("ok", f"The registry {name} is added.")
+    if (name := query.get("tested")) in registries:
+        if name == BUILT_IN:
+            return ("ok", f"{name} answers: it is built in.")
+        since = request.app.state.feather.clock.now() - timedelta(minutes=10)
+        rows = request.app.state.feather.store.audit.for_target(f"registry:{name}", since=since)
+        tests = [r for r in rows if r.action == "test_registry"]
+        if not tests:
+            return None
+        result = tests[-1].result
+        if result == "ok":
+            return ("ok", f"{name} answers.")
+        return ("bad", f"{name}: {redact(result.removeprefix('failed: '))}")
+    if (name := query.get("removed")) and name not in registries:
+        return ("ok", f"The registry {name} is removed.")
+    return None
 
 
 @router.post("/registries/{name}/test", dependencies=[Depends(require_csrf)])
@@ -553,10 +580,7 @@ def test_registry(request: Request, actor: CurrentActor, name: str) -> Response:
         return _registries_page(request, actor, status=404, notice=("bad", redact(text)))
     except RegistryProblem as error:
         return _registries_page(request, actor, status=422, notice=("bad", f"{name}: {redact(str(error))}"))
-    if not found["ok"]:
-        return _registries_page(request, actor, notice=("bad", f"{name}: {redact(str(found['message']))}"))
-    count = found["projects"]
-    return _registries_page(request, actor, notice=("ok", f"{name} answers, with {count} packages."))
+    return RedirectResponse(f"/registries?{urlencode({'tested': str(found['registry'])})}", status_code=303)
 
 
 @router.post("/registries/{name}/remove", dependencies=[Depends(require_csrf)])
@@ -578,4 +602,4 @@ def remove_registry(
     except (KeyError, ValueError) as error:
         text = str(error.args[0] if isinstance(error, KeyError) and error.args else error)
         return _registries_page(request, actor, status=404, notice=("bad", redact(text)))
-    return _registries_page(request, actor, notice=("ok", f"The registry {name} is removed."))
+    return RedirectResponse(f"/registries?{urlencode({'removed': name})}", status_code=303)
