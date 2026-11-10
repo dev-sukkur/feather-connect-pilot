@@ -42,7 +42,7 @@ raises `Busy`, which the API answers 503 with Retry-After.
 import hashlib
 import re
 import threading
-from collections.abc import Generator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, cast
@@ -59,7 +59,14 @@ from feather_connect.packages.prepare import PREPARE_STEPS
 from feather_connect.packages.signing import SignatureError, check_trusted_keys, verify_wheel
 from feather_connect.packages.wheel import read_entry, read_wheel
 from feather_connect.runtime.catalogue import restart_ticks, sync_package_catalog
-from feather_connect.storage.port import DuplicateVersion, FlowActivation, InUse, PackageVersion, Store
+from feather_connect.storage.port import (
+    DuplicateVersion,
+    FlowActivation,
+    InUse,
+    PackageVersion,
+    Store,
+    VersionNotReady,
+)
 from feather_server.auth import Actor
 from feather_server.services.access import require
 from feather_server.services.registries import BUILT_IN, Fetched, Registries, RegistryProblem, VersionExists
@@ -319,8 +326,13 @@ class Packages:
         reason: str | None,
         request: dict[str, Any],
         passed: list[str],
+        *,
+        promoted_from: str | None = None,
+        before_keep: Callable[[], str] | None = None,
     ) -> Installed:
-        """The checks after the fetch, from `signature` on, then the version stored with its flows inactive."""
+        """The checks after the fetch, from `signature` on, then the version stored with its flows inactive.
+        `before_keep` runs only once every check has passed, just before the version is stored, and says which
+        registry it is kept in: a promotion's copy into the built-in registry."""
         signed_by = self._check_signature(fetched.content)
         if signed_by is not None:
             request["signed_by"] = signed_by
@@ -333,7 +345,7 @@ class Packages:
         passed.append("compatibility")
         self._check_lock(fetched)
         passed += ["lock", "wheels"]
-        registry = fetched.registry
+        registry = fetched.registry if before_keep is None else before_keep()
         named = cast(list[dict[str, Any]], manifest.get("flows") or [])
         flows = [f"{project}/{flow}" for flow in sorted(str(f["name"]) for f in named)]
         row = PackageVersion(
@@ -350,6 +362,10 @@ class Packages:
             {},
             actor.name,
             self._clock.now(),
+            tuple(passed),
+            promoted_from,
+            actor.name if promoted_from else None,
+            signed_by,
         )
         try:
             self._store.packages.install(row, fetched.content, flows, reason)
@@ -518,9 +534,20 @@ class Packages:
                 "not_installed", f"{project} {info.version} is installed here already: install a new version"
             )
         passed += ["not_installed", "size", "sha256", "manifest", "name_version"]
-        registry = self._registry_copy(actor, filename, content, actual)
-        fetched = Fetched(registry, filename, actual, content, dict(info.manifest))
-        return self._checked_and_kept(actor, fetched, project, info.version, reason, request, passed)
+        fetched = Fetched("promotion", filename, actual, content, dict(info.manifest))
+        return self._checked_and_kept(
+            actor,
+            fetched,
+            project,
+            info.version,
+            reason,
+            request,
+            passed,
+            promoted_from=str(request["from"]),
+            before_keep=lambda: self._registry_copy(
+                actor, filename, content, actual
+            ),  # once every check passed
+        )
 
     def _registry_copy(self, actor: Actor, filename: str, content: bytes, sha256: str) -> str:
         """Keep the promoted wheel in the built-in registry, when it is on, so this environment has it as any other
@@ -593,15 +620,32 @@ class Packages:
                 else f"it is {installed.state}: {installed.load_check.get('error') or 'see its load check'}"
             )
             raise NotReady(f"{package} {installed.version} can't be activated yet: {why}", installed.state)
+        self._signed_still(installed)
         now = self._clock.now()
+        try:
+            done = self._store.packages.activate(flow, package, installed.version, actor.name, now, reason)
+        except VersionNotReady as error:  # uninstalled meanwhile: the store checks in its transaction
+            raise NotReady(str(error), error.state) from None
         spec = cast(dict[str, Any], installed.load_check.get("specs") or {}).get(flow)
-        if spec is not None:
+        if spec is not None and done.state == "activating":
             restart_ticks(self._store, flow, spec, now)  # no catch-up of the time it was inactive
-        done = self._store.packages.activate(flow, package, installed.version, actor.name, now, reason)
         self._sync(package, installed)
         request = {"version": installed.version, "reason": reason}
         self._audit(actor, "activate_flow", target, request, "ok")
         return self._activation(done)
+
+    def _signed_still(self, installed: PackageVersion) -> None:
+        """Where the environment requires signed packages, a version installed before that was turned on, or since
+        its keys changed, is checked again before a flow of it goes into service. Raises `InstallFailed` at
+        `signature`."""
+        if self._settings().get("require_signed_packages") is not True:
+            return
+        content = self._store.packages.wheel(installed.sha256)
+        if content is None:
+            raise InstallFailed(
+                "signature", f"the wheel of {installed.name} {installed.version} is not kept here"
+            )
+        self._check_signature(content)
 
     def deactivate(self, actor: Actor, flow: str, *, reason: str | None = None) -> dict[str, Any]:
         """Take `flow` out of service: its triggers stop at the next tick. Runs in progress finish."""
@@ -674,6 +718,10 @@ class Packages:
             "registry": row.registry,
             "installed_by": row.installed_by,
             "installed_at": row.installed_at.isoformat(),
+            "checks": list(row.checks),
+            "promoted_from": row.promoted_from,
+            "promoted_by": row.promoted_by,
+            "signed_by": row.signed_by,
         }
 
     @staticmethod
@@ -686,4 +734,5 @@ class Packages:
             "changed_at": row.changed_at.isoformat(),
             "reason": row.reason,
             "error": row.error,
+            "last_active_at": None if row.last_active_at is None else row.last_active_at.isoformat(),
         }

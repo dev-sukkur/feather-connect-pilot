@@ -618,3 +618,80 @@ def test_requiring_signed_packages_needs_trusted_keys_and_keys_must_be_ed25519(s
         environment.put(ADMIN, "setting", "require_signed_packages", "yes")
     environment.put(ADMIN, "setting", "trusted_package_keys", [public_key_text(Signer.generate().public)])
     environment.put(ADMIN, "setting", "require_signed_packages", True)
+
+
+# The P5 review: a refused promotion keeps nothing, roles over the API, activation after uninstall or of an unsigned
+# version where signing is required since.
+
+
+def test_an_unsigned_promotion_is_refused_and_keeps_nothing_then_the_signed_build_promotes(
+    state: AppState, registries: Registries, wheel: Path, tmp_path: Path
+):
+    from feather_connect.packages.signing import Signer, public_key_text
+
+    trusted = Signer.generate()
+    _require_signed(state, public_key_text(trusted.public))
+    packages = _packages(state, registries)
+    unsigned = wheel.read_bytes()
+    with pytest.raises(InstallFailed) as failed:
+        packages.promote(
+            ADMIN, wheel.name, unsigned, sha256=hashlib.sha256(unsigned).hexdigest(), source="qa"
+        )
+    assert failed.value.check == "signature"
+    assert registries.projects() == []  # the registry copy is made only once every check has passed
+    assert state.store.packages.version(NAME, "1.0.0") is None
+    signed = _signed_wheel(tmp_path / "signed", trusted)
+    content = signed.read_bytes()
+    done = packages.promote(
+        ADMIN, signed.name, content, sha256=hashlib.sha256(content).hexdigest(), source="qa"
+    )
+    assert done.registry == "feather" and done.signed_by == trusted.key_id
+    kept = state.store.packages.version(NAME, "1.0.0")
+    assert kept is not None and kept.promoted_from == "qa" and kept.promoted_by == ADMIN.name
+    assert kept.signed_by == trusted.key_id and "signature" in kept.checks
+    assert registries.projects() == [NAME]
+
+
+def test_an_operator_may_not_export_or_promote_over_the_api(state: AppState, wheel: Path):
+    Registries(state.store, state.clock).publish(ADMIN, wheel.name, wheel.read_bytes())
+    _packages(state, Registries(state.store, state.clock)).install(ADMIN, NAME, "1.0.0")
+    prepare(state, NAME)
+    operator = _client(state, "operator")
+    exported = operator.get(f"{API}/packages/{NAME}/versions/1.0.0/wheel")
+    assert exported.status_code == 403 and exported.json()["capability"] == "packages.promote"
+    content = wheel.read_bytes()
+    query = {"filename": wheel.name, "sha256": hashlib.sha256(content).hexdigest(), "from": "qa"}
+    promoted = operator.post(f"{API}/packages:promote", params=query, content=content)
+    assert promoted.status_code == 403 and promoted.json()["capability"] == "packages.promote"
+    assert [a.result for a in state.store.audit.list_audit() if a.action == "export_package"] == []
+
+
+def test_a_version_uninstalled_cant_be_activated(state: AppState, registries: Registries, wheel: Path):
+    registries.publish(ADMIN, wheel.name, wheel.read_bytes())
+    packages = _packages(state, registries)
+    installed = packages.install(ADMIN, NAME, "1.0.0")
+    prepare(state, NAME)
+    packages.uninstall(ADMIN, NAME, "1.0.0")
+    with pytest.raises(NotReady) as refused:
+        packages.activate(ADMIN, installed.flows[0], "1.0.0")
+    assert refused.value.state == "uninstalled"
+    answer = _client(state, "admin").post(
+        f"{API}/flows/{installed.flows[0]}:activate", json={"version": "1.0.0"}
+    )
+    assert answer.status_code == 409 and answer.json()["check"] == "not_ready"
+
+
+def test_a_version_installed_before_signing_was_required_is_checked_again_at_activation(
+    state: AppState, registries: Registries, wheel: Path
+):
+    from feather_connect.packages.signing import Signer, public_key_text
+
+    registries.publish(ADMIN, wheel.name, wheel.read_bytes())
+    packages = _packages(state, registries)
+    installed = packages.install(ADMIN, NAME, "1.0.0")
+    prepare(state, NAME)
+    _require_signed(state, public_key_text(Signer.generate().public))
+    with pytest.raises(InstallFailed) as refused:
+        packages.activate(ADMIN, installed.flows[0], "1.0.0")
+    assert refused.value.check == "signature"
+    assert {a.state for a in state.store.packages.activations(NAME)} == {"inactive"}
