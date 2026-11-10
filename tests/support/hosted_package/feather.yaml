@@ -1,0 +1,10 @@
+# A flow package for the tests of package hosts (flow packages tasks 6 to 8): its source and sink report to tables of
+# the database under test (FEATHER_HOSTED_URL), with the version of the code that ran and of featherlib, if the
+# package's environment has it. The tests build it under other names and versions.
+name: hosted
+version: 1.0.0
+modules: [flows.hosted]
+settings: {timezone: UTC}
+connections:
+  src: {connector: hosted.source}
+  out: {connector: hosted.sink}

@@ -1,0 +1,2 @@
+# dev runs on the test database that FEATHER_HOSTED_URL names.
+settings: {timezone: UTC}
