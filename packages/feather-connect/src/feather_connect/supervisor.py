@@ -79,6 +79,7 @@ BACKOFF_MAX_S = 60.0
 TAKEN_RETRY_S = 1.0  # a host whose id another host still holds is started again this soon
 CRASH_LOOP = 5
 CRASH_WINDOW_S = 300.0
+PARTITIONS_EVERY_S = 600.0  # how often the partitions hosts write to are made ahead
 PREPARE_BACKOFF_S = 5.0
 PREPARE_BACKOFF_MAX_S = 600.0
 _CONFIG_KEPT_S = (
@@ -191,6 +192,7 @@ class Supervisor:
         host_database_url: str | None = None,
         pass_env: Sequence[str] = (),
         db_secrets: Callable[[str], str] | None = None,
+        partitions: Callable[[], None] | None = None,
     ) -> None:
         self._store = store
         self._env = env
@@ -210,6 +212,8 @@ class Supervisor:
         self._spawn = spawn or self._start_process
         self._monotonic = monotonic
         self._db_secrets = db_secrets
+        self._partitions = partitions
+        self._partitions_at: float | None = None
         self._hosts: dict[tuple[str, str], _Host] = {}
         self._crashes: dict[tuple[str, str], _Crashes] = {}
         self._built: dict[tuple[str, str], EnvUse] = {}  # environments built for a host, held until it starts
@@ -305,6 +309,11 @@ class Supervisor:
         so that on Linux a host's parent-death signal is tied to the supervisor and not to a thread that ends."""
         wanted = self.wanted()
         now = self._monotonic()
+        if self._partitions is not None and (
+            self._partitions_at is None or now - self._partitions_at > PARTITIONS_EVERY_S
+        ):
+            self._partitions()  # before a host needs one: a host role can't make them
+            self._partitions_at = now
         with self._lock:
             for key, host in list(self._hosts.items()):
                 if host.tree.process.poll() is not None:  # it ended: drained, or died
@@ -659,7 +668,7 @@ def run_supervisor(
 ) -> int:
     """Run a supervisor until told to stop (SIGTERM, SIGINT or SIGBREAK, or `stop`), and return the exit code."""
     from feather_connect.storage.postgres.connect import connect
-    from feather_connect.storage.postgres.host_role import grant_host_role, role_of
+    from feather_connect.storage.postgres.host_role import ensure_partitions_ahead, grant_host_role, role_of
     from feather_connect.storage.postgres.migrate import migrate
     from feather_connect.vault import Vault, keyring_from_env
 
@@ -679,7 +688,7 @@ def run_supervisor(
             "secrets included. Set up the feather_host role (Operating Guide, 'The host role')",
             "the worker",
         )
-    store, _ = connect(database_url, tenant=tenant)
+    store, spool = connect(database_url, tenant=tenant)
     keyring = keyring_from_env()
     envs = Environments(
         cache / "envs",
@@ -712,6 +721,7 @@ def run_supervisor(
         host_database_url=host_url or database_url,
         pass_env=[n for n in os.environ.get("FEATHER_HOST_ENV_PASS", "").split(",") if n.strip()],
         db_secrets=Vault(store.secrets, env, keyring).open if keyring is not None else None,
+        partitions=lambda: ensure_partitions_ahead(store, spool),
     )
     log.info("supervisor %s runs the packages %s of %s", worker_id, ", ".join(packages), env)
     try:

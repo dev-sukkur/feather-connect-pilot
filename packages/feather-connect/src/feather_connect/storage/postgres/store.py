@@ -3309,6 +3309,7 @@ class PostgresStore(Store):
     """A `Store` that keeps everything in Postgres, for one tenant. `clock` defaults to the system clock."""
 
     _pool: Pool
+    _db: _Db
 
     def __init__(self, pool: Pool, clock: Clock | None = None, tenant: str = "default") -> None:
         db = _Db(pool, clock or SystemClock(), tenant)
@@ -3336,6 +3337,16 @@ class PostgresStore(Store):
             webhooks=_Webhooks(db),
         )
         object.__setattr__(self, "_pool", pool)  # `Store` is frozen
+        object.__setattr__(self, "_db", db)
+
+    def ensure_partitions(self, days_ahead: int) -> None:
+        """Make the inbox's daily partitions and the task logs' and delivery attempts' monthly ones for today through
+        `days_ahead` days on, as a role that owns their parents. Hosts write as a role that can't make them."""
+        self.inbox.ensure_partitions(days_ahead)
+        now = self._db.clock.now()
+        for parent in ("task_log", "delivery_attempt"):
+            for at in (now, now + timedelta(days=days_ahead)):
+                self._db.ensure_month(parent, at)
 
     def is_unavailable(self, error: BaseException) -> bool:
         """A lost or refused connection, a pool timeout, a cancelled statement or a deadlock, and not a value too big

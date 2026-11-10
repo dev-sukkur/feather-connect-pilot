@@ -4,7 +4,8 @@ A package host runs code of the package's authors, so what it can reach in the d
 host role can read and write what running flows needs, and nothing that holds a credential: no access at all to
 `secret`, `secret_key`, `app_user`, `api_token` and `registry` (whose rows say how to reach a registry), and only
 `insert` on `audit`, so a host can record what it did but neither read nor change the record. It owns nothing, so it
-can't change the schema, and it gets the DBOS system schema's tables as DBOS grants them to an application role.
+can't change the schema, nor make the partitions that a day's or a month's rows go to: the supervisor makes them ahead
+of time as the owner (`ensure_partitions_ahead`). It gets the DBOS system schema's tables as DBOS grants them to an application role.
 
     python -m feather_connect.storage.postgres.host_role --database-url OWNER_URL [--role feather_host]
 
@@ -15,13 +16,14 @@ after the migrations, so a table that a migration adds is covered.
 
 import argparse
 from collections.abc import Sequence
+from typing import Any
 from urllib.parse import unquote, urlsplit
 
 import psycopg
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict
 
-__all__ = ["DENIED", "INSERT_ONLY", "grant_host_role", "role_of"]
+__all__ = ["DENIED", "INSERT_ONLY", "ensure_partitions_ahead", "grant_host_role", "role_of"]
 
 SCHEMA = "feather"
 DENIED = ("secret", "secret_key", "app_user", "api_token", "registry", "alembic_version")
@@ -78,6 +80,13 @@ def grant_host_role(owner_url: str, role: str = "feather_host", *, create: bool 
                 )
             )
     DBOS.migrate(system_database_url(owner_url), application_role=role)
+
+
+def ensure_partitions_ahead(store: Any, spool: Any, days: int = 7) -> None:
+    """Make, as the schema's owner, the partitions that hosts write to for the next `days` days: the spool's and the
+    inbox's daily ones, and the task logs' and delivery attempts' monthly ones. A host role can't make them."""
+    spool.ensure_partitions(days)
+    store.ensure_partitions(days)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
