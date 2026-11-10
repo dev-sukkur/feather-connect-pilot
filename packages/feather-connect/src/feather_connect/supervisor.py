@@ -53,7 +53,7 @@ from feather_connect.clock import Clock, SystemClock
 from feather_connect.logs import configure_logging
 from feather_connect.packages import manifest as m
 from feather_connect.packages.check import load_check, unpack
-from feather_connect.packages.envs import BUILD_TIMEOUT, MAX_BYTES, EnvError, EnvUse, Environments
+from feather_connect.packages.envs import BUILD_TIMEOUT, MAX_BYTES, EnvError, Environments, EnvUse
 from feather_connect.packages.link import LinkError, SupervisorSide
 from feather_connect.packages.prepare import Checker, lock_of, prepare_version
 from feather_connect.packages.tree import ProcessTree

@@ -24,8 +24,6 @@ from feather_connect.clock import Clock, SystemClock
 from feather_connect.core.connector import InboundRequest
 from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
-    HostState,
-    PackageHost,
     CLOSED,
     MAX_ENV_ROWS,
     MAX_PACKAGE_ROWS,
@@ -51,6 +49,7 @@ from feather_connect.storage.port import (
     FlowActivation,
     FlowRow,
     Grant,
+    HostState,
     InboxDay,
     InboxEvent,
     InboxStore,
@@ -60,6 +59,7 @@ from feather_connect.storage.port import (
     Override,
     OverrideStore,
     PackageEnv,
+    PackageHost,
     PackageState,
     PackageStore,
     PackageVersion,

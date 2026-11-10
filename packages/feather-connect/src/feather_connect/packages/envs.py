@@ -39,7 +39,7 @@ import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Self, cast
 
 from feather_connect.packages.filelock import FileLock, is_held
 from feather_connect.packages.tree import ProcessTree
@@ -138,7 +138,7 @@ class EnvUse:
         except OSError:
             pass
 
-    def __enter__(self) -> "EnvUse":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> None:

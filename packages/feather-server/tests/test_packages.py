@@ -23,7 +23,15 @@ from feather_connect.storage.port import RegistryFile, Role
 from feather_server.app import AppState, create_app
 from feather_server.auth import Actor, issue_token
 from feather_server.services.access import Forbidden
-from feather_server.services.packages import CHECKS, Busy, InstallFailed, NotReady, Packages, check_lock, check_wheels
+from feather_server.services.packages import (
+    CHECKS,
+    Busy,
+    InstallFailed,
+    NotReady,
+    Packages,
+    check_lock,
+    check_wheels,
+)
 from feather_server.services.registries import Registries
 from feather_server.testing import prepare, sample_wheel, static_index
 

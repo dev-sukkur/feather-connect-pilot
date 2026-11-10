@@ -6,6 +6,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Self
 
 __all__ = ["FileLock", "is_held"]
 
@@ -48,7 +49,7 @@ class FileLock:
             _unlock(fd)
             os.close(fd)
 
-    def __enter__(self) -> "FileLock":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> None:

@@ -1,7 +1,6 @@
 """A package host's own parts (flow packages §7.1): taking its version's queued runs, the locks on concurrency keys
 across versions, and its pipe to the supervisor. The real hosts run in tests/e2e/test_package_hosts.py."""
 
-import io
 import os
 import threading
 from collections.abc import Generator, Mapping
@@ -116,8 +115,8 @@ def test_the_link_answers_requests_and_says_when_the_supervisor_is_gone():
     )
     host = HostSide(
         os.fdopen(to_host_r, "rb", buffering=0),
-        cast(io.RawIOBase, os.fdopen(to_sup_w, "wb", buffering=0)),
-        lost.set,  # type: ignore[arg-type]
+        os.fdopen(to_sup_w, "wb", buffering=0),
+        lost.set,
     )
     assert host.request("secret", connection="out", field="token", ref="r")["value"] == "tok"
     with pytest.raises(LinkError, match="only its own"):

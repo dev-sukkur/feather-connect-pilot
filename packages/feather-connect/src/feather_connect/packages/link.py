@@ -169,7 +169,7 @@ class SupervisorSide:
                     answer: Mapping[str, Any] = handler(message)
                 except LinkError as error:
                     answer = {"error": str(error)}
-                except Exception as error:  # noqa: BLE001 - the host gets a refusal, the log the reason
+                except Exception as error:
                     log.exception("a host's %s request failed", op)
                     answer = {"error": f"{op} failed: {type(error).__name__}"}
                 self._write({**answer, "id": message["id"]})

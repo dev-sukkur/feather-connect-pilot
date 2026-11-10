@@ -45,6 +45,7 @@ def grant_host_role(owner_url: str, role: str = "feather_host", *, create: bool 
     """Give `role` what a package host needs and nothing more, connected as the owner of the schema. With `create`,
     make the role first if it isn't there, with no login."""
     from dbos import DBOS
+
     from feather_engine_dbos.engine import system_database_url
 
     who = sql.Identifier(role)

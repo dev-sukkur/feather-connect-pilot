@@ -310,4 +310,6 @@ sdist = {{ url = "https://x/only.tar.gz", hash = "{sdist}" }}
     noted = with_wheel_hashes(lock.encode(), _wheel_hashes(tmp_path / "uv.lock")).decode()
     assert f"    # wheels: {wheel}\n" in noted
     assert noted.rstrip().endswith("# wheels:")  # only a source distribution: nothing named
-    assert noted.replace(f"    # wheels: {wheel}\n", "").replace("\n    # wheels:", "").strip() == lock.strip()
+    assert (
+        noted.replace(f"    # wheels: {wheel}\n", "").replace("\n    # wheels:", "").strip() == lock.strip()
+    )
