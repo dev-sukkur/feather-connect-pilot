@@ -116,7 +116,9 @@ class DeliverySelection:
         )
 
 
-def _label(dataset: Dataset, partition: str) -> str:
+def _label(dataset: Dataset | None, partition: str) -> str:
+    if dataset is None:  # a packaged dataset: the server has no partition object for it (catalog_view)
+        return partition
     try:
         return dataset.partition.label_of(partition)
     except (ValueError, KeyError):
@@ -322,6 +324,12 @@ class Actions:
             ),
             lambda run_id: f"ok: run {run_id}",
         )
+
+    def _dataset_or_none(self, name: str) -> Dataset | None:
+        try:
+            return self._rt.dataset(name)
+        except KeyError:
+            return None
 
     def _packaged(self, flow: str) -> ActiveFlow | None:
         """The active package flow of that name, when the runtime here has no flow of it."""
@@ -553,14 +561,17 @@ class Actions:
         if action != "skip":  # a skipped delivery makes no calls
             versions = {v.version_id: v for v in self._store.versions.get_many({d.version_id for d in found})}
             for d in found:
-                cost = self._rt.route(d.route).sink.spec.cost.get("write")
+                try:
+                    cost = self._rt.route(d.route).sink.spec.cost.get("write")
+                except KeyError:
+                    cost = None  # a packaged route: its cost is in its package's code (catalog_view)
                 version = versions.get(d.version_id)
                 units = (
                     None
                     if units is None or cost is None or version is None
                     else units + (version.upserts + version.deletes) * cost
                 )
-        by_dataset = {d.dataset: self._rt.dataset(d.dataset) for d in found}
+        by_dataset = {d.dataset: self._dataset_or_none(d.dataset) for d in found}
         return Impact(
             len({(d.dataset, d.partition) for d in found}),
             len(found),

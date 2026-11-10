@@ -146,14 +146,14 @@ def test_a_signed_webhook_reaches_the_sinks_once(push_project, server, db, pg_ur
 
     first = {"event_id": "e2e-1", "id": 1, "v": "first"}
     assert post(server, first) == 202
-    assert post(server, first) == 200  # the sender heard nothing, and tries again: a duplicate
+    assert post(server, first) == 202  # the sender heard nothing, and tries again: kept once, answered alike
 
     wait_until(lambda: captured(push_project, "upsert"), GENEROUS)
     wait_until(lambda: captured(push_project, "append"), GENEROUS)
     assert captured(push_project, "upsert")[0]["payload"]["v"] == "first"
 
     # The repeat is seen to have gone nowhere by what comes after it, as the routes apply in order.
-    assert post(server, first) == 200
+    assert post(server, first) == 202
     assert post(server, {"event_id": "e2e-2", "id": 1, "v": "second"}) == 202
     wait_until(lambda: len(captured(push_project, "append")) >= 2, GENEROUS)
     wait_until(lambda: len(captured(push_project, "upsert")) >= 2, GENEROUS)

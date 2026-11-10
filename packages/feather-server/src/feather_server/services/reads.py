@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from cronsim import CronSim
 
+from feather_connect.core.dataset import Dataset
 from feather_connect.core.flow import Flow
 from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Trigger
 from feather_connect.project import ConfigValue, effective_config
@@ -29,6 +30,7 @@ from feather_connect.storage.port import (
     Version,
     WorkerRow,
 )
+from feather_server.catalog_view import dataset_of
 from feather_server.services.text import span
 
 if TYPE_CHECKING:
@@ -331,6 +333,21 @@ class Reads:
     def flows(self) -> list[FlowSummary]:
         return [self._summary(flow) for flow in self._rt.flows()]
 
+    def _parts(self, flow: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+        """The names of the flow's datasets and routes, from the runtime here or, for a packaged flow, from the
+        catalogue (`catalog_view`); None for a flow neither knows."""
+        if flow in {f.name for f in self._rt.flows()}:
+            found = self._rt.flow(flow)
+            return tuple(d.name for d in found.datasets), tuple(r.name for r in found.routes)
+        try:
+            spec = self._store.catalog.flow(flow).spec
+        except KeyError:
+            return None
+        return (
+            tuple(str(d["name"]) for d in spec.get("datasets") or []),
+            tuple(str(r["name"]) for r in spec.get("routes") or []),
+        )
+
     def flow_detail(self, name: str) -> FlowDetail:
         """Raises `KeyError` for an unknown flow."""
         flow = self._rt.flow(name)
@@ -429,15 +446,18 @@ class Reads:
 
         Raises `KeyError` for an unknown dataset.
         """
-        found = self._rt.dataset(dataset)
-        routes = next(tuple(r.name for r in f.routes) for f in self._rt.flows() if found in f.datasets)
+        try:
+            found: Dataset | None = self._rt.dataset(dataset)
+            routes = next(tuple(r.name for r in f.routes) for f in self._rt.flows() if found in f.datasets)
+        except KeyError:  # a packaged dataset: its routes from the catalogue, its partitions shown by key
+            found, routes = None, dataset_of(self._state, dataset).routes
         rows: list[PartitionRow] = self._store.reads.partition_grid(
             dataset, since=since, cursor=cursor, limit=limit
         )
         shown: list[GridRow] = []
         for row in rows:
             try:
-                label = found.partition.label_of(row.partition)
+                label = row.partition if found is None else found.partition.label_of(row.partition)
             except (ValueError, KeyError):
                 label = row.partition
             cells = tuple(GridCell(route, row.cells.get(route)) for route in routes)
@@ -476,29 +496,30 @@ class Reads:
         versions: list[Version] = []
         deliveries: list[Delivery] = []
         total = 0
-        if run.flow in {f.name for f in self._rt.flows()}:
-            flow = self._rt.flow(run.flow)
-            for dataset in flow.datasets:
-                newest = self._store.versions.newest_sealed_for_run(run_id, dataset.name, _VERSIONS_SHOWN)
+        parts = self._parts(run.flow)
+        if parts is not None:
+            dataset_names, route_names = parts
+            for dataset in dataset_names:
+                newest = self._store.versions.newest_sealed_for_run(run_id, dataset, _VERSIONS_SHOWN)
                 versions.extend(reversed(newest))
                 total += (
                     len(newest)
                     if len(newest) < _VERSIONS_SHOWN
-                    else len(self._store.versions.sealed_for_run(run_id, dataset.name))
+                    else len(self._store.versions.sealed_for_run(run_id, dataset))
                 )
             shown = {v.version_id for v in versions}
             for version in versions:
-                for route in flow.routes:
+                for route in route_names:
                     try:
-                        deliveries.append(self._store.ledger.get(route.name, version.version_id))
+                        deliveries.append(self._store.ledger.get(route, version.version_id))
                     except KeyError:  # not delivered to this route (yet)
                         pass
             if total > len(versions):  # S15: a failed delivery of an older version of the run is shown too
-                for route in flow.routes:
+                for route in route_names:
                     failed = [
                         d
                         for d in self._store.ledger.list_deliveries(
-                            route=route.name, status="failed", limit=_FAILED_SHOWN
+                            route=route, status="failed", limit=_FAILED_SHOWN
                         )
                         if d.version_id not in shown
                     ]

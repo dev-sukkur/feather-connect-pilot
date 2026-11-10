@@ -26,6 +26,7 @@ from feather_connect.storage.port import DeliveryStatus, EnvEntry, EnvKind, deli
 from feather_server.api.errors import ApiProblem, translate
 from feather_server.api.paging import check_limit, decode, page
 from feather_server.auth import Actor, CurrentActor, require_csrf
+from feather_server.catalog_view import dataset_of, route_of
 from feather_server.services import task_records as records
 from feather_server.services.access import require
 from feather_server.services.accounts import Accounts
@@ -252,7 +253,22 @@ def flow(flow: str, reads: See, _: CurrentActor) -> JSONResponse:
 
 def _dataset(request: Request, name: str) -> dict[str, Any]:
     runtime = request.app.state.feather.runtime
-    found = runtime.dataset(name)
+    try:
+        found = runtime.dataset(name)
+    except KeyError:
+        packaged = dataset_of(request.app.state.feather, name)
+        return {
+            "name": packaged.name,
+            "flow": packaged.flow,
+            "connection": packaged.connection,
+            "connector": packaged.connector,
+            "key": packaged.key[0] if len(packaged.key) == 1 else list(packaged.key),
+            "strategy": packaged.strategy,
+            "partition": None,  # in the package's code: the server has no partition object for it
+            "priority": packaged.priority,
+            "on_record_error": None,
+            "routes": list(packaged.routes),
+        }
     owner = next(f for f in runtime.flows() if found in f.datasets)
     key = found.key if isinstance(found.key, str) else list(found.key)
     return {
@@ -276,7 +292,20 @@ def dataset(dataset: str, request: Request, _: CurrentActor) -> JSONResponse:
 
 def _route(request: Request, name: str) -> dict[str, Any]:
     runtime = request.app.state.feather.runtime
-    found = runtime.route(name)
+    try:
+        found = runtime.route(name)
+    except KeyError:
+        packaged = route_of(request.app.state.feather, name)
+        return {
+            "name": packaged.name,
+            "flow": packaged.flow,
+            "connection": packaged.connection,
+            "connector": packaged.connector,
+            "mode": packaged.mode,
+            "priority": packaged.priority,
+            "paused": runtime.is_route_paused(packaged.name),
+            "datasets": list(packaged.datasets),
+        }
     owner = next(f for f in runtime.flows() if found in f.routes)
     return {
         "name": found.name,

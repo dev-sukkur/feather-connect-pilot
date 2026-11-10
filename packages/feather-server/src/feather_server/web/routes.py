@@ -31,6 +31,7 @@ from feather_connect.vault import KeyConflict, VaultError
 from feather_server.api.errors import ApiProblem
 from feather_server.api.paging import decode, encode
 from feather_server.auth import Actor, CurrentActor, csrf_token, current_actor, require_csrf
+from feather_server.catalog_view import route_of
 from feather_server.services import actions as action_limits
 from feather_server.services.access import Capability, Forbidden, can
 from feather_server.services.accounts import Accounts
@@ -500,7 +501,7 @@ def flows_bulk(
     return _bulk_redirect("/flows", _FLOW_BULK[action], len(names) - len(left), left)
 
 
-@router.get("/flows/{name}/row", response_class=HTMLResponse)
+@router.get("/flows/{name:path}/row", response_class=HTMLResponse)
 def flow_row(request: Request, actor: CurrentActor, name: str) -> HTMLResponse:
     """What a flow's row opens to on the list: its datasets, its routes and its last runs."""
     try:
@@ -546,7 +547,7 @@ def _flow_page(
     )
 
 
-@router.get("/flows/{name}", response_class=HTMLResponse)
+@router.get("/flows/{name:path}", response_class=HTMLResponse)
 def flow_detail(request: Request, actor: CurrentActor, name: str) -> HTMLResponse:
     return _flow_page(request, actor, name)
 
@@ -556,7 +557,7 @@ def _back(name: str, **query: str) -> RedirectResponse:
     return RedirectResponse(f"/flows/{quote(name, safe='')}{suffix}", status_code=303)
 
 
-@router.post("/flows/{name}/run", dependencies=[Depends(require_csrf)])
+@router.post("/flows/{name:path}/run", dependencies=[Depends(require_csrf)])
 def run_flow(request: Request, actor: CurrentActor, name: str, reason: Reason = "") -> Response:
     try:
         run_id = actions(request).run_flow(actor, name, reason=_reason(reason))
@@ -567,7 +568,7 @@ def run_flow(request: Request, actor: CurrentActor, name: str, reason: Reason = 
     return _back(name, started=run_id)
 
 
-@router.post("/flows/{name}/pause", dependencies=[Depends(require_csrf)])
+@router.post("/flows/{name:path}/pause", dependencies=[Depends(require_csrf)])
 def pause_flow(request: Request, actor: CurrentActor, name: str, reason: Reason = "") -> Response:
     try:
         actions(request).pause_flow(actor, name, reason=_reason(reason))
@@ -576,7 +577,7 @@ def pause_flow(request: Request, actor: CurrentActor, name: str, reason: Reason 
     return _back(name, done="paused")
 
 
-@router.post("/flows/{name}/resume", dependencies=[Depends(require_csrf)])
+@router.post("/flows/{name:path}/resume", dependencies=[Depends(require_csrf)])
 def resume_flow(request: Request, actor: CurrentActor, name: str, reason: Reason = "") -> Response:
     try:
         actions(request).resume_flow(actor, name, reason=_reason(reason))
@@ -585,7 +586,7 @@ def resume_flow(request: Request, actor: CurrentActor, name: str, reason: Reason
     return _back(name, done="resumed")
 
 
-@router.post("/flows/{name}/backfill/preview", dependencies=[Depends(require_csrf)])
+@router.post("/flows/{name:path}/backfill/preview", dependencies=[Depends(require_csrf)])
 def backfill_preview(
     request: Request,
     actor: CurrentActor,
@@ -609,7 +610,7 @@ def backfill_preview(
     return _flow_page(request, actor, name, preview=preview, form=form)
 
 
-@router.post("/flows/{name}/backfill/confirm", dependencies=[Depends(require_csrf)])
+@router.post("/flows/{name:path}/backfill/confirm", dependencies=[Depends(require_csrf)])
 def backfill_confirm(
     request: Request, actor: CurrentActor, name: str, token: Annotated[str, Form()], reason: Reason = ""
 ) -> Response:
@@ -706,7 +707,7 @@ def _grid_page(
     )
 
 
-@router.get("/datasets/{dataset}/partitions", response_class=HTMLResponse)
+@router.get("/datasets/{dataset:path}/partitions", response_class=HTMLResponse)
 def partitions(request: Request, actor: CurrentActor, dataset: str) -> HTMLResponse:
     return _grid_page(request, actor, dataset)
 
@@ -716,7 +717,7 @@ def _partitions_url(dataset: str, **query: str) -> str:
     return f"/datasets/{quote(dataset, safe='')}/partitions{suffix}"
 
 
-@router.post("/datasets/{dataset}/partitions/rerun/preview", dependencies=[Depends(require_csrf)])
+@router.post("/datasets/{dataset:path}/partitions/rerun/preview", dependencies=[Depends(require_csrf)])
 def rerun_preview(
     request: Request, actor: CurrentActor, dataset: str, partition: Annotated[list[str] | None, Form()] = None
 ) -> Response:
@@ -732,7 +733,7 @@ def rerun_preview(
     )
 
 
-@router.post("/datasets/{dataset}/partitions/rerun/confirm", dependencies=[Depends(require_csrf)])
+@router.post("/datasets/{dataset:path}/partitions/rerun/confirm", dependencies=[Depends(require_csrf)])
 def rerun_confirm(
     request: Request, actor: CurrentActor, dataset: str, token: Annotated[str, Form()], reason: Reason = ""
 ) -> Response:
@@ -746,7 +747,9 @@ def rerun_confirm(
     return _back(flow, started=run_id)
 
 
-@router.post("/datasets/{dataset}/partitions/{partition:path}/verify", dependencies=[Depends(require_csrf)])
+@router.post(
+    "/datasets/{dataset:path}/partitions/{partition:path}/verify", dependencies=[Depends(require_csrf)]
+)
 def verify_partition(request: Request, actor: CurrentActor, dataset: str, partition: str) -> Response:
     try:
         found = actions(request).verify_partition(actor, dataset, partition)
@@ -1197,10 +1200,14 @@ def _deliveries_page(
     notice: tuple[str, str] | None = None,
     preview: Preview | None = None,
 ) -> HTMLResponse:
+    state = request.app.state.feather
     try:
-        spec = request.app.state.feather.runtime.route(route)
+        destination = state.runtime.route(route).sink.connection
     except KeyError:
-        return _not_found(request, f"No route named {route!r}.")
+        try:
+            destination = route_of(state, route).connection
+        except KeyError:
+            return _not_found(request, f"No route named {route!r}.")
     chosen = request.query_params.get("status", "")
     if chosen and chosen not in _DELIVERY_STATUSES:
         return render(
@@ -1234,7 +1241,7 @@ def _deliveries_page(
         title=f"{route} deliveries",
         actor=actor,
         route=route,
-        destination=spec.sink.connection,
+        destination=destination,
         deliveries=shown,
         tiles=tiles,
         q=q,
@@ -1247,12 +1254,12 @@ def _deliveries_page(
     )
 
 
-@router.get("/routes/{route}/deliveries", response_class=HTMLResponse)
+@router.get("/routes/{route:path}/deliveries", response_class=HTMLResponse)
 def route_deliveries(request: Request, actor: CurrentActor, route: str) -> HTMLResponse:
     return _deliveries_page(request, actor, route)
 
 
-@router.get("/routes/{route}/deliveries/{version_id}", response_class=HTMLResponse)
+@router.get("/routes/{route:path}/deliveries/{version_id}", response_class=HTMLResponse)
 def delivery_detail(request: Request, actor: CurrentActor, route: str, version_id: str) -> HTMLResponse:
     """One delivery: its attempts and what the destination answered for each record (ruling 5)."""
     try:

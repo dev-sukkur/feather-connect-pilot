@@ -552,9 +552,13 @@ class Runtime:
         and end, using up its key. So does a version with nothing left to send (`replay_gap`).
         """
         delivery = self._deps.store.ledger.get(route, version_id)
-        return self._newer_than(delivery) or replay_gap(
-            self.route(route), self._deps.store.versions.get(version_id), self._deps
-        )
+        if (newer := self._newer_than(delivery)) is not None:
+            return newer
+        try:
+            spec = self.route(route)
+        except KeyError:  # a packaged route, whose code is on its host: the host checks what is left to send
+            return None
+        return replay_gap(spec, self._deps.store.versions.get(version_id), self._deps)
 
     def _newer_than(self, delivery: Delivery) -> str | None:
         """Say what, sealed after `delivery` in its route's partition, stops it from replaying."""
