@@ -41,6 +41,7 @@ from feather_connect.logs import redact
 from feather_connect.packages.webhooks import Rejected, Unauthentic, Webhook, pick, signature_header, verify
 from feather_connect.project import ProjectError, resolve_secret, webhook_secret_name
 from feather_connect.storage.port import WebhookEvent
+from feather_server.package_push import PackageDataset, PackagePushes
 
 if TYPE_CHECKING:
     from feather_connect.runtime.catalogue import Catalogue
@@ -133,7 +134,8 @@ def _push_dataset(state: "AppState", tenant: str, source: str) -> Dataset | None
     try:
         dataset = state.runtime.dataset(source)
     except KeyError:
-        return None
+        pushes = cast("PackagePushes | None", getattr(state, "pushes", None))
+        return None if pushes is None else cast(Dataset, pushes.dataset(source))
     if dataset.strategy.name != _PUSH:
         return None
     flows = [flow for flow in state.runtime.flows() if dataset in flow.datasets]
@@ -173,7 +175,10 @@ def _verified(
     if is_unsigned(source):
         return None
     try:
-        ctx = replace(state.runtime.make_context(source.connection), now=request.received_at)
+        if isinstance(dataset, PackageDataset):  # an installed package's (§13): its connection is the package's
+            ctx = dataset.context(request.received_at)
+        else:
+            ctx = replace(state.runtime.make_context(source.connection), now=request.received_at)
         source.verify(ctx, request)
     except SignatureInvalid as error:
         log.warning("ingress %s: refused: %s", name, redact(str(error)))
@@ -426,9 +431,13 @@ class IngressWorker:
 @router.post("/ingress/{tenant}/{source}")
 async def ingress(request: Request, tenant: str, source: str) -> Response:
     state: AppState = request.app.state.feather
-    dataset = _push_dataset(state, tenant, source)
+    dataset = await run_in_threadpool(_push_dataset, state, tenant, source)
     if dataset is None:
         return _problem(404)
+    return await _pushed(request, state, dataset, source)
+
+
+async def _pushed(request: Request, state: "AppState", dataset: Dataset, source: str) -> Response:
     address = request.client.host if request.client else "unknown"
     refused = _over_rate(request.app.state.ingress_rate, f"address:{source}:{address}", source)
     if refused is not None:
@@ -508,8 +517,11 @@ async def declared_webhook(request: Request, tenant: str, package: str, webhook:
         return refused
     catalogue = cast("Catalogue", state.catalogue)
     hook = await run_in_threadpool(catalogue.webhook, package, webhook)  # from memory, but after a change
-    if hook is None:
-        return _problem(404)
+    if hook is None:  # a push dataset of the package, such as an M1 project's after its upgrade (§13)
+        dataset = await run_in_threadpool(_push_dataset, state, tenant, f"{package}/{webhook}")
+        if dataset is None:
+            return _problem(404)
+        return await _pushed(request, state, dataset, f"{package}/{webhook}")
     try:
         body = await _read_body(request, state.settings.ingress_max_bytes)
     except _TooLarge:

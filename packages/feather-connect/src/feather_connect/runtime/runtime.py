@@ -115,7 +115,8 @@ class Runtime:
 
     `config_of` gives the settings of a connection, secrets resolved, for the default context to hand to its
     connector; it is called each time a context is made, so a secret is never kept. `timezone` is the IANA name of
-    the time zone that contexts carry.
+    the time zone that contexts carry. `prefix` is the package prefix of an installed package's flows: a task an M1
+    worker submitted before the upgrade to packages (§13) names them without it, and is found by the prefixed name.
     """
 
     def __init__(
@@ -132,8 +133,10 @@ class Runtime:
         sleep: Callable[[float], None] = time.sleep,
         config_of: Callable[[str], Mapping[str, Any]] | None = None,
         timezone: str = _UTC,
+        prefix: str | None = None,
     ) -> None:
         self._engine = engine
+        self._prefix = prefix
         self._clock: Clock = SystemClock() if clock is None else clock
         self._deps = RuntimeDeps(store, spool, self._clock, code_sha, make_context or self._default_context)
         self._flows: dict[str, Flow] = {}
@@ -218,11 +221,12 @@ class Runtime:
     def route(self, name: str) -> RouteSpec:
         return self._find(self._routes, "route", name)
 
-    @staticmethod
-    def _find[T](found: Mapping[str, T], kind: str, name: str) -> T:
-        if name not in found:
-            raise KeyError(f"no {kind} is named {name!r}")
-        return found[name]
+    def _find[T](self, found: Mapping[str, T], kind: str, name: str) -> T:
+        if name in found:
+            return found[name]
+        if self._prefix is not None and (prefixed := f"{self._prefix}/{name}") in found:
+            return found[prefixed]  # an M1 task's name, from before the upgrade
+        raise KeyError(f"no {kind} is named {name!r}")
 
     def tasks(self) -> Mapping[str, TaskFn]:
         return {

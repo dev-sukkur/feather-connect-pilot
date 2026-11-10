@@ -25,6 +25,7 @@ from typing import Any, cast
 import yaml
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 from feather_connect.packages import manifest as m
 from feather_connect.packages.manifest import ManifestError
@@ -83,17 +84,23 @@ def wheel_name(name: str, version: str) -> str:
 
 
 def build_package(
-    root: Path, out_dir: Path | None = None, *, env: str = "dev", signer: Signer | None = None
+    root: Path,
+    out_dir: Path | None = None,
+    *,
+    env: str = "dev",
+    signer: Signer | None = None,
+    version: str | None = None,
 ) -> Built:
     """Build the project in `root` into `out_dir` (`root/dist` by default). Checks the project as `feather validate
-    --env <env>` does first. With a `signer`, the wheel carries its signature of the RECORD (`signing`). Raises
-    `ManifestError` saying what to fix."""
+    --env <env>` does first. With a `signer`, the wheel carries its signature of the RECORD (`signing`). `version`
+    stands in for feather.yaml's, as `feather dev` (a `.devN` of it) and the upgrade of an M1 project (one with no
+    version yet) build. Raises `ManifestError` saying what to fix."""
     root = root.resolve()
     config = _feather_yaml(root)
     name = m.check_name(config.get("name"))
-    if "version" not in config:
+    if version is None and "version" not in config:
         raise ManifestError("feather.yaml: version: is required to build a package, such as version: 1.0.0")
-    version = m.check_version(config["version"])
+    version = m.check_version(config["version"] if version is None else version)
     fc_versions = m.check_fc_versions(config.get("fc_versions") or m.default_fc_versions())
     dependencies = _dependencies(root, name, version)
     lock = _lock(root, dependencies)
@@ -150,7 +157,7 @@ def _dependencies(root: Path, name: str, version: str) -> list[str]:
         raise ManifestError(f"pyproject.toml: can't read it ({error})") from None
     if "name" in project and canonicalize_name(str(project["name"])) != canonicalize_name(name):
         raise ManifestError(f"pyproject.toml names {project['name']!r}, but feather.yaml names {name!r}")
-    if "version" in project and str(project["version"]) != version:
+    if "version" in project and str(project["version"]) not in (version, _released(version)):
         raise ManifestError(
             f"pyproject.toml says version {project['version']}, but feather.yaml says {version}"
         )
@@ -163,6 +170,12 @@ def _dependencies(root: Path, name: str, version: str) -> list[str]:
         if canonicalize_name(requirement.name) != "feather-connect":
             found.append(str(requirement))
     return sorted(found)
+
+
+def _released(version: str) -> str:
+    """The version a `.devN` build of `feather dev` comes before: `1.2.0` for `1.2.0.dev7`."""
+    parsed = Version(version)
+    return parsed.base_version if parsed.is_devrelease else version
 
 
 def _lock(root: Path, dependencies: Sequence[str]) -> bytes:

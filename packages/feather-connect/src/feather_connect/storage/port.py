@@ -1435,6 +1435,11 @@ class PackageStore(Protocol):
         worker must keep."""
         ...
 
+    def renames(self) -> dict[tuple[str, str], str]:
+        """What the upgrade from the project mode renamed (§13): the prefixed name of each old one, by its kind
+        (`flow`, `dataset` or `route`) and old name."""
+        ...
+
     def activations(self, name: str, version: str | None = None) -> list[FlowActivation]:
         """The flows of the package's versions, or of one, by flow and then as they changed, at most
         `MAX_PACKAGE_ROWS`."""

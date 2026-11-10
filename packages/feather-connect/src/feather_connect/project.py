@@ -44,6 +44,7 @@ __all__ = [
     "db_secret_name",
     "effective_config",
     "environment_layer",
+    "environment_project",
     "is_secret_ref",
     "load_project",
     "resolve_secret",
@@ -869,6 +870,32 @@ def prefixed(flows: Sequence[Flow], package: str) -> tuple[Flow, ...]:
         changed.triggers = tuple(_retargeted(t, datasets) for t in flow.triggers)
         found.append(changed)
     return tuple(found)
+
+
+def environment_project(env: str, environment: Mapping[str, Any] | None = None) -> Project:
+    """The environment with no flows of its own: its shared connections, budgets and settings (§8), over the
+    defaults. The server runs on this since the project mode is retired (§13): every flow is an installed package's,
+    and package code never loads in the server."""
+    config: dict[str, Any] = {}
+    layers: dict[str, str] = {}
+    _merge(config, layers, DEFAULTS, _DEFAULTS_LAYER, "")
+    if environment:
+        _merge(config, layers, _strkeys(environment), _ENVIRONMENT_LAYER, "")
+    budgets = _budgets(config, layers)
+    connections = _connections(config, layers, budgets, Path("."))
+    settings: Mapping[str, Any] = config.get("settings", {})
+    return Project(
+        "environment",
+        Path("."),
+        env,
+        (),
+        connections,
+        budgets,
+        settings,
+        "environment",
+        copy.deepcopy(config),
+        dict(layers),
+    )
 
 
 _PLURAL = {"connection": "connections", "budget": "budgets", "setting": "settings"}

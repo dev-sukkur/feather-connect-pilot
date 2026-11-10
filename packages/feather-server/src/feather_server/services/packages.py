@@ -83,6 +83,7 @@ __all__ = [
     "check_wheels",
 ]
 
+DEV_ENV = "dev"  # the one environment a development build (`1.2.0.dev3`, of feather dev) installs in
 MAX_BUSY = 2  # installs and wheel fetches at once
 BUSY_RETRY_S = 30
 
@@ -333,6 +334,12 @@ class Packages:
         """The checks after the fetch, from `signature` on, then the version stored with its flows inactive.
         `before_keep` runs only once every check has passed, just before the version is stored, and says which
         registry it is kept in: a promotion's copy into the built-in registry."""
+        if Version(wanted).is_devrelease and self._env != DEV_ENV:
+            raise InstallFailed(
+                "name_version",
+                f"{project} {wanted} is a development build of feather dev: it installs only in the {DEV_ENV} "
+                f"environment. Build a release, such as {Version(wanted).base_version}, to install it here",
+            )
         signed_by = self._check_signature(fetched.content)
         if signed_by is not None:
             request["signed_by"] = signed_by
@@ -488,6 +495,7 @@ class Packages:
         sha256: str,
         source: str,
         reason: str | None = None,
+        keep_in_registry: bool = True,
     ) -> Installed:
         """Install here the wheel that environment `source` exported, which must hash to `sha256`, the digest the
         source gave: so this environment runs exactly the bytes tested there. A copy goes in the built-in registry
@@ -498,7 +506,7 @@ class Packages:
         request: dict[str, Any] = {"filename": filename, "sha256": sha256, "from": source, "reason": reason}
         with self._slot():
             try:
-                installed = self._promote(actor, filename, content, sha256, reason, request)
+                installed = self._promote(actor, filename, content, sha256, reason, request, keep_in_registry)
             except InstallFailed as error:
                 self._audit(actor, "promote_package", target, request, f"failed: {redact(str(error))}")
                 raise
@@ -516,6 +524,7 @@ class Packages:
         sha256: str,
         reason: str | None,
         request: dict[str, Any],
+        keep_in_registry: bool = True,
     ) -> Installed:
         passed: list[str] = []
         actual = hashlib.sha256(content).hexdigest()
@@ -544,9 +553,11 @@ class Packages:
             request,
             passed,
             promoted_from=str(request["from"]),
-            before_keep=lambda: self._registry_copy(
-                actor, filename, content, actual
-            ),  # once every check passed
+            before_keep=(  # once every check passed
+                (lambda: self._registry_copy(actor, filename, content, actual))
+                if keep_in_registry
+                else (lambda: "promotion")
+            ),
         )
 
     def _registry_copy(self, actor: Actor, filename: str, content: bytes, sha256: str) -> str:

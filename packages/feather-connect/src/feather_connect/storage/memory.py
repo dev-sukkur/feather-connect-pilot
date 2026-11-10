@@ -149,6 +149,7 @@ class _Data:
         default_factory=dict[tuple[str, str], PackageVersion]
     )  # by (name, version_key), in install order
     wheels: dict[str, bytes] = field(default_factory=dict[str, bytes])  # by sha256
+    renames: dict[tuple[str, str], str] = field(default_factory=dict[tuple[str, str], str])  # (kind, old): new
     activations: dict[tuple[str, str, str], FlowActivation] = field(
         default_factory=dict[tuple[str, str, str], FlowActivation]
     )  # by (flow, package, version_key)
@@ -1494,6 +1495,16 @@ class _Packages(PackageStore):
     def needed_lock_hashes(self) -> set[str]:
         with self._d.lock:
             return {v.lock_hash for v in self._d.package_versions.values() if v.state != "uninstalled"}
+
+    def renames(self) -> dict[tuple[str, str], str]:
+        with self._d.lock:
+            return dict(self._d.renames)
+
+    def record_renames(self, renames: Mapping[tuple[str, str], str]) -> None:
+        """As the upgrade from the project mode records them, for tests: an old name that has one keeps it."""
+        with self._d.lock:
+            for key, new in renames.items():
+                self._d.renames.setdefault(key, new)
 
     def activations(self, name: str, version: str | None = None) -> list[FlowActivation]:
         wanted = None if version is None else version_key(version)

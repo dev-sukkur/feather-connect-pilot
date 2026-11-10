@@ -27,7 +27,7 @@ from feather_connect.packages.webhooks import Webhook, parse_webhooks
 from feather_connect.runtime.scheduler import MAX_CATCH_UP, _due, trigger_id  # pyright: ignore[reportPrivateUsage]
 from feather_connect.storage.port import PackageVersion, Store
 
-__all__ = ["REFRESH_S", "ActiveFlow", "Catalogue", "restart_ticks", "sync_package_catalog", "triggers_of"]
+__all__ = ["REFRESH_S", "ActiveFlow", "Catalogue", "PackagePush", "restart_ticks", "sync_package_catalog", "triggers_of"]
 
 log = logging.getLogger(__name__)
 REFRESH_S = 2.0  # the poll that backs NOTIFY up (§7.2)
@@ -50,9 +50,23 @@ class ActiveFlow:
 
 
 @dataclass(frozen=True)
+class PackagePush:
+    """A push dataset of an active flow whose source the server can make with no package code (`Flow.spec_dict`'s
+    `push`): its webhooks come in at the server's ingress as in M1, under the dataset's prefixed name (§13)."""
+
+    dataset: str
+    package: str
+    version: str
+    source: str  # module:qualname of the source's class
+    connection: str
+    options: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
 class _Read:
     flows: list[ActiveFlow]
     webhooks: dict[tuple[str, str], Webhook]
+    pushes: dict[str, PackagePush] = field(default_factory=dict[str, PackagePush])
 
 
 def triggers_of(spec: Mapping[str, Any]) -> tuple[Trigger, ...]:
@@ -135,9 +149,14 @@ class Catalogue:
         """The webhook `name` of `package`, when an active flow of it reads the dataset the webhook feeds."""
         return self._current().webhooks.get((package, name))
 
+    def push(self, dataset: str) -> PackagePush | None:
+        """The push dataset of that name of an active, enabled flow, when the server can take its webhooks."""
+        return self._current().pushes.get(dataset)
+
     def _read(self) -> _Read:
         found: list[ActiveFlow] = []
         hooks: dict[tuple[str, str], Webhook] = {}
+        pushes: dict[str, PackagePush] = {}
         for activation in self._store.packages.active():
             version = self._store.packages.version(activation.package, activation.version)
             check: Mapping[str, Any] = version.load_check if version is not None else {}
@@ -151,9 +170,20 @@ class Catalogue:
                     activation.version,
                 )
                 continue
-            datasets = frozenset(
-                str(d.get("name")) for d in cast(list[dict[str, Any]], spec.get("datasets") or [])
-            )
+            listed = cast(list[dict[str, Any]], spec.get("datasets") or [])
+            datasets = frozenset(str(d.get("name")) for d in listed)
+            for d in listed:
+                push = d.get("push")
+                if isinstance(push, dict) and spec.get("enabled", True):
+                    found_push = cast(dict[str, Any], push)
+                    pushes[str(d.get("name"))] = PackagePush(
+                        str(d.get("name")),
+                        activation.package,
+                        activation.version,
+                        str(found_push.get("source")),
+                        str(found_push.get("connection")),
+                        cast(dict[str, Any], found_push.get("options") or {}),
+                    )
             found.append(
                 ActiveFlow(
                     activation.flow,
@@ -176,7 +206,7 @@ class Catalogue:
             for hook in declared.values():
                 if f"{activation.package}/{hook.dataset}" in datasets:
                     hooks[(activation.package, hook.name)] = hook
-        return _Read(found, hooks)
+        return _Read(found, hooks, pushes)
 
     def tick(self, now: datetime) -> list[str]:
         """Write a run for every trigger of an active, enabled flow that is due as of `now`, and return their ids."""

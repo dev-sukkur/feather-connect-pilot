@@ -672,6 +672,23 @@ class Webhook:
         self.deleted_field = deleted_field
         self.custom_verify = verify
 
+    def push_options(self) -> dict[str, Any] | None:
+        """Its settings as JSON, so the server takes its webhooks for an installed package with none of the package's
+        code (flow packages §13): what `Webhook(connection, **options)` makes again. None for a `verify` function."""
+        if self.custom_verify is not None:
+            return None
+        return {
+            "signature_secret": self.signature_secret,
+            "unsigned": self.unsigned,
+            "signature_header": self.signature_header,
+            "timestamp_header": self.timestamp_header,
+            "tolerance": f"{int(self.tolerance.total_seconds())}s",
+            "records_path": self.records_path,
+            "event_id_path": self.event_id_path,
+            "event_id_header": self.event_id_header,
+            "deleted_field": self.deleted_field,
+        }
+
     def _secret(self, ctx: Context) -> str:
         if self.signature_secret is None:
             raise PermanentError(f"webhook on {self.connection!r} names no signature_secret")

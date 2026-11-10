@@ -370,7 +370,7 @@ def task_logs(task_id: str, reads: See, _: CurrentActor) -> JSONResponse:
     return ok({"task_id": task_id, "lines": reads.task_logs(task_id)})
 
 
-@router.post("/flows/{flow}:run", status_code=202)
+@router.post("/flows/{flow:path}:run", status_code=202)
 def run_flow(
     flow: str,
     request: Request,
@@ -417,7 +417,7 @@ def _pause(
     return _once(request, actor, key, do)
 
 
-@router.post("/flows/{flow}:pause")
+@router.post("/flows/{flow:path}:pause")
 def pause_flow(
     flow: str,
     request: Request,
@@ -432,7 +432,7 @@ def pause_flow(
     )
 
 
-@router.post("/flows/{flow}:resume")
+@router.post("/flows/{flow:path}:resume")
 def resume_flow(
     flow: str,
     request: Request,

@@ -22,7 +22,9 @@ from feather_connect.core.flow import Flow
 from feather_connect.logs import redact, register_secrets
 from feather_connect.project import ProjectError
 from feather_connect.runtime.budgets import BudgetHandle
+from feather_connect.runtime.catalogue import ActiveFlow
 from feather_connect.runtime.extract import VerifyResult
+from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.storage.port import Delivery, DeliveryStatus, InvalidTransition, split_error
 from feather_server.auth import Actor
 from feather_server.services.access import Capability, require
@@ -287,7 +289,19 @@ class Actions:
     ) -> str:
         """Start a run of the flow now, of `partitions` if they are given (as a re-run with new inputs does). Raises
         `FlowPaused` for a paused flow, `KeyError` for an unknown one and `ValueError` for a partition that is not one
-        of the flow's."""
+        of the flow's.
+
+        A flow of an installed package (§13: every flow, since the project mode is retired) runs on its active
+        version's host: the run is queued, tagged with that version, as a tick queues one, and the host plans it."""
+        if (packaged := self._packaged(flow)) is not None:
+            return self._do(
+                actor,
+                "run_flow",
+                f"flow:{flow}",
+                {"reason": reason, **({} if partitions is None else {"partitions": list(partitions)})},
+                lambda: self._queue_packaged(packaged, actor, reason, partitions, max_concurrent),
+                lambda run_id: f"ok: run {run_id}",
+            )
         found = self._rt.flow(flow)
         chosen = None if partitions is None else list(dict.fromkeys(partitions))
         if chosen is not None:
@@ -308,6 +322,38 @@ class Actions:
             ),
             lambda run_id: f"ok: run {run_id}",
         )
+
+    def _packaged(self, flow: str) -> ActiveFlow | None:
+        """The active package flow of that name, when the runtime here has no flow of it."""
+        if flow in {f.name for f in self._rt.flows()}:
+            return None
+        catalogue = self._state.catalogue
+        if catalogue is None:
+            return None
+        return next((f for f in catalogue.flows() if f.name == flow), None)
+
+    def _queue_packaged(
+        self,
+        flow: ActiveFlow,
+        actor: Actor,
+        reason: str | None,
+        partitions: Sequence[str] | None,
+        max_concurrent: int | None,
+    ) -> str:
+        if self._rt.is_flow_paused(flow.name):
+            raise FlowPaused(f"flow {flow.name!r} is paused")
+        params: dict[str, Any] = {"package": flow.package, "version": flow.version}
+        if partitions is not None:
+            params["partitions"] = list(dict.fromkeys(partitions))
+        if max_concurrent is not None:
+            params["max_concurrent"] = max_concurrent
+        return self._store.runs.create_run(flow.name, "manual", actor.name, params, reason=reason)
+
+    def _pause_target(self, flow: str) -> None:
+        """Raises `KeyError` for a flow that is neither the runtime's nor an installed package's."""
+        package = flow.split("/", 1)[0] if "/" in flow else None
+        if package is None or not any(a.flow == flow for a in self._store.packages.activations(package)):
+            self._rt.flow(flow)
 
     def preview_rerun(self, actor: Actor, dataset: str, partitions: Sequence[str]) -> Preview:
         """Say what reading these partitions of the dataset again would touch."""
@@ -652,7 +698,7 @@ class Actions:
             "pause_flow",
             f"flow:{flow}",
             {"reason": reason},
-            lambda: self._rt.pause_flow(flow, actor=actor.name, reason=reason),
+            lambda: self._set_paused(flow, actor, reason, True),
         )
 
     def resume_flow(self, actor: Actor, flow: str, *, reason: str | None = None) -> None:
@@ -661,8 +707,22 @@ class Actions:
             "resume_flow",
             f"flow:{flow}",
             {"reason": reason},
-            lambda: self._rt.resume_flow(flow, actor=actor.name, reason=reason),
+            lambda: self._set_paused(flow, actor, reason, False),
         )
+
+    def _set_paused(self, flow: str, actor: Actor, reason: str | None, paused: bool) -> None:
+        """Pause or resume a flow of the runtime, or of an installed package, whose host reads the same pause."""
+        if flow in {f.name for f in self._rt.flows()}:
+            if paused:
+                self._rt.pause_flow(flow, actor=actor.name, reason=reason)
+            else:
+                self._rt.resume_flow(flow, actor=actor.name, reason=reason)
+            return
+        self._pause_target(flow)
+        if paused:
+            self._store.overrides.set(f"flow:{flow}", "paused", True, actor=actor.name, reason=reason)
+        else:
+            self._store.overrides.clear(f"flow:{flow}", "paused", actor=actor.name, reason=reason)
 
     def pause_route(self, actor: Actor, route: str, *, reason: str | None = None) -> None:
         self._do(

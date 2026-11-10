@@ -2473,6 +2473,14 @@ class _Packages(PackageStore):
             r["last_active_at"],
         )
 
+    def renames(self) -> dict[tuple[str, str], str]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                "select kind, old_name, new_name from feather.renamed where tenant_id = %s",
+                (self._db.tenant,),
+            ).fetchall()
+        return {(r["kind"], r["old_name"]): r["new_name"] for r in rows}
+
     def needed_lock_hashes(self) -> set[str]:
         with self._db.tx() as conn:
             rows = conn.execute(

@@ -301,6 +301,7 @@ def run_host(
             budgets={c.name: c.budget for c in project.connections.values() if c.budget is not None},
             config_of=lambda connection: config_of(project, connection),
             timezone=str(project.settings["timezone"]),
+            prefix=package,
         )
         submitted: dict[str, float] = {}
 
