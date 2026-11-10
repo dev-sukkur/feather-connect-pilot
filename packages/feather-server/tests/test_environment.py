@@ -23,9 +23,9 @@ from feather_server.app import AppState, create_app
 from feather_server.auth import Actor, issue_token
 from feather_server.services.access import Forbidden
 from feather_server.services.environment import ConfigProblem, Environment, coerce_setting
-from feather_server.services.packages import InstallFailed, Packages
+from feather_server.services.packages import Packages
 from feather_server.services.registries import Registries, VersionExists
-from feather_server.testing import sample_wheel, sign_in
+from feather_server.testing import prepare, sample_wheel, sign_in
 
 API = "/api/v1"
 ADMIN = Actor("human", "root", "admin", "root")
@@ -338,8 +338,9 @@ def _installed(
             True, flows, ["invoices"], [], [], None, 0.1, [], {FLOW: _spec(**spec)}, webhooks or {}
         )
 
-    packages = Packages(state.store, state.clock, registries, env="dev", checker=checker)
+    packages = Packages(state.store, state.clock, registries, env="dev")
     packages.install(ADMIN, PACKAGE, "1.0.0")
+    prepare(state, PACKAGE, checker=checker)  # as a worker would, after the install
     return packages
 
 
@@ -410,10 +411,16 @@ def test_ingress_refuses_a_flood_before_reading_anything(keyed: AppState, monkey
 def test_a_declared_webhook_for_a_dataset_the_package_doesnt_define_is_refused(
     keyed: AppState, tmp_path: Path
 ):
-    with pytest.raises(InstallFailed, match="doesn't define"):
-        _installed(keyed, tmp_path, {"h": {**HOOK, "dataset": "orders"}})
-    with pytest.raises(InstallFailed, match="not valid"):
-        _installed(keyed, tmp_path / "again", {"h": {**HOOK, "verify": {"scheme": "md5"}}})
+    # The worker that prepares the version refuses it, naming the step; the server never ran its code.
+    _installed(keyed, tmp_path, {"h": {**HOOK, "dataset": "orders"}})
+    row = keyed.store.packages.version(PACKAGE, "1.0.0")
+    assert row is not None and row.state == "failed" and row.load_check["check"] == "webhook_connector"
+    assert "doesn't define" in row.load_check["error"]
+    from feather_connect.packages.prepare import _judged  # pyright: ignore[reportPrivateUsage]
+
+    odd = {"h": {**HOOK, "verify": {"scheme": "md5"}}}
+    step, why = _judged(LoadCheck(True, [], ["invoices"], [], [], None, 0.1, [], {}, odd))
+    assert step == "webhook_connector" and "not valid" in (why or "")
 
 
 def test_a_flow_activated_while_the_server_runs_fires_on_time_with_no_restart(

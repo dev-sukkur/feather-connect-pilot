@@ -7,6 +7,8 @@ from textwrap import dedent
 
 import pytest
 
+from feather_server.testing import prepare
+
 SAMPLE = Path(__file__).resolve().parents[3] / "examples" / "packages" / "acme-invoices"
 
 
@@ -74,11 +76,11 @@ def server():
         for role in ("admin", "operator", "publish")
     }  # fmt: skip
     with serve(create_app(state=state, loops=lambda s: [])) as base:
-        yield base, tokens
+        yield base, tokens, state
 
 
 def test_publish_uploads_the_built_wheel_once_and_search_finds_it(cli, sample: Path, server):
-    base, tokens = server
+    base, tokens, _ = server
     assert cli("package", "build", "--project", str(sample)).exit_code == 0
     args = ("package", "publish", "--project", str(sample), "--url", base, "--token", tokens["publish"])
     first = cli(*args, "--json")
@@ -99,7 +101,7 @@ def test_publish_uploads_the_built_wheel_once_and_search_finds_it(cli, sample: P
 
 
 def test_publish_without_a_built_wheel_says_to_build(cli, sample: Path, server):
-    base, tokens = server
+    base, tokens, _ = server
     r = cli("package", "publish", "--project", str(sample), "--url", base, "--token", tokens["publish"])
     assert r.exit_code == 1 and "feather package build" in r.stderr
 
@@ -107,7 +109,7 @@ def test_publish_without_a_built_wheel_says_to_build(cli, sample: Path, server):
 def test_registry_add_list_test_and_remove(cli, sample: Path, server, monkeypatch: pytest.MonkeyPatch):
     from feather_server.testing import sample_wheel, static_index
 
-    base, tokens = server
+    base, tokens, _ = server
     wheel = sample_wheel(sample / "built")
     monkeypatch.setenv("ACME_REGISTRY_TOKEN", "company-secret")
     admin = ("--server", base)
@@ -138,7 +140,7 @@ def test_registry_add_list_test_and_remove(cli, sample: Path, server, monkeypatc
 def test_install_list_show_and_fetch(cli, sample: Path, server, tmp_path: Path):
     import hashlib
 
-    base, tokens = server
+    base, tokens, state = server
     assert cli("package", "build", "--project", str(sample)).exit_code == 0
     published = cli(
         "package", "publish", "--project", str(sample), "--url", base, "--token", tokens["publish"]
@@ -153,14 +155,16 @@ def test_install_list_show_and_fetch(cli, sample: Path, server, tmp_path: Path):
     installed = cli("package", "install", "acme-invoices==1.0.0", "--reason", "first", *admin)
     assert installed.exit_code == 0, installed.output
     assert "installed acme-invoices 1.0.0 from feather" in installed.stdout
-    assert ": inactive" in installed.stdout and "activate a flow to run it" in installed.stdout
+    assert ": inactive" in installed.stdout and "it is preparing: a worker builds" in installed.stdout
     again = cli("package", "install", "acme-invoices==1.0", *admin)
     assert again.exit_code == 1 and "install a new version" in again.stderr
     missing = cli("package", "install", "acme-invoices==9.9.9", *admin)
     assert missing.exit_code == 1 and "feather package search" in missing.stderr
     assert cli("package", "install", "==1.0", *admin).exit_code != 0
     listed = cli("package", "list", *operator)
-    assert "acme-invoices: 1.0.0 (installed); 0 flows active" in listed.stdout
+    assert "acme-invoices: 1.0.0 (preparing); 0 flows active" in listed.stdout
+    prepare(state, "acme-invoices")  # a worker's supervisor
+    assert "acme-invoices: 1.0.0 (ready); 0 flows active" in cli("package", "list", *operator).stdout
     shown = json.loads(cli("package", "show", "acme-invoices==1.0.0", *operator, "--json").stdout)
     assert shown["load_check"]["ok"] and {f["state"] for f in shown["flows"]} == {"inactive"}
     assert "acme-invoices/" in cli("package", "show", "acme-invoices", *operator).stdout
@@ -179,7 +183,7 @@ def test_install_list_show_and_fetch(cli, sample: Path, server, tmp_path: Path):
 
 
 def test_activate_and_deactivate_a_flow_of_an_installed_version(cli, sample: Path, server):
-    base, tokens = server
+    base, tokens, state = server
     assert cli("package", "build", "--project", str(sample)).exit_code == 0
     publish = ("--project", str(sample), "--url", base, "--token", tokens["publish"])
     assert cli("package", "publish", *publish).exit_code == 0
@@ -189,6 +193,9 @@ def test_activate_and_deactivate_a_flow_of_an_installed_version(cli, sample: Pat
     )
     assert cli("package", "install", "acme-invoices==1.0.0", *admin).exit_code == 0
     flow = "acme-invoices/invoices"
+    early = cli("flow", "activate", flow, "--version", "1.0.0", *operator)
+    assert early.exit_code == 1 and "still preparing" in early.stderr
+    prepare(state, "acme-invoices")
     done = cli("flow", "activate", flow, "--version", "1.0.0", "--reason", "go live", *operator)
     assert done.exit_code == 0, done.output
     assert f"{flow} 1.0.0: active" in done.stdout
@@ -200,7 +207,7 @@ def test_activate_and_deactivate_a_flow_of_an_installed_version(cli, sample: Pat
 
 
 def test_connections_and_secrets_of_the_environment(cli, server, tmp_path: Path):
-    base, tokens = server
+    base, tokens, _ = server
     admin, operator = (
         ("--server", base, "--token", tokens["admin"]),
         ("--server", base, "--token", tokens["operator"]),

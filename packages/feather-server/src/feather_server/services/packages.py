@@ -1,5 +1,6 @@
-"""Installing flow packages (flow packages design §5): a version fetched from a trusted registry, checked, loaded in a
-child process, and recorded with every flow inactive. For the API, the dashboard and the CLI alike.
+"""Installing flow packages (flow packages design §5): a version fetched from a trusted registry, checked, and recorded
+`preparing` with every flow inactive; a worker then builds its environment and load-checks it, and records it `ready`
+or `failed` (`feather_connect.packages.prepare`). For the API, the dashboard and the CLI alike.
 
 The checks run in order and an install stops at the first that fails, which `InstallFailed.check` names:
 
@@ -12,24 +13,23 @@ The checks run in order and an install stops at the first that fails, which `Ins
 - `compatibility`: the manifest's `fc_versions` takes this Feather Connect.
 - `lock`: the locked requirements in the wheel are the ones the manifest's `lock_hash` names, and each is pinned with
   `==` and has its sha256 hashes: no index options, direct URLs or paths.
-- `load_check`: in a child process, the code imports, loads for this environment with no error, and defines the flows,
-  datasets and routes the manifest says. This process never imports package code. The check is a correctness gate, not
-  a security boundary, until task 6 moves it to the package hosts (see `feather_connect.packages.check`).
-- `webhook_connector`: no push dataset reads with a source class of the package's own. Webhook ingress runs in the
-  server, which never loads package code, so a package can't bring its own webhook connector (§7.2, §12).
 
-At most `MAX_BUSY` installs and wheel fetches run at once, for each holds a worker thread for as long as a load check
-takes; one more raises `Busy`, which the API answers 503 with Retry-After.
-
-Then the wheel, the version and its flows (named `<package>/<flow>`, all `inactive`) are stored in one transaction,
-and an audit row says who installed what and why. Nothing runs until a flow is activated (§6). Every failure is audited
+Then the wheel, the version (`preparing`) and its flows as the manifest names them (`<package>/<flow>`, all
+`inactive`) are stored in one transaction, and an audit row says who installed what and why. Every failure is audited
 too, with its check, or as `internal` for an error that is a bug.
+
+The server never runs package code. The steps that do run on a worker, as its user, in the version's own environment:
+`environment`, `load_check` and `webhook_connector` (`PREPARE_STEPS`), and the version's load check names the one that
+failed. A flow can be activated only once its version is `ready` (`NotReady` otherwise); nothing runs until then (§6).
+
+At most `MAX_BUSY` installs and wheel fetches run at once, for each holds a worker thread while it fetches; one more
+raises `Busy`, which the API answers 503 with Retry-After.
 """
 
 import hashlib
 import re
 import threading
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, cast
@@ -41,18 +41,25 @@ from feather_connect.clock import Clock
 from feather_connect.logs import redact
 from feather_connect.packages import manifest as m
 from feather_connect.packages.build import LOCK_FILE
-from feather_connect.packages.check import DEFAULT_TIMEOUT, LoadCheck, load_check
 from feather_connect.packages.manifest import ManifestError
-from feather_connect.packages.webhooks import parse_webhooks
+from feather_connect.packages.prepare import PREPARE_STEPS
 from feather_connect.packages.wheel import read_entry
-from feather_connect.project import environment_layer
 from feather_connect.runtime.catalogue import restart_ticks
 from feather_connect.storage.port import DuplicateVersion, FlowActivation, PackageVersion, Store
 from feather_server.auth import Actor
 from feather_server.services.access import require
 from feather_server.services.registries import BUILT_IN, Fetched, Registries, RegistryProblem
 
-__all__ = ["CHECKS", "MAX_BUSY", "Busy", "InstallFailed", "Packages", "check_lock"]
+__all__ = [
+    "CHECKS",
+    "MAX_BUSY",
+    "PREPARE_STEPS",
+    "Busy",
+    "InstallFailed",
+    "NotReady",
+    "Packages",
+    "check_lock",
+]
 
 MAX_BUSY = 2  # installs and wheel fetches at once
 BUSY_RETRY_S = 30
@@ -67,13 +74,9 @@ CHECKS = (
     "not_yanked",
     "compatibility",
     "lock",
-    "load_check",
-    "webhook_connector",
 )
 _PINNED = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._, -]+\])?==[A-Za-z0-9.+!_-]+(\s*;.*)?")
 _HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}")
-
-Checker = Callable[..., LoadCheck]
 
 
 class InstallFailed(ValueError):
@@ -82,6 +85,15 @@ class InstallFailed(ValueError):
     def __init__(self, check: str, message: str) -> None:
         super().__init__(f"{check}: {message}")
         self.check = check
+
+
+class NotReady(Exception):
+    """A flow of a version that isn't `ready` can't be activated: it is still being prepared on a worker, or that
+    failed. `state` is the version's."""
+
+    def __init__(self, message: str, state: str) -> None:
+        super().__init__(message)
+        self.state = state
 
 
 class Busy(Exception):
@@ -130,25 +142,13 @@ class Installed:
 
 
 class Packages:
-    """The installed packages of one store's tenant, for the environment `env`. `checker` and `timeout` run the load
-    check; tests may pass their own checker."""
+    """The installed packages of one store's tenant, for the environment `env`."""
 
-    def __init__(
-        self,
-        store: Store,
-        clock: Clock,
-        registries: Registries,
-        *,
-        env: str,
-        checker: Checker = load_check,
-        timeout: float = DEFAULT_TIMEOUT,
-    ) -> None:
+    def __init__(self, store: Store, clock: Clock, registries: Registries, *, env: str) -> None:
         self._store = store
         self._clock = clock
         self._registries = registries
         self._env = env
-        self._checker = checker
-        self._timeout = timeout
         self._slots = threading.BoundedSemaphore(MAX_BUSY)
 
     # Installing.
@@ -256,30 +256,8 @@ class Packages:
         passed.append("compatibility")
         self._check_lock(fetched)
         passed.append("lock")
-        environment = environment_layer(self._store.env_config.entries(self._env))
-        found = self._checker(
-            fetched.content, manifest, env=self._env, timeout=self._timeout, environment=environment
-        )
-        if not found.ok:
-            raise InstallFailed("load_check", found.error or "the package doesn't load")
-        passed.append("load_check")
-        if found.own_push_sources:
-            raise InstallFailed(
-                "webhook_connector",
-                f"the push datasets {', '.join(found.own_push_sources)} read with a source of the package's own: "
-                "webhooks are verified and parsed in the server, which runs only Feather Connect's connectors",
-            )
-        try:
-            declared = parse_webhooks(found.webhooks)
-        except ValueError as error:
-            raise InstallFailed("webhook_connector", f"a declared webhook is not valid: {error}") from None
-        unknown = sorted(h.dataset for h in declared.values() if h.dataset not in found.datasets)
-        if unknown:
-            raise InstallFailed(
-                "webhook_connector", f"declared webhooks feed datasets it doesn't define: {unknown}"
-            )
-        passed.append("webhook_connector")
-        flows = [f"{project}/{flow}" for flow in sorted(found.flows)]
+        named = cast(list[dict[str, Any]], manifest.get("flows") or [])
+        flows = [f"{project}/{flow}" for flow in sorted(str(f["name"]) for f in named)]
         row = PackageVersion(
             project,
             str(manifest["version"]),
@@ -290,8 +268,8 @@ class Packages:
             manifest,
             str(manifest["fc_versions"]),
             str(manifest["lock_hash"]),
-            "installed",
-            found.as_json(),
+            "preparing",
+            {},
             actor.name,
             self._clock.now(),
         )
@@ -354,7 +332,8 @@ class Packages:
         except ValueError as error:
             raise InstallFailed("lock", f"{where}: {error}") from None
 
-    # Activating (§6): the minimal step of task 5; package hosts come with task 6.
+    # Activating (§6): each worker supervisor starts a host for an active version, and drains it when no flow of it is
+    # active and its runs are over.
 
     def activate(self, actor: Actor, flow: str, version: str, *, reason: str | None = None) -> dict[str, Any]:
         """Make `version` the active one of `flow` (`<package>/<name>`), audited. The scheduler fires its triggers
@@ -365,6 +344,13 @@ class Packages:
         installed = self._store.packages.version(package, version)
         if installed is None:
             raise KeyError(f"{package} {version} is not installed here")
+        if installed.state != "ready":
+            why = (
+                "a worker is still preparing it: building its environment and load-checking it"
+                if installed.state in ("installed", "preparing")
+                else f"it is {installed.state}: {installed.load_check.get('error') or 'see its load check'}"
+            )
+            raise NotReady(f"{package} {installed.version} can't be activated yet: {why}", installed.state)
         now = self._clock.now()
         spec = cast(dict[str, Any], installed.load_check.get("specs") or {}).get(flow)
         if spec is not None:

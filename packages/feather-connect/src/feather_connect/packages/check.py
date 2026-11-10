@@ -13,15 +13,14 @@ The parent keeps the last few KiB of the child's stderr as it comes and reads at
 
 What the code defines must be what the manifest says: a package whose code and manifest disagree fails the check.
 
-**A correctness gate, not a security boundary.** Until task 6 moves the check to the package hosts, the child runs as
-the server's user, on the server's machine, with the server's Python and packages:
+**Where it runs.** A worker supervisor runs the check when it prepares a version (`prepare.prepare_version`), as the
+worker's user, in the version's own dependency environment (`envs.Environments`), so the package imports what its lock
+pins. The server never runs it: package code never runs in the server's process or as its user. On the worker it can
+do what any package code there can (§11: there is no sandbox inside the worker):
 
-- Package code can do what that user can: read its files, reach the network, start a process that leaves the process
-  group. On Linux the server sets itself not dumpable, so that a child can't read `/proc/<server>/environ`.
 - The nonce keeps a package that exits early from answering for the bootstrap by mistake or by a naive write; code
   that sets out to find it in the bootstrap's memory can.
-- A package's own dependencies are not installed: environments come with task 8. Until then a package may import only
-  what the server has, and one that imports anything else fails the check, which says so.
+- A package that imports what neither its lock nor the worker has fails the check, which names the module.
 """
 
 import io
@@ -42,6 +41,7 @@ from pathlib import Path, PurePosixPath
 from typing import IO, Any, cast
 
 from feather_connect.packages import manifest as m
+from feather_connect.packages.tree import ProcessTree
 
 __all__ = ["DEFAULT_TIMEOUT", "LoadCheck", "load_check", "protect_server_process", "unpack"]
 
@@ -55,8 +55,8 @@ _STDERR_TAIL = 2000  # characters of that stderr put in a failure
 # server's settings or secrets. A package's secrets are references, not resolved by the check.
 _KEPT_VARIABLES = ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL", "TZ")
 _NO_DEPENDENCIES = (
-    "a package's own dependencies are not installed yet (they come with its environment, task 8): "
-    "until then it may import only what the server has"
+    "a package gets what its lock pins and what the worker has: add it to the package's dependencies, "
+    "run uv lock and build again"
 )
 
 
@@ -162,108 +162,6 @@ class _Tail:
         return self._kept.decode("utf-8", "replace")[-_STDERR_TAIL:].strip()
 
 
-class _Tree:
-    """The child and every process it starts: a process group on POSIX, a Job Object on Windows that kills them all
-    when it is closed."""
-
-    def __init__(self, command: list[str], **options: Any) -> None:
-        if sys.platform == "win32":
-            self.process = subprocess.Popen(
-                command, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP, **options
-            )
-            self._job = _job_for(self.process)
-        else:
-            self.process = subprocess.Popen(command, start_new_session=True, **options)
-
-    def kill(self) -> None:
-        """Kill the whole tree and reap the child. Safe to call more than once."""
-        if sys.platform == "win32":
-            if self._job is not None:
-                _close_job(self._job)
-                self._job = None
-            if self.process.poll() is None:
-                self.process.kill()
-        else:
-            import signal
-
-            try:
-                os.killpg(self.process.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-        try:
-            self.process.wait(timeout=10)
-        except subprocess.TimeoutExpired:  # pragma: no cover - a process SIGKILL doesn't end
-            pass
-
-
-if sys.platform == "win32":  # defined only where they run, so a type checker for another platform skips them
-
-    def _job_for(process: "subprocess.Popen[Any]") -> int | None:
-        """A Job Object holding `process`, set to kill every process in it when its handle is closed."""
-        import ctypes
-        from ctypes import wintypes
-
-        class Basic(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_int64),
-                ("PerJobUserTimeLimit", ctypes.c_int64),
-                ("LimitFlags", wintypes.DWORD),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", wintypes.DWORD),
-                ("Affinity", ctypes.c_size_t),
-                ("PriorityClass", wintypes.DWORD),
-                ("SchedulingClass", wintypes.DWORD),
-            ]
-
-        class Extended(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", Basic),
-                ("IoInfo", ctypes.c_uint64 * 6),
-                ("ProcessMemoryLimit", ctypes.c_size_t),
-                ("JobMemoryLimit", ctypes.c_size_t),
-                ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                ("PeakJobMemoryUsed", ctypes.c_size_t),
-            ]
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-        kernel32.SetInformationJobObject.argtypes = [
-            wintypes.HANDLE,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            wintypes.DWORD,
-        ]
-        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-        job = kernel32.CreateJobObjectW(None, None)
-        if not job:
-            process.kill()
-            raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
-        limits = Extended()
-        limits.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        extended_limit_information = 9
-        set_ok = kernel32.SetInformationJobObject(
-            job, extended_limit_information, ctypes.byref(limits), ctypes.sizeof(limits)
-        )
-        handle = int(cast(Any, process)._handle)  # pyright: ignore[reportPrivateUsage]
-        if not set_ok or not kernel32.AssignProcessToJobObject(job, handle):
-            error = ctypes.get_last_error()
-            _close_job(job)
-            process.kill()
-            raise OSError(error, "the load check's process could not be put in a Job Object")
-        return int(job)
-
-    def _close_job(job: int) -> None:
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.TerminateJobObject(job, 1)
-        kernel32.CloseHandle(job)
-
-
 def load_check(
     content: bytes,
     manifest: Mapping[str, Any],
@@ -299,7 +197,7 @@ def load_check(
             str(manifest["name"]),
             env,
         ]
-        tree = _Tree(
+        tree = ProcessTree(
             command,
             cwd=home,
             env=_child_environment(home),
@@ -449,9 +347,7 @@ def _why(error: BaseException, name: str) -> str:
         cause = cause.__cause__ or cause.__context__
     missing = cause.name if isinstance(cause, ModuleNotFoundError) else None
     if missing and missing.split(".")[0] != m.module_of(name):
-        return (
-            f"the package doesn't load: it imports {missing}, which isn't installed here: {_NO_DEPENDENCIES}"
-        )
+        return f"the package doesn't load: it imports {missing}, which isn't installed: {_NO_DEPENDENCIES}"
     return f"the package doesn't load: {last}"
 
 

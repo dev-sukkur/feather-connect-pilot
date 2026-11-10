@@ -14,7 +14,7 @@ from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.storage.port import DuplicateUser, InvalidTransition
 from feather_connect.vault import KeyConflict, NoMasterKey, VaultError
 from feather_server.services.access import Forbidden
-from feather_server.services.packages import Busy, InstallFailed
+from feather_server.services.packages import Busy, InstallFailed, NotReady
 from feather_server.services.previews import PreviewError, PreviewInvalid
 from feather_server.services.registries import VersionExists
 
@@ -66,6 +66,8 @@ def translate(error: Exception) -> ApiProblem | None:
             (409, "Conflict") if error.check == "not_installed" else (422, "Unprocessable Content")
         )
         return ApiProblem(status, title, _message(error), check=error.check)
+    if isinstance(error, NotReady):
+        return ApiProblem(409, "Conflict", str(error), check="not_ready", state=error.state)
     if isinstance(error, VersionExists):
         return ApiProblem(409, "Conflict", str(error))
     if isinstance(error, DuplicateUser):

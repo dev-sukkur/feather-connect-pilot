@@ -182,11 +182,9 @@ _INSTALL_HINTS = {
     "fetch": "check the name and version with: feather package search",
     "not_yanked": "install another version, or pass --allow-yanked to take this one anyway",
     "lock": "build it again with feather package build, which locks every requirement with its hashes",
-    "webhook_connector": "read webhooks with a Feather Connect push source, such as http.Webhook",
     "sha256": "the registry's record and the wheel disagree: ask the publisher to publish a new version",
     "manifest": "it is not a flow package this server can read: build it again with feather package build",
     "compatibility": "build it for this Feather Connect, or upgrade the server",
-    "load_check": "fix the package (feather validate --env <env> shows the same problems), then publish a new version",
 }
 
 
@@ -204,8 +202,8 @@ def install(
     json_mode: Json = False,
 ) -> None:
     """Install a version of a package from one of the environment's registries: the newest not yanked when none is
-    given, and not a pre-release unless --pre. It is checked and loaded on the server, in a child process, and its
-    flows start inactive: nothing runs until one is activated."""
+    given, and not a pre-release unless --pre. The server checks it and records it preparing; a worker then builds
+    its environment and load-checks it, and its flows start inactive: nothing runs until one is activated."""
     name, version = _wanted(spec, json_mode)
     with remote.client(project, env, server, token, json_mode) as api:
 
@@ -226,7 +224,10 @@ def install(
         typer.echo(f"installed {doc['name']} {doc['version']} from {doc['registry']}, sha256 {doc['sha256']}")
         for flow in doc["flows"]:
             typer.echo(f"  {flow}: inactive")
-        typer.echo("activate a flow to run it")
+        typer.echo(
+            f"it is {doc['state']}: a worker builds its environment and load-checks it "
+            "(feather package show says when it is ready); then activate a flow to run it"
+        )
 
     emit(installed, json_mode=json_mode, human=human)
 

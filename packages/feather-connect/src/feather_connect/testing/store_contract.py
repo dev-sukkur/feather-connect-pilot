@@ -1636,7 +1636,9 @@ class StoreContract(
             assert heard.wait(10)  # a supervisor waiting for it hears that it is ready
             row = store.packages.version("acme", "1.0.0")
             assert row is not None and row.state == "ready" and row.load_check == check
-            assert not store.packages.prepared("acme", "1.0.0", "failed", {"ok": False})  # another worker, later
+            assert not store.packages.prepared(
+                "acme", "1.0.0", "failed", {"ok": False}
+            )  # another worker, later
             assert store.packages.version("acme", "1.0.0") == row
             assert not store.packages.prepared("zed", "1.0.0", "ready", {})
         finally:

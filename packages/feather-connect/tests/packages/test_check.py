@@ -175,11 +175,32 @@ def test_an_answer_the_package_writes_itself_is_refused(sample: Path):
     assert not found.ok and "not the bootstrap's" in (found.error or "")
 
 
-def test_a_package_that_imports_what_the_server_lacks_says_dependencies_come_later(sample: Path):
+def test_a_package_that_imports_what_its_lock_lacks_says_to_add_it(sample: Path):
     content, manifest = _built(sample)
     found = load_check(_prefixed(content, "import acme_billing_sdk\n"), manifest, env="dev")
     assert not found.ok
-    assert "imports acme_billing_sdk" in (found.error or "") and "task 8" in (found.error or "")
+    assert "imports acme_billing_sdk, which isn't installed" in (found.error or "")
+    assert "add it to the package's dependencies" in (found.error or "")
+
+
+def test_a_package_imports_what_its_environment_pins(sample: Path, tmp_path: Path):
+    # The dependency limit of P2 is lifted (task 8): in its environment, a package imports its own pinned library.
+    import hashlib
+
+    from feather_connect.packages.envs import Environments
+    from feather_connect.testing.packaging import library_wheel, lock_for
+
+    if shutil.which("uv") is None:
+        pytest.skip("uv builds the environment")
+    lib = library_wheel(tmp_path / "wheels", "acme-billing-sdk", "1.2", {"acme_billing_sdk/__init__.py": ""})
+    lock = lock_for([lib])
+    envs = Environments(tmp_path / "envs", index=["--no-index", "--find-links", str(lib.parent)])
+    python = envs.ensure(lock, hashlib.sha256(lock).hexdigest())
+    content, manifest = _built(sample)
+    found = load_check(
+        _prefixed(content, "import acme_billing_sdk\n"), manifest, env="dev", python=str(python)
+    )
+    assert found.ok, found.error
 
 
 def test_a_push_source_of_the_packages_own_is_named(sample: Path):
