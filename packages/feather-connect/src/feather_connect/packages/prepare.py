@@ -6,7 +6,9 @@ This runs in the worker supervisor, as the worker's user, never in the server. T
 lock); the first supervisor to prepare the version records what it found, and others change nothing (`prepared`
 compares and sets). A failed version says which step failed in its load check's `check`:
 
-- `environment`: its locked requirements could not be installed (`envs.Environments`);
+- `environment`: the version's wheel or lock is not what it names. An environment that can't be built is not a
+  failure of the version, as the network or an index may be away: `prepare_version` raises `EnvError`, the version
+  stays `preparing`, and the supervisor tries again later;
 - `load_check`: in a child process, in that environment, the code doesn't import, load for this environment, or
   define what its manifest says (`check.load_check`);
 - `webhook_connector`: a push dataset reads with a source class of the package's own, or a declared webhook isn't
@@ -15,7 +17,7 @@ compares and sets). A failed version says which step failed in its load check's 
 
 import hashlib
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from feather_connect.clock import Clock
@@ -74,9 +76,12 @@ def prepare_version(
     clock: Clock,
     checker: Checker = load_check,
     timeout: float = DEFAULT_TIMEOUT,
+    keep: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Build the version's environment and load-check it there, record the version `ready` or `failed`, and return
-    the load check as recorded. With no `envs`, the check runs on this process's Python, as tests do."""
+    the load check as recorded. With no `envs`, the check runs on this process's Python, as tests do. The environment
+    is held in use while the check runs, and `keep` names lock hashes that making room for it doesn't remove. Raises
+    `EnvError` when the environment can't be built, recording that against the worker, not the version."""
 
     def record(result: dict[str, Any]) -> dict[str, Any]:
         state = "ready" if result.get("ok") else "failed"
@@ -95,20 +100,20 @@ def prepare_version(
         lock = lock_of(content, row)
     except ValueError as error:
         return failed("environment", str(error))
-    python: str | None = None
-    if envs is not None:
-        store.packages.record_env(worker_id, row.lock_hash, "building", clock.now())
-        try:
-            python = str(envs.ensure(lock, row.lock_hash))
-        except EnvError as error:
-            store.packages.record_env(worker_id, row.lock_hash, "failed", clock.now(), str(error))
-            return failed("environment", str(error))
-        store.packages.record_env(worker_id, row.lock_hash, "ready", clock.now())
     environment = environment_layer(store.env_config.entries(env))
     options: dict[str, Any] = {"env": env, "timeout": timeout, "environment": environment}
-    if python is not None:
-        options["python"] = python
-    found = checker(content, row.manifest, **options)
+    if envs is None:
+        found = checker(content, row.manifest, **options)
+    else:
+        store.packages.record_env(worker_id, row.lock_hash, "building", clock.now())
+        try:
+            use = envs.use(lock, row.lock_hash, keep=keep)
+        except EnvError as error:
+            store.packages.record_env(worker_id, row.lock_hash, "failed", clock.now(), str(error))
+            raise
+        store.packages.record_env(worker_id, row.lock_hash, "ready", clock.now())
+        with use:
+            found = checker(content, row.manifest, **options, python=str(use.python))
     step, error = _judged(found)
     if step is not None:
         return failed(step, error or "", found.as_json())

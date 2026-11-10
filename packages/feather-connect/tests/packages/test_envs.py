@@ -94,3 +94,117 @@ def test_a_build_past_the_timeout_is_stopped(tmp_path: Path):
     envs = _envs(tmp_path, timeout=0.01)
     with pytest.raises(EnvError, match="past"):
         envs.ensure(lock, hashlib.sha256(lock).hexdigest())
+
+
+def test_an_environment_in_use_is_never_evicted_and_eviction_removes_the_marker_first(tmp_path: Path):
+    locks = [lock_for([_lib(tmp_path, v)]) for v in ("1.0", "2.0")]
+    hashes = [hashlib.sha256(lock).hexdigest() for lock in locks]
+    first = _envs(tmp_path)
+    held = first.use(locks[0], hashes[0])  # a host runs in it
+    other = _envs(tmp_path, max_bytes=1)  # another supervisor on the same cache, with no room at all
+    assert other.in_use(hashes[0])
+    with pytest.raises(EnvError, match="doesn't fit"):
+        other.ensure(locks[1], hashes[1])
+    assert other.python(hashes[0]) == held.python  # in use: it stayed
+    held.release()
+    assert not other.in_use(hashes[0])
+    other._make_room(set())  # pyright: ignore[reportPrivateUsage]
+    assert other.python(hashes[0]) is None and not other.path(hashes[0]).exists()
+    assert not list(other.root.glob(".trash-*"))
+
+
+def test_two_supervisors_sharing_a_cache_build_a_lock_once(tmp_path: Path):
+    import threading
+
+    lock = lock_for([_lib(tmp_path, "1.0")])
+    digest = hashlib.sha256(lock).hexdigest()
+    found: list[Path] = []
+    builds: list[str] = []
+    workers = [_envs(tmp_path), _envs(tmp_path)]
+    for envs in workers:
+        real = envs._build  # pyright: ignore[reportPrivateUsage]
+
+        def counted(*args: object, real: object = real) -> Path:
+            builds.append("built")
+            return real(*args)  # type: ignore[operator]
+
+        envs._build = counted  # type: ignore[method-assign]
+
+    threads = [threading.Thread(target=lambda e=e: found.append(e.ensure(lock, digest))) for e in workers]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(120)
+    assert builds == ["built"] and len(set(found)) == 1  # one built it, the other waited and took it
+
+
+def test_uv_gets_no_secret_of_the_worker_and_no_index_unless_one_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from feather_connect.packages.envs import uv_environment
+
+    monkeypatch.setenv("FEATHER_MASTER_KEY", "a" * 44)
+    monkeypatch.setenv("FEATHER_DATABASE_URL", "postgresql://u:p@db/feather")
+    monkeypatch.setenv("UV_INDEX_URL", "https://evil.example/simple")
+    env = uv_environment(tmp_path / "uv")
+    assert not {"FEATHER_MASTER_KEY", "FEATHER_DATABASE_URL", "UV_INDEX_URL"} & env.keys()
+    assert env["UV_CACHE_DIR"] == str(tmp_path / "uv") and "PATH" in env
+    assert "--no-index" in Environments(tmp_path, index=["--find-links", "x"])._index  # pyright: ignore[reportPrivateUsage]
+    assert "--no-index" not in Environments(tmp_path, index=["--index-url", "u"])._index  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_process_tree_in_an_environment_dies_whole_grandchildren_too(tmp_path: Path):
+    import sys
+    import time
+
+    from feather_connect.packages.tree import ProcessTree
+
+    lock = lock_for([_lib(tmp_path, "1.0")])
+    python = _envs(tmp_path).ensure(lock, hashlib.sha256(lock).hexdigest())
+    marker = tmp_path / "grandchild.pid"
+    (tmp_path / "grandchild.py").write_text(
+        f"import os, time\nopen({str(marker)!r}, 'w').write(str(os.getpid()))\ntime.sleep(120)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "child.py").write_text(
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, {str(tmp_path / 'grandchild.py')!r}])\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    tree = ProcessTree([str(python), str(tmp_path / "child.py")])  # the venv's python: on Windows, a launcher
+    deadline = time.monotonic() + 60
+    while not (marker.is_file() and marker.read_text()) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    grandchild = int(marker.read_text())
+    tree.kill()
+    deadline = time.monotonic() + 20
+    while _alive(grandchild) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not _alive(grandchild), f"the grandchild {grandchild} outlived its tree on {sys.platform}"
+
+
+def _alive(pid: int) -> bool:
+    import os
+    import sys
+
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        kernel32.CloseHandle(handle)
+        return code.value == 259
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:  # a zombie the test process doesn't reap still answers kill 0
+        with open(f"/proc/{pid}/stat") as stat:
+            return stat.read().split()[2] != "Z"
+    except OSError:
+        return False

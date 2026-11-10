@@ -193,7 +193,53 @@ def _lock(root: Path, dependencies: Sequence[str]) -> bytes:
         raise ManifestError(f"uv export failed: {reason[-1] if reason else done.returncode}")
     lock = done.stdout.replace(b"\r\n", b"\n")
     _check_hashes(lock)
-    return lock
+    return with_wheel_hashes(lock, _wheel_hashes(root / "uv.lock"))
+
+
+WHEELS_NOTE = "# wheels:"  # the comment, under a requirement of a lock, that names the hashes of its wheels
+
+
+def _wheel_hashes(uv_lock: Path) -> dict[str, set[str]]:
+    """The sha256 hashes of each locked package's wheels, by `name==version`, from uv.lock."""
+    import tomllib
+
+    found: dict[str, set[str]] = {}
+    data = tomllib.loads(uv_lock.read_text(encoding="utf-8"))
+    for package in data.get("package", []):
+        name = str(package.get("name", "")).lower().replace("_", "-")
+        hashes = {str(w["hash"]) for w in package.get("wheels", []) if "hash" in w}
+        found[f"{name}=={package.get('version')}"] = hashes
+    return found
+
+
+def with_wheel_hashes(lock: bytes, wheels: dict[str, set[str]]) -> bytes:
+    """The lock with a `# wheels:` comment under each requirement naming those of its hashes that are wheels, so that
+    an install can refuse a requirement that has only a source distribution (a worker installs wheels only, and
+    building a source distribution would run its code). Comments change nothing for uv or pip."""
+    out: list[str] = []
+    requirement: str | None = None
+    hashes: list[str] = []
+
+    def close() -> None:
+        if requirement is not None:
+            named = sorted(h for h in hashes if h in wheels.get(requirement, set()))
+            out.append(f"    {WHEELS_NOTE} {' '.join(named)}".rstrip())
+
+    for line in lock.decode("utf-8").splitlines():
+        text = line.strip()
+        if line[:1].isspace() and text.startswith("--hash="):
+            hashes += [
+                p.removeprefix("--hash=") for p in text.rstrip("\\ ").split() if p.startswith("--hash=")
+            ]
+            out.append(line)
+            continue
+        if text and not text.startswith("#") and not line[:1].isspace():
+            close()
+            requirement = text.split(" ")[0].split(";")[0].lower().replace("_", "-")
+            hashes = [p.removeprefix("--hash=") for p in text.split() if p.startswith("--hash=")]
+        out.append(line)
+    close()
+    return ("\n".join(out) + "\n").encode()
 
 
 def _check_hashes(lock: bytes) -> None:

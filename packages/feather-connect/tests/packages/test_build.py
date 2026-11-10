@@ -282,3 +282,32 @@ def test_every_workspace_distribution_is_left_out_of_a_lock():
     found = [*root.glob("packages/*/pyproject.toml"), *root.glob("packages/*/*/pyproject.toml")]
     names = {tomllib.loads(p.read_text(encoding="utf-8"))["project"]["name"] for p in found}
     assert set(PLATFORM_DISTRIBUTIONS) == names
+
+
+def test_a_lock_says_which_of_its_hashes_are_wheels(tmp_path: Path):
+    from feather_connect.packages.build import _wheel_hashes, with_wheel_hashes  # pyright: ignore[reportPrivateUsage]
+
+    wheel, sdist = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    (tmp_path / "uv.lock").write_text(
+        f"""version = 1
+[[package]]
+name = "httpx"
+version = "0.28.1"
+sdist = {{ url = "https://x/httpx.tar.gz", hash = "{sdist}" }}
+wheels = [{{ url = "https://x/httpx.whl", hash = "{wheel}" }}]
+
+[[package]]
+name = "only-source"
+version = "1.0"
+sdist = {{ url = "https://x/only.tar.gz", hash = "{sdist}" }}
+""",
+        encoding="utf-8",
+    )
+    lock = (
+        f"httpx==0.28.1 \\\n    --hash={sdist} \\\n    --hash={wheel}\n    # via acme\n"
+        f"only-source==1.0 \\\n    --hash={sdist}\n"
+    )
+    noted = with_wheel_hashes(lock.encode(), _wheel_hashes(tmp_path / "uv.lock")).decode()
+    assert f"    # wheels: {wheel}\n" in noted
+    assert noted.rstrip().endswith("# wheels:")  # only a source distribution: nothing named
+    assert noted.replace(f"    # wheels: {wheel}\n", "").replace("\n    # wheels:", "").strip() == lock.strip()

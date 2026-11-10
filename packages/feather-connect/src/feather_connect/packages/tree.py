@@ -1,5 +1,9 @@
 """A child process and its whole tree, killed together however it ends (flow packages: the load check, environment
-builds and package hosts). A process group on POSIX; a Job Object set to kill on close on Windows."""
+builds and package hosts). A process group on POSIX; a Job Object set to kill on close on Windows.
+
+On Windows the child starts suspended and is resumed only once it is in the Job Object, so nothing it starts, such as
+the base interpreter a virtual environment's `python.exe` launches, can get out of the job before it is made. The job
+is killed when its last handle closes, so a tree outlives neither `kill` nor the death of the process that made it."""
 
 import os
 import subprocess
@@ -17,9 +21,10 @@ class ProcessTree:
     def __init__(self, command: list[str], **options: Any) -> None:
         if sys.platform == "win32":
             self.process = subprocess.Popen(
-                command, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP, **options
+                command, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED, **options
             )
             self._job = _job_for(self.process)
+            _resume(self.process)
         else:
             self.process = subprocess.Popen(command, start_new_session=True, **options)
 
@@ -59,6 +64,20 @@ class ProcessTree:
 
 
 if sys.platform == "win32":  # defined only where they run, so a type checker for another platform skips them
+    _CREATE_SUSPENDED = 0x00000004
+
+    def _resume(process: "subprocess.Popen[Any]") -> None:
+        """Resume every thread of a process started suspended (`NtResumeProcess`)."""
+        import ctypes
+        from ctypes import wintypes
+
+        ntdll = ctypes.WinDLL("ntdll")
+        ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+        handle = int(cast(Any, process)._handle)  # pyright: ignore[reportPrivateUsage]
+        status = ntdll.NtResumeProcess(handle)
+        if status != 0:
+            process.kill()
+            raise OSError(status, "the child process could not be resumed")
 
     def _job_for(process: "subprocess.Popen[Any]") -> int | None:
         """A Job Object holding `process`, set to kill every process in it when its handle is closed."""

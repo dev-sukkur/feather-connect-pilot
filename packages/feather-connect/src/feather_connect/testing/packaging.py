@@ -38,13 +38,15 @@ def library_wheel(out_dir: Path, name: str, version: str, files: Mapping[str, st
     return path
 
 
-def lock_for(wheels: Sequence[Path]) -> bytes:
-    """A lock, as `uv export` writes one, that pins each wheel by name, version and sha256."""
+def lock_for(wheels: Sequence[Path], *, sdist: bool = False) -> bytes:
+    """A lock, as `feather package build` writes one from `uv export`, that pins each wheel by name, version and
+    sha256, and notes that hash is a wheel's. With `sdist`, the hashes stand for source distributions: no note."""
     lines: list[str] = []
     for wheel in wheels:
         name, version = wheel.name.split("-")[:2]
         digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
         lines.append(f"{name.replace('_', '-')}=={version} \\\n    --hash=sha256:{digest}")
+        lines.append(f"    {build.WHEELS_NOTE}" + ("" if sdist else f" sha256:{digest}"))
     return ("\n".join(lines) + "\n").encode()
 
 
