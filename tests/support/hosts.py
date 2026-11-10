@@ -30,7 +30,7 @@ from feather_connect.packages.envs import Environments
 from feather_connect.runtime.catalogue import Catalogue
 from feather_connect.storage.port import PackageVersion
 from feather_connect.storage.postgres.connect import connect
-from feather_connect.storage.postgres.host_role import grant_host_role
+from feather_connect.storage.postgres.host_role import ensure_partitions_ahead, grant_host_role
 from feather_connect.storage.postgres.migrate import migrate
 from feather_connect.supervisor import Supervisor
 from feather_connect.testing.packaging import built_with_lock, library_wheel, lock_for
@@ -144,6 +144,7 @@ class HostWorld:
             host_database_url=self.host_url,
             pass_env=["FEATHER_HOSTED_URL"],
             db_secrets=vault.open,
+            partitions=lambda: ensure_partitions_ahead(self.store, self.spool),
         )
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
