@@ -1049,7 +1049,10 @@ class StoreContract(
             ("a", "pending"): 1,
             ("b", "pending"): 1,
         }
-        assert store.ledger.count_by_status(["b"], ["failed"]) == {} and store.ledger.count_by_status([], ["failed"]) == {}
+        assert (
+            store.ledger.count_by_status(["b"], ["failed"]) == {}
+            and store.ledger.count_by_status([], ["failed"]) == {}
+        )
 
     def test_starting_a_task_again_keeps_its_row(self, store: Store):
         rid = store.runs.create_run("f", "manual", "ann", {})

@@ -132,7 +132,9 @@ def test_tenants_do_not_see_each_other(pool: ConnectionPool[Pg], pg: Pg, clock: 
         other.runs.get_run(run_id)
 
 
-def test_the_dashboards_counts_see_their_own_tenant(pool: ConnectionPool[Pg], clock: FrozenClock):  # ADR-0013
+def test_the_dashboards_counts_see_their_own_tenant(
+    pool: ConnectionPool[Pg], pg: Pg, clock: FrozenClock
+):  # ADR-0013
     mine, other = PostgresStore(pool, clock, "mine"), PostgresStore(pool, clock, "other")
     seal(mine, "v1", ["a"])
     run_id = mine.runs.create_run("f", "manual", "ann", {})
