@@ -6,13 +6,17 @@ import re
 from collections.abc import Callable
 from datetime import timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 
+from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.vault import MasterKey, Vault, new_master_key
 from feather_server import web
 from feather_server.app import create_app
 from feather_server.auth import Actor, issue_token
+from feather_server.services.actions import Actions
 from feather_server.services.environment import Environment
+from feather_server.services.reads import Reads
 from feather_server.testing import World, sign_in
 
 Csrf = Callable[[], str]
@@ -206,8 +210,100 @@ def test_a_bulk_action_needs_csrf_a_known_action_and_rows(
     unknown = client.post(
         "/flows/bulk", data={"csrf_token": csrf(), "action": "pause", "name": ["orders", "nope"]}
     )
-    assert unknown.status_code == 409 and "there is no flow named &#39;nope&#39;" in unknown.text
+    assert (
+        unknown.status_code == 303
+        and unknown.headers["location"] == "/flows?done=paused&n=1&left=missing%3Anope"
+    )
+    assert (
+        "1 flow paused. Left as they were: nope is not there." in client.get(unknown.headers["location"]).text
+    )
     assert client.post("/runs/bulk", data={"action": "cancel", "run_id": ["x"]}).status_code == 403
+
+
+def test_a_second_bulk_run_of_a_flow_already_running_starts_nothing(
+    client: TestClient, world: World, csrf: Csrf
+) -> None:
+    first = client.post("/flows/bulk", data={"csrf_token": csrf(), "action": "run", "name": ["orders"]})
+    assert first.status_code == 303 and first.headers["location"] == "/flows?done=started&n=1"
+    again = client.post("/flows/bulk", data={"csrf_token": csrf(), "action": "run", "name": ["orders"]})
+    assert again.status_code == 303 and "left=running%3Aorders" in again.headers["location"]
+    assert len(world.store.runs.list_runs(flow="orders")) == 1  # the double click started one run
+    assert (
+        "0 flows started. Left as they were: orders is already running."
+        in client.get(again.headers["location"]).text
+    )
+
+
+def test_a_bulk_run_goes_on_past_a_paused_flow_and_says_which(
+    client: TestClient, world: World, csrf: Csrf, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[str] = []
+
+    def run_flow(self: Actions, actor: Actor, flow: str, **_: object) -> str:
+        if flow == "held":
+            raise FlowPaused("held is paused")
+        if flow not in ("first", "last"):
+            raise KeyError(flow)
+        started.append(flow)
+        return "R"
+
+    monkeypatch.setattr(Actions, "run_flow", run_flow)
+    monkeypatch.setattr(Reads, "has_active_run", lambda self, flow: False)
+    names = ["first", "held", "gone", "last"]
+    done = client.post("/flows/bulk", data={"csrf_token": csrf(), "action": "run", "name": names})
+    assert done.status_code == 303 and started == ["first", "last"]  # the paused flow did not stop the rest
+    page = client.get(done.headers["location"]).text
+    assert (
+        "2 flows started. Left as they were: held is paused, so it can&#39;t be run; gone is not there."
+        in page
+    )
+
+
+def test_an_operator_and_an_admin_may_run_flows_in_bulk_and_no_more_than_a_hundred(world: World) -> None:
+    for role in ("operator", "admin"):
+        browser = sign_in(create_app(state=world.state, loops=lambda s: []), f"u-{role}", role)
+        token = re.search(r'<meta name="csrf-token" content="([^"]+)"', browser.get("/").text)
+        assert token
+        many = browser.post(
+            "/flows/bulk",
+            data={"csrf_token": token.group(1), "action": "run", "name": [f"f{i}" for i in range(101)]},
+        )
+        assert many.status_code == 422 and "Tick between 1 and 100" in many.text
+        ran = browser.post(
+            "/flows/bulk", data={"csrf_token": token.group(1), "action": "run", "name": ["orders"]}
+        )
+        assert ran.status_code == 303 and "/flows?done=started" in ran.headers["location"]
+    assert len(world.store.runs.list_runs(flow="orders")) == 1  # the admin's came second, and was left
+
+
+def test_a_poll_of_a_list_reads_the_table_and_not_the_tiles(
+    client: TestClient, world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refused(*_: object, **__: object) -> object:
+        raise AssertionError("a poll read the tiles")
+
+    monkeypatch.setattr(Reads, "run_activity", refused)
+    monkeypatch.setattr(Reads, "count_runs", refused)
+    for path in ("/flows", "/runs"):
+        polled = client.get(path, headers={"HX-Request": "true"})
+        assert polled.status_code == 200 and "hx-get" in polled.text and "<html" not in polled.text
+
+
+def test_a_token_that_may_only_publish_sees_no_dashboard_data(world: World) -> None:
+    publisher = _bearer(world, "publish")
+    for path in ("/search.json?q=orders", "/status", "/secrets"):
+        assert publisher.get(path).status_code == 403, path
+
+
+def test_search_takes_a_hostile_query_as_text(client: TestClient, world: World) -> None:
+    world.run()
+    for q in ("%", "_", r"%_'\<script>alert(1)</script>", "' or 1=1 --", "0%25"):
+        found = client.get("/search.json", params={"q": q})
+        assert found.status_code == 200 and found.headers["content-type"].startswith("application/json")
+        items = found.json()["items"]
+        assert not any(i["kind"] == "run" for i in items)  # a wildcard is not a prefix of every id
+        assert "<script>" not in found.text
+    assert "<script>alert" not in client.get("/search", params={"q": "<script>alert(1)</script>"}).text
 
 
 def test_a_token_that_may_only_publish_can_do_no_bulk_action(world: World) -> None:
@@ -232,7 +328,13 @@ def test_runs_are_cancelled_in_bulk_after_a_second_step(client: TestClient, worl
     again = client.post(
         "/runs/bulk", data={"csrf_token": csrf(), "action": "cancel", "run_id": [run_id], "confirm": "yes"}
     )
-    assert again.status_code == 409 and "already over" in again.text
+    assert again.status_code == 303 and again.headers["location"].startswith(
+        "/runs?done=cancelled&n=0&left=over"
+    )
+    assert (
+        f"0 runs cancelled. Left as they were: {run_id[:8]} is already over."
+        in client.get(again.headers["location"]).text
+    )
 
 
 def test_actions_a_role_cannot_do_are_not_shown(world: World) -> None:

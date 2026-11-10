@@ -78,11 +78,12 @@
     <h2 id="palette-title" class="sr-only">Search</h2>
     <div class="palette-box">
       {{ icon("search") }}
-      <input id="palette-input" type="text" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="palette-list" aria-label="Search flows, runs by id, datasets, connections and pages" autocomplete="off" maxlength="200">
+      <input id="palette-input" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="palette-list" aria-label="Search flows, runs by id, datasets, connections and pages" autocomplete="off" maxlength="200">
       <kbd aria-hidden="true">Esc</kbd>
     </div>
     <ul id="palette-list" role="listbox" aria-label="Results"></ul>
     <p class="palette-empty muted" id="palette-empty" hidden>Nothing matches.</p>
+    <p class="sr-only" id="palette-said" role="status" aria-live="polite"></p>
   </dialog>
   <dialog id="help" class="sheet" aria-labelledby="help-title">
     <h2 id="help-title">Keyboard shortcuts</h2>

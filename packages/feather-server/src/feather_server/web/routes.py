@@ -4,6 +4,7 @@ decides anything the service layer does not.
 
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from importlib.metadata import PackageNotFoundError
@@ -36,7 +37,7 @@ from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.environment import Environment, coerce_setting
 from feather_server.services.previews import Preview, PreviewError, PreviewExpired, PreviewInvalid
-from feather_server.services.reads import COUNT_CAP, FlowSummary, Reads
+from feather_server.services.reads import FlowSummary, Reads
 from feather_server.services.task_records import NoRecords, TaskRecordReader
 from feather_server.services.text import span
 from feather_server.services.trace import Tracer
@@ -146,6 +147,11 @@ _STATUSES: dict[str, tuple[str, str, str]] = {  # status: (icon, word, tone)
 }
 
 
+def connection_anchor(name: str) -> str:
+    """The id of a connection's row on the Connections page, which the search links to."""
+    return "connection-" + re.sub(r"[^A-Za-z0-9_-]", "-", name)
+
+
 def status_info(status: str) -> tuple[str, str, str, str]:
     """A status's icon, word and tone, and the class name it gives its badge."""
     if status in _STATUSES:
@@ -162,6 +168,7 @@ templates.env.globals.update(
         "icon": icon,
         "can": can,
         "status_info": status_info,
+        "connection_anchor": connection_anchor,
     }
 )
 
@@ -333,10 +340,6 @@ class Tile:
     note: str = ""
 
 
-def _capped(count: int, cap: int) -> int | str:
-    return f"{cap}+" if count >= cap else count
-
-
 def _matches(query: str, *texts: str | None) -> bool:
     """Whether any of `texts` holds `query`, ignoring case. An empty query matches everything."""
     wanted = query.strip().lower()
@@ -345,6 +348,44 @@ def _matches(query: str, *texts: str | None) -> bool:
 
 def _plural(count: int, one: str, many: str | None = None) -> str:
     return f"{count} {one if count == 1 else many or one + 's'}"
+
+
+def _polled(request: Request) -> bool:
+    """Whether HTMX asks, to refresh or search a list: it takes the table, and the tiles above it are not read."""
+    return request.headers.get("hx-request") == "true"
+
+
+# Why a bulk action left a row as it was. The redirect names the rows and these codes, never text of its own.
+_LEFT = {
+    "running": "already running",
+    "paused": "paused, so it can't be run",
+    "missing": "not there",
+    "over": "already over",
+    "stream": "a daily stream run, which can't be cancelled",
+}
+_LEFT_SHOWN = 20
+
+
+def _bulk_redirect(path: str, done: str, count: int, left: list[tuple[str, str]]) -> RedirectResponse:
+    query = [("done", done), ("n", str(count))] + [("left", f"{code}:{name}") for name, code in left]
+    return RedirectResponse(f"{path}?{urlencode(query)}", status_code=303)
+
+
+def _bulk_notice(request: Request, noun: str, verbs: Iterable[str]) -> tuple[str, str] | None:
+    """The notice a bulk action's redirect asks for: how many rows it did, and why it left any."""
+    query = request.query_params
+    done, count = query.get("done", ""), query.get("n", "")
+    if done not in verbs or not (count.isascii() and count.isdigit()):
+        return None
+    left = []
+    for item in query.getlist("left")[:_LEFT_SHOWN]:
+        code, _, name = item.partition(":")
+        if code in _LEFT and name:
+            left.append(f"{name[:100]} is {_LEFT[code]}")
+    message = f"{_plural(int(count), noun)} {done}."
+    if not left:
+        return ("ok", message)
+    return ("warn", f"{message} Left as they were: " + "; ".join(left) + ".")
 
 
 def _today(request: Request) -> datetime:
@@ -371,24 +412,19 @@ def _flows_page(
         and (not chosen["active"] or (f.enabled and not f.paused))
         and _matches(chosen["q"], f.name, f.owner, *f.tags)
     ]
-    started, failed = read.run_activity()
-    failing = sum(1 for f in everything if f.last_run and f.last_run.status == "failed")
-    paused = sum(1 for f in everything if f.paused)
-    tiles = [
-        Tile(
-            "Active",
-            sum(1 for f in everything if f.enabled and not f.paused),
-            "",
-            tuple(started),
-            "runs a day",
-        ),
-        Tile("Paused", paused, "warn" if paused else ""),
-        Tile("Failing", failing, "bad" if failing else "", tuple(failed), "failed runs a day"),
-    ]
-    done = query.get("done", "")
-    count = query.get("n", "")
-    if notice is None and done in _FLOW_BULK.values() and count.isascii() and count.isdigit():
-        notice = ("ok", f"{_plural(int(count), 'flow')} {done}.")
+    tiles: list[Tile] = []
+    if not _polled(request):  # a refresh of the table brings back the table only
+        started, failed = read.run_activity()
+        failing = sum(1 for f in everything if f.last_run and f.last_run.status == "failed")
+        paused = sum(1 for f in everything if f.paused)
+        active = sum(1 for f in everything if f.enabled and not f.paused)
+        tiles = [
+            Tile("Active", active, "", tuple(started), "runs a day"),
+            Tile("Paused", paused, "warn" if paused else ""),
+            Tile("Failing", failing, "bad" if failing else "", tuple(failed), "failed runs a day"),
+        ]
+    if notice is None:
+        notice = _bulk_notice(request, "flow", _FLOW_BULK.values())
     return render(
         request,
         "flows.html",
@@ -430,29 +466,24 @@ def flows_bulk(
     if not names or len(names) > _BULK_MOST:
         message = f"Tick between 1 and {_BULK_MOST} flows first."
         return _flows_page(request, actor, status=422, notice=("bad", message))
-    act, why = actions(request), _reason(reason)
-    problems: list[str] = []
+    act, read, why = actions(request), reads(request), _reason(reason)
+    left: list[tuple[str, str]] = []
     for flow in names:
         try:
             if action == "run":
+                if read.has_active_run(flow):  # a second click, or a second tab: not a second run
+                    left.append((flow, "running"))
+                    continue
                 act.run_flow(actor, flow, reason=why)
             elif action == "pause":
                 act.pause_flow(actor, flow, reason=why)
             else:
                 act.resume_flow(actor, flow, reason=why)
         except KeyError:
-            problems.append(f"there is no flow named {flow!r}")
-        except FlowPaused as error:
-            problems.append(str(error))
-    if problems:
-        done = len(names) - len(problems)
-        message = (
-            f"{_plural(done, 'flow')} {_FLOW_BULK[action]}; not the others: " + "; ".join(problems) + "."
-        )
-        return _flows_page(request, actor, status=409, notice=("bad", message))
-    return RedirectResponse(
-        f"/flows?{urlencode({'done': _FLOW_BULK[action], 'n': len(names)})}", status_code=303
-    )
+            left.append((flow, "missing"))
+        except FlowPaused:
+            left.append((flow, "paused"))
+    return _bulk_redirect("/flows", _FLOW_BULK[action], len(names) - len(left), left)
 
 
 @router.get("/flows/{name}/row", response_class=HTMLResponse)
@@ -823,23 +854,20 @@ def _runs_page(
         )
         next_cursor = page[-1].run_id if len(page) == limit else None
     found = [r for r in page if _matches(chosen["q"], r.run_id, r.flow, r.actor, r.trigger, r.reason)]
-    started, failed = read.run_activity()
-    cap = COUNT_CAP
-    running, queued = read.count_runs("running"), read.count_runs("queued")
-    failed_today = read.count_runs("failed", since=_today(request))
-    tiles = [
-        Tile(
-            "Started today", _capped(read.count_runs(since=_today(request)), cap), "", tuple(started), "a day"
-        ),
-        Tile("Running", _capped(running, cap), "ok" if running else ""),
-        Tile(
-            "Failed today", _capped(failed_today, cap), "bad" if failed_today else "", tuple(failed), "a day"
-        ),
-        Tile("Queued", _capped(queued, cap), "warn" if queued else ""),
-    ]
-    done, count = query.get("done", ""), query.get("n", "")
-    if notice is None and done == "cancelled" and count.isascii() and count.isdigit():
-        notice = ("ok", f"{_plural(int(count), 'run')} cancelled.")
+    tiles: list[Tile] = []
+    if not _polled(request):  # a refresh of the table brings back the table only
+        started, failed = read.run_activity()
+        today = _today(request)
+        running, queued = read.count_runs("running"), read.count_runs("queued")
+        failed_today = read.count_runs("failed", since=today)
+        tiles = [
+            Tile("Started today", read.count_runs(since=today), "", tuple(started), "a day"),
+            Tile("Running", running, "ok" if running else ""),
+            Tile("Failed today", failed_today, "bad" if failed_today else "", tuple(failed), "a day"),
+            Tile("Queued", queued, "warn" if queued else ""),
+        ]
+    if notice is None:
+        notice = _bulk_notice(request, "run", ("cancelled",))
     return render(
         request,
         "runs.html",
@@ -886,25 +914,20 @@ def runs_bulk(
     if confirm != "yes":
         return _runs_page(request, actor, confirm_cancel=ids)
     read, act = reads(request), actions(request)
-    left: list[str] = []
-    cancelled = 0
+    left: list[tuple[str, str]] = []
     for one in ids:
         try:
             run = read.run(one)
         except KeyError:
-            left.append(f"{one[:8]} is not a run")
+            left.append((one[:26], "missing"))
             continue
         if run.trigger == STREAM_TRIGGER:
-            left.append(f"{one[:8]} is a daily stream run")
+            left.append((one[:8], "stream"))
         elif run.status not in _ACTIVE:
-            left.append(f"{one[:8]} is already over")
+            left.append((one[:8], "over"))
         else:
             act.cancel_run(actor, one, reason=_reason(reason))
-            cancelled += 1
-    if left:
-        message = f"{_plural(cancelled, 'run')} cancelled; not the others: " + "; ".join(left) + "."
-        return _runs_page(request, actor, status=409, notice=("bad", message))
-    return RedirectResponse(f"/runs?{urlencode({'done': 'cancelled', 'n': cancelled})}", status_code=303)
+    return _bulk_redirect("/runs", "cancelled", len(ids) - len(left), left)
 
 
 _CHILD_TASKS = 20
@@ -1693,7 +1716,6 @@ def deliveries(request: Request, actor: CurrentActor) -> HTMLResponse:
 # The shell: the status bar and the search of the command palette.
 
 _READY_FOR = 10.0  # seconds a database check is reused for: every open page asks every 15 s
-_ready: dict[int, tuple[float, dict[str, str]]] = {}
 
 
 def _database(request: Request) -> dict[str, str]:
@@ -1701,10 +1723,10 @@ def _database(request: Request) -> dict[str, str]:
 
     state = request.app.state.feather
     now = state.clock.now().timestamp()
-    found = _ready.get(id(state))
+    found: tuple[float, dict[str, str]] | None = getattr(request.app.state, "database_check", None)
     if found is None or not 0 <= now - found[0] < _READY_FOR:
         found = (now, readiness(state))
-        _ready[id(state)] = found
+        request.app.state.database_check = found
     return found[1]
 
 
@@ -1755,9 +1777,7 @@ def _search(request: Request, actor: Actor, q: str) -> list[Found]:
     names = set(request.app.state.feather.project.connections)
     names |= {e["name"] for e in request.app.state.environment.connections()}
     for name in sorted(n for n in names if _matches(wanted, n)):
-        found.append(
-            Found("connection", name, f"/connections#connection-{quote(name, safe='')}", "Connection")
-        )
+        found.append(Found("connection", name, f"/connections#{connection_anchor(name)}", "Connection"))
     if len(wanted) >= _RUN_ID_FROM and re.fullmatch(r"[0-9A-Za-z_-]+", wanted):
         for run in reads(request).find_runs(wanted):
             href = f"/runs/{quote(run.run_id, safe='')}"

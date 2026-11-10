@@ -12,7 +12,7 @@
   <thead><tr><th scope="col" data-sort>Connection</th><th scope="col" data-col="connector" data-sort>Connector</th><th scope="col" data-col="site" data-sort>Site</th><th scope="col" data-col="budget">Budget</th><th scope="col" data-col="flows">Used by</th><th scope="col" data-col="secrets">Secret settings</th><th scope="col" data-col="check" data-sort>Last check</th>{% if can(actor, "connections.check") %}<th scope="col">Check</th>{% endif %}</tr></thead>
   <tbody>
   {% for c in connections %}
-    <tr id="connection-{{ c.name }}">
+    <tr id="{{ connection_anchor(c.name) }}">
       <th scope="row">{{ c.name }}</th>
       <td data-col="connector"><code>{{ c.connector }}</code></td>
       <td data-col="site">{% if c.site %}{{ c.site }}{% else %}<span class="muted">none</span>{% endif %}</td>

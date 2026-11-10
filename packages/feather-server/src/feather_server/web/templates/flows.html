@@ -25,7 +25,7 @@
 <form id="bulk" class="bulkbar" method="post" action="/flows/bulk" data-bulk aria-label="With the ticked flows">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <span class="bulk-count" aria-live="polite" data-bulk-count>Tick flows to act on several at once.</span>
-  {% if can(actor, "runs.start") %}<button type="submit" name="action" value="run">{{ icon("play") }} Run</button>{% endif %}
+  {% if can(actor, "runs.start") %}<button type="submit" name="action" value="run" data-confirm="Run the ticked flows now? A flow with a run already queued or running is left as it is.">{{ icon("play") }} Run</button>{% endif %}
   {% if can(actor, "flows.pause") %}<button type="submit" name="action" value="pause" data-confirm="Pause the ticked flows? Nothing new of theirs starts until they are resumed.">{{ icon("pause") }} Pause</button>
   <button type="submit" name="action" value="resume">{{ icon("play") }} Resume</button>{% endif %}
 </form>

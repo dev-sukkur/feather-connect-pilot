@@ -16,8 +16,8 @@
       <th scope="row"><a href="/routes/{{ r.name | urlencode }}/deliveries">{{ r.name }}</a></th>
       <td data-col="flow"><a href="/flows/{{ r.flow | urlencode }}">{{ r.flow }}</a></td>
       <td data-col="to">{{ r.connection }}</td>
-      <td data-col="failed" class="num">{% if r.failed %}<a href="/routes/{{ r.name | urlencode }}/deliveries?status=failed">{{ r.failed }}{% if r.failed >= 100 %}+{% endif %}<span class="sr-only"> failed deliveries to {{ r.name }}</span></a>{% else %}0{% endif %}</td>
-      <td data-col="held" class="num">{% if r.held %}<a href="/routes/{{ r.name | urlencode }}/deliveries?status=held">{{ r.held }}{% if r.held >= 100 %}+{% endif %}<span class="sr-only"> held deliveries to {{ r.name }}</span></a>{% else %}0{% endif %}</td>
+      <td data-col="failed" class="num">{% if r.failed %}<a href="/routes/{{ r.name | urlencode }}/deliveries?status=failed">{{ r.failed }}<span class="sr-only"> failed deliveries to {{ r.name }}</span></a>{% else %}0{% endif %}</td>
+      <td data-col="held" class="num">{% if r.held %}<a href="/routes/{{ r.name | urlencode }}/deliveries?status=held">{{ r.held }}<span class="sr-only"> held deliveries to {{ r.name }}</span></a>{% else %}0{% endif %}</td>
     </tr>
   {% endfor %}
   </tbody>
