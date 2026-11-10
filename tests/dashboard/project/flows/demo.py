@@ -6,6 +6,7 @@ answers each record with a 503 and the body it was sent with, as an HTTP sink do
 """
 
 import os
+from pathlib import Path
 
 import feather_connect as fc
 from feather_connect.connectors import simulation
@@ -26,7 +27,10 @@ class Flaky(simulation.Sink):
 
 items = fc.Dataset(
     "demo.items",
-    source=simulation.Source("shop", fixture=os.environ.get("FEATHER_DASHBOARD_FIXTURE", "unset")),
+    source=simulation.Source(
+        "shop",
+        fixture=os.environ.get("FEATHER_DASHBOARD_FIXTURE", str(Path(__file__).with_name("empty.json"))),
+    ),
     key="id",
     strategy=fc.strategy.replace(),
     partition=fc.partition.by_day("day", tz="UTC"),

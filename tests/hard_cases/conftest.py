@@ -54,6 +54,9 @@ def wait_until(check: Callable[[], object], what: str, timeout: float = SETTLE) 
     raise AssertionError(f"timed out waiting for {what}")
 
 
+PACKAGE = "hard-cases"  # flows, datasets and routes are named `<package>/<name>` (flow packages §13)
+
+
 @dataclass
 class Erp:
     """The HTTP stand-in, in a process of its own."""
@@ -94,7 +97,7 @@ class Cases:
 
     def settled(self, route: str) -> bool:
         """Whether every delivery of `route` is applied."""
-        found = self.stack.store.ledger.list_deliveries(route=route)
+        found = self.stack.store.ledger.list_deliveries(route=f"{PACKAGE}/{route}")
         return bool(found) and all(d.status == "applied" for d in found)
 
     def wait_applied(self, *routes: str) -> None:
@@ -104,13 +107,15 @@ class Cases:
             except AssertionError as error:
                 found = [
                     (d.partition, d.status, d.attempts, d.last_error)
-                    for d in self.stack.store.ledger.list_deliveries(route=route)
+                    for d in self.stack.store.ledger.list_deliveries(route=f"{PACKAGE}/{route}")
                 ]
                 raise AssertionError(f"{error}: {found}\n{self.worker_log()}") from None
 
     def start(self, flow: str, partitions: list[str] | None = None) -> str:
         """Start a run of `flow` and return its id, without waiting for it."""
-        answer = self.api.post(f"/flows/{flow}:run", json={"partitions": partitions} if partitions else {})
+        answer = self.api.post(
+            f"/flows/{PACKAGE}/{flow}:run", json={"partitions": partitions} if partitions else {}
+        )
         assert answer.status_code == 202, answer.text
         return answer.json()["run_id"]
 

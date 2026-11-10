@@ -20,7 +20,8 @@ host role's, `FEATHER_HOST_DATABASE_URL`, where one is set up), and a pipe to it
   partition at once (their pools' queues don't share keys);
 - submits the plan of each queued run tagged with its version, oldest first, and again while it stays queued, since
   the plan's idempotency key is the run's and a second submit of one that exists changes nothing (`take_queued`); and
-  runs the sweeper's resubmit pass for the runs of its version, which only a process with their code can do;
+  runs the sweeper's resubmit pass for the runs of its version, which only a process with their code can do, and, while
+  its version is the active one, the sealer of its push datasets, whose events only its code can parse (§7.2);
 - heartbeats, retries, checkpoints and drains on SIGTERM (CTRL_BREAK_EVENT on Windows) as any worker does. A host that
   is killed hands its tasks on as a killed worker does: the supervisor starts it again under the same id, and DBOS
   takes its pending tasks back.
@@ -55,6 +56,7 @@ from feather_connect.project import (
     use_secret_broker,
 )
 from feather_connect.runtime.runtime import Runtime
+from feather_connect.runtime.sealer import seal_once
 from feather_connect.runtime.sweeper import resubmit_lost
 from feather_connect.storage.port import Run, Store, check_wheel
 from feather_connect.storage.postgres.connect import connect
@@ -320,6 +322,10 @@ def run_host(
                 try:
                     for run_id in take_queued(runtime, package, version, submitted):
                         log.info("took run %s of %s %s", run_id, package, version)
+                    if any(a.package == package and a.version == version for a in store.packages.active()):
+                        seal_once(
+                            runtime, now=datetime.now(UTC)
+                        )  # its push datasets: their parse is its code
                     if time.monotonic() - swept >= SWEEP_EVERY_S:
                         swept = time.monotonic()
                         resubmit_lost(store, runtime, now=datetime.now(UTC), owns=tagged)

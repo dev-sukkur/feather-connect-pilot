@@ -7,11 +7,13 @@ from pathlib import Path
 import feather_connect as fc
 from feather_connect.connectors import http, postgres, simulation  # pyright: ignore[reportAttributeAccessIssue]
 
-FIXTURES = Path(os.environ.get("FEATHER_HARD_FIXTURES", "unset"))
+# The install check loads the package with none of the host's variables: it reads an empty fixture then.
+_EMPTY = Path(__file__).with_name("empty.json")
+FIXTURES = Path(os.environ["FEATHER_HARD_FIXTURES"]) if "FEATHER_HARD_FIXTURES" in os.environ else None
 
 
 def source(case: str) -> simulation.Source:
-    return simulation.Source("shop", fixture=FIXTURES / f"{case}.json")
+    return simulation.Source("shop", fixture=_EMPTY if FIXTURES is None else FIXTURES / f"{case}.json")
 
 
 def table(name: str, key: str = "id") -> postgres.Table:
