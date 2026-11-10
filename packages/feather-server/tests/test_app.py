@@ -1,7 +1,6 @@
 import time
 import uuid
 from collections.abc import Iterator
-from pathlib import Path
 from urllib.parse import urlsplit
 
 import psycopg
@@ -106,7 +105,7 @@ def test_settings_come_from_the_environment() -> None:
         "k",
         "https://feather.example",
     )
-    assert str(settings.project).replace("\\", "/") == "/srv/flows"
+    assert settings.legacy_project == "/srv/flows"  # only warned about: the project mode is retired (§13)
 
 
 def test_the_server_refuses_the_local_engine(  # Stage 2 M10: nothing would run its tasks
@@ -121,8 +120,9 @@ def test_settings_have_defaults_and_say_what_is_missing_or_wrong() -> None:
     assert len(settings.secret_key) >= 32  # made up for this process when none is set
     with pytest.raises(SettingsError, match="FEATHER_DATABASE_URL"):
         Settings.from_env({"FEATHER_PROJECT": "p"})
-    with pytest.raises(SettingsError, match="FEATHER_PROJECT"):
-        Settings.from_env({"FEATHER_DATABASE_URL": "x"})
+    assert (
+        Settings.from_env({"FEATHER_DATABASE_URL": "x"}).legacy_project is None
+    )  # no project is needed any more
     with pytest.raises(SettingsError, match="FEATHER_ENGINE"):
         Settings.from_env({"FEATHER_DATABASE_URL": "x", "FEATHER_PROJECT": "p", "FEATHER_ENGINE": "celery"})
     with pytest.raises(SettingsError, match="FEATHER_SPOOL"):
@@ -142,18 +142,14 @@ def test_the_ingress_queue_and_wait_are_settings() -> None:
 
 @pytest.mark.postgres
 @pytest.mark.parametrize("engine", ["local", "dbos"])
-def test_create_app_builds_its_state_from_settings(
-    engine: str, pg_url: str, pg: object, tmp_path: Path
-) -> None:
-    (tmp_path / "feather.yaml").write_text("name: demo\n")
-    (tmp_path / "env").mkdir()
-    (tmp_path / "env" / "dev.yaml").write_text("")
-    settings = Settings(database_url=pg_url, project=tmp_path, engine=engine, secret_key="test-secret-key")  # type: ignore[arg-type]
+def test_create_app_builds_its_state_from_settings(engine: str, pg_url: str, pg: object) -> None:
+    settings = Settings(database_url=pg_url, engine=engine, secret_key="test-secret-key")  # type: ignore[arg-type]
     app = create_app(settings, loops=no_loops)
     with TestClient(app) as client:
         assert client.get("/readyz").json() == {"database": "ok", "schema": "current"}
         state: AppState = app.state.feather
-        assert state.project.name == "demo" and state.store.runs.list_runs() == []
+        assert state.project.name == "environment" and not state.project.flows  # no flow loads in the server
+        assert state.store.runs.list_runs() == []
         assert type(state.engine).__name__ == {"local": "LocalEngine", "dbos": "DbosEngine"}[engine]
         assert state.closers
     assert not state.closers  # the lifespan's end let go of the pool and the engine (F10)

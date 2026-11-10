@@ -23,6 +23,7 @@ from feather_connect.storage.port import (
     ResponseRow,
 )
 from feather_connect.storage.spool import table_to_records
+from feather_server.catalog_view import dataset_of
 
 if TYPE_CHECKING:
     from feather_server.app import AppState
@@ -128,8 +129,11 @@ class Tracer:
 
     def trace(self, dataset: str, key: str) -> Trace:
         """Raises `KeyError` for a dataset the project doesn't have."""
-        found = self._rt.dataset(dataset)
-        routes = [r.name for f in self._rt.flows() if found in f.datasets for r in f.routes]
+        try:
+            found = self._rt.dataset(dataset)
+            routes = [r.name for f in self._rt.flows() if found in f.datasets for r in f.routes]
+        except KeyError:  # a packaged dataset: its routes from the catalogue
+            routes = list(dataset_of(self._state, dataset).routes)
         sightings = self._store.versions.key_history(dataset, key, VERSIONS_TRACED)
         version_ids = [s.version_id for s in sightings]
         entries = self._store.quarantine.of_key(dataset, key, version_ids)

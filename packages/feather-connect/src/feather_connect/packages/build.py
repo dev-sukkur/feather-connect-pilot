@@ -25,9 +25,11 @@ from typing import Any, cast
 import yaml
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 from feather_connect.packages import manifest as m
 from feather_connect.packages.manifest import ManifestError
+from feather_connect.packages.signing import SIGNATURE_FILE, Signer
 from feather_connect.project import ProjectError, is_secret_ref, load_project, validate_project
 
 PROJECT_DIRS = (
@@ -81,15 +83,24 @@ def wheel_name(name: str, version: str) -> str:
     return f"{m.module_of(name)}-{version}-{_TAG}.whl"
 
 
-def build_package(root: Path, out_dir: Path | None = None, *, env: str = "dev") -> Built:
+def build_package(
+    root: Path,
+    out_dir: Path | None = None,
+    *,
+    env: str = "dev",
+    signer: Signer | None = None,
+    version: str | None = None,
+) -> Built:
     """Build the project in `root` into `out_dir` (`root/dist` by default). Checks the project as `feather validate
-    --env <env>` does first. Raises `ManifestError` saying what to fix."""
+    --env <env>` does first. With a `signer`, the wheel carries its signature of the RECORD (`signing`). `version`
+    stands in for feather.yaml's, as `feather dev` (a `.devN` of it) and the upgrade of an M1 project (one with no
+    version yet) build. Raises `ManifestError` saying what to fix."""
     root = root.resolve()
     config = _feather_yaml(root)
     name = m.check_name(config.get("name"))
-    if "version" not in config:
+    if version is None and "version" not in config:
         raise ManifestError("feather.yaml: version: is required to build a package, such as version: 1.0.0")
-    version = m.check_version(config["version"])
+    version = m.check_version(config["version"] if version is None else version)
     fc_versions = m.check_fc_versions(config.get("fc_versions") or m.default_fc_versions())
     dependencies = _dependencies(root, name, version)
     lock = _lock(root, dependencies)
@@ -114,7 +125,7 @@ def build_package(root: Path, out_dir: Path | None = None, *, env: str = "dev") 
     target = (out_dir or root / "dist").resolve()
     target.mkdir(parents=True, exist_ok=True)
     path = target / wheel_name(name, version)
-    _write_wheel(path, manifest, files, lock, dependencies)
+    _write_wheel(path, manifest, files, lock, dependencies, signer)
     data = path.read_bytes()
     return Built(path, hashlib.sha256(data).hexdigest(), len(data), manifest, _secret_warnings(root))
 
@@ -146,7 +157,7 @@ def _dependencies(root: Path, name: str, version: str) -> list[str]:
         raise ManifestError(f"pyproject.toml: can't read it ({error})") from None
     if "name" in project and canonicalize_name(str(project["name"])) != canonicalize_name(name):
         raise ManifestError(f"pyproject.toml names {project['name']!r}, but feather.yaml names {name!r}")
-    if "version" in project and str(project["version"]) != version:
+    if "version" in project and str(project["version"]) not in (version, _released(version)):
         raise ManifestError(
             f"pyproject.toml says version {project['version']}, but feather.yaml says {version}"
         )
@@ -159,6 +170,12 @@ def _dependencies(root: Path, name: str, version: str) -> list[str]:
         if canonicalize_name(requirement.name) != "feather-connect":
             found.append(str(requirement))
     return sorted(found)
+
+
+def _released(version: str) -> str:
+    """The version a `.devN` build of `feather dev` comes before: `1.2.0` for `1.2.0.dev7`."""
+    parsed = Version(version)
+    return parsed.base_version if parsed.is_devrelease else version
 
 
 def _lock(root: Path, dependencies: Sequence[str]) -> bytes:
@@ -193,7 +210,53 @@ def _lock(root: Path, dependencies: Sequence[str]) -> bytes:
         raise ManifestError(f"uv export failed: {reason[-1] if reason else done.returncode}")
     lock = done.stdout.replace(b"\r\n", b"\n")
     _check_hashes(lock)
-    return lock
+    return with_wheel_hashes(lock, _wheel_hashes(root / "uv.lock"))
+
+
+WHEELS_NOTE = "# wheels:"  # the comment, under a requirement of a lock, that names the hashes of its wheels
+
+
+def _wheel_hashes(uv_lock: Path) -> dict[str, set[str]]:
+    """The sha256 hashes of each locked package's wheels, by `name==version`, from uv.lock."""
+    import tomllib
+
+    found: dict[str, set[str]] = {}
+    data = tomllib.loads(uv_lock.read_text(encoding="utf-8"))
+    for package in data.get("package", []):
+        name = str(package.get("name", "")).lower().replace("_", "-")
+        hashes = {str(w["hash"]) for w in package.get("wheels", []) if "hash" in w}
+        found[f"{name}=={package.get('version')}"] = hashes
+    return found
+
+
+def with_wheel_hashes(lock: bytes, wheels: dict[str, set[str]]) -> bytes:
+    """The lock with a `# wheels:` comment under each requirement naming those of its hashes that are wheels, so that
+    an install can refuse a requirement that has only a source distribution (a worker installs wheels only, and
+    building a source distribution would run its code). Comments change nothing for uv or pip."""
+    out: list[str] = []
+    requirement: str | None = None
+    hashes: list[str] = []
+
+    def close() -> None:
+        if requirement is not None:
+            named = sorted(h for h in hashes if h in wheels.get(requirement, set()))
+            out.append(f"    {WHEELS_NOTE} {' '.join(named)}".rstrip())
+
+    for line in lock.decode("utf-8").splitlines():
+        text = line.strip()
+        if line[:1].isspace() and text.startswith("--hash="):
+            hashes += [
+                p.removeprefix("--hash=") for p in text.rstrip("\\ ").split() if p.startswith("--hash=")
+            ]
+            out.append(line)
+            continue
+        if text and not text.startswith("#") and not line[:1].isspace():
+            close()
+            requirement = text.split(" ")[0].split(";")[0].lower().replace("_", "-")
+            hashes = [p.removeprefix("--hash=") for p in text.split() if p.startswith("--hash=")]
+        out.append(line)
+    close()
+    return ("\n".join(out) + "\n").encode()
 
 
 def _check_hashes(lock: bytes) -> None:
@@ -330,6 +393,7 @@ def _write_wheel(
     files: Sequence[tuple[str, Path]],
     lock: bytes,
     dependencies: Sequence[str],
+    signer: Signer | None = None,
 ) -> None:
     name, version, module = manifest["name"], manifest["version"], manifest["module"]
     info = f"{module}-{version}.dist-info"
@@ -361,6 +425,8 @@ def _write_wheel(
     ]
     record = "".join(f"{p},{_record_hash(d)},{len(d)}\n" for p, d in entries) + f"{info}/RECORD,,\n"
     entries.append((f"{info}/RECORD", record.encode()))
+    if signer is not None:  # not in RECORD, which it signs
+        entries.append((f"{info}/{SIGNATURE_FILE}", signer.sign(record.encode())))
     partial = path.with_suffix(".whl.part")
     with zipfile.ZipFile(partial, "w") as archive:
         for arcname, data in entries:

@@ -3,7 +3,7 @@
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pyarrow as pa
 
@@ -221,6 +221,7 @@ class Flow:
                     "complete": d.strategy.complete,
                     "priority": d.priority,
                     "keep_state": d.keep_state,
+                    **({"push": push} if (push := push_spec(d)) is not None else {}),
                 }
                 for d in self.datasets
             ],
@@ -300,3 +301,21 @@ class Flow:
                     )
                 )
         return problems
+
+
+def push_spec(dataset: Dataset) -> dict[str, Any] | None:
+    """What the server needs to take a push dataset's webhooks with no code of its package (flow packages §7.2, §13):
+    the source's class and its settings, when the source can say them as JSON (`push_options`). None for a dataset
+    that isn't pushed, or whose source can't."""
+    if dataset.strategy.name != "push":
+        return None
+    options_of = getattr(dataset.source, "push_options", None)
+    options = options_of() if callable(options_of) else None
+    if options is None:
+        return None
+    kind = type(dataset.source)
+    return {
+        "source": f"{kind.__module__}:{kind.__qualname__}",
+        "connection": dataset.source.connection,
+        "options": dict(cast("Mapping[str, Any]", options)),
+    }

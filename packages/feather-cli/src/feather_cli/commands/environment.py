@@ -274,10 +274,18 @@ def activate(
     token: remote.Token = None,
     json_mode: Json = False,
 ) -> None:
-    """Put a flow of an installed version in service: its triggers fire from the next tick, with no restart."""
+    """Put a flow of an installed version in service. A worker starts a host of the version, and once it is up the
+    flow's triggers fire on it, with no restart; the version active before fires until then."""
     with remote.client(project, env, server, token, json_mode) as api:
         done = remote.call(lambda: api.activate_flow(flow, version, reason), json_mode)
-    emit(done, json_mode=json_mode, human=lambda d: typer.echo(f"{d['flow']} {d['version']}: {d['state']}"))
+
+    def said(d: dict[str, Any]) -> None:
+        line = f"{d['flow']} {d['version']}: {d['state']}"
+        if d["state"] == "activating":
+            line += " (it fires once a worker's host of it is up; the version active before fires until then)"
+        typer.echo(line)
+
+    emit(done, json_mode=json_mode, human=said)
 
 
 @flow_app.command()

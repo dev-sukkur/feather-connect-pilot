@@ -398,6 +398,10 @@ def test_installed_packages_belong_to_their_tenant(pg: Pg, pg_url: str, clock: F
     )  # the other tenant's to have
     assert first.packages.wheel(one) == b"one" and second.packages.wheel(two) == b"two"
     assert first.packages.wheel(two) is None and second.packages.wheel(one) is None
+    assert first.packages.prepared("acme", "1.0.0", "ready", {"ok": True})
+    assert second.packages.version("acme", "1.0.0").state == "installed"  # type: ignore[union-attr]
+    first.packages.record_env("w-1", "b" * 64, "ready", T0)
+    assert second.packages.envs() == [] and len(first.packages.envs()) == 1
     assert [a.flow for a in second.packages.activations("acme")] == ["acme/invoices"]
 
 
@@ -467,7 +471,7 @@ def _package_version(load_check: dict[str, Any]) -> Any:
     sha = hashlib.sha256(b"wheel").hexdigest()
     return PackageVersion(
         "acme", "1.0.0", sha, "feather", "acme-1.0.0-py3-none-any.whl", 5, manifest, ">=0.1", "b" * 64,
-        "installed", load_check, "root", T0,
+        "ready", load_check, "root", T0,
     )  # fmt: skip
 
 
@@ -479,6 +483,7 @@ def test_a_deactivated_flow_stops_firing_within_seconds_over_listen_notify(store
     spec = {"name": "acme/invoices", "datasets": [], "triggers": [{"kind": "every", "seconds": 1.0}]}
     store.packages.install(_package_version({"specs": {"acme/invoices": spec}}), b"wheel", ["acme/invoices"])
     store.packages.activate("acme/invoices", "acme", "1.0.0", "ops", T0)
+    store.packages.promote("acme", "1.0.0", T0)  # its host is up
     catalogue = Catalogue(store, monotonic=lambda: 0.0)  # no poll: only NOTIFY makes it read again
     catalogue.listen()
     try:
@@ -521,7 +526,8 @@ def test_a_notify_during_a_read_isnt_lost(store: Store):
         first.start()
         assert reading.wait(5)
         object.__setattr__(store.packages, "active", real)
-        store.packages.activate("acme/invoices", "acme", "1.0.0", "ops", T0)  # NOTIFY while the read runs
+        store.packages.activate("acme/invoices", "acme", "1.0.0", "ops", T0)
+        store.packages.promote("acme", "1.0.0", T0)  # NOTIFY while the read runs
         deadline = time.monotonic() + 5
         while catalogue._generation == 0 and time.monotonic() < deadline:  # pyright: ignore[reportPrivateUsage]
             time.sleep(0.02)

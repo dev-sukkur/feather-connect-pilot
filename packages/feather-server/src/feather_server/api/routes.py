@@ -16,15 +16,19 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi import Path as Path_
+from fastapi.concurrency import run_in_threadpool
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from feather_connect.packages.wheel import MAX_WHEEL
 from feather_connect.storage.port import DeliveryStatus, EnvEntry, EnvKind, delivery_cursor
 from feather_server.api.errors import ApiProblem, translate
 from feather_server.api.paging import check_limit, decode, page
 from feather_server.auth import Actor, CurrentActor, require_csrf
+from feather_server.catalog_view import dataset_of, route_of
 from feather_server.services import task_records as records
+from feather_server.services.access import require
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.environment import Environment
@@ -242,14 +246,29 @@ def flows(reads: See, _: CurrentActor) -> JSONResponse:
     return ok({"items": reads.flows(), "next_cursor": None})
 
 
-@router.get("/flows/{flow}")
+@router.get("/flows/{flow:path}")
 def flow(flow: str, reads: See, _: CurrentActor) -> JSONResponse:
     return ok(call(lambda: reads.flow_detail(flow)))
 
 
 def _dataset(request: Request, name: str) -> dict[str, Any]:
     runtime = request.app.state.feather.runtime
-    found = runtime.dataset(name)
+    try:
+        found = runtime.dataset(name)
+    except KeyError:
+        packaged = dataset_of(request.app.state.feather, name)
+        return {
+            "name": packaged.name,
+            "flow": packaged.flow,
+            "connection": packaged.connection,
+            "connector": packaged.connector,
+            "key": packaged.key[0] if len(packaged.key) == 1 else list(packaged.key),
+            "strategy": packaged.strategy,
+            "partition": None,  # in the package's code: the server has no partition object for it
+            "priority": packaged.priority,
+            "on_record_error": None,
+            "routes": list(packaged.routes),
+        }
     owner = next(f for f in runtime.flows() if found in f.datasets)
     key = found.key if isinstance(found.key, str) else list(found.key)
     return {
@@ -266,14 +285,27 @@ def _dataset(request: Request, name: str) -> dict[str, Any]:
     }
 
 
-@router.get("/datasets/{dataset}")
+@router.get("/datasets/{dataset:path}")
 def dataset(dataset: str, request: Request, _: CurrentActor) -> JSONResponse:
     return ok(call(lambda: _dataset(request, dataset)))
 
 
 def _route(request: Request, name: str) -> dict[str, Any]:
     runtime = request.app.state.feather.runtime
-    found = runtime.route(name)
+    try:
+        found = runtime.route(name)
+    except KeyError:
+        packaged = route_of(request.app.state.feather, name)
+        return {
+            "name": packaged.name,
+            "flow": packaged.flow,
+            "connection": packaged.connection,
+            "connector": packaged.connector,
+            "mode": packaged.mode,
+            "priority": packaged.priority,
+            "paused": runtime.is_route_paused(packaged.name),
+            "datasets": list(packaged.datasets),
+        }
     owner = next(f for f in runtime.flows() if found in f.routes)
     return {
         "name": found.name,
@@ -287,7 +319,7 @@ def _route(request: Request, name: str) -> dict[str, Any]:
     }
 
 
-@router.get("/routes/{route}")
+@router.get("/routes/{route:path}")
 def route(route: str, request: Request, _: CurrentActor) -> JSONResponse:
     return ok(call(lambda: _route(request, route)))
 
@@ -367,7 +399,7 @@ def task_logs(task_id: str, reads: See, _: CurrentActor) -> JSONResponse:
     return ok({"task_id": task_id, "lines": reads.task_logs(task_id)})
 
 
-@router.post("/flows/{flow}:run", status_code=202)
+@router.post("/flows/{flow:path}:run", status_code=202)
 def run_flow(
     flow: str,
     request: Request,
@@ -414,7 +446,7 @@ def _pause(
     return _once(request, actor, key, do)
 
 
-@router.post("/flows/{flow}:pause")
+@router.post("/flows/{flow:path}:pause")
 def pause_flow(
     flow: str,
     request: Request,
@@ -429,7 +461,7 @@ def pause_flow(
     )
 
 
-@router.post("/flows/{flow}:resume")
+@router.post("/flows/{flow:path}:resume")
 def resume_flow(
     flow: str,
     request: Request,
@@ -444,7 +476,7 @@ def resume_flow(
     )
 
 
-@router.post("/routes/{route}:pause")
+@router.post("/routes/{route:path}:pause")
 def pause_route(
     route: str,
     request: Request,
@@ -464,7 +496,7 @@ def pause_route(
     )
 
 
-@router.post("/routes/{route}:resume")
+@router.post("/routes/{route:path}:resume")
 def resume_route(
     route: str,
     request: Request,
@@ -487,7 +519,7 @@ def resume_route(
 # Partitions.
 
 
-@router.get("/datasets/{dataset}/partitions")
+@router.get("/datasets/{dataset:path}/partitions")
 def partitions(
     dataset: str, reads: See, _: CurrentActor, limit: Limit = 100, cursor: Cursor = None
 ) -> JSONResponse:
@@ -495,12 +527,12 @@ def partitions(
     return ok({**page(grid.rows, grid.next_cursor), "routes": grid.routes})
 
 
-@router.post("/datasets/{dataset}/partitions:rerun:preview")
+@router.post("/datasets/{dataset:path}/partitions:rerun:preview")
 def preview_rerun(dataset: str, body: RerunPreview, actions: Do, actor: CurrentActor) -> JSONResponse:
     return ok(_preview(call(lambda: actions.preview_rerun(actor, dataset, body.partitions))))
 
 
-@router.post("/datasets/{dataset}/partitions:rerun", status_code=202)
+@router.post("/datasets/{dataset:path}/partitions:rerun", status_code=202)
 def rerun(
     dataset: str,
     request: Request,
@@ -514,7 +546,7 @@ def rerun(
     return _once(request, actor, key, lambda: {"run_id": actions.rerun(actor, token, reason=reason)}, 202)
 
 
-@router.post("/flows/{flow}:backfill:preview")
+@router.post("/flows/{flow:path}:backfill:preview")
 def preview_backfill(flow: str, body: BackfillPreview, actions: Do, actor: CurrentActor) -> JSONResponse:
     found = call(
         lambda: actions.preview_backfill(
@@ -524,7 +556,7 @@ def preview_backfill(flow: str, body: BackfillPreview, actions: Do, actor: Curre
     return ok(_preview(found))
 
 
-@router.post("/flows/{flow}:backfill", status_code=202)
+@router.post("/flows/{flow:path}:backfill", status_code=202)
 def backfill(
     flow: str,
     request: Request,
@@ -568,7 +600,7 @@ def version_records(
 # Tracing a record.
 
 
-@router.get("/datasets/{dataset}/records/{key:path}/trace")
+@router.get("/datasets/{dataset:path}/records/{key:path}/trace")
 def record_trace(dataset: str, key: str, request: Request, _: CurrentActor) -> JSONResponse:
     """What happened to one record, by its dataset key: each version that held it, oldest first, with what each route
     did with it. Only versions sealed since the key index came in are traced."""
@@ -578,7 +610,7 @@ def record_trace(dataset: str, key: str, request: Request, _: CurrentActor) -> J
 # Deliveries.
 
 
-@router.get("/routes/{route}/deliveries")
+@router.get("/routes/{route:path}/deliveries")
 def deliveries(
     route: str,
     reads: See,
@@ -868,6 +900,88 @@ def package_version(name: str, version: str, installs: Installs, _: CurrentActor
     return ok(call(lambda: installs.version(name, version)))
 
 
+@router.delete("/packages/{name}/versions/{version}")
+def uninstall_package(
+    name: str,
+    version: str,
+    request: Request,
+    installs: Installs,
+    actor: CurrentActor,
+    key: IdempotencyKey = None,
+    body: Reason | None = None,
+) -> JSONResponse:
+    """Uninstall a version (§6): refused 409 (`check: in_use`) while a flow of it is active or a run of it is queued
+    or running."""
+    reason = (body or Reason()).reason
+    return _once(request, actor, key, lambda: installs.uninstall(actor, name, version, reason=reason))
+
+
+# Promotion (§6, task 10): the admin's CLI takes a ready version's wheel from one environment and gives it, with its
+# sha256, to another, which installs it only if the bytes hash to it.
+
+
+@router.get("/packages/{name}/versions/{version}/wheel")
+def export_package(name: str, version: str, installs: Installs, actor: CurrentActor) -> Response:
+    """A ready version's stored wheel, the bytes this environment tested, with their sha256 in `X-Feather-Sha256`.
+    An admin's (`packages.promote`), audited."""
+    found = call(lambda: installs.export(actor, name, version))
+    content = found.content
+
+    def chunks() -> Iterator[bytes]:
+        for start in range(0, len(content), _CHUNK):
+            yield content[start : start + _CHUNK]
+
+    return StreamingResponse(
+        chunks(),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": attachment(found.filename),
+            "Content-Length": str(len(content)),
+            "X-Feather-Sha256": found.sha256,
+        },
+    )
+
+
+_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+@router.post("/packages:promote", status_code=201)
+async def promote_package(
+    request: Request,
+    installs: Installs,
+    actor: CurrentActor,
+    filename: Annotated[str, Query(max_length=200)],
+    sha256: Annotated[str, Query(min_length=64, max_length=64)],
+    source: Annotated[str, Query(alias="from", max_length=64)],
+    reason: Annotated[str | None, Query(max_length=500)] = None,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    """Install the wheel in the body (`application/octet-stream`), which another environment exported, only if it
+    hashes to `sha256`. The body is refused past the 50 MiB a package may have, as it comes."""
+    if not _SHA256.match(sha256):
+        raise ApiProblem(422, "Unprocessable Content", "sha256 is 64 hex digits")
+    call(
+        lambda: require(
+            actor, "packages.promote", request.app.state.feather.store.audit, f"package:{filename}"
+        )
+    )
+    length = request.headers.get("content-length", "")
+    too_big = ApiProblem(413, "Content Too Large", f"a package may have at most {MAX_WHEEL} bytes")
+    if length.isdigit() and int(length) > MAX_WHEEL:
+        raise too_big
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > MAX_WHEEL:
+            raise too_big
+    content = bytes(body)
+
+    def promote() -> Any:
+        return installs.promote(actor, filename, content, sha256=sha256, source=source, reason=reason)
+
+    return await run_in_threadpool(_once, request, actor, key, promote, 201)
+
+
 # The environment's own configuration and secrets (flow packages §8): reading needs any role, changing an admin.
 
 
@@ -1110,3 +1224,18 @@ def summary(reads: See, _: CurrentActor) -> JSONResponse:
             "workers": found.workers,
         }
     )
+
+
+def _names_last() -> None:
+    """Packaged names carry a "/" (`<package>/<name>`), so the name routes take a path. A route that is only a name
+    would also take `<name>/partitions` and the like, so those go after every other route."""
+    bare = {
+        f"{PREFIX}/flows/{{flow:path}}",
+        f"{PREFIX}/datasets/{{dataset:path}}",
+        f"{PREFIX}/routes/{{route:path}}",
+    }
+    last = [r for r in router.routes if getattr(r, "path", None) in bare]
+    router.routes[:] = [r for r in router.routes if r not in last] + last
+
+
+_names_last()

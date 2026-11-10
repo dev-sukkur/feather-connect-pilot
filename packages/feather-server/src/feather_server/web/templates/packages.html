@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{{ m.page_head("Packages", tiles) }}
+<p class="muted lead">The flow packages installed in environment <code>{{ env }}</code>, their versions, and which flows are in service on which version. A version is prepared on each worker, its environment built and its code load-checked, before its flows can be activated.</p>
+{{ m.notice_of(notice) }}
+{% if ask %}{{ m.ask_form(ask) }}{% endif %}
+{% call m.toolbar("/packages", q, "packages") %}{% endcall %}
+<div id="live">
+{% if packages %}
+<div class="table-wrap scroll"><table class="data" data-table="packages">
+  <caption class="sr-only">Installed packages</caption>
+  <thead><tr><th scope="col" data-sort>Package</th><th scope="col">Versions</th><th scope="col">Active flows</th><th scope="col">Hosts</th></tr></thead>
+  <tbody>
+  {% for p in packages %}
+    <tr>
+      <th scope="row"><a href="/packages/{{ p.name | urlencode }}">{{ p.name }}</a></th>
+      <td><ul class="plain-list">{% for v in p.versions %}<li><code>{{ v.version }}</code> {{ m.version_state(v) }}</li>{% endfor %}</ul></td>
+      <td>{% for flow, version in p.active %}<a href="/packages/{{ p.name | urlencode }}/flows/{{ flow.split('/', 1)[1] | urlencode }}">{{ flow }}</a> <code>{{ version }}</code>{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">none</span>{% endfor %}</td>
+      <td>{% if p.failing %}{% for h in p.failing %}{{ m.status_dot(h.state) }} <code>{{ h.version }}</code> on {{ h.worker_id }}{% if not loop.last %}<br>{% endif %}{% endfor %}{% else %}<span class="muted">none failing</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{{ m.table_foot(packages | length, "package", "packages") }}
+{% else %}
+<p class="empty">{% if q %}No package matches {{ q }}.{% else %}No package is installed here yet.{% endif %}</p>
+{% endif %}
+</div>
+
+{% if can(actor, "packages.install") %}
+<section aria-labelledby="h-install">
+  <h2 id="h-install">Install from a registry</h2>
+  <p class="muted">A version is fetched from one of the <a href="/registries">registries</a> this environment trusts, and checked: {{ checks | join(", ") }}. A version is installed once, and always means the same code.</p>
+  <form class="filters" method="post" action="/packages/install">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p><label for="install-registry">Registry</label><br>
+      <select id="install-registry" name="registry">{% for r in registries %}<option value="{{ r }}"{% if r == form.get("registry") %} selected{% endif %}>{{ r }}</option>{% endfor %}</select></p>
+    <p><label for="install-name">Package</label><br><input id="install-name" name="name" type="text" maxlength="200" required value="{{ form.get('name', '') }}" placeholder="acme-invoices" autocomplete="off"></p>
+    <p><label for="install-version">Version (newest if empty)</label><br><input id="install-version" name="version" type="text" maxlength="64" value="{{ form.get('version', '') }}" placeholder="1.4.0" autocomplete="off"></p>
+    <p><label for="install-reason">Reason</label><br><input id="install-reason" name="reason" type="text" maxlength="500" value="{{ form.get('reason', '') }}"></p>
+    <p><button type="submit" class="primary" data-confirm="Install this package? It is fetched and checked; its flows start inactive, and nothing runs until one is activated." data-confirm-field="confirm">Install</button></p>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

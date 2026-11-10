@@ -1,6 +1,7 @@
-"""The worker process: loads a flow project, registers it in the catalogue, heartbeats and executes tasks.
+"""The worker loop that every package host runs (`feather_connect.host`): it heartbeats and executes tasks.
 
-    python -m feather_connect.worker PROJECT_ROOT ENV --database-url postgresql://...
+The project mode, where this module loaded a project folder and ran its flows, is retired (flow packages §13): a worker
+is a supervisor (`feather_connect.supervisor`, `feather worker`) that runs a package host per installed version.
 
 On SIGTERM (on Windows also CTRL_BREAK_EVENT) it marks itself `draining`, stops taking work, waits up to 30 s for
 the tasks that are running, and exits 0. A worker that is killed instead is found by the sweeper, which sees its
@@ -10,25 +11,19 @@ The engine side is DBOS (`feather-engine-dbos`), which is imported when the work
 the SDK does not depend on it.
 """
 
-import argparse
 import logging
-import os
 import signal
-import socket
 import threading
-from collections.abc import Mapping, Sequence
-from pathlib import Path
+from collections.abc import Callable, Mapping
 from types import FrameType
 from typing import Any
 
 from feather_connect.core.errors import PermanentError
-from feather_connect.logs import configure_logging, install_task_logs, register_secrets
-from feather_connect.project import Project, ProjectError, environment_layer, load_project, use_db_secrets
+from feather_connect.engine.port import TaskFn
+from feather_connect.logs import register_secrets
+from feather_connect.project import Project, ProjectError
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.port import Store
-from feather_connect.storage.postgres.connect import connect
-from feather_connect.storage.postgres.migrate import migrate
-from feather_connect.vault import Vault, keyring_from_env
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +31,7 @@ HEARTBEAT_S = 5.0
 DRAIN_S = 30.0
 
 
-def _check_connections(project: Project) -> None:
+def check_connections(project: Project) -> None:
     """Fail at startup, not in a task, when a flow uses a connection the project does not define."""
     for flow in project.flows:
         used = {d.source.connection for d in flow.datasets} | {r.sink.connection for r in flow.routes}
@@ -47,7 +42,7 @@ def _check_connections(project: Project) -> None:
             )
 
 
-def _heartbeats(
+def heartbeats(
     store: Store, worker_id: str, labels: Mapping[str, str], sha: str, slots: int
 ) -> threading.Event:
     """Heartbeat every `HEARTBEAT_S` from a daemon thread, until the returned event is set."""
@@ -75,62 +70,7 @@ def config_of(project: Project, connection: str) -> Mapping[str, Any]:
     return resolved
 
 
-def run_worker(
-    project_root: Path,
-    env: str,
-    *,
-    database_url: str,
-    worker_id: str | None = None,
-    slots: int = 8,
-    labels: Mapping[str, str] | None = None,
-    poll_s: float = 0.5,
-    stop: threading.Event | None = None,
-) -> int:
-    """Run a worker until it is told to stop, and return the exit code. `worker_id` defaults to
-    `FEATHER_WORKER_ID`, then the host name.
-
-    It stops on SIGTERM, SIGINT or SIGBREAK, or, when `stop` is given, when that event is set: a caller that runs
-    the worker in a thread (`feather dev`) passes one, and no signal handler is installed.
-    """
-    from feather_engine_dbos import DbosEngine
-
-    configure_logging(os.environ.get("FEATHER_LOG_LEVEL", "INFO"))
-    worker_id = worker_id or os.environ.get("FEATHER_WORKER_ID") or socket.gethostname()
-    labels = dict(labels or {})
-    migrate(database_url)
-    store, spool = connect(database_url)
-    keyring = keyring_from_env()
-    use_db_secrets(Vault(store.secrets, env, keyring).open)  # one vault for the process
-    # TODO(flow packages task 6, P4 package hosts; task 8, P6 retiring project mode): workers stop loading a project
-    # here and run installed packages' flows from the catalogue on package hosts.
-    project = load_project(project_root, env, environment=environment_layer(store.env_config.entries(env)))
-    _check_connections(project)
-    remove_task_logs = install_task_logs(store)
-    engine: DbosEngine | None = None
-    try:
-        store.catalog.sync(project.name, project.code_sha, {f.name: f.spec_dict() for f in project.flows})
-        for budget in project.budgets.values():
-            store.budgets.define(budget)
-        engine = DbosEngine(database_url)
-        runtime = Runtime(
-            project.flows,
-            store,
-            spool,
-            engine,
-            code_sha=project.code_sha,
-            budgets={c.name: c.budget for c in project.connections.values() if c.budget is not None},
-            config_of=lambda connection: config_of(project, connection),
-            timezone=str(project.settings["timezone"]),
-        )
-        return _work(runtime, store, database_url, worker_id, labels, slots, poll_s, stop, project.code_sha)
-    finally:  # a reload in `feather dev` runs this again in the same process
-        remove_task_logs()
-        if engine is not None:
-            engine.close()
-        store.close()
-
-
-def _work(
+def work(
     runtime: Runtime,
     store: Store,
     database_url: str,
@@ -140,8 +80,11 @@ def _work(
     poll_s: float,
     stop: threading.Event | None,
     code_sha: str,
+    background: "Callable[[threading.Event], None] | None" = None,
+    tasks: "Mapping[str, TaskFn] | None" = None,
 ) -> int:
-    """Execute tasks and heartbeat until told to stop, and drain."""
+    """Execute tasks and heartbeat until told to stop, and drain. `background`, if given, runs on a thread of its own
+    from when the worker takes tasks, and is given the event that says to stop. `tasks` replaces the runtime's."""
     from feather_engine_dbos import DbosWorkerRuntime
 
     told_to_stop = threading.Event() if stop is None else stop
@@ -159,9 +102,11 @@ def _work(
     # a restarted container keeps its hostname, the default id, and its last process left the row draining.
     store.workers.mark(worker_id, "alive")
     handle = DbosWorkerRuntime(database_url, poll_s=poll_s, drain_s=DRAIN_S).run(
-        runtime.tasks(), worker_id, labels, slots
+        runtime.tasks() if tasks is None else tasks, worker_id, labels, slots
     )
-    stop_beating = _heartbeats(store, worker_id, labels, code_sha, slots)
+    stop_beating = heartbeats(store, worker_id, labels, code_sha, slots)
+    if background is not None:
+        threading.Thread(target=background, args=(told_to_stop,), name="background", daemon=True).start()
     try:
         while not told_to_stop.wait(
             0.5
@@ -172,31 +117,3 @@ def _work(
     finally:
         stop_beating.set()
     return 0
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m feather_connect.worker", description=__doc__)
-    parser.add_argument("project_root", type=Path)
-    parser.add_argument("env")
-    parser.add_argument("--database-url", default=os.environ.get("FEATHER_DATABASE_URL"))
-    parser.add_argument("--worker-id")
-    parser.add_argument("--slots", type=int, default=8)
-    parser.add_argument("--label", action="append", default=[], metavar="KEY=VALUE")
-    parser.add_argument("--poll-s", type=float, default=float(os.environ.get("FEATHER_ENGINE_POLL_S", "0.5")))
-    args = parser.parse_args(argv)
-    if not args.database_url:
-        parser.error("give --database-url or set FEATHER_DATABASE_URL")
-    labels = dict(label.split("=", 1) for label in args.label)
-    return run_worker(
-        args.project_root,
-        args.env,
-        database_url=args.database_url,
-        worker_id=args.worker_id,
-        slots=args.slots,
-        labels=labels,
-        poll_s=args.poll_s,
-    )
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

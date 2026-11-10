@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+<h1>{{ name }}</h1>
+<p><a href="/packages">&larr; All packages</a></p>
+{{ m.notice_of(notice) }}
+{% if ask %}{{ m.ask_form(ask) }}{% endif %}
+
+<section aria-labelledby="h-flows">
+  <h2 id="h-flows">Flows</h2>
+  <p class="muted">Which version of each flow is in service here. Activating another version switches to it once a worker's host of it is up; until then the version in service keeps running.</p>
+  {% for f in flows %}
+  <section class="card" aria-labelledby="flow-{{ loop.index }}">
+    <h3 id="flow-{{ loop.index }}"><a href="/packages/{{ name | urlencode }}/flows/{{ f.short | urlencode }}">{{ f.name }}</a>
+      {% if f.active %}{{ m.status_badge("active") }} <code>{{ f.active }}</code>{% elif f.activating %}{{ m.status_badge("activating") }} <code>{{ f.activating }}</code>{% else %}{{ m.status_badge("inactive") }}{% endif %}</h3>
+    {% if f.activating and f.active %}<p class="muted">Moving to <code>{{ f.activating }}</code> once its host is up; <code>{{ f.active }}</code> keeps running until then.</p>{% endif %}
+    {% if f.failed %}<p class="notice notice-bad">Activating <code>{{ f.failed.version }}</code> failed: {{ f.failed.error or "its host didn't come up" }}</p>{% endif %}
+    {% set back = "package" %}{% include "_package_flow_actions.html" %}
+  </section>
+  {% else %}
+  <p class="empty">The package defines no flows.</p>
+  {% endfor %}
+</section>
+
+<section aria-labelledby="h-versions">
+  <h2 id="h-versions">Versions</h2>
+  {% if signing[0] %}<p class="muted">This environment takes only packages signed with one of its trusted keys ({{ signing[1] | join(", ") }}).</p>{% endif %}
+  {% for v in versions %}
+  {% set row = v.row %}
+  <section class="card" aria-labelledby="v-{{ loop.index }}">
+    <h3 id="v-{{ loop.index }}"><code>{{ row.version }}</code> {{ m.version_state(row) }}</h3>
+    <dl class="facts">
+      <dt>sha256</dt><dd><code class="wrap">{{ row.sha256 }}</code></dd>
+      <dt>From</dt><dd>{% if row.promoted_from %}promoted from <b>{{ row.promoted_from }}</b>{% if row.promoted_by %} by {{ row.promoted_by }}{% endif %}, kept in {{ row.registry }}{% else %}{{ row.registry }}{% endif %}</dd>
+      <dt>Signed</dt><dd>{% if row.signed_by %}by key <code>{{ row.signed_by }}</code>{% else %}<span class="muted">not checked: signing wasn't required when it was installed</span>{% endif %}</dd>
+      <dt>Installed</dt><dd>{{ m.time_ago(row.installed_at) }} by {{ row.installed_by }}</dd>
+      <dt>Feather Connect</dt><dd><code>{{ row.fc_versions }}</code></dd>
+      <dt>Active flows</dt><dd>{% if v.active_flows %}{{ v.active_flows | join(", ") }}{% else %}<span class="muted">none</span>{% endif %}</dd>
+    </dl>
+    {% if row.state != "uninstalled" %}
+    <h4>Install checks</h4>
+    {% if row.checks %}<ul class="checks">{% for check in row.checks %}<li>{{ m.status_dot("passed") }} <code>{{ check }}</code></li>{% endfor %}</ul>
+    {% else %}<p class="muted">Not recorded: it was installed before the checks it passed were kept.</p>{% endif %}
+    <h4>Preparing on the workers</h4>
+    <ul class="checks">{% for step, how in v.steps %}<li>{{ m.status_dot(how) }} <code>{{ step }}</code></li>{% endfor %}</ul>
+    {% if row.load_check %}
+    <h4>Load check</h4>
+    <dl class="facts">
+      <dt>Result</dt><dd>{% if row.load_check.get("ok") %}{{ m.status_dot("passed") }}{% else %}{{ m.status_dot("failed") }}{% endif %}</dd>
+      {% if row.load_check.get("error") %}<dt>Error</dt><dd class="error-text">{{ row.load_check["error"] }}</dd>{% endif %}
+      {% if row.load_check.get("flows") %}<dt>Flows it defines</dt><dd>{{ row.load_check["flows"] | join(", ") }}</dd>{% endif %}
+      {% if row.load_check.get("seconds") is not none %}<dt>Took</dt><dd>{{ "%.1f" | format(row.load_check.get("seconds") or 0) }} s{% if row.load_check.get("worker") %} on {{ row.load_check["worker"] }}{% endif %}</dd>{% endif %}
+    </dl>
+    {% endif %}
+    <h4>Environment</h4>
+    {% if v.envs %}
+    <div class="table-wrap"><table>
+      <caption class="sr-only">The environment of {{ row.version }} on each worker</caption>
+      <thead><tr><th scope="col">Worker</th><th scope="col">State</th><th scope="col">Built</th></tr></thead>
+      <tbody>{% for e in v.envs %}<tr><th scope="row">{{ e.worker_id }}</th><td>{{ m.status_dot(e.state) }}{% if e.error %}<div class="error-text">{{ e.error }}</div>{% endif %}</td><td>{{ m.time_ago(e.built_at) }}</td></tr>{% endfor %}</tbody>
+    </table></div>
+    {% else %}<p class="muted">No worker has built its environment yet (lock <code>{{ row.lock_hash[:12] }}</code>).</p>{% endif %}
+    <h4>Hosts</h4>
+    {% if v.hosts %}
+    <div class="table-wrap"><table>
+      <caption class="sr-only">The hosts of {{ row.version }}</caption>
+      <thead><tr><th scope="col">Worker</th><th scope="col">State</th><th scope="col">Restarts</th><th scope="col">Since</th></tr></thead>
+      <tbody>{% for h in v.hosts %}<tr><th scope="row">{{ h.worker_id }}</th><td>{{ m.status_dot(h.state) }}{% if h.error %}<div class="error-text">{{ h.error }}</div>{% endif %}</td><td>{{ h.restarts }}</td><td>{{ m.time_ago(h.changed_at) }}</td></tr>{% endfor %}</tbody>
+    </table></div>
+    {% else %}<p class="muted">No host of it is running: one starts when a flow of it is activated, or a run of it is waiting.</p>{% endif %}
+    {% if can(actor, "packages.uninstall") %}
+    <form method="post" action="/packages/{{ name | urlencode }}/versions/{{ row.version | urlencode }}/uninstall">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="danger" data-confirm="Uninstall {{ name }} {{ row.version }}? Its wheel and environment are removed; its history stays. It can't be installed here again." data-confirm-field="confirm">Uninstall {{ row.version }}</button>
+    </form>
+    {% endif %}
+    {% endif %}
+  </section>
+  {% endfor %}
+</section>
+{% endblock %}

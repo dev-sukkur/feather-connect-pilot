@@ -56,6 +56,40 @@ def wait_until(check: Callable[[], Any], timeout: float = 30) -> None:
     raise AssertionError("timed out waiting")
 
 
+_INSTALLED: dict[tuple[str, Path], str] = {}
+
+
+def install_project(
+    project: Path,
+    pg_url: str,
+    env: str = "dev",
+    environ: Mapping[str, str] | None = None,
+    *,
+    again: bool = False,
+) -> str:
+    """Install `project` as a package on `pg_url`'s database and make its flows active, as `feather dev` does; once per
+    project folder and database, so a worker started again runs the same version, and a test of its own on a shared
+    database gets its own. `again` installs the next dev version, as `feather dev` does on a save. Returns the
+    package's name: flows are `<package>/<name>`."""
+    from feather_cli.upgrade import install_dev_version
+    from feather_connect.storage.postgres.connect import connect
+
+    key = (pg_url, project.resolve())
+    if again:
+        _INSTALLED.pop(key, None)
+    if key not in _INSTALLED:
+        store, _ = connect(pg_url)
+        saved = dict(os.environ)
+        os.environ.update(environ or {})  # what the project reads as it loads, for its load check
+        try:
+            _INSTALLED[key] = install_dev_version(project, env=env, database_url=pg_url, store=store).package
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+            store.close()
+    return _INSTALLED[key]
+
+
 def start_worker(
     project: Path,
     pg_url: str,
@@ -66,14 +100,18 @@ def start_worker(
     log: IO[bytes] | None = None,
     poll_s: float = 0.1,
 ) -> subprocess.Popen[bytes]:
-    """Start `python -m feather_connect.worker`. `env` adds to the environment, and `log` takes its output."""
+    """Install `project` as a package (`install_project`) and start a supervisor for it,
+    `python -m feather_connect.supervisor`, under `worker_id`. `env` adds to the environment, and `log` takes its
+    output. The project mode is retired (flow packages §13): a worker runs installed packages."""
+    install_project(project, pg_url, environ=env)
+    extra = [name for name in (env or {}) if name.startswith("FEATHER_")]
+    passed = ",".join(n for n in [os.environ.get("FEATHER_HOST_ENV_PASS", ""), *extra] if n)
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0  # type: ignore[attr-defined]
     return subprocess.Popen(
         [
             sys.executable,
             "-m",
-            "feather_connect.worker",
-            str(project),
+            "feather_connect.supervisor",
             "dev",
             "--database-url",
             pg_url,
@@ -81,11 +119,13 @@ def start_worker(
             worker_id,
             "--poll-s",
             str(poll_s),
+            "--workdir",
+            str(project),  # as `feather dev` runs it: the project's relative paths mean its folder
         ],
-        env={**os.environ, "FEATHER_CODE_SHA": sha, **(env or {})},
+        env={**os.environ, "FEATHER_CODE_SHA": sha, **(env or {}), "FEATHER_HOST_ENV_PASS": passed},
         creationflags=flags,
         stdout=log,
-        stderr=log,
+        stderr=subprocess.STDOUT,
     )
 
 

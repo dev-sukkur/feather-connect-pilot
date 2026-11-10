@@ -124,6 +124,21 @@ class DbosEngine(Engine):
             self._client.resume_workflow(workflow.workflow_id, queue_name=workflow.queue_name)
         return [workflow.workflow_id for workflow in running]
 
+    def move_to_pool(self, pool: str) -> list[str]:
+        """Put every task waiting or left running on the shared queues onto `pool`'s, and return their references.
+        The upgrade from the project mode (flow packages §13) does this once the M1 workers have stopped, so their
+        project's tasks run on its package's hosts, which listen only to their pool's queues."""
+        moved: list[str] = []
+        for status in ("ENQUEUED", "PENDING"):
+            for base in (FREE, KEYED):
+                found = self._client.list_workflows(
+                    status=status, queue_name=base, load_input=False, load_output=False
+                )
+                for workflow in found:
+                    self._client.resume_workflow(workflow.workflow_id, queue_name=queue_name(base, pool))
+                    moved.append(workflow.workflow_id)
+        return moved
+
     def has_ended(self, ref: str) -> bool:
         """Whether the workflow exists and has ended."""
         found = self._client.list_workflows(workflow_ids=[ref], load_input=False, load_output=False)

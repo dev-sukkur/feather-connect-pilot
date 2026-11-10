@@ -1,5 +1,6 @@
 """Installing flow packages (flow packages §5, task 4): each check's failure is named, nothing is kept of a failed
-install, and an installed version's flows are inactive, so nothing runs."""
+install, and an installed version's flows are inactive, so nothing runs. The server runs no package code: a version is
+`preparing` until a worker has load-checked it (task 6), here `prepare`, and only a `ready` one can be activated."""
 
 import hashlib
 import io
@@ -22,9 +23,17 @@ from feather_connect.storage.port import RegistryFile, Role
 from feather_server.app import AppState, create_app
 from feather_server.auth import Actor, issue_token
 from feather_server.services.access import Forbidden
-from feather_server.services.packages import CHECKS, Busy, InstallFailed, Packages, check_lock
+from feather_server.services.packages import (
+    CHECKS,
+    Busy,
+    InstallFailed,
+    NotReady,
+    Packages,
+    check_lock,
+    check_wheels,
+)
 from feather_server.services.registries import Registries
-from feather_server.testing import sample_wheel, static_index
+from feather_server.testing import prepare, sample_wheel, static_index
 
 API = "/api/v1"
 ADMIN = Actor("human", "root", "admin", "root")
@@ -42,12 +51,8 @@ def registries(state: AppState) -> Registries:
     return Registries(state.store, state.clock)
 
 
-def _packages(
-    state: AppState, registries: Registries, checker: Callable[..., LoadCheck] | None = None
-) -> Packages:
-    if checker is None:
-        return Packages(state.store, state.clock, registries, env="dev")
-    return Packages(state.store, state.clock, registries, env="dev", checker=checker)
+def _packages(state: AppState, registries: Registries) -> Packages:
+    return Packages(state.store, state.clock, registries, env="dev")
 
 
 def _sound(content: bytes, manifest: dict[str, Any], **_: Any) -> LoadCheck:
@@ -94,11 +99,16 @@ def test_an_admin_installs_a_version_whose_flows_start_inactive_and_nothing_runs
         NAME,
         "1.0.0",
         sha,
-        "installed",
+        "preparing",
     )
-    assert installed.checks == list(CHECKS)
+    assert installed.checks == list(CHECKS) and installed.load_check == {}  # no package code ran here
     assert installed.flows and all(f.startswith(f"{NAME}/") for f in installed.flows)
-    assert installed.load_check["ok"] and installed.load_check["seconds"] > 0  # loaded in a child process
+    with pytest.raises(NotReady, match="still preparing"):
+        _packages(state, registries).activate(OPERATOR, installed.flows[0], "1.0.0")
+    found = prepare(state, NAME)  # a worker's supervisor, in a child process
+    assert found["ok"] and found["seconds"] > 0 and found["worker"] == "test"
+    ready = state.store.packages.version(NAME, "1.0.0")
+    assert ready is not None and ready.state == "ready" and ready.load_check == found
     flows = state.store.packages.activations(NAME, "1.0.0")
     assert {a.state for a in flows} == {"inactive"} and [a.flow for a in flows] == installed.flows
     assert state.store.packages.wheel(sha) == wheel.read_bytes()  # the stored copy, kept by sha256
@@ -115,7 +125,7 @@ def test_without_a_version_the_newest_not_yanked_is_installed(
         built = sample_wheel(tmp_path / version, version)
         registries.publish(ADMIN, built.name, built.read_bytes())
     registries.yank(ADMIN, NAME, "1.2.0", reason="broken")
-    installed = _packages(state, registries, _sound).install(ADMIN, NAME)
+    installed = _packages(state, registries).install(ADMIN, NAME)
     assert installed.version == "1.1.0"
 
 
@@ -125,7 +135,7 @@ def test_a_package_from_a_company_index_installs(
     monkeypatch.setenv("ACME_REGISTRY_TOKEN", "company-secret")
     with static_index({NAME: {wheel.name: wheel.read_bytes()}}, "company-secret") as url:
         registries.add(ADMIN, "acme", url, "${secret:env:ACME_REGISTRY_TOKEN}")
-        installed = _packages(state, registries, _sound).install(ADMIN, NAME, "1.0.0", registry="acme")
+        installed = _packages(state, registries).install(ADMIN, NAME, "1.0.0", registry="acme")
     assert installed.registry == "acme" and state.store.packages.version(NAME, "1.0.0") is not None
 
 
@@ -146,7 +156,7 @@ def test_a_version_installed_before_is_refused_as_not_installed(
     state: AppState, registries: Registries, wheel: Path
 ):
     registries.publish(ADMIN, wheel.name, wheel.read_bytes())
-    packages = _packages(state, registries, _sound)
+    packages = _packages(state, registries)
     packages.install(ADMIN, NAME, "1.0.0")
     for version in ("1.0.0", "1.0"):  # 1.0 is 1.0.0 to every installer
         with pytest.raises(InstallFailed) as caught:
@@ -156,7 +166,7 @@ def test_a_version_installed_before_is_refused_as_not_installed(
 
 def test_an_unknown_version_or_registry_fails_the_fetch(state: AppState, registries: Registries, wheel: Path):
     registries.publish(ADMIN, wheel.name, wheel.read_bytes())
-    packages = _packages(state, registries, _sound)
+    packages = _packages(state, registries)
     _refused(state, packages, "fetch", "9.9.9")
     _refused(state, packages, "fetch", "1.0.0", registry="nowhere")
     _refused(state, packages, "fetch", "not a version")
@@ -169,7 +179,7 @@ def test_a_wheel_too_big_fails_the_size_check(
 
     registries.publish(ADMIN, wheel.name, wheel.read_bytes())
     monkeypatch.setattr(module, "MAX_WHEEL", 100)
-    _refused(state, _packages(state, registries, _sound), "size", "1.0.0")
+    _refused(state, _packages(state, registries), "size", "1.0.0")
 
 
 def test_a_wheel_whose_bytes_changed_fails_the_sha256_check(
@@ -178,7 +188,7 @@ def test_a_wheel_whose_bytes_changed_fails_the_sha256_check(
     monkeypatch.setenv("ACME_REGISTRY_TOKEN", "company-secret")
     with static_index({NAME: {wheel.name: wheel.read_bytes()}}, "company-secret", tamper=True) as url:
         registries.add(ADMIN, "acme", url, "${secret:env:ACME_REGISTRY_TOKEN}")
-        _refused(state, _packages(state, registries, _sound), "sha256", "1.0.0", registry="acme")
+        _refused(state, _packages(state, registries), "sha256", "1.0.0", registry="acme")
 
 
 def test_a_wheel_with_a_bad_manifest_fails_the_manifest_check(
@@ -186,14 +196,14 @@ def test_a_wheel_with_a_bad_manifest_fails_the_manifest_check(
 ):
     bad = _rewheel(wheel.read_bytes(), {f"{MODULE}/feather-package.json": _manifest_edit(flows="many")})
     _put(state, bad)
-    _refused(state, _packages(state, registries, _sound), "manifest", "1.0.0")
+    _refused(state, _packages(state, registries), "manifest", "1.0.0")
 
 
 def test_a_wheel_of_another_version_fails_the_name_version_check(
     state: AppState, registries: Registries, wheel: Path
 ):
     _put(state, wheel.read_bytes(), version="2.0.0", filename=wheel.name)  # listed as 2.0.0, holds 1.0.0
-    _refused(state, _packages(state, registries, _sound), "name_version", "2.0.0")
+    _refused(state, _packages(state, registries), "name_version", "2.0.0")
 
 
 def test_a_package_for_another_feather_connect_fails_the_compatibility_check(
@@ -203,7 +213,7 @@ def test_a_package_for_another_feather_connect_fails_the_compatibility_check(
         state,
         _rewheel(wheel.read_bytes(), {f"{MODULE}/feather-package.json": _manifest_edit(fc_versions=">=99")}),
     )
-    error = _refused(state, _packages(state, registries, _sound), "compatibility", "1.0.0")
+    error = _refused(state, _packages(state, registries), "compatibility", "1.0.0")
     assert "doesn't include this Feather Connect" in str(error)
 
 
@@ -212,7 +222,7 @@ def test_a_lock_that_isnt_the_manifests_fails_the_lock_check(
 ):
     lock = f"{MODULE}-1.0.0.dist-info/feather-lock.txt"
     _put(state, _rewheel(wheel.read_bytes(), {lock: lambda raw: raw + b"evil==6.6.6 --hash=sha256:00\n"}))
-    error = _refused(state, _packages(state, registries, _sound), "lock", "1.0.0")
+    error = _refused(state, _packages(state, registries), "lock", "1.0.0")
     assert "lock_hash" in str(error)
 
 
@@ -224,14 +234,22 @@ def test_a_package_that_doesnt_load_fails_the_load_check(
         {f"{MODULE}/feather.yaml": lambda raw: raw.replace(b"flows.invoices", b"flows.missing")},
     )
     _put(state, lying)
-    error = _refused(state, _packages(state, registries), "load_check", "1.0.0")  # the real check, in a child
-    assert "flows.missing" in str(error)
+    installed = _packages(state, registries).install(
+        ADMIN, NAME, "1.0.0"
+    )  # the server can't tell: it runs no code
+    found = prepare(state, NAME)  # the real check, in a child
+    assert not found["ok"] and found["check"] == "load_check" and "flows.missing" in found["error"]
+    row = state.store.packages.version(NAME, "1.0.0")
+    assert row is not None and row.state == "failed"
+    with pytest.raises(NotReady, match="flows.missing") as refused:
+        _packages(state, registries).activate(OPERATOR, installed.flows[0], "1.0.0")
+    assert refused.value.state == "failed"
 
 
 def test_an_operator_may_not_install(state: AppState, registries: Registries, wheel: Path):
     registries.publish(ADMIN, wheel.name, wheel.read_bytes())
     with pytest.raises(Forbidden):
-        _packages(state, registries, _sound).install(OPERATOR, NAME, "1.0.0")
+        _packages(state, registries).install(OPERATOR, NAME, "1.0.0")
     assert state.store.packages.packages() == []
 
 
@@ -255,7 +273,11 @@ def test_the_api_installs_lists_shows_and_names_a_failed_check(state: AppState, 
     made = admin.post(f"{API}/packages", json={"name": NAME, "version": "1.0.0", "reason": "go"},
                       headers={"Idempotency-Key": "k1"})  # fmt: skip
     assert made.status_code == 201, made.text
-    assert made.json()["flows"] and made.json()["state"] == "installed"
+    assert made.json()["flows"] and made.json()["state"] == "preparing"
+    flow = made.json()["flows"][0]
+    early = operator.post(f"{API}/flows/{flow}:activate", json={"version": "1.0.0"})
+    assert early.status_code == 409 and early.json()["check"] == "not_ready"
+    assert early.json()["state"] == "preparing"
     again = admin.post(f"{API}/packages", json={"name": NAME, "version": "1.0.0"})
     assert again.status_code == 409 and again.json()["check"] == "not_installed"
     missing = admin.post(f"{API}/packages", json={"name": NAME, "version": "9.9.9"})
@@ -267,7 +289,14 @@ def test_the_api_installs_lists_shows_and_names_a_failed_check(state: AppState, 
     shown = operator.get(f"{API}/packages/{NAME}").json()
     assert {f["state"] for f in shown["flows"]} == {"inactive"}
     version = operator.get(f"{API}/packages/{NAME}/versions/1.0").json()
-    assert version["manifest"]["name"] == NAME and version["load_check"]["ok"]
+    assert (
+        version["manifest"]["name"] == NAME
+        and version["state"] == "preparing"
+        and version["load_check"] == {}
+    )
+    prepare(state, NAME)
+    assert operator.get(f"{API}/packages/{NAME}/versions/1.0").json()["load_check"]["ok"]
+    assert operator.post(f"{API}/flows/{flow}:activate", json={"version": "1.0.0"}).status_code == 200
     assert operator.get(f"{API}/packages/nothing").status_code == 404
     assert operator.get(f"{API}/packages/{NAME}/versions/2.0.0").status_code == 404
 
@@ -302,7 +331,7 @@ def test_a_filename_is_made_safe_for_content_disposition():
 def test_a_yanked_version_is_refused_unless_allowed(state: AppState, registries: Registries, wheel: Path):
     registries.publish(ADMIN, wheel.name, wheel.read_bytes())
     registries.yank(ADMIN, NAME, "1.0.0", reason="broken")
-    packages = _packages(state, registries, _sound)
+    packages = _packages(state, registries)
     _refused(state, packages, "not_yanked", "1.0.0")
     assert packages.install(ADMIN, NAME, "1.0.0", allow_yanked=True).version == "1.0.0"
 
@@ -313,7 +342,7 @@ def test_pre_releases_are_skipped_unless_pinned_or_asked_for(
     for version in ("1.0.0", "1.1.0rc1"):
         built = sample_wheel(tmp_path / version, version)
         registries.publish(ADMIN, built.name, built.read_bytes())
-    packages = _packages(state, registries, _sound)
+    packages = _packages(state, registries)
     assert packages.install(ADMIN, NAME).version == "1.0.0"
     assert packages.install(ADMIN, NAME, pre=True).version == "1.1.0rc1"
 
@@ -338,6 +367,39 @@ def test_only_pinned_hashed_requirements_pass_the_lock_check():
             check_lock(bad.encode())
 
 
+def test_only_requirements_with_a_wheel_pass_the_wheels_check():
+    wheel, sdist = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    check_wheels(b"")
+    check_wheels(
+        f"httpx==0.28.1 \\\n    --hash={wheel} \\\n    --hash={sdist}\n    # wheels: {wheel}\n    # via acme\n".encode()
+    )
+    for bad in (
+        f"httpx==0.28.1 --hash={sdist}\n    # wheels:\n",  # only a source distribution
+        f"httpx==0.28.1 --hash={sdist}\n",  # nothing says which is a wheel
+        f"httpx==0.28.1 --hash={sdist}\n    # wheels: {wheel}\n",  # a wheel it doesn't pin
+    ):
+        with pytest.raises(ValueError, match="only a source distribution"):
+            check_wheels(bad.encode())
+
+
+def test_a_lock_with_only_a_source_distribution_fails_the_wheels_check(
+    state: AppState, registries: Registries, wheel: Path
+):
+    lock = f"httpx==0.28.1 --hash=sha256:{'b' * 64}\n    # wheels:\n".encode()
+    _put(
+        state,
+        _rewheel(
+            wheel.read_bytes(),
+            {
+                f"{MODULE}-1.0.0.dist-info/feather-lock.txt": lambda _: lock,
+                f"{MODULE}/feather-package.json": _manifest_edit(lock_hash=hashlib.sha256(lock).hexdigest()),
+            },
+        ),
+    )
+    error = _refused(state, _packages(state, registries), "wheels", "1.0.0")
+    assert "httpx==0.28.1 has no wheel" in str(error)
+
+
 def test_a_lock_with_an_index_option_fails_the_lock_check(
     state: AppState, registries: Registries, wheel: Path
 ):
@@ -352,7 +414,7 @@ def test_a_lock_with_an_index_option_fails_the_lock_check(
             },
         ),
     )
-    error = _refused(state, _packages(state, registries, _sound), "lock", "1.0.0")
+    error = _refused(state, _packages(state, registries), "lock", "1.0.0")
     assert "is an option" in str(error)
 
 
@@ -365,18 +427,23 @@ def test_a_package_with_its_own_webhook_connector_is_refused(
         sound = _sound(content, manifest)
         return LoadCheck(True, sound.flows, [], [], [], None, 0.1, ["hooks (AcmeHooks)"])
 
-    error = _refused(state, _packages(state, registries, own), "webhook_connector", "1.0.0")
-    assert "hooks (AcmeHooks)" in str(error)
+    _packages(state, registries).install(ADMIN, NAME, "1.0.0")
+    found = prepare(state, NAME, checker=own)
+    assert found["check"] == "webhook_connector" and "hooks (AcmeHooks)" in found["error"]
+    assert state.store.packages.version(NAME, "1.0.0").state == "failed"  # type: ignore[union-attr]
 
 
-def test_an_error_that_is_a_bug_is_audited_as_internal(state: AppState, registries: Registries, wheel: Path):
+def test_an_error_that_is_a_bug_is_audited_as_internal(
+    state: AppState, registries: Registries, wheel: Path, monkeypatch: pytest.MonkeyPatch
+):
     registries.publish(ADMIN, wheel.name, wheel.read_bytes())
 
-    def broken(content: bytes, manifest: dict[str, Any], **_: Any) -> LoadCheck:
+    def broken(*_: Any, **__: Any) -> Any:
         raise RuntimeError("disk on fire")
 
+    monkeypatch.setattr(registries, "fetch", broken)
     with pytest.raises(RuntimeError):
-        _packages(state, registries, broken).install(ADMIN, NAME, "1.0.0")
+        _packages(state, registries).install(ADMIN, NAME, "1.0.0")
     [row] = [a for a in state.store.audit.list_audit() if a.action == "install_package"]
     assert row.result == "failed: internal"
 
@@ -384,22 +451,29 @@ def test_an_error_that_is_a_bug_is_audited_as_internal(state: AppState, registri
 # Installs at once.
 
 
-def _waiting(started: threading.Barrier | None = None, go: threading.Event | None = None) -> Any:
-    def check(content: bytes, manifest: dict[str, Any], **_: Any) -> LoadCheck:
+def _waiting(
+    registries: Registries, started: threading.Barrier | None = None, go: threading.Event | None = None
+) -> Registries:
+    """The registries, made to hold every wheel fetch until `started` and `go` let it through."""
+    fetch = registries.fetch
+
+    def held(*args: Any, **kwargs: Any) -> Any:
+        found = fetch(*args, **kwargs)
         if started is not None:
             started.wait(timeout=10)
         if go is not None:
             assert go.wait(timeout=10)
-        return _sound(content, manifest)
+        return found
 
-    return check
+    registries.fetch = held  # type: ignore[method-assign]
+    return registries
 
 
 def test_two_installs_of_a_version_at_once_install_it_once(
     state: AppState, registries: Registries, wheel: Path
 ):
     registries.publish(ADMIN, wheel.name, wheel.read_bytes())
-    packages = _packages(state, registries, _waiting(threading.Barrier(2)))  # both pass not_installed first
+    packages = _packages(state, _waiting(registries, threading.Barrier(2)))  # both pass not_installed first
     with ThreadPoolExecutor(2) as pool:
         futures = [pool.submit(packages.install, ADMIN, NAME, "1.0.0") for _ in range(2)]
     outcomes = [f.exception() for f in futures]
@@ -417,7 +491,7 @@ def test_an_install_past_the_limit_is_busy_and_the_api_answers_503(
         built = sample_wheel(tmp_path / version, version)
         registries.publish(ADMIN, built.name, built.read_bytes())
     go, started = threading.Event(), threading.Barrier(3)
-    packages = _packages(state, registries, _waiting(started, go))
+    packages = _packages(state, _waiting(registries, started, go))
     with ThreadPoolExecutor(2) as pool:
         running = [pool.submit(packages.install, ADMIN, NAME, v) for v in ("1.0.0", "1.1.0")]
         started.wait(timeout=10)  # both installs hold their slots
@@ -429,14 +503,14 @@ def test_an_install_past_the_limit_is_busy_and_the_api_answers_503(
     assert all(f.exception() is None for f in running)
     monkeypatch.setattr(module, "MAX_BUSY", 0)
     app = create_app(state=state, loops=lambda s: [])
-    app.state.packages = _packages(state, registries, _sound)
+    app.state.packages = _packages(state, registries)
     token = issue_token(state.store, "admin", timedelta(days=1), role="admin")
     client = TestClient(app, base_url="http://localhost:8000", headers={"Authorization": f"Bearer {token}"})
     path, key = f"{API}/packages", {"Idempotency-Key": "b1"}
     busy = client.post(path, json={"name": NAME, "version": "1.0.0"}, headers=key)
     assert busy.status_code == 503 and busy.headers["retry-after"] == "30"
     monkeypatch.setattr(module, "MAX_BUSY", 2)
-    app.state.packages = _packages(state, registries, _sound)
+    app.state.packages = _packages(state, registries)
     again = client.post(path, json={"name": NAME, "version": "2.0.0"}, headers=key)
     assert again.status_code == 422 and again.json()["check"] == "fetch"  # the 503 wasn't kept for the key
 
@@ -448,7 +522,7 @@ def test_requests_with_one_idempotency_key_at_once_install_once(
 
     registries.publish(ADMIN, wheel.name, wheel.read_bytes())
     app = create_app(state=state, loops=lambda s: [])
-    app.state.packages = _packages(state, registries, _waiting(go=(go := threading.Event())))
+    app.state.packages = _packages(state, _waiting(registries, go=(go := threading.Event())))
     token = issue_token(state.store, "admin", timedelta(days=1), role="admin")
     headers = {"Authorization": f"Bearer {token}", "Idempotency-Key": "same"}
     with serve(app) as base, ThreadPoolExecutor(2) as pool:
@@ -463,3 +537,161 @@ def test_requests_with_one_idempotency_key_at_once_install_once(
         first, second = (a.result() for a in answers)
     assert first.status_code == second.status_code == 201 and first.json() == second.json()
     assert len([a for a in state.store.audit.list_audit() if a.action == "install_package"]) == 1
+
+
+# Signing (task 11): an environment may take only packages signed with a key it trusts.
+
+
+def _require_signed(state: AppState, *keys: str) -> None:
+    from feather_connect.storage.port import EnvEntry
+
+    now = state.clock.now()
+    state.store.env_config.put(EnvEntry("dev", "setting", "trusted_package_keys", list(keys), "root", now))
+    state.store.env_config.put(EnvEntry("dev", "setting", "require_signed_packages", True, "root", now))
+
+
+def _signed_wheel(out: Path, signer: Any) -> Path:
+    from feather_connect.packages.build import build_package
+    from feather_server.testing import SAMPLE_PACKAGE
+
+    return build_package(SAMPLE_PACKAGE, out, signer=signer).path
+
+
+def test_an_unsigned_package_is_refused_where_signing_is_required(
+    state: AppState, registries: Registries, wheel: Path
+):
+    from feather_connect.packages.signing import Signer, public_key_text
+
+    _require_signed(state, public_key_text(Signer.generate().public))
+    registries.publish(ADMIN, wheel.name, wheel.read_bytes())
+    with pytest.raises(InstallFailed, match="not signed") as failed:
+        _packages(state, registries).install(ADMIN, NAME, "1.0.0")
+    assert failed.value.check == "signature"
+    assert state.store.packages.version(NAME, "1.0.0") is None
+    [row] = [a for a in state.store.audit.list_audit() if a.action == "install_package"]
+    assert row.result.startswith("failed: signature:")
+
+
+def test_a_package_signed_with_a_trusted_key_installs_and_another_key_or_a_changed_file_is_refused(
+    state: AppState, registries: Registries, tmp_path: Path
+):
+    from feather_connect.packages.signing import Signer, public_key_text
+
+    trusted, other = Signer.generate(), Signer.generate()
+    _require_signed(state, public_key_text(trusted.public))
+    good = _signed_wheel(tmp_path / "good", trusted).read_bytes()
+    by_other = _signed_wheel(tmp_path / "other", other).read_bytes()
+    changed = _rewheel(good, {f"{MODULE}/__init__.py": lambda b: b + b"print('changed')\n"})
+    packages = _packages(state, registries)
+    for content, why in ((by_other, "doesn't trust"), (changed, "not the file its signed RECORD names")):
+        _put(state, content, "1.0.0")
+        with pytest.raises(InstallFailed, match=why) as failed:
+            packages.install(ADMIN, NAME, "1.0.0")
+        assert failed.value.check == "signature"
+        assert state.store.packages.version(NAME, "1.0.0") is None
+        _forget(state)
+    _put(state, good, "1.0.0")
+    installed = packages.install(ADMIN, NAME, "1.0.0")
+    assert installed.signed_by == trusted.key_id and "signature" in installed.checks
+    assert packages.signing() == (True, [trusted.key_id])
+
+
+def _forget(state: AppState) -> None:
+    """Drop the built-in registry's files of the sample, so the next test wheel takes their place."""
+    files = state.store.registry._d.registry_files  # pyright: ignore[reportAttributeAccessIssue] # the memory store's
+    for name in [n for n in files if n.startswith(MODULE)]:
+        del files[name]
+
+
+def test_requiring_signed_packages_needs_trusted_keys_and_keys_must_be_ed25519(state: AppState):
+    from feather_connect.packages.signing import Signer, public_key_text
+    from feather_connect.vault import MasterKey, Vault, new_master_key
+    from feather_server.services.environment import ConfigProblem, Environment
+
+    vault = Vault(state.store.secrets, "dev", MasterKey.parse(new_master_key()))
+    environment = Environment(state.store, state.clock, "dev", vault)
+    with pytest.raises(ConfigProblem, match="needs trusted_package_keys"):
+        environment.put(ADMIN, "setting", "require_signed_packages", True)
+    with pytest.raises(ConfigProblem, match="not a public key"):
+        environment.put(ADMIN, "setting", "trusted_package_keys", ["ssh-rsa AAAA"])
+    with pytest.raises(ConfigProblem, match="true or false"):
+        environment.put(ADMIN, "setting", "require_signed_packages", "yes")
+    environment.put(ADMIN, "setting", "trusted_package_keys", [public_key_text(Signer.generate().public)])
+    environment.put(ADMIN, "setting", "require_signed_packages", True)
+
+
+# The P5 review: a refused promotion keeps nothing, roles over the API, activation after uninstall or of an unsigned
+# version where signing is required since.
+
+
+def test_an_unsigned_promotion_is_refused_and_keeps_nothing_then_the_signed_build_promotes(
+    state: AppState, registries: Registries, wheel: Path, tmp_path: Path
+):
+    from feather_connect.packages.signing import Signer, public_key_text
+
+    trusted = Signer.generate()
+    _require_signed(state, public_key_text(trusted.public))
+    packages = _packages(state, registries)
+    unsigned = wheel.read_bytes()
+    with pytest.raises(InstallFailed) as failed:
+        packages.promote(
+            ADMIN, wheel.name, unsigned, sha256=hashlib.sha256(unsigned).hexdigest(), source="qa"
+        )
+    assert failed.value.check == "signature"
+    assert registries.projects() == []  # the registry copy is made only once every check has passed
+    assert state.store.packages.version(NAME, "1.0.0") is None
+    signed = _signed_wheel(tmp_path / "signed", trusted)
+    content = signed.read_bytes()
+    done = packages.promote(
+        ADMIN, signed.name, content, sha256=hashlib.sha256(content).hexdigest(), source="qa"
+    )
+    assert done.registry == "feather" and done.signed_by == trusted.key_id
+    kept = state.store.packages.version(NAME, "1.0.0")
+    assert kept is not None and kept.promoted_from == "qa" and kept.promoted_by == ADMIN.name
+    assert kept.signed_by == trusted.key_id and "signature" in kept.checks
+    assert registries.projects() == [NAME]
+
+
+def test_an_operator_may_not_export_or_promote_over_the_api(state: AppState, wheel: Path):
+    Registries(state.store, state.clock).publish(ADMIN, wheel.name, wheel.read_bytes())
+    _packages(state, Registries(state.store, state.clock)).install(ADMIN, NAME, "1.0.0")
+    prepare(state, NAME)
+    operator = _client(state, "operator")
+    exported = operator.get(f"{API}/packages/{NAME}/versions/1.0.0/wheel")
+    assert exported.status_code == 403 and exported.json()["capability"] == "packages.promote"
+    content = wheel.read_bytes()
+    query = {"filename": wheel.name, "sha256": hashlib.sha256(content).hexdigest(), "from": "qa"}
+    promoted = operator.post(f"{API}/packages:promote", params=query, content=content)
+    assert promoted.status_code == 403 and promoted.json()["capability"] == "packages.promote"
+    assert [a.result for a in state.store.audit.list_audit() if a.action == "export_package"] == []
+
+
+def test_a_version_uninstalled_cant_be_activated(state: AppState, registries: Registries, wheel: Path):
+    registries.publish(ADMIN, wheel.name, wheel.read_bytes())
+    packages = _packages(state, registries)
+    installed = packages.install(ADMIN, NAME, "1.0.0")
+    prepare(state, NAME)
+    packages.uninstall(ADMIN, NAME, "1.0.0")
+    with pytest.raises(NotReady) as refused:
+        packages.activate(ADMIN, installed.flows[0], "1.0.0")
+    assert refused.value.state == "uninstalled"
+    answer = _client(state, "admin").post(
+        f"{API}/flows/{installed.flows[0]}:activate", json={"version": "1.0.0"}
+    )
+    assert answer.status_code == 409 and answer.json()["check"] == "not_ready"
+
+
+def test_a_version_installed_before_signing_was_required_is_checked_again_at_activation(
+    state: AppState, registries: Registries, wheel: Path
+):
+    from feather_connect.packages.signing import Signer, public_key_text
+
+    registries.publish(ADMIN, wheel.name, wheel.read_bytes())
+    packages = _packages(state, registries)
+    installed = packages.install(ADMIN, NAME, "1.0.0")
+    prepare(state, NAME)
+    _require_signed(state, public_key_text(Signer.generate().public))
+    with pytest.raises(InstallFailed) as refused:
+        packages.activate(ADMIN, installed.flows[0], "1.0.0")
+    assert refused.value.check == "signature"
+    assert {a.state for a in state.store.packages.activations(NAME)} == {"inactive"}

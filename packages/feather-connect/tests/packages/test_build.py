@@ -282,3 +282,65 @@ def test_every_workspace_distribution_is_left_out_of_a_lock():
     found = [*root.glob("packages/*/pyproject.toml"), *root.glob("packages/*/*/pyproject.toml")]
     names = {tomllib.loads(p.read_text(encoding="utf-8"))["project"]["name"] for p in found}
     assert set(PLATFORM_DISTRIBUTIONS) == names
+
+
+def test_a_lock_says_which_of_its_hashes_are_wheels(tmp_path: Path):
+    from feather_connect.packages.build import _wheel_hashes, with_wheel_hashes  # pyright: ignore[reportPrivateUsage]
+
+    wheel, sdist = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    (tmp_path / "uv.lock").write_text(
+        f"""version = 1
+[[package]]
+name = "httpx"
+version = "0.28.1"
+sdist = {{ url = "https://x/httpx.tar.gz", hash = "{sdist}" }}
+wheels = [{{ url = "https://x/httpx.whl", hash = "{wheel}" }}]
+
+[[package]]
+name = "only-source"
+version = "1.0"
+sdist = {{ url = "https://x/only.tar.gz", hash = "{sdist}" }}
+""",
+        encoding="utf-8",
+    )
+    lock = (
+        f"httpx==0.28.1 \\\n    --hash={sdist} \\\n    --hash={wheel}\n    # via acme\n"
+        f"only-source==1.0 \\\n    --hash={sdist}\n"
+    )
+    noted = with_wheel_hashes(lock.encode(), _wheel_hashes(tmp_path / "uv.lock")).decode()
+    assert f"    # wheels: {wheel}\n" in noted
+    assert noted.rstrip().endswith("# wheels:")  # only a source distribution: nothing named
+    assert (
+        noted.replace(f"    # wheels: {wheel}\n", "").replace("\n    # wheels:", "").strip() == lock.strip()
+    )
+
+
+def test_a_signature_check_of_a_bad_zip_or_oversized_entries_is_a_signature_error():
+    import io
+    import zipfile
+
+    import pytest
+
+    from feather_connect.packages.signing import MAX_RECORD, SignatureError, Signer, verify_wheel
+
+    signer = Signer.generate()
+    keys = {signer.key_id: signer.public}
+    with pytest.raises(SignatureError, match="can't be unzipped"):
+        verify_wheel(b"PK\x03\x04 not really a zip", keys)
+
+    def wheel(signature: bytes, record: bytes) -> bytes:
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("x-1.dist-info/RECORD", record)
+            archive.writestr("x-1.dist-info/feather-signature.json", signature)
+        return out.getvalue()
+
+    with pytest.raises(SignatureError, match="more than 4096 bytes"):
+        verify_wheel(wheel(b" " * 5000, b""), keys)
+    big = signer.sign(b"r" * (MAX_RECORD + 1))
+    with pytest.raises(SignatureError, match=f"more than {MAX_RECORD} bytes"):
+        verify_wheel(wheel(big, b"r" * (MAX_RECORD + 1)), keys)
+    broken = bytearray(wheel(signer.sign(b""), b""))
+    broken[40:60] = b"\x00" * 20  # a damaged entry
+    with pytest.raises(SignatureError):
+        verify_wheel(bytes(broken), keys)

@@ -42,7 +42,7 @@ class Site:
         return self.stack.url
 
     def deliveries(self, route: str, status: str | None = None) -> list[Any]:
-        return self.stack.store.ledger.list_deliveries(route=route, status=status)
+        return self.stack.store.ledger.list_deliveries(route=f"dashboard/{route}", status=status)
 
     def captured(self) -> list[dict[str, Any]]:
         if not self.capture.exists():
@@ -55,7 +55,9 @@ class Site:
         task = next(
             t
             for t in self.stack.store.runs.list_tasks(version.run_id)
-            if t.kind == kind and t.partition == version.partition and (route is None or t.route == route)
+            if t.kind == kind
+            and t.partition == version.partition
+            and (route is None or t.route == f"dashboard/{route}")
         )
         return f"/runs/{version.run_id}/tasks/{task.task_id}/records"
 
@@ -79,7 +81,7 @@ def open_site(root: Path) -> Iterator[Site]:
         stack.store.users.create_user(USER, hash_password(PASSWORD), "admin")
         token = issue_token(stack.store, "dashboard-tests", timedelta(hours=1), role="operator")
         answer = httpx.post(
-            f"{stack.url}/api/v1/flows/demo:run",
+            f"{stack.url}/api/v1/flows/dashboard/demo:run",
             json={"partitions": [f"day={day}" for day in DAYS]},
             headers={"Authorization": f"Bearer {token}"},
             timeout=30,
@@ -87,4 +89,44 @@ def open_site(root: Path) -> Iterator[Site]:
         assert answer.status_code == 202, answer.text
         wait_until(lambda: len(site.deliveries("lake", "applied")) == len(DAYS), "the lake's deliveries")
         wait_until(lambda: len(site.deliveries("flaky", "failed")) == len(DAYS), "the flaky route to fail")
+        seed_package(stack.store, root / "wheels")
         yield site
+
+
+PACKAGE = "acme-invoices"
+
+
+def seed_package(store: Any, out: Path) -> None:
+    """Two versions of the sample package for the Packages pages: 1.0.0 in service, 1.1.0 ready, a worker's
+    environment, a host of 1.1.0 in a crash loop, and a version that failed its load check. No package code runs:
+    the load checks are recorded as a worker would."""
+    from feather_connect.clock import SystemClock
+    from feather_server.auth import Actor
+    from feather_server.services.packages import Packages
+    from feather_server.services.registries import Registries
+    from feather_server.testing import sample_wheel
+
+    clock = SystemClock()
+    admin = Actor("human", USER, "admin", USER)
+    registries = Registries(store, clock)
+    packages = Packages(store, clock, registries, env="dev")
+    for version in ("1.0.0", "1.1.0", "1.2.0"):
+        wheel = sample_wheel(out / version, version)
+        registries.publish(admin, wheel.name, wheel.read_bytes())
+        packages.install(admin, PACKAGE, version, reason="the dashboard tests")
+    loaded = {"ok": True, "flows": ["invoices"], "seconds": 1.2, "worker": "w1"}
+    store.packages.prepared(PACKAGE, "1.0.0", "ready", loaded)
+    store.packages.prepared(PACKAGE, "1.1.0", "ready", loaded)
+    store.packages.prepared(
+        PACKAGE,
+        "1.2.0",
+        "failed",
+        {"ok": False, "check": "load_check", "error": "ImportError: no module named x"},
+    )
+    now = clock.now()
+    store.packages.activate(f"{PACKAGE}/invoices", PACKAGE, "1.0.0", USER, now, "go live")
+    store.packages.promote(PACKAGE, "1.0.0", now)
+    lock = store.packages.version(PACKAGE, "1.0.0").lock_hash
+    store.packages.record_env("w1", lock, "ready", now)
+    store.packages.record_host("w1", PACKAGE, "1.0.0", "ready", 0, now)
+    store.packages.record_host("w1", PACKAGE, "1.1.0", "crash_loop", 5, now, "boom: the package fell over")

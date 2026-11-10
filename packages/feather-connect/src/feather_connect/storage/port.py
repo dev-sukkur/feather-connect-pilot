@@ -245,6 +245,15 @@ class RunJournal(Protocol):
         """Newest first. `cursor` is the `run_id` of the last run of the previous page."""
         ...
 
+    def tagged_versions(self, statuses: Sequence[str] = ("queued", "running")) -> set[tuple[str, str]]:
+        """The package versions that runs with one of `statuses` are tagged with (`params.package` and
+        `params.version`, as the catalogue's scheduler writes them), however many runs there are (flow packages §7.1)."""
+        ...
+
+    def queued_of(self, package: str, version: str, limit: int = 50) -> list[Run]:
+        """The queued runs tagged with the package version, oldest first."""
+        ...
+
     def count_runs(self, status: str | None = None, since: datetime | None = None) -> int:
         """How many runs have `status` (any, when None) and were created at `since` or later (any time, when None)."""
         ...
@@ -1284,6 +1293,7 @@ class RegistryStore(Protocol):
 
 PackageState = Literal["installed", "preparing", "ready", "failed", "uninstalled"]
 ActivationState = Literal["inactive", "activating", "active", "deactivating", "failed"]
+EnvState = Literal["building", "ready", "failed"]
 MAX_PACKAGE_ROWS = 500  # the most rows a package listing returns
 
 
@@ -1306,6 +1316,10 @@ class PackageVersion:
     load_check: Mapping[str, Any]
     installed_by: str
     installed_at: datetime
+    checks: Sequence[str] = ()  # the install checks it passed, in order
+    promoted_from: str | None = None  # the environment it was promoted from, by sha256
+    promoted_by: str | None = None
+    signed_by: str | None = None  # the id of the trusted key that signed it, where signing was required
 
 
 @dataclass(frozen=True)
@@ -1321,6 +1335,7 @@ class FlowActivation:
     changed_at: datetime
     reason: str | None = None
     error: str | None = None
+    last_active_at: datetime | None = None  # when it last served: became active, or stopped being so
 
 
 def check_wheel(version: "PackageVersion", content: bytes) -> None:
@@ -1331,6 +1346,48 @@ def check_wheel(version: "PackageVersion", content: bytes) -> None:
         raise ValueError(
             f"the wheel stored for {version.name} {version.version} is not the one its sha256 names"
         )
+
+
+HostState = Literal["starting", "ready", "crash_loop", "failed", "stopped"]
+
+
+@dataclass(frozen=True)
+class PackageHost:
+    """How a worker's package host of a version stands (flow packages §7.1, task 9's Packages page): `restarts` counts
+    its ends in the crash window, and `error` is the last thing it died of."""
+
+    worker_id: str
+    package: str
+    version: str
+    state: HostState
+    restarts: int
+    error: str | None
+    changed_at: datetime
+
+
+@dataclass(frozen=True)
+class PackageEnv:
+    """A dependency environment that a worker built for a lock hash (flow packages §5 step 3, task 8)."""
+
+    worker_id: str
+    lock_hash: str
+    state: EnvState
+    error: str | None
+    built_at: datetime
+
+
+class VersionNotReady(Exception):
+    """A flow of a version that isn't `ready` can't be activated: it is being prepared, failed, or was uninstalled.
+    `state` is the version's."""
+
+    def __init__(self, message: str, state: str) -> None:
+        super().__init__(message)
+        self.state = state
+
+
+class InUse(Exception):
+    """A version can't be uninstalled while a flow of it is active or activating, or runs of it are queued or
+    running."""
 
 
 class DuplicateVersion(Exception):
@@ -1366,6 +1423,23 @@ class PackageStore(Protocol):
         """The wheel's bytes, or None when the store has no wheel of that sha256."""
         ...
 
+    def uninstall(self, name: str, version: str, by: str, at: datetime, reason: str | None = None) -> bool:
+        """Mark the version `uninstalled` (§6) in one transaction, its flows' rows staying, inactive, as its history
+        does, and delete its wheel unless a version still installed has the same sha256. Returns whether the wheel was
+        deleted. Raises `KeyError` when the version isn't installed (or is uninstalled already), and `InUse` when a
+        flow of it is active or activating, or a run tagged with it is queued or running; it changes nothing then."""
+        ...
+
+    def needed_lock_hashes(self) -> set[str]:
+        """The lock hashes of every version that isn't uninstalled, however many there are: the environments a
+        worker must keep."""
+        ...
+
+    def renames(self) -> dict[tuple[str, str], str]:
+        """What the upgrade from the project mode renamed (§13): the prefixed name of each old one, by its kind
+        (`flow`, `dataset` or `route`) and old name."""
+        ...
+
     def activations(self, name: str, version: str | None = None) -> list[FlowActivation]:
         """The flows of the package's versions, or of one, by flow and then as they changed, at most
         `MAX_PACKAGE_ROWS`."""
@@ -1374,14 +1448,30 @@ class PackageStore(Protocol):
     def activate(
         self, flow: str, name: str, version: str, by: str, at: datetime, reason: str | None = None
     ) -> FlowActivation:
-        """Make `version` the active one of `flow`, and any other version of it inactive, in one transaction, and
-        tell every listener that the catalogue changed (NOTIFY). Raises `KeyError` when the version has no such
-        flow."""
+        """Ask for `version` to be the active one of `flow` (§6): it is `activating`, and the version active now stays
+        active, until a host of the new one is up and `promote` makes the switch. A version already active stays so,
+        and another one activating is dropped (inactive). Tells every listener (NOTIFY). Raises `KeyError` when the
+        version has no such flow, and `VersionNotReady` when the version isn't `ready`, checked in the same
+        transaction, so that an uninstall can't slip in between."""
+        ...
+
+    def promote(self, name: str, version: str, at: datetime) -> list[FlowActivation]:
+        """Make every flow that the version is `activating` active, and the version active before inactive, in one
+        transaction, and tell the listeners: a host of it is up. Returns the flows it made active."""
+        ...
+
+    def activation_failed(self, name: str, version: str, error: str, at: datetime) -> list[FlowActivation]:
+        """Mark every flow that the version is `activating` failed, saying why: its host didn't come up, and the
+        version active before stays active. Tells the listeners, and returns those flows."""
+        ...
+
+    def activating(self) -> list[FlowActivation]:
+        """Every flow waiting for a host of the version asked for, by name, at most `MAX_PACKAGE_ROWS`."""
         ...
 
     def deactivate(self, flow: str, by: str, at: datetime, reason: str | None = None) -> FlowActivation:
-        """Make the active version of `flow` inactive, and tell the listeners. Raises `KeyError` when no version of
-        it is active."""
+        """Make the active version of `flow` inactive, and one activating too, and tell the listeners. Returns the
+        active one, or else the one activating. Raises `KeyError` when no version of it is either."""
         ...
 
     def active(self) -> list[FlowActivation]:
@@ -1389,8 +1479,48 @@ class PackageStore(Protocol):
         ...
 
     def listen(self, callback: "Callable[[], None]") -> "Callable[[], None]":
-        """Call `callback` whenever a flow of this tenant is activated or deactivated, from this process or another.
-        Returns what stops listening."""
+        """Call `callback` whenever a flow of this tenant is activated or deactivated, or a version is prepared, from
+        this process or another. Returns what stops listening."""
+        ...
+
+    def prepared(
+        self,
+        name: str,
+        version: str,
+        state: PackageState,
+        load_check: Mapping[str, Any],
+        expect: Sequence[PackageState] = ("installed", "preparing"),
+    ) -> bool:
+        """Record what preparing the version found, its state (`ready` or `failed`) and its load check, if its state
+        is still one of `expect`, and tell the listeners. Returns whether it did: a worker that prepared it too, later,
+        changes nothing."""
+        ...
+
+    def record_env(
+        self, worker_id: str, lock_hash: str, state: EnvState, at: datetime, error: str | None = None
+    ) -> None:
+        """Note the state of the environment that `worker_id` keeps for `lock_hash`."""
+        ...
+
+    def envs(self, worker_id: str | None = None) -> list[PackageEnv]:
+        """The environments of one worker or of all, by worker and lock hash, at most `MAX_PACKAGE_ROWS`."""
+        ...
+
+    def record_host(
+        self,
+        worker_id: str,
+        name: str,
+        version: str,
+        state: HostState,
+        restarts: int,
+        at: datetime,
+        error: str | None = None,
+    ) -> None:
+        """Note how the worker's host of the version stands."""
+        ...
+
+    def hosts(self, worker_id: str | None = None) -> list[PackageHost]:
+        """The hosts of one worker or of all, by worker, package and version, at most `MAX_PACKAGE_ROWS`."""
         ...
 
 

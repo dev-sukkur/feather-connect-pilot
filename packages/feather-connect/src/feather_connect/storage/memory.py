@@ -20,6 +20,7 @@ from feather_connect.storage.port import (
     MAX_ENV_ROWS,
     MAX_PACKAGE_ROWS,
     STREAM_TRIGGER,
+    ActivationState,
     Attempt,
     AuditRow,
     AuditStore,
@@ -35,18 +36,24 @@ from feather_connect.storage.port import (
     EnvConfigStore,
     EnvEntry,
     EnvKind,
+    EnvState,
     FailureGroup,
     FlowActivation,
     FlowRow,
     Grant,
+    HostState,
     InboxDay,
     InboxEvent,
     InboxStore,
+    InUse,
     KeyMismatch,
     KeySighting,
     Ledger,
     Override,
     OverrideStore,
+    PackageEnv,
+    PackageHost,
+    PackageState,
     PackageStore,
     PackageVersion,
     PartitionRow,
@@ -78,6 +85,7 @@ from feather_connect.storage.port import (
     UserStore,
     Version,
     VersionDraft,
+    VersionNotReady,
     VersionSealed,
     VersionStore,
     WebhookEvent,
@@ -141,10 +149,17 @@ class _Data:
         default_factory=dict[tuple[str, str], PackageVersion]
     )  # by (name, version_key), in install order
     wheels: dict[str, bytes] = field(default_factory=dict[str, bytes])  # by sha256
+    renames: dict[tuple[str, str], str] = field(
+        default_factory=dict[tuple[str, str], str]
+    )  # (kind, old): new
     activations: dict[tuple[str, str, str], FlowActivation] = field(
         default_factory=dict[tuple[str, str, str], FlowActivation]
     )  # by (flow, package, version_key)
     catalog_listeners: list[Callable[[], None]] = field(default_factory=list[Callable[[], None]])
+    package_envs: dict[tuple[str, str], PackageEnv] = field(default_factory=dict[tuple[str, str], PackageEnv])
+    package_hosts: dict[tuple[str, str, str], PackageHost] = field(
+        default_factory=dict[tuple[str, str, str], PackageHost]
+    )
     env_config: dict[tuple[str, str, str], EnvEntry] = field(
         default_factory=dict[tuple[str, str, str], EnvEntry]
     )
@@ -207,6 +222,27 @@ class _Runs(RunJournal):
             and (cursor is None or r.run_id < cursor)
         ]
         return runs[:limit]
+
+    def tagged_versions(self, statuses: Sequence[str] = ("queued", "running")) -> set[tuple[str, str]]:
+        with self._d.lock:
+            runs = list(self._d.runs.values())
+        found: set[tuple[str, str]] = set()
+        for r in runs:
+            package, version = r.params.get("package"), r.params.get("version")
+            if r.status in statuses and isinstance(package, str) and isinstance(version, str):
+                found.add((package, version))
+        return found
+
+    def queued_of(self, package: str, version: str, limit: int = 50) -> list[Run]:
+        with self._d.lock:
+            runs = sorted(self._d.runs.values(), key=lambda r: (r.created_at, r.run_id))
+        return [
+            r
+            for r in runs
+            if r.status == "queued"
+            and r.params.get("package") == package
+            and r.params.get("version") == version
+        ][:limit]
 
     def count_runs(self, status: str | None = None, since: datetime | None = None) -> int:
         with self._d.lock:
@@ -1423,6 +1459,55 @@ class _Packages(PackageStore):
         with self._d.lock:
             return self._d.wheels.get(sha256)
 
+    def uninstall(self, name: str, version: str, by: str, at: datetime, reason: str | None = None) -> bool:
+        key = (name, version_key(version))
+        with self._d.lock:
+            row = self._d.package_versions.get(key)
+            if row is None or row.state == "uninstalled":
+                raise KeyError(f"{name} {version} is not installed here")
+            busy = [
+                a
+                for (_, package, vkey), a in self._d.activations.items()
+                if package == name and vkey == key[1] and a.state in ("active", "activating")
+            ]
+            if busy:
+                raise InUse(f"{name} {row.version}: its flow {busy[0].flow} is {busy[0].state}")
+            runs = [
+                r
+                for r in self._d.runs.values()
+                if r.status in ("queued", "running")
+                and r.params.get("package") == name
+                and r.params.get("version") == row.version
+            ]
+            if runs:
+                raise InUse(
+                    f"{name} {row.version} has {runs[0].status} runs: let them finish, or cancel them"
+                )
+            self._d.package_versions[key] = replace(row, state="uninstalled")
+            shared = any(
+                v.sha256 == row.sha256 and v.state != "uninstalled" for v in self._d.package_versions.values()
+            )
+            if not shared:
+                self._d.wheels.pop(row.sha256, None)
+            listeners = list(self._d.catalog_listeners)
+        for listener in listeners:
+            listener()
+        return not shared
+
+    def needed_lock_hashes(self) -> set[str]:
+        with self._d.lock:
+            return {v.lock_hash for v in self._d.package_versions.values() if v.state != "uninstalled"}
+
+    def renames(self) -> dict[tuple[str, str], str]:
+        with self._d.lock:
+            return dict(self._d.renames)
+
+    def record_renames(self, renames: Mapping[tuple[str, str], str]) -> None:
+        """As the upgrade from the project mode records them, for tests: an old name that has one keeps it."""
+        with self._d.lock:
+            for key, new in renames.items():
+                self._d.renames.setdefault(key, new)
+
     def activations(self, name: str, version: str | None = None) -> list[FlowActivation]:
         wanted = None if version is None else version_key(version)
         with self._d.lock:
@@ -1442,29 +1527,86 @@ class _Packages(PackageStore):
             row = self._d.activations.get(wanted)
             if row is None:
                 raise KeyError(f"{name} {version} has no flow {flow}")
+            installed = self._d.package_versions.get((name, wanted[2]))
+            if installed is None or installed.state != "ready":
+                state = "uninstalled" if installed is None else installed.state
+                raise VersionNotReady(
+                    f"{name} {version} is {state}: only a ready version can be activated", state
+                )
             for key, other in self._d.activations.items():
-                if key[0] == flow and key != wanted and other.state == "active":
+                if key[0] == flow and key != wanted and other.state == "activating":
                     self._d.activations[key] = replace(
                         other, state="inactive", changed_by=by, changed_at=at, reason=reason
                     )
-            done = replace(row, state="active", changed_by=by, changed_at=at, reason=reason, error=None)
+            state = "active" if row.state == "active" else "activating"
+            done = replace(row, state=state, changed_by=by, changed_at=at, reason=reason, error=None)
             self._d.activations[wanted] = done
             listeners = list(self._d.catalog_listeners)
         for listener in listeners:
             listener()
         return done
 
+    def _settle(
+        self, name: str, version: str, to: ActivationState, at: datetime, error: str | None
+    ) -> list[FlowActivation]:
+        key = version_key(version)
+        done: list[FlowActivation] = []
+        with self._d.lock:
+            for (flow, package, vkey), row in list(self._d.activations.items()):
+                if package != name or vkey != key or row.state != "activating":
+                    continue
+                if to == "active":
+                    for other_key, other in list(self._d.activations.items()):
+                        if (
+                            other_key[0] == flow
+                            and other_key != (flow, package, vkey)
+                            and other.state == "active"
+                        ):
+                            self._d.activations[other_key] = replace(
+                                other, state="inactive", changed_at=at, last_active_at=at
+                            )
+                served = at if to == "active" else row.last_active_at
+                settled = replace(row, state=to, changed_at=at, error=error, last_active_at=served)
+                self._d.activations[(flow, package, vkey)] = settled
+                done.append(settled)
+            listeners = list(self._d.catalog_listeners) if done else []
+        for listener in listeners:
+            listener()
+        return sorted(done, key=lambda a: a.flow)
+
+    def promote(self, name: str, version: str, at: datetime) -> list[FlowActivation]:
+        return self._settle(name, version, "active", at, None)
+
+    def activation_failed(self, name: str, version: str, error: str, at: datetime) -> list[FlowActivation]:
+        return self._settle(name, version, "failed", at, error)
+
+    def activating(self) -> list[FlowActivation]:
+        with self._d.lock:
+            found = [a for a in self._d.activations.values() if a.state == "activating"]
+        return sorted(found, key=lambda a: a.flow)[:MAX_PACKAGE_ROWS]
+
     def deactivate(self, flow: str, by: str, at: datetime, reason: str | None = None) -> FlowActivation:
         with self._d.lock:
-            found = [(k, a) for k, a in self._d.activations.items() if k[0] == flow and a.state == "active"]
+            found = [
+                (k, a)
+                for k, a in self._d.activations.items()
+                if k[0] == flow and a.state in ("active", "activating")
+            ]
             if not found:
                 raise KeyError(f"no version of {flow} is active")
-            key, row = found[0]
-            done = replace(row, state="inactive", changed_by=by, changed_at=at, reason=reason)
-            self._d.activations[key] = done
+            found.sort(key=lambda item: item[1].state != "active")  # the active one first
+            done: FlowActivation | None = None
+            for key, row in found:
+                served = at if row.state == "active" else row.last_active_at
+                settled = replace(
+                    row, state="inactive", changed_by=by, changed_at=at, reason=reason, last_active_at=served
+                )
+                self._d.activations[key] = settled
+                done = done or settled
             listeners = list(self._d.catalog_listeners)
         for listener in listeners:
             listener()
+        assert done is not None
         return done
 
     def active(self) -> list[FlowActivation]:
@@ -1482,6 +1624,56 @@ class _Packages(PackageStore):
                     self._d.catalog_listeners.remove(callback)
 
         return stop
+
+    def prepared(
+        self,
+        name: str,
+        version: str,
+        state: PackageState,
+        load_check: Mapping[str, Any],
+        expect: Sequence[PackageState] = ("installed", "preparing"),
+    ) -> bool:
+        key = (name, version_key(version))
+        with self._d.lock:
+            row = self._d.package_versions.get(key)
+            if row is None or row.state not in expect:
+                return False
+            self._d.package_versions[key] = replace(row, state=state, load_check=dict(load_check))
+            listeners = list(self._d.catalog_listeners)
+        for listener in listeners:
+            listener()
+        return True
+
+    def record_env(
+        self, worker_id: str, lock_hash: str, state: EnvState, at: datetime, error: str | None = None
+    ) -> None:
+        with self._d.lock:
+            self._d.package_envs[(worker_id, lock_hash)] = PackageEnv(worker_id, lock_hash, state, error, at)
+
+    def envs(self, worker_id: str | None = None) -> list[PackageEnv]:
+        with self._d.lock:
+            found = [e for (w, _), e in self._d.package_envs.items() if worker_id in (None, w)]
+        return sorted(found, key=lambda e: (e.worker_id, e.lock_hash))[:MAX_PACKAGE_ROWS]
+
+    def record_host(
+        self,
+        worker_id: str,
+        name: str,
+        version: str,
+        state: HostState,
+        restarts: int,
+        at: datetime,
+        error: str | None = None,
+    ) -> None:
+        with self._d.lock:
+            self._d.package_hosts[(worker_id, name, version)] = PackageHost(
+                worker_id, name, version, state, restarts, error, at
+            )
+
+    def hosts(self, worker_id: str | None = None) -> list[PackageHost]:
+        with self._d.lock:
+            found = [h for (w, _, _), h in self._d.package_hosts.items() if worker_id in (None, w)]
+        return sorted(found, key=lambda h: (h.worker_id, h.package, h.version))[:MAX_PACKAGE_ROWS]
 
 
 class _EnvConfig(EnvConfigStore):

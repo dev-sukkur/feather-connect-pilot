@@ -9,12 +9,13 @@ that failed or was cancelled will never be sealed, so it goes, or it would keep 
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from feather_connect.engine.port import Engine
 from feather_connect.runtime.runtime import Runtime
-from feather_connect.storage.port import Store
+from feather_connect.storage.port import Run, Store
 
 log = logging.getLogger(__name__)
 _QUEUED = 1000  # runs one sweep looks at
@@ -62,44 +63,10 @@ def sweep_once(
             log.exception("could not recover worker %s", worker.worker_id)
         else:
             dead.append(worker.worker_id)
-    deliveries: list[tuple[str, str]] = []
-    stranded: list[tuple[str, str]] = []
-    for delivery in store.ledger.pending_older_than(pending_after, now=now):
-        if runtime.is_route_paused(delivery.route):  # held on purpose, and picked up when the pause ends
-            continue
-        name = (delivery.route, delivery.version_id)
-        try:
-            runtime.submit_apply(*name)
-            ended = runtime.fail_stranded(*name)
-        except Exception:
-            log.exception("could not submit delivery %s of version %s", *name)
-        else:
-            (stranded if ended else deliveries).append(name)
-    for delivery in store.ledger.list_deliveries(status="running", limit=_RUNNING):
-        name = (delivery.route, delivery.version_id)
-        try:
-            if runtime.fail_stranded(*name):
-                stranded.append(name)
-        except Exception:
-            log.exception("could not check delivery %s of version %s", *name)
-    runs: list[str] = []
-    for run in store.runs.list_runs(status="queued", limit=_QUEUED):
-        if run.created_at >= now - pending_after or runtime.is_flow_paused(run.flow):
-            continue
-        try:
-            runtime.submit_plan(run.flow, run.run_id)
-        except Exception:
-            log.exception("could not submit the plan of run %s", run.run_id)
-        else:
-            runs.append(run.run_id)
-    seals: list[tuple[str, str]] = []
-    for run_id, dataset in store.versions.runs_ready_to_seal():
-        try:
-            runtime.submit_seal(store.runs.get_run(run_id).flow, dataset, run_id)
-        except Exception:
-            log.exception("could not submit the seal of dataset %s for run %s", dataset, run_id)
-        else:
-            seals.append((run_id, dataset))
+    known = {f.name for f in runtime.flows()}
+    lost = resubmit_lost(
+        store, runtime, now=now, pending_after=pending_after, owns=lambda run: run.flow in known
+    )
     discarded: list[str] = []
     for version in store.versions.abandoned():
         try:
@@ -112,4 +79,81 @@ def sweep_once(
         discarded += runtime.sweep_stream_runs()
     except Exception:
         log.exception("could not look after the stream runs")
-    return SweepReport(dead, recovered, deliveries, seals, runs, stranded, discarded)
+    return SweepReport(dead, recovered, lost.deliveries, lost.seals, lost.runs, lost.stranded, discarded)
+
+
+@dataclass(frozen=True)
+class Resubmitted:
+    """What `resubmit_lost` put back on its way."""
+
+    deliveries: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    seals: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    runs: list[str] = field(default_factory=list[str])
+    stranded: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+
+
+def resubmit_lost(
+    store: Store,
+    runtime: Runtime,
+    *,
+    now: datetime,
+    pending_after: timedelta = timedelta(minutes=1),
+    owns: Callable[[Run], bool],
+) -> Resubmitted:
+    """Submit again, under the same idempotency keys, what a crash may have lost of the runs that `owns` says this
+    runtime runs: a pending delivery's apply, a queued run's plan and a read run's seal; and fail a delivery whose task
+    ended without finishing it. The server's sweeper does it for the project's flows, and each package host for the runs
+    of its own version (flow packages §7.1), since only a process with a flow's code can submit its tasks."""
+    found = Resubmitted()
+    runs_seen: dict[str, Run | None] = {}
+
+    def run_of(run_id: str) -> Run | None:
+        if run_id not in runs_seen:
+            try:
+                runs_seen[run_id] = store.runs.get_run(run_id)
+            except KeyError:
+                runs_seen[run_id] = None
+        return runs_seen[run_id]
+
+    def ours(version_id: str) -> bool:
+        run = run_of(store.versions.get(version_id).run_id)
+        return run is not None and owns(run)
+
+    for delivery in store.ledger.pending_older_than(pending_after, now=now):
+        name = (delivery.route, delivery.version_id)
+        try:
+            if not ours(delivery.version_id) or runtime.is_route_paused(delivery.route):
+                continue  # another's, or held on purpose and picked up when the pause ends
+            runtime.submit_apply(*name)
+            ended = runtime.fail_stranded(*name)
+        except Exception:
+            log.exception("could not submit delivery %s of version %s", *name)
+        else:
+            (found.stranded if ended else found.deliveries).append(name)
+    for delivery in store.ledger.list_deliveries(status="running", limit=_RUNNING):
+        name = (delivery.route, delivery.version_id)
+        try:
+            if ours(delivery.version_id) and runtime.fail_stranded(*name):
+                found.stranded.append(name)
+        except Exception:
+            log.exception("could not check delivery %s of version %s", *name)
+    for run in store.runs.list_runs(status="queued", limit=_QUEUED):
+        if run.created_at >= now - pending_after or not owns(run) or runtime.is_flow_paused(run.flow):
+            continue
+        try:
+            runtime.submit_plan(run.flow, run.run_id)
+        except Exception:
+            log.exception("could not submit the plan of run %s", run.run_id)
+        else:
+            found.runs.append(run.run_id)
+    for run_id, dataset in store.versions.runs_ready_to_seal():
+        run = run_of(run_id)
+        if run is None or not owns(run):
+            continue
+        try:
+            runtime.submit_seal(run.flow, dataset, run_id)
+        except Exception:
+            log.exception("could not submit the seal of dataset %s for run %s", dataset, run_id)
+        else:
+            found.seals.append((run_id, dataset))
+    return found

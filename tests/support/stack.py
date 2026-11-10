@@ -11,6 +11,7 @@ from typing import Any
 import psycopg
 from real_stack import (
     free_port,
+    install_project,
     kill_abruptly,
     scratch_database,
     server_is_ready,
@@ -65,6 +66,20 @@ class Stack:
                 self.project, self.pg_url, "w-perf", env=self.env, log=log, poll_s=self.poll_s
             )
         wait_until(lambda: "w-perf" in [w.worker_id for w in self.store.workers.list_workers()], STARTING)
+        package = install_project(self.project, self.pg_url)  # installed already, by start_worker: its name
+        wait_until(lambda: self._active(package), STARTING)  # its host took its flows over: they can run
+
+    def reinstall(self) -> None:
+        """Install the project's files again as the next dev version, as `feather dev` does on a save, and wait until
+        its host has taken the flows over: the installed package carries its own copy of the project's files."""
+        package = install_project(self.project, self.pg_url, environ=self.env, again=True)
+        wait_until(lambda: self._active(package), STARTING)
+
+    def _active(self, package: str) -> bool:
+        """Whether every flow of the package's newest version is active on its host."""
+        newest = self.store.packages.versions(package)[-1].version
+        found = [a for a in self.store.packages.activations(package) if a.version == newest]
+        return bool(found) and all(a.state == "active" for a in found)
 
     def close(self) -> None:
         if self.server is not None:

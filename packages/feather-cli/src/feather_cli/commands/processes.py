@@ -23,7 +23,6 @@ from feather_connect.project import ProjectError
 from feather_connect.storage.port import DuplicateUser, Store
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import at_head, migrate
-from feather_connect.worker import run_worker
 from feather_server.app import create_app
 from feather_server.auth import token_digest
 from feather_server.services.accounts import CLI, Accounts
@@ -154,6 +153,57 @@ def migrate_database(env: Env = "dev", database_url: DatabaseUrl = None, json_mo
 server_app.command("migrate")(migrate_database)
 
 
+@server_app.command("upgrade")
+def upgrade_from_project(
+    project: ProjectDir = Path("."),
+    version: Annotated[
+        str | None,
+        typer.Option(help="The package version to make it. Default: feather.yaml's version, or 1.0.0."),
+    ] = None,
+    reason: Annotated[str | None, typer.Option(help="Why, for the audit log.")] = None,
+    env: Env = "dev",
+    database_url: DatabaseUrl = None,
+    json_mode: Json = False,
+) -> None:
+    """Make an M1 project its environment's first package, with its history: build and install it, rename runs,
+    watermarks, deliveries and the ledger to the package's names, and activate its flows. Stop the server and the
+    workers first. Safe to repeat: it finishes what a run before left."""
+    from feather_cli.upgrade import UpgradeError, upgrade_project
+    from feather_connect.packages.manifest import ManifestError
+    from feather_server.services.packages import InstallFailed
+
+    url = _database(database_url, json_mode)
+    _reachable(url, json_mode)
+    try:
+        migrate(url)
+    except (psycopg.Error, SQLAlchemyError) as error:
+        _unreachable(error, json_mode)
+    store = connect(url)[0]
+    try:
+        done = upgrade_project(
+            project,
+            env=env,
+            database_url=url,
+            store=store,
+            version=version,
+            reason=reason or "the upgrade from the project mode",
+            note=lambda line: typer.echo(line, err=True),
+        )
+    except (UpgradeError, ProjectError, ManifestError) as error:
+        fail(str(error), json_mode=json_mode)
+    except InstallFailed as error:
+        fail(f"the {error.check} check failed: {error}", json_mode=json_mode)
+    finally:
+        store.close()
+
+    def show(found: dict[str, object]) -> None:
+        flows = ", ".join(done.activated) or "none new"
+        typer.echo(f"{done.package} {done.version} is installed; flows activated: {flows}")
+        typer.echo("unset FEATHER_PROJECT and remove the /project mount, then start the server and workers")
+
+    emit(done.as_dict(), json_mode=json_mode, human=show)
+
+
 def _read_password() -> str:
     if sys.stdin.isatty():
         return typer.prompt("Password", hide_input=True, confirmation_prompt=True)
@@ -276,32 +326,42 @@ def create_token(
 
 
 def worker(
-    project: ProjectDir = Path("."),
     env: Env = "dev",
     database_url: DatabaseUrl = None,
-    slots: Annotated[int, typer.Option(help="How many tasks it runs at once.")] = 8,
-    labels: Annotated[
-        list[str] | None, typer.Option(help="A label such as site=hq. Repeat for more.")
+    slots: Annotated[int, typer.Option(help="How many tasks each package host runs at once.")] = 8,
+    packages: Annotated[
+        list[str] | None,
+        typer.Option(
+            help="The installed packages it runs: a glob of their names, such as 'acme-*'. Repeat for more. "
+            "Default: all of them."
+        ),
+    ] = None,
+    project: Annotated[
+        Path | None,
+        typer.Option(
+            "--project",
+            envvar="FEATHER_PROJECT",
+            hidden=True,
+            help="Retired: a worker runs installed packages. Make a project a package with feather server upgrade.",
+        ),
     ] = None,
     json_mode: Json = False,
 ) -> None:
-    """Run a worker: it runs the tasks of the project's flows until told to stop."""
+    """Run a worker: a supervisor that runs a package host for each installed package version with work, and
+    prepares the versions installed (flow packages §7.1). It imports no flow code itself."""
+    from feather_connect.supervisor import run_supervisor
+
     url = _database(database_url, json_mode)
-    pairs: dict[str, str] = {}
-    for label in labels or []:
-        key, sep, value = label.partition("=")
-        if not sep or not key:
-            fail(
-                f"{label!r} is not a label",
-                hint="write labels as key=value, such as site=hq",
-                json_mode=json_mode,
-            )
-        pairs[key] = value
+    if project is not None:
+        log.warning(
+            "--project and FEATHER_PROJECT are retired: a worker runs the installed packages. Make %s a package with "
+            "feather server upgrade --project %s",
+            project,
+            project,
+        )
     _reachable(url, json_mode)
     try:
-        code = run_worker(project, env, database_url=url, slots=slots, labels=pairs)
-    except ProjectError as error:
-        fail(str(error), hint="run: feather validate", json_mode=json_mode)
+        code = run_supervisor(env, database_url=url, packages=packages or ["*"], slots=slots)
     except (psycopg.Error, SQLAlchemyError) as error:
         _unreachable(error, json_mode)
     raise typer.Exit(code)

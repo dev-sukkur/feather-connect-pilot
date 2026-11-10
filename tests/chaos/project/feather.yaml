@@ -12,5 +12,5 @@ connections:
   slow_c: {connector: chaos.slow_sink}
   fits_sink: {connector: chaos.slow_sink}
   big_sink: {connector: chaos.slow_sink}
-  hooks: {connector: chaos.push_source}
+  hooks: {connector: simulation.source}
   push_sink: {connector: chaos.slow_sink}

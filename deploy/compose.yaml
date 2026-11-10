@@ -16,9 +16,9 @@ x-feather: &feather
     FEATHER_ENV: ${FEATHER_ENV:-qa}
     FEATHER_BASE_URL: ${FEATHER_BASE_URL:-http://127.0.0.1:8080}
     FEATHER_LOG_LEVEL: ${FEATHER_LOG_LEVEL:-INFO}
-  volumes:
-    - ${FEATHER_PROJECT_DIR:-../examples/demo}:/project:ro
   restart: unless-stopped
+  # No /project mount: flows come as installed packages (feather package install), kept in Postgres. A worker's
+  # package environments are a cache it rebuilds, so they need no volume (NFR-07).
 
 services:
   postgres:

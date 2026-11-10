@@ -107,3 +107,26 @@
     <p class="muted">This confirmation is valid for 10 minutes, and once.</p>
   </section>
 {%- endmacro %}
+
+{# The second step of an action that asks first, for a browser without JavaScript: what it does, and the form that
+   does it, carrying confirm=yes. With JavaScript the button's data-confirm asks in a dialog instead. #}
+{% macro ask_form(ask) -%}
+  <section class="confirm" aria-labelledby="ask-title">
+    <h2 id="ask-title">{{ ask.title }}</h2>
+    <p>{{ ask.text }}</p>
+    <form method="post" action="{{ ask.action }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="confirm" value="yes">
+      {% for field, value in ask.fields.items() if field != "reason" %}<input type="hidden" name="{{ field }}" value="{{ value }}">
+      {% endfor %}<p><label for="ask-reason">Reason (kept in the audit log)</label><br>
+        <input id="ask-reason" name="reason" type="text" maxlength="500" value="{{ ask.fields.get('reason', '') }}"></p>
+      <p><button type="submit" class="{{ 'danger' if ask.danger else 'primary' }}">{{ ask.label }}</button>
+         <a class="button" href="{{ path }}">Cancel</a></p>
+    </form>
+  </section>
+{%- endmacro %}
+
+{# A package version's state, with the step that failed. #}
+{% macro version_state(row) -%}
+  {{ status_dot(row.state) }}{% if row.state == "failed" and row.load_check.get("check") %} <span class="muted">at {{ row.load_check["check"] }}</span>{% endif %}
+{%- endmacro %}

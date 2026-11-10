@@ -44,18 +44,24 @@ from feather_connect.storage.port import (
     EnvConfigStore,
     EnvEntry,
     EnvKind,
+    EnvState,
     FailureGroup,
     FlowActivation,
     FlowRow,
     Grant,
+    HostState,
     InboxDay,
     InboxEvent,
     InboxStore,
+    InUse,
     KeyMismatch,
     KeySighting,
     Ledger,
     Override,
     OverrideStore,
+    PackageEnv,
+    PackageHost,
+    PackageState,
     PackageStore,
     PackageVersion,
     PartitionRow,
@@ -87,6 +93,7 @@ from feather_connect.storage.port import (
     UserStore,
     Version,
     VersionDraft,
+    VersionNotReady,
     VersionSealed,
     VersionStore,
     WebhookEvent,
@@ -298,6 +305,27 @@ class _Runs(RunJournal):
                      and (%(cursor)s::text is null or run_id < %(cursor)s)
                    order by run_id desc limit %(limit)s""",
                 {"tenant": self._db.tenant, "flow": flow, "status": status, "cursor": cursor, "limit": limit},
+            ).fetchall()
+        return [_run(r) for r in rows]
+
+    def tagged_versions(self, statuses: Sequence[str] = ("queued", "running")) -> set[tuple[str, str]]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select distinct params->>'package' as package, params->>'version' as version from feather.run
+                   where tenant_id = %s and status = any(%s)
+                     and params ? 'package' and params ? 'version'""",  # run_tagged_idx
+                (self._db.tenant, list(statuses)),
+            ).fetchall()
+        return {(r["package"], r["version"]) for r in rows if r["package"] and r["version"]}
+
+    def queued_of(self, package: str, version: str, limit: int = 50) -> list[Run]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.run
+                   where tenant_id = %s and status = 'queued'
+                     and params->>'package' = %s and params->>'version' = %s
+                   order by created_at, run_id limit %s""",  # run_tagged_idx
+                (self._db.tenant, package, version, limit),
             ).fetchall()
         return [_run(r) for r in rows]
 
@@ -2261,7 +2289,7 @@ class _Packages(PackageStore):
         self._db = db
 
     _COLUMNS = """name, version, sha256, registry, filename, size, manifest, fc_versions, lock_hash, state, load_check,
-                  installed_by, installed_at"""
+                  installed_by, installed_at, checks, promoted_from, promoted_by, signed_by"""
 
     @staticmethod
     def _version(row: Mapping[str, Any]) -> PackageVersion:
@@ -2279,6 +2307,10 @@ class _Packages(PackageStore):
             row["load_check"],
             row["installed_by"],
             row["installed_at"],
+            tuple(row["checks"] or ()),
+            row["promoted_from"],
+            row["promoted_by"],
+            row["signed_by"],
         )
 
     def install(
@@ -2300,7 +2332,7 @@ class _Packages(PackageStore):
                 )
                 conn.execute(
                     f"""insert into feather.package_version (tenant_id, version_key, {self._COLUMNS})
-                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         tenant,
                         key,
@@ -2317,6 +2349,10 @@ class _Packages(PackageStore):
                         _json(dict(version.load_check)),
                         version.installed_by,
                         version.installed_at,
+                        _json(list(version.checks)),
+                        version.promoted_from,
+                        version.promoted_by,
+                        version.signed_by,
                     ),
                 )
                 for flow in flows:
@@ -2374,7 +2410,54 @@ class _Packages(PackageStore):
             ).fetchone()
         return None if row is None else bytes(row["content"])
 
-    _ACTIVATION = "flow, package, version, state, changed_by, changed_at, reason, error"
+    def uninstall(self, name: str, version: str, by: str, at: datetime, reason: str | None = None) -> bool:
+        tenant, key = self._db.tenant, version_key(version)
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select version, sha256, state from feather.package_version
+                   where tenant_id = %s and name = %s and version_key = %s for update""",
+                (tenant, name, key),
+            ).fetchone()
+            if row is None or row["state"] == "uninstalled":
+                raise KeyError(f"{name} {version} is not installed here")
+            busy = conn.execute(
+                """select flow, state from feather.flow_activation
+                   where tenant_id = %s and package = %s and version_key = %s and state in ('active', 'activating')
+                   order by flow collate "C" limit 1 for update""",
+                (tenant, name, key),
+            ).fetchone()
+            if busy is not None:
+                raise InUse(f"{name} {row['version']}: its flow {busy['flow']} is {busy['state']}")
+            runs = conn.execute(
+                """select status from feather.run
+                   where tenant_id = %s and status in ('queued', 'running')
+                     and params->>'package' = %s and params->>'version' = %s
+                   limit 1""",  # run_tagged_idx
+                (tenant, name, row["version"]),
+            ).fetchone()
+            if runs is not None:
+                raise InUse(
+                    f"{name} {row['version']} has {runs['status']} runs: let them finish, or cancel them"
+                )
+            conn.execute(
+                """update feather.package_version set state = 'uninstalled'
+                   where tenant_id = %s and name = %s and version_key = %s""",
+                (tenant, name, key),
+            )
+            shared = conn.execute(
+                """select 1 from feather.package_version
+                   where tenant_id = %s and sha256 = %s and state <> 'uninstalled' limit 1""",
+                (tenant, row["sha256"]),
+            ).fetchone()
+            if shared is None:
+                conn.execute(
+                    "delete from feather.package_wheel where tenant_id = %s and sha256 = %s",
+                    (tenant, row["sha256"]),
+                )
+            conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, tenant))
+        return shared is None
+
+    _ACTIVATION = "flow, package, version, state, changed_by, changed_at, reason, error, last_active_at"
 
     @staticmethod
     def _activation(r: Mapping[str, Any]) -> FlowActivation:
@@ -2387,46 +2470,65 @@ class _Packages(PackageStore):
             r["changed_at"],
             r["reason"],
             r["error"],
+            r["last_active_at"],
         )
+
+    def renames(self) -> dict[tuple[str, str], str]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                "select kind, old_name, new_name from feather.renamed where tenant_id = %s",
+                (self._db.tenant,),
+            ).fetchall()
+        return {(r["kind"], r["old_name"]): r["new_name"] for r in rows}
+
+    def needed_lock_hashes(self) -> set[str]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select distinct lock_hash from feather.package_version
+                   where tenant_id = %s and state <> 'uninstalled'""",
+                (self._db.tenant,),
+            ).fetchall()
+        return {r["lock_hash"] for r in rows}
 
     def activations(self, name: str, version: str | None = None) -> list[FlowActivation]:
         key = None if version is None else version_key(version)
         with self._db.tx() as conn:
             rows = conn.execute(
-                """select flow, package, version, state, changed_by, changed_at, reason, error
+                f"""select {self._ACTIVATION}
                    from feather.flow_activation
                    where tenant_id = %s and package = %s and (%s::text is null or version_key = %s)
                    order by flow collate "C", changed_at, version collate "C" limit %s""",
                 (self._db.tenant, name, key, key, MAX_PACKAGE_ROWS),
             ).fetchall()
-        return [
-            FlowActivation(
-                r["flow"],
-                r["package"],
-                r["version"],
-                r["state"],
-                r["changed_by"],
-                r["changed_at"],
-                r["reason"],
-                r["error"],
-            )
-            for r in rows
-        ]
+        return [self._activation(r) for r in rows]
 
     def activate(
         self, flow: str, name: str, version: str, by: str, at: datetime, reason: str | None = None
     ) -> FlowActivation:
         tenant, key = self._db.tenant, version_key(version)
         with self._db.tx() as conn:
+            installed = (
+                conn.execute(  # shared: an uninstall, which takes it for update, waits or makes this wait
+                    """select state from feather.package_version
+                   where tenant_id = %s and name = %s and version_key = %s for share""",
+                    (tenant, name, key),
+                ).fetchone()
+            )
+            if installed is None or installed["state"] != "ready":
+                state = "uninstalled" if installed is None else installed["state"]
+                raise VersionNotReady(
+                    f"{name} {version} is {state}: only a ready version can be activated", state
+                )
             conn.execute(
                 """update feather.flow_activation set state = 'inactive', changed_by = %s, changed_at = %s, reason = %s
-                   where tenant_id = %s and flow = %s and state = 'active'
+                   where tenant_id = %s and flow = %s and state = 'activating'
                      and not (package = %s and version_key = %s)""",
                 (by, at, reason, tenant, flow, name, key),
             )
             row = conn.execute(
-                f"""update feather.flow_activation set state = 'active', changed_by = %s, changed_at = %s,
-                        reason = %s, error = null
+                f"""update feather.flow_activation
+                    set state = case when state = 'active' then 'active' else 'activating' end,
+                        changed_by = %s, changed_at = %s, reason = %s, error = null
                     where tenant_id = %s and flow = %s and package = %s and version_key = %s
                     returning {self._ACTIVATION}""",
                 (by, at, reason, tenant, flow, name, key),
@@ -2437,18 +2539,74 @@ class _Packages(PackageStore):
         return self._activation(row)
 
     def deactivate(self, flow: str, by: str, at: datetime, reason: str | None = None) -> FlowActivation:
+        tenant = self._db.tenant
         with self._db.tx() as conn:
-            row = conn.execute(
-                f"""update feather.flow_activation set state = 'inactive', changed_by = %s, changed_at = %s,
-                        reason = %s
-                    where tenant_id = %s and flow = %s and state = 'active'
-                    returning {self._ACTIVATION}""",
-                (by, at, reason, self._db.tenant, flow),
-            ).fetchone()
-            if row is None:
+            found = conn.execute(
+                """select package, version_key, state from feather.flow_activation
+                   where tenant_id = %s and flow = %s and state in ('active', 'activating')
+                   order by (state <> 'active') for update""",
+                (tenant, flow),
+            ).fetchall()
+            if not found:
                 raise KeyError(f"no version of {flow} is active")
-            conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, self._db.tenant))
-        return self._activation(row)
+            rows = conn.execute(
+                f"""update feather.flow_activation set state = 'inactive', changed_by = %s, changed_at = %s,
+                        reason = %s, last_active_at = case when state = 'active' then %s else last_active_at end
+                    where tenant_id = %s and flow = %s and state in ('active', 'activating')
+                    returning {self._ACTIVATION}, version_key""",
+                (by, at, reason, at, tenant, flow),
+            ).fetchall()
+            conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, tenant))
+        first = (found[0]["package"], found[0]["version_key"])  # the active one, if there is one
+        return self._activation(next(r for r in rows if (r["package"], r["version_key"]) == first))
+
+    def _settle(
+        self, name: str, version: str, to: str, at: datetime, error: str | None
+    ) -> list[FlowActivation]:
+        tenant, key = self._db.tenant, version_key(version)
+        with self._db.tx() as conn:
+            flows = [
+                r["flow"]
+                for r in conn.execute(
+                    """select flow from feather.flow_activation
+                       where tenant_id = %s and package = %s and version_key = %s and state = 'activating'
+                       for update""",
+                    (tenant, name, key),
+                ).fetchall()
+            ]
+            if not flows:
+                return []
+            if to == "active":
+                conn.execute(
+                    """update feather.flow_activation set state = 'inactive', changed_at = %s, last_active_at = %s
+                       where tenant_id = %s and flow = any(%s) and state = 'active'
+                         and not (package = %s and version_key = %s)""",
+                    (at, at, tenant, flows, name, key),
+                )
+            rows = conn.execute(
+                f"""update feather.flow_activation set state = %s, changed_at = %s, error = %s,
+                        last_active_at = case when %s::text = 'active' then %s else last_active_at end
+                    where tenant_id = %s and package = %s and version_key = %s and state = 'activating'
+                    returning {self._ACTIVATION}""",
+                (to, at, error, to, at, tenant, name, key),
+            ).fetchall()
+            conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, tenant))
+        return sorted((self._activation(r) for r in rows), key=lambda a: a.flow)
+
+    def promote(self, name: str, version: str, at: datetime) -> list[FlowActivation]:
+        return self._settle(name, version, "active", at, None)
+
+    def activation_failed(self, name: str, version: str, error: str, at: datetime) -> list[FlowActivation]:
+        return self._settle(name, version, "failed", at, error)
+
+    def activating(self) -> list[FlowActivation]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                f"""select {self._ACTIVATION} from feather.flow_activation
+                    where tenant_id = %s and state = 'activating' order by flow collate "C" limit %s""",
+                (self._db.tenant, MAX_PACKAGE_ROWS),
+            ).fetchall()
+        return [self._activation(r) for r in rows]
 
     def active(self) -> list[FlowActivation]:
         with self._db.tx() as conn:
@@ -2481,6 +2639,91 @@ class _Packages(PackageStore):
 
         threading.Thread(target=run, name="catalog-listen", daemon=True).start()
         return stop.set
+
+    def prepared(
+        self,
+        name: str,
+        version: str,
+        state: PackageState,
+        load_check: Mapping[str, Any],
+        expect: Sequence[PackageState] = ("installed", "preparing"),
+    ) -> bool:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """update feather.package_version set state = %s, load_check = %s
+                   where tenant_id = %s and name = %s and version_key = %s and state = any(%s)
+                   returning name""",
+                (state, _json(dict(load_check)), self._db.tenant, name, version_key(version), list(expect)),
+            ).fetchone()
+            if row is not None:
+                conn.execute("select pg_notify(%s, %s)", (CATALOG_CHANNEL, self._db.tenant))
+        return row is not None
+
+    def record_env(
+        self, worker_id: str, lock_hash: str, state: EnvState, at: datetime, error: str | None = None
+    ) -> None:
+        with self._db.tx() as conn:
+            conn.execute(
+                """insert into feather.package_env (tenant_id, worker_id, lock_hash, state, error, built_at)
+                   values (%s, %s, %s, %s, %s, %s)
+                   on conflict (tenant_id, worker_id, lock_hash)
+                   do update set state = excluded.state, error = excluded.error, built_at = excluded.built_at""",
+                (self._db.tenant, worker_id, lock_hash, state, error, at),
+            )
+
+    def envs(self, worker_id: str | None = None) -> list[PackageEnv]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select worker_id, lock_hash, state, error, built_at from feather.package_env
+                   where tenant_id = %s and (%s::text is null or worker_id = %s)
+                   order by worker_id collate "C", lock_hash collate "C" limit %s""",
+                (self._db.tenant, worker_id, worker_id, MAX_PACKAGE_ROWS),
+            ).fetchall()
+        return [
+            PackageEnv(r["worker_id"], r["lock_hash"], r["state"], r["error"], r["built_at"]) for r in rows
+        ]
+
+    def record_host(
+        self,
+        worker_id: str,
+        name: str,
+        version: str,
+        state: HostState,
+        restarts: int,
+        at: datetime,
+        error: str | None = None,
+    ) -> None:
+        with self._db.tx() as conn:
+            conn.execute(
+                """insert into feather.package_host
+                       (tenant_id, worker_id, package, version, state, restarts, error, changed_at)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s)
+                   on conflict (tenant_id, worker_id, package, version)
+                   do update set state = excluded.state, restarts = excluded.restarts, error = excluded.error,
+                                 changed_at = excluded.changed_at""",
+                (self._db.tenant, worker_id, name, version, state, restarts, error, at),
+            )
+
+    def hosts(self, worker_id: str | None = None) -> list[PackageHost]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select worker_id, package, version, state, restarts, error, changed_at from feather.package_host
+                   where tenant_id = %s and (%s::text is null or worker_id = %s)
+                   order by worker_id collate "C", package collate "C", version collate "C" limit %s""",
+                (self._db.tenant, worker_id, worker_id, MAX_PACKAGE_ROWS),
+            ).fetchall()
+        return [
+            PackageHost(
+                r["worker_id"],
+                r["package"],
+                r["version"],
+                r["state"],
+                r["restarts"],
+                r["error"],
+                r["changed_at"],
+            )
+            for r in rows
+        ]
 
 
 class _Audit(AuditStore):
@@ -3142,6 +3385,7 @@ class PostgresStore(Store):
     """A `Store` that keeps everything in Postgres, for one tenant. `clock` defaults to the system clock."""
 
     _pool: Pool
+    _db: _Db
 
     def __init__(self, pool: Pool, clock: Clock | None = None, tenant: str = "default") -> None:
         db = _Db(pool, clock or SystemClock(), tenant)
@@ -3169,6 +3413,16 @@ class PostgresStore(Store):
             webhooks=_Webhooks(db),
         )
         object.__setattr__(self, "_pool", pool)  # `Store` is frozen
+        object.__setattr__(self, "_db", db)
+
+    def ensure_partitions(self, days_ahead: int) -> None:
+        """Make the inbox's daily partitions and the task logs' and delivery attempts' monthly ones for today through
+        `days_ahead` days on, as a role that owns their parents. Hosts write as a role that can't make them."""
+        self.inbox.ensure_partitions(days_ahead)
+        now = self._db.clock.now()
+        for parent in ("task_log", "delivery_attempt"):
+            for at in (now, now + timedelta(days=days_ahead)):
+                self._db.ensure_month(parent, at)
 
     def is_unavailable(self, error: BaseException) -> bool:
         """A lost or refused connection, a pool timeout, a cancelled statement or a deadlock, and not a value too big

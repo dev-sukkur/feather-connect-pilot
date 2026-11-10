@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{{ m.page_head("Registries", tiles) }}
+<p class="muted lead">The Python package indexes this environment installs packages from. The built-in one, <code>feather</code>, is served by this server. A registry's token is kept only as a secret reference, and never shown.</p>
+{{ m.notice_of(notice) }}
+{% if ask %}{{ m.ask_form(ask) }}{% endif %}
+<div class="table-wrap scroll"><table class="data" data-table="registries">
+  <caption class="sr-only">Trusted registries</caption>
+  <thead><tr><th scope="col">Registry</th><th scope="col">Index</th><th scope="col">Token</th><th scope="col">Added</th>{% if can_manage %}<th scope="col">Actions</th>{% endif %}</tr></thead>
+  <tbody>
+  {% for r in registries %}
+    <tr>
+      <th scope="row">{{ r.name }}{% if r.built_in %} <span class="muted">(built in)</span>{% endif %}</th>
+      <td><code class="wrap">{{ r.index_url }}</code></td>
+      <td>{% if r.token_ref %}set{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td>{% if r.added_by %}by {{ r.added_by }}{% else %}<span class="muted">from the start</span>{% endif %}</td>
+      {% if can_manage %}<td><div class="actions">
+        <form method="post" action="/registries/{{ r.name | urlencode }}/test"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Test<span class="sr-only"> {{ r.name }}</span></button></form>
+        {% if not r.built_in %}<form method="post" action="/registries/{{ r.name | urlencode }}/remove"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="danger" data-confirm="Remove the registry {{ r.name }}? Nothing can be installed from it any more; versions installed from it stay." data-confirm-field="confirm">Remove<span class="sr-only"> {{ r.name }}</span></button></form>{% endif %}
+      </div></td>{% endif %}
+    </tr>
+  {% else %}
+    <tr><td colspan="{{ 5 if can_manage else 4 }}" class="empty">No registry: the built-in one is off and none is added.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{{ m.table_foot(registries | length, "registry", "registries") }}
+
+{% if can_manage %}
+<section aria-labelledby="h-add">
+  <h2 id="h-add">Add a registry</h2>
+  <p class="muted">Any index that speaks the Python simple index protocol. Give its token as a reference, such as <code>${secret:env:ACME_REGISTRY_TOKEN}</code>, never the token itself.</p>
+  <form class="filters" method="post" action="/registries/add">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p><label for="reg-name">Name</label><br><input id="reg-name" name="name" type="text" maxlength="64" required value="{{ form.get('name', '') }}" placeholder="acme" autocomplete="off"></p>
+    <p><label for="reg-url">Index URL</label><br><input id="reg-url" name="index_url" type="url" maxlength="500" required value="{{ form.get('index_url', '') }}" placeholder="https://pkgs.example.com/simple/" autocomplete="off"></p>
+    <p><label for="reg-token">Token reference (optional)</label><br><input id="reg-token" name="token_ref" type="text" maxlength="500" value="{{ form.get('token_ref', '') }}" placeholder="${secret:env:ACME_REGISTRY_TOKEN}" autocomplete="off"></p>
+    <p><button type="submit" class="primary">Add</button></p>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

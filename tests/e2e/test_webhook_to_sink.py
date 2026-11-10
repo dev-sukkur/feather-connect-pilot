@@ -50,27 +50,32 @@ def push_project(tmp_path: Path) -> Path:
             name: push-project
             modules: [flows.hooks]
             connections:
-              e2e_hooks:
-                connector: simulation.source
-                auth: {signature_secret: "${secret:env:HOOK_SECRET}"}
+              e2e_hooks: {connector: simulation.source}
               e2e_upsert: {connector: simulation.sink}
               e2e_append: {connector: simulation.sink}
+            webhooks:
+              hooks:
+                dataset: e2e_hooks
+                verify: {scheme: hmac-sha256, header: x-signature, encoding: hex, timestamp_header: x-timestamp}
+                secret: ${secret:env:HOOK_SECRET}
+                key: $.event_id
             """
         )
     )
     (tmp_path / "env" / "dev.yaml").write_text("")
     (tmp_path / "flows" / "hooks.py").write_text(
-        dedent(
+        f"ROOT = {str(tmp_path)!r}\n"
+        + dedent(
             """
             from pathlib import Path
 
             import feather_connect as fc
             from feather_connect.connectors import simulation
 
-            root = Path(__file__).parent.parent
+            root = Path(ROOT)  # the installed copy of this file runs from elsewhere
             hooks = fc.Dataset(
                 "e2e_hooks",
-                source=simulation.Source("e2e_hooks", generator={"id": simulation.seq()}, rows_per_partition=0),
+                source=simulation.Source("e2e_hooks", generator={"id": simulation.seq()}, rows_per_partition=0, unsigned=True),
                 key="id",
                 strategy=fc.strategy.push(),
             )
@@ -109,12 +114,12 @@ def post(url: str, payload: dict[str, Any], *, secret: str = SECRET) -> int:
     body = json.dumps(payload).encode()
     stamp = str(int(time.time()))
     request = urllib.request.Request(
-        f"{url}/ingress/default/e2e_hooks",
+        f"{url}/ingress/default/push-project/hooks",
         data=body,
         method="POST",
         headers={
             "Content-Type": "application/json",
-            SIGNATURE_HEADER: sign(secret, body, stamp),
+            SIGNATURE_HEADER: sign(secret, body, None),
             TIMESTAMP_HEADER: stamp,
         },
     )
@@ -133,13 +138,15 @@ def captured(project: Path, name: str) -> list[dict[str, Any]]:
 def test_a_signed_webhook_reaches_the_sinks_once(push_project, server, db, pg_url, workers):
     store, _ = db
     workers.append(start_worker(push_project, pg_url, "w-push", env=ENV))
+    active = lambda: [a.state for a in store.packages.activations("push-project")] == ["active"]
+    wait_until(active, GENEROUS)  # the ingress takes events only for a flow that is active
 
     assert post(server, {"event_id": "refused", "id": 99}, secret="not-the-secret") == 401
-    assert store.inbox.oldest_age("e2e_hooks", datetime.now(UTC)) is None
+    assert store.inbox.oldest_age("push-project/e2e_hooks", datetime.now(UTC)) is None
 
     first = {"event_id": "e2e-1", "id": 1, "v": "first"}
     assert post(server, first) == 202
-    assert post(server, first) == 202  # the sender heard nothing, and tries again
+    assert post(server, first) == 202  # the sender heard nothing, and tries again: kept once, answered alike
 
     wait_until(lambda: captured(push_project, "upsert"), GENEROUS)
     wait_until(lambda: captured(push_project, "append"), GENEROUS)
@@ -153,7 +160,7 @@ def test_a_signed_webhook_reaches_the_sinks_once(push_project, server, db, pg_ur
     assert [line["payload"]["event_id"] for line in captured(push_project, "append")] == ["e2e-1", "e2e-2"]
     assert captured(push_project, "upsert")[-1]["payload"]["v"] == "second"
 
-    versions = store.versions.list_versions("e2e_hooks")
+    versions = store.versions.list_versions("push-project/e2e_hooks")
     assert versions and all(not v.complete for v in versions)
     run_ids = {v.run_id for v in versions}
     assert len(run_ids) == 1  # no run per event

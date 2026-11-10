@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -167,6 +168,31 @@ def sign_in(app: FastAPI, username: str = "op", role: Role = "operator") -> Test
 # Package registries, for the tests of the built-in registry, `feather package` and `feather registry`.
 
 SAMPLE_PACKAGE = Path(__file__).resolve().parents[4] / "examples" / "packages" / "acme-invoices"
+
+
+def prepare(state: AppState, name: str, version: str = "1.0.0", checker: Any = None) -> dict[str, Any]:
+    """Prepare an installed version as a worker supervisor would, with no environment of its own: the load check runs
+    in a child process on this Python, or `checker` stands in for it. Returns the load check as recorded."""
+    from feather_connect.packages.prepare import prepare_version
+
+    row = state.store.packages.version(name, version)
+    assert row is not None, f"{name} {version} is not installed"
+    options: dict[str, Any] = {} if checker is None else {"checker": checker}
+    return prepare_version(
+        state.store, row, env=state.settings.env, envs=None, worker_id="test", clock=state.clock, **options
+    )
+
+
+def host_up(state: AppState, name: str, version: str = "1.0.0") -> list[str]:
+    """Say that a host of the version is up, as a worker supervisor does when its host says ready: the flows
+    activating move to it, and show in the catalogue. Returns those flows."""
+    from feather_connect.runtime.catalogue import sync_package_catalog
+
+    promoted = state.store.packages.promote(name, version, state.clock.now())
+    row = state.store.packages.version(name, version)
+    if promoted and row is not None:
+        sync_package_catalog(state.store, name, row)
+    return [a.flow for a in promoted]
 
 
 def sample_wheel(out_dir: Path, version: str | None = None) -> Path:

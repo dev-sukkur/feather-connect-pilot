@@ -4,7 +4,6 @@ import os
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal, cast, get_args
 
 Engine = Literal["dbos", "local"]
@@ -30,7 +29,7 @@ class Settings:
     spool: Literal["postgres"] = "postgres"
     secret_key: str = ""
     base_url: str = "http://localhost:8000"
-    project: Path = Path(".")
+    legacy_project: str | None = None  # FEATHER_PROJECT of the retired project mode: only warned about (§13)
     ingress_max_bytes: int = 1024 * 1024
     ingress_rate_per_s: float = 1000.0
     ingress_queue_max: int = 5000
@@ -39,8 +38,8 @@ class Settings:
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
-        """Read the settings from `environ`, which is the process environment by default. The database and the project
-        are required.
+        """Read the settings from `environ`, which is the process environment by default. The database is required.
+        FEATHER_PROJECT, of the retired project mode, is only noted, for the server to say what to do instead.
 
         A missing secret key is made up for this process, which signs out everyone whenever the server restarts.
         """
@@ -94,7 +93,7 @@ class Settings:
             engine_poll_s=poll,
             secret_key=environ.get("FEATHER_SECRET_KEY") or secrets.token_urlsafe(32),
             base_url=environ.get("FEATHER_BASE_URL", "http://localhost:8000"),
-            project=Path(need("FEATHER_PROJECT")),
+            legacy_project=environ.get("FEATHER_PROJECT") or None,
             ingress_max_bytes=max_bytes,
             ingress_rate_per_s=rate,
             ingress_queue_max=queue_max,

@@ -119,3 +119,38 @@ def test_users_and_tokens_of_an_m1_database_become_admins(pg_url: str):  # flow 
                     """insert into feather.app_user (tenant_id, user_id, username, password_hash, created_at)
                        values ('default', 'u3', 'cy', 'h', now())"""
                 )
+
+
+def test_installed_packages_survive_0024_and_0025(pg_url: str):  # flow packages §6, tasks 10 and 11
+    with scratch_database(server_url()) as url:
+        migrate(url, "0023")
+        with psycopg.connect(url, autocommit=True) as conn:
+            conn.execute("insert into feather.package values ('default', 'acme', 'ann', now())")
+            conn.execute("insert into feather.package_wheel values ('default', 'abc', 3, 'pk!', now())")
+            conn.execute(
+                """insert into feather.package_version (tenant_id, name, version, version_key, sha256, registry,
+                       filename, size, manifest, fc_versions, lock_hash, state, load_check, installed_by,
+                       installed_at)
+                   values ('default', 'acme', '1.0.0', '1.0.0', 'abc', 'feather', 'acme-1.0.0.whl', 3,
+                           '{"name": "acme"}', '>=1', 'lh', 'ready', '{"ok": true}', 'ann', now())"""
+            )
+            conn.execute(
+                """insert into feather.flow_activation (tenant_id, flow, package, version_key, version, state,
+                       changed_by, changed_at)
+                   values ('default', 'acme/a', 'acme', '1.0.0', '1.0.0', 'active', 'ann',
+                           '2026-01-02T03:04:05Z'),
+                          ('default', 'acme/b', 'acme', '1.0.0', '1.0.0', 'inactive', 'ann', now())"""
+            )
+        migrate(url)
+        with psycopg.connect(url, autocommit=True) as conn:
+            row = conn.execute(
+                """select sha256, state, manifest, checks, promoted_from, signed_by
+                   from feather.package_version where name = 'acme'"""
+            ).fetchone()
+            assert row == ("abc", "ready", {"name": "acme"}, [], None, None)
+            served = conn.execute(
+                "select flow, last_active_at is not null from feather.flow_activation order by flow"
+            ).fetchall()
+            assert served == [("acme/a", True), ("acme/b", False)]
+            conn.execute("delete from feather.package_wheel where sha256 = 'abc'")  # no foreign key now
+            assert conn.execute("select count(*) from feather.package_version").fetchone() == (1,)

@@ -40,12 +40,15 @@ __all__ = [
     "ProjectError",
     "check_binding",
     "check_environment",
+    "connection_configs",
     "db_secret_name",
     "effective_config",
     "environment_layer",
+    "environment_project",
     "is_secret_ref",
     "load_project",
     "resolve_secret",
+    "use_secret_broker",
     "validate_project",
     "webhook_secret_name",
 ]
@@ -64,6 +67,9 @@ _LOCAL_PROVIDERS = frozenset({"env", "file", "db"})
 _ENVIRONMENT_LAYER = "environment"  # the environment's own configuration, from the database (§8)
 # Opens `${secret:db:<name>}`: set by a server or worker that has the environment's secret store.
 _db_secrets: Callable[[str], str] | None = None
+# Resolves every credential of a connection, `(connection, field, reference) -> value`, in a process that holds none of
+# them: a package host, whose supervisor resolves them (flow packages §11). None resolves them here.
+_secret_broker: Callable[[str, str, str], str] | None = None
 _SECRET = re.compile(r"^\$\{secret:([^:{}]+):(.+)\}$")
 _CONNECTION_KEYS = frozenset({"connector", "site", "budget", "auth"})
 _ENV_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -94,6 +100,12 @@ class ConnectionConfig:
         secret opens only for the connection and field it is named for, `<connection>/<field>`."""
         for key, ref in self.secret_refs.items():
             check_binding(ref, self.name, key)
+        broker = _secret_broker
+        if broker is not None:
+            return {
+                **self.options,
+                **{key: broker(self.name, key, ref) for key, ref in self.secret_refs.items()},
+            }
         return {
             **self.options,
             **{key: resolve_secret(ref, self.root) for key, ref in self.secret_refs.items()},
@@ -239,6 +251,12 @@ def use_db_secrets(opener: Callable[[str], str] | None) -> None:
     _db_secrets = opener
 
 
+def use_secret_broker(broker: Callable[[str, str, str], str] | None) -> None:
+    """Resolve every connection credential with `broker(connection, field, reference)`, or here again with None."""
+    global _secret_broker
+    _secret_broker = broker
+
+
 def _check_provider(provider: str) -> None:
     if provider not in _SECRET_PROVIDERS:
         known = ", ".join(sorted(_SECRET_PROVIDERS))
@@ -265,17 +283,7 @@ def load_project(
     `simulate` runs every connection on simulation stand-ins, as if each one's `connector:` named a simulation
     connector: what `feather run --sim` does. Sources then read `fixtures/<dataset>.json[l]`, and no secret is needed.
     """
-    if not _ENV_NAME.match(env):
-        raise ProjectError(f"{env!r} is not an environment name: use letters, digits, - and _")
-    layer_files = [(_PROJECT_FILE, root / _PROJECT_FILE), (f"env/{env}.yaml", root / "env" / f"{env}.yaml")]
-    config: dict[str, Any] = {}
-    layers: dict[str, str] = {}
-    _merge(config, layers, DEFAULTS, _DEFAULTS_LAYER, "")
-    for label, path in layer_files:
-        _merge(config, layers, _read_yaml(label, path), label, "")
-    if environment:
-        _merge(config, layers, _strkeys(environment), _ENVIRONMENT_LAYER, "")
-    _check_secrets(config, layers, package)
+    config, layers = _layered(root, env, environment, package)
     name = _text(config, "name", layers)
     budgets = _budgets(config, layers)
     connections = _connections(config, layers, budgets, root)
@@ -479,6 +487,35 @@ def _dev_processes(config: Mapping[str, Any], layers: Mapping[str, str]) -> tupl
             raise ProjectError(f"{where}[{i}].port: must be a port number from 1 to 65535")
         found.append(DevProcess(name, tuple(str(w) for w in words), port))
     return tuple(found)
+
+
+def _layered(
+    root: Path, env: str, environment: Mapping[str, Any] | None, package: str | None
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """The project's configuration for `env`, its files and the environment's own layer merged, and where each value
+    came from. Reads files only: no code of the project runs."""
+    if not _ENV_NAME.match(env):
+        raise ProjectError(f"{env!r} is not an environment name: use letters, digits, - and _")
+    layer_files = [(_PROJECT_FILE, root / _PROJECT_FILE), (f"env/{env}.yaml", root / "env" / f"{env}.yaml")]
+    config: dict[str, Any] = {}
+    layers: dict[str, str] = {}
+    _merge(config, layers, DEFAULTS, _DEFAULTS_LAYER, "")
+    for label, path in layer_files:
+        _merge(config, layers, _read_yaml(label, path), label, "")
+    if environment:
+        _merge(config, layers, _strkeys(environment), _ENVIRONMENT_LAYER, "")
+    _check_secrets(config, layers, package)
+    return config, layers
+
+
+def connection_configs(
+    root: Path, env: str, *, environment: Mapping[str, Any] | None = None, package: str | None = None
+) -> dict[str, ConnectionConfig]:
+    """The project's connections for `env`, as `load_project` makes them, from its files and the environment's layer
+    alone: no code of the project is imported, so a process that must not run it, such as a worker supervisor, can
+    tell which credentials a package's connections name."""
+    config, layers = _layered(root, env, environment, package)
+    return _connections(config, layers, _budgets(config, layers), root)
 
 
 def _connections(
@@ -835,6 +872,32 @@ def prefixed(flows: Sequence[Flow], package: str) -> tuple[Flow, ...]:
     return tuple(found)
 
 
+def environment_project(env: str, environment: Mapping[str, Any] | None = None) -> Project:
+    """The environment with no flows of its own: its shared connections, budgets and settings (§8), over the
+    defaults. The server runs on this since the project mode is retired (§13): every flow is an installed package's,
+    and package code never loads in the server."""
+    config: dict[str, Any] = {}
+    layers: dict[str, str] = {}
+    _merge(config, layers, DEFAULTS, _DEFAULTS_LAYER, "")
+    if environment:
+        _merge(config, layers, _strkeys(environment), _ENVIRONMENT_LAYER, "")
+    budgets = _budgets(config, layers)
+    connections = _connections(config, layers, budgets, Path("."))
+    settings: Mapping[str, Any] = config.get("settings", {})
+    return Project(
+        "environment",
+        Path("."),
+        env,
+        (),
+        connections,
+        budgets,
+        settings,
+        "environment",
+        copy.deepcopy(config),
+        dict(layers),
+    )
+
+
 _PLURAL = {"connection": "connections", "budget": "budgets", "setting": "settings"}
 
 
@@ -856,6 +919,28 @@ def check_environment(environment: Mapping[str, Any]) -> None:
         raise ProjectError(
             f"{_where(layers, 'settings.timezone')}: {timezone!r} is not a time zone"
         ) from None
+    _check_signing(_mapping(config, "settings", layers), layers)
+
+
+def _check_signing(settings: Mapping[str, Any], layers: Mapping[str, str]) -> None:
+    """`require_signed_packages` is a boolean, and `trusted_package_keys` a list of ed25519 public keys (task 11);
+    requiring signed packages needs a key to trust."""
+    from feather_connect.packages.signing import SignatureError, check_trusted_keys
+
+    required = settings.get("require_signed_packages", False)
+    if not isinstance(required, bool):
+        where = _where(layers, "settings.require_signed_packages")
+        raise ProjectError(f"{where}: {required!r} is not true or false")
+    keys = settings.get("trusted_package_keys", [])
+    try:
+        trusted = check_trusted_keys(keys)
+    except SignatureError as error:
+        raise ProjectError(f"{_where(layers, 'settings.trusted_package_keys')}: {error}") from None
+    if required and not trusted:
+        raise ProjectError(
+            f"{_where(layers, 'settings.require_signed_packages')}: requiring signed packages needs "
+            "trusted_package_keys, the public keys they may be signed with"
+        )
 
 
 def _entry_value(kind: str, value: Any) -> Any:

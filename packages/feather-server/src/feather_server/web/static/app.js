@@ -476,6 +476,15 @@
 
   /* A row's More menu opens over the table, not inside its scroll box, and closes on Escape or a click away. */
   function menus() {
+    var openedAt = 0;  // when a row menu was last asked open: its toggle comes after the scroll that showing it makes
+    document.addEventListener("pointerdown", function (event) {
+      if (event.target.closest && event.target.closest("details.row-menu > summary")) { openedAt = Date.now(); }
+    }, true);
+    document.addEventListener("keydown", function (event) {
+      if ((event.key === "Enter" || event.key === " ") && event.target.matches && event.target.matches("details.row-menu > summary")) {
+        openedAt = Date.now();
+      }
+    }, true);
     document.addEventListener("toggle", function (event) {
       var details = event.target;
       if (!details.classList || !details.open) { return; }
@@ -484,6 +493,7 @@
         if (other !== details) { other.open = false; }
       });
       if (details.classList.contains("row-menu")) {
+        openedAt = Date.now();
         var panel = details.querySelector(".menu-panel");
         var spot = details.querySelector("summary").getBoundingClientRect();
         panel.style.position = "fixed";
@@ -504,6 +514,8 @@
       });
     });
     window.addEventListener("scroll", function () {
+      // Opening a menu can scroll its table to show it: that scroll is not the reader's, and must not close it.
+      if (Date.now() - openedAt < 400) { return; }
       all("details.row-menu[open]").forEach(function (details) { details.open = false; });
     }, true);
   }

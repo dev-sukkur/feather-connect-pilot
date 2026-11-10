@@ -234,7 +234,7 @@ def test_demo_runs_and_reaches_destinations(dev, database, pg_connect):
     store, _ = pg_connect(database)
 
     def applied(route: str) -> bool:
-        done = store.ledger.list_deliveries(route=route, status="applied")
+        done = store.ledger.list_deliveries(route=f"demo/{route}", status="applied")
         return bool(done) and sum(d.rows_applied for d in done) > 0
 
     # dev delivers to real targets: the demo schema of this database, a DuckDB file and sims/targets.py.
@@ -257,10 +257,10 @@ def test_editing_a_flow_reloads_it(database, start_dev, tmp_path, pg_connect):
     running.wait_ready()
     store, _ = pg_connect(database)
     flow_file = project / "flows" / "orders.py"
-    assert store.catalog.flow("orders").spec["owner"] == "demo"
+    wait_until(lambda: store.catalog.flow("demo/orders").spec["owner"] == "demo", 120, "the installed flow")
 
     flow_file.write_text(flow_file.read_text().replace('owner = "demo"', 'owner = "reloaded"'))
-    wait_until(lambda: store.catalog.flow("orders").spec["owner"] == "reloaded", 60, "the reloaded flow")
+    wait_until(lambda: store.catalog.flow("demo/orders").spec["owner"] == "reloaded", 60, "the reloaded flow")
     # the worker registers the new code before the restarted server is back
     wait_until(
         lambda: httpx.get(f"{running.base}/readyz", timeout=5).status_code == 200, 60, "the restarted server"
@@ -270,12 +270,12 @@ def test_editing_a_flow_reloads_it(database, start_dev, tmp_path, pg_connect):
     flow_file.write_text("this is not python (\n")
     wait_until(lambda: "reload failed" in running.output(), 60, "the reload failure message")
     assert httpx.get(f"{running.base}/readyz", timeout=5).status_code == 200
-    assert store.catalog.flow("orders").spec["owner"] == "reloaded"
+    assert store.catalog.flow("demo/orders").spec["owner"] == "reloaded"
 
     flow_file.write_text(
         DEMO.joinpath("flows", "orders.py").read_text().replace('owner = "demo"', 'owner = "fixed"')
     )
-    wait_until(lambda: store.catalog.flow("orders").spec["owner"] == "fixed", 60, "the repaired flow")
+    wait_until(lambda: store.catalog.flow("demo/orders").spec["owner"] == "fixed", 60, "the repaired flow")
 
 
 def test_docker_not_running_explains_what_to_do(fake_no_docker):
@@ -481,7 +481,7 @@ def backends():
 
 
 migrate(url)
-stack = Stack(Settings(env="dev", database_url=url, secret_key="k" * 32, project=project, engine_poll_s=0.5))
+stack = Stack(Settings(env="dev", database_url=url, secret_key="k" * 32, engine_poll_s=0.5), project)
 counts = []
 for _ in range(3):
     stack.start(port)
