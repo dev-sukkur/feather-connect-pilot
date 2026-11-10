@@ -165,7 +165,7 @@ def test_create_user_reads_the_password_from_stdin_and_the_user_can_log_in(
     row = open_store(migrated).users.get_user(name)
     assert row is not None and row.password_hash != password and verify_password(row.password_hash, password)
 
-    app = create_app(Settings(database_url=migrated, project=project, engine="local", secret_key="k"))
+    app = create_app(Settings(database_url=migrated, engine="local", secret_key="k"))
     with TestClient(app, base_url="http://localhost:8000", follow_redirects=False) as browser:
         page = browser.get("/login").text
         csrf = re.search(r'name="csrf_token" value="([^"]+)"', page)
@@ -262,25 +262,14 @@ def test_a_token_is_an_operator_unless_told_and_never_above_its_user(cli, databa
     assert wrong.exit_code == 1 and "not a token scope" in wrong.stderr
 
 
-def test_worker_starts_and_appears_on_the_server(spawn, migrated, project, open_store):
-    worker_id = "w-cli-" + uuid.uuid4().hex[:6]
-    proc = spawn(
-        "worker",
-        "--slots",
-        "3",
-        "--labels",
-        "site=hq",
-        env={**process_env(migrated, project), "FEATHER_WORKER_ID": worker_id},
-    )
-    store = open_store(migrated)
-
-    def listed() -> bool:
+def test_worker_starts_as_a_supervisor_and_keeps_running(spawn, migrated, project):
+    # The project mode is retired (§13): a worker is a supervisor. It registers no worker of its own; its package
+    # hosts do, once a package is installed and active. With none, it just keeps running.
+    proc = spawn("worker", "--slots", "3", env={**process_env(migrated, project), "FEATHER_WORKER_ID": "w-cli"})
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
         assert proc.poll() is None, "the worker ended"
-        return any(w.worker_id == worker_id for w in store.workers.list_workers())
-
-    wait_until(listed)
-    [mine] = [w for w in store.workers.list_workers() if w.worker_id == worker_id]
-    assert mine.slots == 3 and dict(mine.labels) == {"site": "hq"} and mine.state == "alive"
+        time.sleep(0.5)
 
 
 @pytest.mark.parametrize(
