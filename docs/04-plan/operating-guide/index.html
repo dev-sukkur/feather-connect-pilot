@@ -594,12 +594,21 @@ docker compose -f deploy/compose.yaml exec feather-server feather server create-
     <tr><th>Part</th><th>What it is</th></tr>
     <tr><td>Containers</td><td><code>postgres</code> (17), a one-shot <code>migrate</code>, <code>feather-server</code> (dashboard, API, ingress and scheduler) and <code>feather-worker</code>. Postgres is the only state, in the <code>pgdata</code> volume. Compose refuses to start without <code>FEATHER_SECRET_KEY</code> and <code>POSTGRES_PASSWORD</code>.</td></tr>
     <tr><td>Images</td><td><code>ghcr.io/&lt;org&gt;/feather-server</code> and <code>feather-worker</code>, with <code>&lt;org&gt;</code> from <code>FEATHER_IMAGE_ORG</code>. They hold no secrets.</td></tr>
-    <tr><td>Your flows</td><td>Set <code>FEATHER_PROJECT_DIR</code> to your project (the demo by default), mounted read-only. Or build a flow image <code>FROM</code> the worker image with your project copied to <code>/project</code>.</td></tr>
+    <tr><td>Your flows</td><td>Flows come as installed packages: <code>feather package build</code> and <code>feather package install</code> against the server. Nothing is mounted; <code>FEATHER_PROJECT</code> is ignored with a warning.</td></tr>
     <tr><td>Environment</td><td><code>FEATHER_ENV</code> picks the overlay (<code>qa</code> by default).</td></tr>
     <tr><td>More workers</td><td><code>FEATHER_WORKERS=3 docker compose -f deploy/compose.yaml up -d</code></td></tr>
     <tr><td>TLS</td><td>Ports bind to <code>127.0.0.1</code>. Put a TLS proxy in front to serve the dashboard further, and set <code>FEATHER_BASE_URL</code> to its <code>https://</code> address so the session cookie is <code>Secure</code>.</td></tr>
     <tr><td>Without Compose</td><td><code>feather server migrate</code>, then <code>feather server</code> (<code>--host</code>, <code>--port</code>), and <code>feather worker</code>, each with <code>FEATHER_DATABASE_URL</code>.</td></tr>
   </table></div>
+  <h3>Upgrading from the project mode (M1 to M1.1)</h3>
+  <p class="prose">M1.1 retires the project mode: flows run only as installed packages, named <code>&lt;package&gt;/&lt;name&gt;</code>. An M1 database is upgraded in place.</p>
+  <ol class="prose">
+    <li>Stop the workers and the server. The upgrade refuses while an M1 worker is alive.</li>
+    <li>Pull, then <code>feather server migrate</code>.</li>
+    <li><code>feather server upgrade --project &lt;dir&gt;</code> installs the project as a package and renames its runs, schedules, datasets and deliveries to <code>&lt;package&gt;/&lt;name&gt;</code>, in one transaction. Running it twice changes nothing.</li>
+    <li>Start the server and workers again. Old links and API calls that use the old names are redirected to the new ones.</li>
+  </ol>
+  <p class="prose">Locally, <code>feather dev</code> does all of this on start: it installs the project as the next <code>&lt;version&gt;.devN</code>, renames any M1 history, and installs again on each save. It keeps the last three dev versions.</p>
 </section>
 
 <section id="limits">

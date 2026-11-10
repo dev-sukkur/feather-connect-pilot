@@ -481,7 +481,7 @@ def backends():
 
 
 migrate(url)
-stack = Stack(Settings(env="dev", database_url=url, secret_key="k" * 32, project=project, engine_poll_s=0.5))
+stack = Stack(Settings(env="dev", database_url=url, secret_key="k" * 32, engine_poll_s=0.5), project)
 counts = []
 for _ in range(3):
     stack.start(port)
