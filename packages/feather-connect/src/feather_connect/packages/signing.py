@@ -21,6 +21,7 @@ import hashlib
 import io
 import json
 import zipfile
+import zlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
@@ -46,6 +47,8 @@ __all__ = [
 SIGNATURE_FILE = "feather-signature.json"  # in the wheel's .dist-info, beside RECORD and not listed in it
 PREFIX = "ed25519:"
 _ALG = "ed25519"
+MAX_SIGNATURE = 4 * 1024  # bytes the signature file may have
+MAX_RECORD = 1024 * 1024  # bytes RECORD may have
 _MAX_TOTAL = (
     200 * 1024 * 1024
 )  # bytes a wheel may unzip to while its RECORD is checked: a zip bomb stops here
@@ -149,11 +152,37 @@ def _dist_info(names: Iterable[str]) -> str:
 
 def verify_wheel(content: bytes, trusted: Mapping[str, Ed25519PublicKey]) -> str:
     """Check that the wheel is signed by one of the `trusted` keys (by id) and that its files are the ones its signed
-    RECORD lists. Returns the id of the key that signed it. Raises `SignatureError` saying why not."""
+    RECORD lists. Returns the id of the key that signed it. Raises `SignatureError` saying why not, for a zip that
+    can't be read as for a bad signature: never anything else."""
     try:
-        archive = zipfile.ZipFile(io.BytesIO(content))
-    except zipfile.BadZipFile:
-        raise SignatureError("the wheel is not a zip file") from None
+        return _verify(content, trusted)
+    except SignatureError:
+        raise
+    except (
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+        RuntimeError,
+        NotImplementedError,
+        zlib.error,
+        EOFError,
+        OSError,
+    ):
+        raise SignatureError("the wheel can't be unzipped to check its signature") from None
+
+
+def _bounded(archive: zipfile.ZipFile, name: str, most: int) -> bytes:
+    """An entry's bytes, refused past `most` by what the zip says and by what it unzips to."""
+    if archive.getinfo(name).file_size > most:
+        raise SignatureError(f"{name} is more than {most} bytes")
+    with archive.open(name) as entry:
+        data = entry.read(most + 1)
+    if len(data) > most:
+        raise SignatureError(f"{name} is more than {most} bytes")
+    return data
+
+
+def _verify(content: bytes, trusted: Mapping[str, Ed25519PublicKey]) -> str:
+    archive = zipfile.ZipFile(io.BytesIO(content))
     with archive:
         names = archive.namelist()
         info = _dist_info(names)
@@ -162,8 +191,9 @@ def verify_wheel(content: bytes, trusted: Mapping[str, Ed25519PublicKey]) -> str
             raise SignatureError("the package is not signed: build it with feather package build --sign-key")
         if record_name not in names:
             raise SignatureError("the wheel has no RECORD to check its signature against")
+        raw = _bounded(archive, where, MAX_SIGNATURE)
         try:
-            found: Any = json.loads(archive.read(where)[:4096])
+            found: Any = json.loads(raw)
             kid, signature = str(found["key_id"]), base64.b64decode(str(found["signature"]), validate=True)
             if found.get("alg") != _ALG:
                 raise SignatureError(f"the signature is not {_ALG}")
@@ -172,7 +202,7 @@ def verify_wheel(content: bytes, trusted: Mapping[str, Ed25519PublicKey]) -> str
         public = trusted.get(kid)
         if public is None:
             raise SignatureError(f"the package is signed by key {kid}, which this environment doesn't trust")
-        record = archive.read(record_name)
+        record = _bounded(archive, record_name, MAX_RECORD)
         try:
             public.verify(signature, record)
         except InvalidSignature:

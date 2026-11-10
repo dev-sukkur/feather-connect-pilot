@@ -313,3 +313,34 @@ sdist = {{ url = "https://x/only.tar.gz", hash = "{sdist}" }}
     assert (
         noted.replace(f"    # wheels: {wheel}\n", "").replace("\n    # wheels:", "").strip() == lock.strip()
     )
+
+
+def test_a_signature_check_of_a_bad_zip_or_oversized_entries_is_a_signature_error():
+    import io
+    import zipfile
+
+    import pytest
+
+    from feather_connect.packages.signing import MAX_RECORD, SignatureError, Signer, verify_wheel
+
+    signer = Signer.generate()
+    keys = {signer.key_id: signer.public}
+    with pytest.raises(SignatureError, match="can't be unzipped"):
+        verify_wheel(b"PK\x03\x04 not really a zip", keys)
+
+    def wheel(signature: bytes, record: bytes) -> bytes:
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("x-1.dist-info/RECORD", record)
+            archive.writestr("x-1.dist-info/feather-signature.json", signature)
+        return out.getvalue()
+
+    with pytest.raises(SignatureError, match="more than 4096 bytes"):
+        verify_wheel(wheel(b" " * 5000, b""), keys)
+    big = signer.sign(b"r" * (MAX_RECORD + 1))
+    with pytest.raises(SignatureError, match=f"more than {MAX_RECORD} bytes"):
+        verify_wheel(wheel(big, b"r" * (MAX_RECORD + 1)), keys)
+    broken = bytearray(wheel(signer.sign(b""), b""))
+    broken[40:60] = b"\x00" * 20  # a damaged entry
+    with pytest.raises(SignatureError):
+        verify_wheel(bytes(broken), keys)
