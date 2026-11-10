@@ -245,7 +245,7 @@ def flows(reads: See, _: CurrentActor) -> JSONResponse:
     return ok({"items": reads.flows(), "next_cursor": None})
 
 
-@router.get("/flows/{flow}")
+@router.get("/flows/{flow:path}")
 def flow(flow: str, reads: See, _: CurrentActor) -> JSONResponse:
     return ok(call(lambda: reads.flow_detail(flow)))
 
@@ -269,7 +269,7 @@ def _dataset(request: Request, name: str) -> dict[str, Any]:
     }
 
 
-@router.get("/datasets/{dataset}")
+@router.get("/datasets/{dataset:path}")
 def dataset(dataset: str, request: Request, _: CurrentActor) -> JSONResponse:
     return ok(call(lambda: _dataset(request, dataset)))
 
@@ -290,7 +290,7 @@ def _route(request: Request, name: str) -> dict[str, Any]:
     }
 
 
-@router.get("/routes/{route}")
+@router.get("/routes/{route:path}")
 def route(route: str, request: Request, _: CurrentActor) -> JSONResponse:
     return ok(call(lambda: _route(request, route)))
 
@@ -447,7 +447,7 @@ def resume_flow(
     )
 
 
-@router.post("/routes/{route}:pause")
+@router.post("/routes/{route:path}:pause")
 def pause_route(
     route: str,
     request: Request,
@@ -467,7 +467,7 @@ def pause_route(
     )
 
 
-@router.post("/routes/{route}:resume")
+@router.post("/routes/{route:path}:resume")
 def resume_route(
     route: str,
     request: Request,
@@ -490,7 +490,7 @@ def resume_route(
 # Partitions.
 
 
-@router.get("/datasets/{dataset}/partitions")
+@router.get("/datasets/{dataset:path}/partitions")
 def partitions(
     dataset: str, reads: See, _: CurrentActor, limit: Limit = 100, cursor: Cursor = None
 ) -> JSONResponse:
@@ -498,12 +498,12 @@ def partitions(
     return ok({**page(grid.rows, grid.next_cursor), "routes": grid.routes})
 
 
-@router.post("/datasets/{dataset}/partitions:rerun:preview")
+@router.post("/datasets/{dataset:path}/partitions:rerun:preview")
 def preview_rerun(dataset: str, body: RerunPreview, actions: Do, actor: CurrentActor) -> JSONResponse:
     return ok(_preview(call(lambda: actions.preview_rerun(actor, dataset, body.partitions))))
 
 
-@router.post("/datasets/{dataset}/partitions:rerun", status_code=202)
+@router.post("/datasets/{dataset:path}/partitions:rerun", status_code=202)
 def rerun(
     dataset: str,
     request: Request,
@@ -517,7 +517,7 @@ def rerun(
     return _once(request, actor, key, lambda: {"run_id": actions.rerun(actor, token, reason=reason)}, 202)
 
 
-@router.post("/flows/{flow}:backfill:preview")
+@router.post("/flows/{flow:path}:backfill:preview")
 def preview_backfill(flow: str, body: BackfillPreview, actions: Do, actor: CurrentActor) -> JSONResponse:
     found = call(
         lambda: actions.preview_backfill(
@@ -527,7 +527,7 @@ def preview_backfill(flow: str, body: BackfillPreview, actions: Do, actor: Curre
     return ok(_preview(found))
 
 
-@router.post("/flows/{flow}:backfill", status_code=202)
+@router.post("/flows/{flow:path}:backfill", status_code=202)
 def backfill(
     flow: str,
     request: Request,
@@ -571,7 +571,7 @@ def version_records(
 # Tracing a record.
 
 
-@router.get("/datasets/{dataset}/records/{key:path}/trace")
+@router.get("/datasets/{dataset:path}/records/{key:path}/trace")
 def record_trace(dataset: str, key: str, request: Request, _: CurrentActor) -> JSONResponse:
     """What happened to one record, by its dataset key: each version that held it, oldest first, with what each route
     did with it. Only versions sealed since the key index came in are traced."""
@@ -581,7 +581,7 @@ def record_trace(dataset: str, key: str, request: Request, _: CurrentActor) -> J
 # Deliveries.
 
 
-@router.get("/routes/{route}/deliveries")
+@router.get("/routes/{route:path}/deliveries")
 def deliveries(
     route: str,
     reads: See,
@@ -1195,3 +1195,14 @@ def summary(reads: See, _: CurrentActor) -> JSONResponse:
             "workers": found.workers,
         }
     )
+
+
+def _names_last() -> None:
+    """Packaged names carry a "/" (`<package>/<name>`), so the name routes take a path. A route that is only a name
+    would also take `<name>/partitions` and the like, so those go after every other route."""
+    bare = {f"{PREFIX}/flows/{{flow:path}}", f"{PREFIX}/datasets/{{dataset:path}}", f"{PREFIX}/routes/{{route:path}}"}
+    last = [r for r in router.routes if getattr(r, "path", None) in bare]
+    router.routes[:] = [r for r in router.routes if r not in last] + last
+
+
+_names_last()
