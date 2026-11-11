@@ -28,7 +28,7 @@ def test_the_palette_finds_a_flow_a_run_by_id_and_a_page(signed_in: Page, site: 
     page.keyboard.press("Tab")  # the focus stays in the dialog
     expect(box).to_be_focused()
     page.keyboard.press("Enter")
-    expect(page).to_have_url(f"{site.url}/flows/dashboard%2Fdemo")
+    expect(page).to_have_url(f"{site.url}/flows/dashboard/demo")
 
     run_id = site.stack.store.runs.list_runs(limit=1)[0].run_id
     page.keyboard.press("Control+k")
