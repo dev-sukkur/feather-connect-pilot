@@ -8,11 +8,11 @@ whether it worked or not, with the actor and the reason. Before anything, each c
 
 import logging
 import threading
+import time as _time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import date, datetime, time, timedelta
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any, Literal
-from zoneinfo import ZoneInfo
 
 from feather_connect.core.connector import CheckResult
 from feather_connect.core.context import Context
@@ -24,7 +24,8 @@ from feather_connect.project import ProjectError
 from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.catalogue import ActiveFlow
 from feather_connect.runtime.extract import VerifyResult
-from feather_connect.runtime.runtime import FlowPaused
+from feather_connect.runtime.plan import BACKFILL, MAX_BACKFILL_DAYS, backfill_partitions
+from feather_connect.runtime.runtime import VERIFY, FlowPaused
 from feather_connect.storage.port import Delivery, DeliveryStatus, InvalidTransition, split_error
 from feather_server.auth import Actor
 from feather_server.catalog_view import CatalogDataset, dataset_of
@@ -45,7 +46,6 @@ log = logging.getLogger(__name__)
 
 DeliveryAction = Literal["retry", "skip", "replay"]
 MAX_SELECTION = 10_000  # deliveries one confirmation may touch
-MAX_BACKFILL_DAYS = 366
 _PAGE = 500
 _SAMPLES = 5
 _STATUSES: dict[str, tuple[DeliveryStatus, ...]] = {
@@ -126,49 +126,13 @@ def _label(dataset: Dataset | None, partition: str) -> str:
         return partition
 
 
-def _date_of(value: Any) -> date | None:
-    if isinstance(value, datetime):
-        return value.date()
-    return value if isinstance(value, date) else None
-
-
-def backfill_partitions(flow: Flow, start: date, end: date, timezone: str) -> list[str]:
-    """The partitions of `flow` that cover the days from `start` to `end` (both included).
-
-    Each dataset's scheme names its own partitions, so this asks for the ones planned around each day and keeps those
-    whose date limits overlap the range. Every dataset of the flow must come out with the same partitions, because a run
-    reads one list of them.
-    """
-    if start > end:
-        raise ValueError("start must be on or before end")
-    if (end - start).days + 1 > MAX_BACKFILL_DAYS:
-        raise ValueError(f"a backfill covers at most {MAX_BACKFILL_DAYS} days")
-    zone = ZoneInfo(timezone)
-    found: list[set[str]] = []
-    for dataset in flow.datasets:
-        scheme, keys = dataset.partition, set[str]()
-        for offset in range((end - start).days + 3):
-            moment = datetime.combine(start + timedelta(days=offset - 1), time(12), zone)
-            planned = scheme.recent(moment)
-            if planned is None:
-                raise ValueError(
-                    f"dataset {dataset.name!r} can't list its partitions, so it can't be backfilled"
-                )
-            for key in planned:
-                for bound in scheme.bounds(key).values():
-                    low, high = _date_of(bound.low), _date_of(bound.high)
-                    if low is None or high is None:
-                        continue
-                    if (low == high and start <= low <= end) or (low != high and low <= end and high > start):
-                        keys.add(key)
-        if not keys:
-            raise ValueError(
-                f"dataset {dataset.name!r} is not partitioned by date, so it can't be backfilled"
-            )
-        found.append(keys)
-    if any(keys != found[0] for keys in found):
-        raise ValueError("the datasets of this flow are partitioned differently, so it can't be backfilled")
-    return sorted(found[0])
+VERIFY_WAIT_S = 60.0  # how long a packaged partition check is waited for, in the request
+_VERIFY_POLL_S = 0.25
+_DAYS_NOTE = (
+    "Counted in days. The flow's host names the partitions of those days as it plans the run, so the number of "
+    "partitions and deliveries may differ."
+)
+_monotonic, _sleep = _time.monotonic, _time.sleep
 
 
 class Actions:
@@ -350,10 +314,11 @@ class Actions:
         max_concurrent: int | None,
         *,
         trigger: str = "manual",
+        extra: Mapping[str, Any] | None = None,
     ) -> str:
         if self._rt.is_flow_paused(flow.name):
             raise FlowPaused(f"flow {flow.name!r} is paused")
-        params: dict[str, Any] = {"package": flow.package, "version": flow.version}
+        params: dict[str, Any] = {"package": flow.package, "version": flow.version, **(extra or {})}
         if partitions is not None:
             params["partitions"] = list(dict.fromkeys(partitions))
         if max_concurrent is not None:
@@ -441,6 +406,8 @@ class Actions:
         time."""
         if max_concurrent < 1:
             raise ValueError(f"max_concurrent is {max_concurrent}: it must be at least 1")
+        if self._packaged(flow) is not None:
+            return self._preview_packaged_backfill(actor, flow, start, end, max_concurrent)
         found = self._rt.flow(flow)
         keys = backfill_partitions(found, start, end, str(self._state.project.settings["timezone"]))
         selection = {
@@ -453,6 +420,28 @@ class Actions:
         token = self._issue(actor, "backfill", selection, self._backfill_print(selection))
         return Preview(token, "backfill", self._impact(found, keys))
 
+    def _preview_packaged_backfill(
+        self, actor: Actor, flow: str, start: date, end: date, max_concurrent: int
+    ) -> Preview:
+        """A packaged flow's partition schemes are in its code, which only its host has: the preview counts days, and
+        the host names the partitions of those days as it plans the run (`runtime.plan.BACKFILL`)."""
+        if start > end:
+            raise ValueError("start must be on or before end")
+        days = (end - start).days + 1
+        if days > MAX_BACKFILL_DAYS:
+            raise ValueError(f"a backfill covers at most {MAX_BACKFILL_DAYS} days")
+        selection = {
+            "flow": flow,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "max_concurrent": max_concurrent,
+            "partitions": None,
+        }
+        token = self._issue(actor, "backfill", selection, self._backfill_print(selection))
+        routes = len(self._store.catalog.flow(flow).spec.get("routes") or [])
+        samples = tuple((start + timedelta(days=n)).isoformat() for n in range(min(days, _SAMPLES)))
+        return Preview(token, "backfill", Impact(days, days * routes, None, samples, _DAYS_NOTE))
+
     @staticmethod
     def _backfill_print(selection: Mapping[str, Any]) -> str:
         return fingerprint("backfill", selection)
@@ -460,6 +449,33 @@ class Actions:
     def backfill(self, actor: Actor, token: str, *, reason: str | None = None) -> str:
         """Run the previewed backfill, with the limit it was previewed with. Returns the run."""
         selection = self._redeem(actor, "backfill", token, reason, self._backfill_print)
+        packaged = self._packaged(selection["flow"])
+        days = {
+            "start": selection["start"],
+            "end": selection["end"],
+            "timezone": str(self._state.project.settings["timezone"]),
+        }
+
+        def start_run() -> str:
+            if packaged is not None:
+                return self._queue_packaged(
+                    packaged,
+                    actor,
+                    reason,
+                    None,
+                    selection["max_concurrent"],
+                    trigger="backfill",
+                    extra={BACKFILL: days},
+                )
+            return self._rt.start_run(
+                selection["flow"],
+                trigger="backfill",
+                actor=actor.name,
+                partitions=selection["partitions"],
+                reason=reason,
+                max_concurrent=selection["max_concurrent"],
+            )
+
         return self._do(
             actor,
             "backfill",
@@ -469,16 +485,9 @@ class Actions:
                 "start": selection["start"],
                 "end": selection["end"],
                 "max_concurrent": selection["max_concurrent"],
-                "partitions": len(selection["partitions"]),
+                "partitions": None if selection["partitions"] is None else len(selection["partitions"]),
             },
-            lambda: self._rt.start_run(
-                selection["flow"],
-                trigger="backfill",
-                actor=actor.name,
-                partitions=selection["partitions"],
-                reason=reason,
-                max_concurrent=selection["max_concurrent"],
-            ),
+            start_run,
             lambda run_id: f"ok: run {run_id}",
         )
 
@@ -494,7 +503,24 @@ class Actions:
 
     def verify_partition(self, actor: Actor, dataset: str, partition: str) -> VerifyResult:
         """Read the partition from its source and report what differs from the last sealed version. It changes
-        nothing, but it does call the source, and that costs budget like any read."""
+        nothing, but it does call the source, and that costs budget like any read.
+
+        A packaged dataset is read by its version's host: this queues a verify run there and waits for its answer, up
+        to `VERIFY_WAIT_S`. Raises `TimeoutError`, naming the run, if the host hasn't answered by then."""
+        packaged = self._packaged_dataset(dataset)
+        if packaged is not None:
+            chosen = partition.strip()
+            if not chosen:
+                raise ValueError("choose a partition")
+            active = packaged[0]
+            return self._do(
+                actor,
+                "verify_partition",
+                f"dataset:{dataset}",
+                {"partition": chosen},
+                lambda: self._verify_on_host(active, actor, dataset, chosen),
+                lambda r: f"ok: {r.upserts} upserts and {r.deletes} deletes differ",
+            )
         _, found = self._dataset_flow(dataset)
         (chosen,) = self._check_partitions(found, [partition])
         return self._do(
@@ -505,6 +531,29 @@ class Actions:
             lambda: self._rt.verify_partition(dataset, chosen),
             lambda r: f"ok: {r.upserts} upserts and {r.deletes} deletes differ",
         )
+
+    def _verify_on_host(self, active: ActiveFlow, actor: Actor, dataset: str, partition: str) -> VerifyResult:
+        check = {"dataset": dataset, "partition": partition}
+        run_id = self._queue_packaged(
+            active, actor, None, None, None, trigger="verify", extra={VERIFY: check}
+        )
+        runs, deadline = self._store.runs, _monotonic() + VERIFY_WAIT_S
+        while True:
+            run = runs.get_run(run_id)
+            if run.status not in ("queued", "running"):
+                break
+            if _monotonic() >= deadline:
+                raise TimeoutError(
+                    f"the check is still running, as run {run_id}: its answer will be on that run"
+                )
+            _sleep(_VERIFY_POLL_S)
+        result = run.result or {}
+        if run.status == "succeeded" and "upserts" in result:
+            return VerifyResult(int(result["upserts"]), int(result["deletes"]))
+        message = str(result.get("error") or run.reason or f"the check ended {run.status}")
+        if "is not a partition of" in message:
+            raise ValueError(message)
+        raise PermanentError(message)
 
     # Deliveries.
 

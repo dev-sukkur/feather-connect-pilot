@@ -53,6 +53,7 @@ class Impact:
     deliveries: int
     estimated_budget_units: int | None
     samples: tuple[str, ...]
+    note: str | None = None  # what the counts mean, when they are not what the labels say
 
 
 @dataclass(frozen=True)

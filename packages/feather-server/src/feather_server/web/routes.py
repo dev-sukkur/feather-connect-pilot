@@ -757,7 +757,12 @@ def verify_partition(request: Request, actor: CurrentActor, dataset: str, partit
         return _not_found(request, f"No dataset named {dataset!r}.")
     except (ValueError, PermanentError) as error:
         return _grid_page(request, actor, dataset, status=422, notice=("bad", str(error)))
-    label = request.app.state.feather.runtime.dataset(dataset).partition.label_of(partition)
+    except TimeoutError as error:  # a packaged dataset's host is slow to answer: the run will hold the answer
+        return _grid_page(request, actor, dataset, status=202, notice=("warn", str(error)))
+    try:
+        label = request.app.state.feather.runtime.dataset(dataset).partition.label_of(partition)
+    except KeyError:  # a packaged dataset: its scheme, which labels partitions, is in its code
+        label = partition
     if not (found.upserts or found.deletes):
         return _grid_page(
             request, actor, dataset, notice=("ok", f"{label} matches its source. Nothing was changed.")

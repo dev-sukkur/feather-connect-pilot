@@ -180,6 +180,7 @@ def _run(r: Row) -> Run:
         r["reason"],
         r["created_at"],
         r["updated_at"],
+        None if r.get("result") is None else _unjson(r["result"]),
     )
 
 
@@ -280,6 +281,15 @@ class _Runs(RunJournal):
                 """update feather.run set status = %s, reason = coalesce(%s, reason), updated_at = %s
                    where tenant_id = %s and run_id = %s""",
                 (status, reason, self._db.clock.now(), self._db.tenant, run_id),
+            )
+        if changed.rowcount == 0:
+            raise KeyError(run_id)
+
+    def set_run_result(self, run_id: str, result: Mapping[str, Any]) -> None:
+        with self._db.tx() as conn:
+            changed = conn.execute(
+                """update feather.run set result = %s, updated_at = %s where tenant_id = %s and run_id = %s""",
+                (_json(dict(result)), self._db.clock.now(), self._db.tenant, run_id),
             )
         if changed.rowcount == 0:
             raise KeyError(run_id)

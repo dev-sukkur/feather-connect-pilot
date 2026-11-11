@@ -205,6 +205,11 @@ class _Runs(RunJournal):
                 updated_at=self._d.clock.now(),
             )
 
+    def set_run_result(self, run_id: str, result: Mapping[str, Any]) -> None:
+        with self._d.lock:
+            run = self.get_run(run_id)
+            self._d.runs[run_id] = replace(run, result=dict(result), updated_at=self._d.clock.now())
+
     def get_run(self, run_id: str) -> Run:
         with self._d.lock:
             return self._d.runs[run_id]

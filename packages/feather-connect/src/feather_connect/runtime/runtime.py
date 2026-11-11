@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from feather_connect.clock import Clock, SystemClock
@@ -53,6 +53,7 @@ _UTC = "UTC"
 _ACTIVE = ("queued", "running")
 _PAUSED = "route paused"  # why a task ended without delivering: the key of its successor ends in `#n`
 _MANY = 10_000
+VERIFY = "verify"  # a run's param: the partition its host checks, for a packaged dataset (flow packages §12)
 _READING = (
     "plan",
     "extract",
@@ -677,11 +678,36 @@ class Runtime:
         def body() -> None:
             flow = self.flow(args["flow"])
             ctx.step("begin", lambda: self._deps.store.runs.set_run_status(run_id, "running"))
+            check = self._deps.store.runs.get_run(run_id).params.get(VERIFY)
+            if isinstance(check, Mapping):  # a question, not a read: it delivers nothing
+                question = cast("Mapping[str, Any]", check)
+                ctx.step("verify", lambda: self._answer_verify(run_id, question))
+                return
             planned = ctx.step("plan", lambda: run_plan(flow, run_id, self._deps, tick))
             ctx.step("submit_extracts", lambda: self._submit_extracts(flow.name, run_id, planned, tick))
             self._finish_step(ctx, run_id)
 
         self._tracked(ctx, run_id, body)
+
+    def _answer_verify(self, run_id: str, check: Mapping[str, Any]) -> None:
+        """Check a partition for a verify run the server queued, and leave the counts, or why it couldn't, on the run.
+        An error the source may recover from is raised, so the task is tried again as any read is."""
+        runs = self._deps.store.runs
+        dataset, partition = str(check.get("dataset")), str(check.get("partition"))
+        try:
+            self.dataset(dataset).partition.label_of(partition)
+            found = self.verify_partition(dataset, partition)
+        except (KeyError, ValueError, PermanentError) as error:
+            message = (
+                f"{partition!r} is not a partition of dataset {dataset!r}"
+                if not isinstance(error, PermanentError)
+                else str(error)
+            )
+            runs.set_run_result(run_id, {"error": message})
+            runs.set_run_status(run_id, "failed", message)
+            return
+        runs.set_run_result(run_id, {"upserts": found.upserts, "deletes": found.deletes})
+        runs.set_run_status(run_id, "succeeded")
 
     def _extract_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
         run_id, partition = args["run_id"], args["partition"]

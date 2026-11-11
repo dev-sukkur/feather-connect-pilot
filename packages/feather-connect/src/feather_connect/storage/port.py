@@ -81,6 +81,7 @@ class Run:
     reason: str | None
     created_at: datetime
     updated_at: datetime
+    result: Mapping[str, Any] | None = None  # what a run that answers a question found
 
 
 @dataclass(frozen=True)
@@ -236,6 +237,10 @@ class RunJournal(Protocol):
     ) -> str: ...
     def set_run_status(self, run_id: str, status: str, reason: str | None = None) -> None:
         """Set the status, and the reason when one is given."""
+        ...
+
+    def set_run_result(self, run_id: str, result: Mapping[str, Any]) -> None:
+        """Keep what the run found, such as a partition check's counts."""
         ...
 
     def get_run(self, run_id: str) -> Run: ...
