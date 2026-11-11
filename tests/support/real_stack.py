@@ -124,6 +124,8 @@ def start_worker(
         ],
         env={**os.environ, "FEATHER_CODE_SHA": sha, **(env or {}), "FEATHER_HOST_ENV_PASS": passed},
         creationflags=flags,
+        start_new_session=sys.platform
+        != "win32",  # a group of its own: the supervisor and its hosts, as a container
         stdout=log,
         stderr=subprocess.STDOUT,
     )
@@ -138,7 +140,14 @@ def kill_abruptly(proc: subprocess.Popen[bytes]) -> None:
     if sys.platform == "win32":
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], check=False, capture_output=True)
     else:
-        proc.kill()
+        try:  # the worker's group, as a container's end takes it; its hosts, in sessions of their own, get SIGKILL as it dies
+            group = os.getpgid(proc.pid)
+            if group == proc.pid:
+                os.killpg(group, signal.SIGKILL)
+            else:
+                proc.kill()
+        except ProcessLookupError:
+            pass
     proc.wait(timeout=30)
 
 

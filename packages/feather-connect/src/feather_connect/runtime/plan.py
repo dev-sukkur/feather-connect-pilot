@@ -1,6 +1,9 @@
 """Planning: which partitions of each dataset a run reads."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime, time, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
 
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import PermanentError
@@ -10,6 +13,64 @@ from feather_connect.runtime.deps import RuntimeDeps
 
 _ALL_PARTITIONS = "*"
 _PUSH = "push"
+MAX_BACKFILL_DAYS = 366
+BACKFILL = "backfill"  # a run's param: the days a backfill of a packaged flow covers, which its host makes partitions of
+
+
+def _date_of(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    return value if isinstance(value, date) else None
+
+
+def backfill_partitions(flow: Flow, start: date, end: date, timezone: str) -> list[str]:
+    """The partitions of `flow` that cover the days from `start` to `end` (both included).
+
+    Each dataset's scheme names its own partitions, so this asks for the ones planned around each day and keeps those
+    whose date limits overlap the range. Every dataset of the flow must come out with the same partitions, because a run
+    reads one list of them.
+    """
+    if start > end:
+        raise ValueError("start must be on or before end")
+    if (end - start).days + 1 > MAX_BACKFILL_DAYS:
+        raise ValueError(f"a backfill covers at most {MAX_BACKFILL_DAYS} days")
+    zone = ZoneInfo(timezone)
+    found: list[set[str]] = []
+    for dataset in flow.datasets:
+        scheme, keys = dataset.partition, set[str]()
+        for offset in range((end - start).days + 3):
+            moment = datetime.combine(start + timedelta(days=offset - 1), time(12), zone)
+            planned = scheme.recent(moment)
+            if planned is None:
+                raise ValueError(
+                    f"dataset {dataset.name!r} can't list its partitions, so it can't be backfilled"
+                )
+            for key in planned:
+                for bound in scheme.bounds(key).values():
+                    low, high = _date_of(bound.low), _date_of(bound.high)
+                    if low is None or high is None:
+                        continue
+                    if (low == high and start <= low <= end) or (low != high and low <= end and high > start):
+                        keys.add(key)
+        if not keys:
+            raise ValueError(
+                f"dataset {dataset.name!r} is not partitioned by date, so it can't be backfilled"
+            )
+        found.append(keys)
+    if any(keys != found[0] for keys in found):
+        raise ValueError("the datasets of this flow are partitioned differently, so it can't be backfilled")
+    return sorted(found[0])
+
+
+def _backfill_of(flow: Flow, days: Mapping[str, Any]) -> list[str]:
+    """The partitions of a backfill queued by the days it covers: the server, which has no package code, can't name
+    them, so the host does as it plans."""
+    try:
+        return backfill_partitions(
+            flow, date.fromisoformat(days["start"]), date.fromisoformat(days["end"]), str(days["timezone"])
+        )
+    except (KeyError, ValueError) as error:
+        raise PermanentError(f"the backfill can't be planned: {error}") from error
 
 
 def _partitions_of(dataset: Dataset, explicit: Sequence[str] | None, deps: RuntimeDeps) -> list[str]:
@@ -39,7 +100,10 @@ def run_plan(flow: Flow, run_id: str, deps: RuntimeDeps, tick: str | None = None
 
     A `tick` of a stream run can't do that: slices are registered per run, and a stream run holds a day of ticks.
     """
-    explicit = deps.store.runs.get_run(run_id).params.get("partitions")
+    params = deps.store.runs.get_run(run_id).params
+    explicit = params.get("partitions")
+    if explicit is None and isinstance(params.get(BACKFILL), Mapping):
+        explicit = _backfill_of(flow, params[BACKFILL])
     planned: dict[str, list[str]] = {}
     for dataset in flow.datasets:
         if (

@@ -1,5 +1,6 @@
-"""The push path's crash safety: the server, which runs the sealer, killed between writing a batch's chunks and
-`seal_batch`, or between `seal_batch` and submitting the applies, and a worker killed mid-apply of a webhook version.
+"""The push path's crash safety: a worker, whose host of the active version runs the push dataset's sealer (flow
+packages §7.1), killed between writing a batch's chunks and `seal_batch`, or between `seal_batch` and submitting the
+applies, and a worker killed mid-apply of a webhook version.
 
 Whatever is killed is started again, and every accepted event must reach the sink once: none lost, no effective write
 twice (see `SlowSink`), and each event in one sealed version only, which is what one version per first event comes to.
@@ -21,9 +22,9 @@ EVENTS = 30  # two chunks of `CHUNK_ROWS`, so that a kill mid-apply finds a chun
 
 def post(world: Any, event: dict[str, Any]) -> int:
     request = urllib.request.Request(
-        f"{world.server_address}/ingress/default/hooks",
+        f"{world.server_address}/ingress/default/chaos-project/hooks",  # the package's declared webhook
         data=json.dumps(event).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {world.hook_token}"},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=30) as response:
@@ -33,7 +34,7 @@ def post(world: Any, event: dict[str, Any]) -> int:
 def keys_by_version(world: Any) -> dict[str, list[str]]:
     """The record keys of each sealed version of the push dataset."""
     found: dict[str, list[str]] = {}
-    for version in world.store.versions.list_versions("hooks", limit=1000):
+    for version in world.store.versions.list_versions(world.name("hooks"), limit=1000):
         if version.status != "sealed":
             continue
         found[version.version_id] = [
@@ -52,20 +53,22 @@ def assert_each_event_sealed_once_and_written_once(world: Any) -> None:
     assert world.max_writes_per_key() == 1, world.state()
     world.wait(lambda: set(world.deliveries("push_sink")) == {"applied"}, 60, "every delivery to be applied")
     first_seq = min(e for e in world.conn.execute("select event_seq from feather.inbox").fetchall())[0]
-    assert stable_id("hooks", "_", str(first_seq)) in keys_by_version(world)  # named after its first event
+    assert stable_id(world.name("hooks"), "_", str(first_seq)) in keys_by_version(
+        world
+    )  # named after its first event
 
 
 @pytest.mark.timeout(400)
 @pytest.mark.parametrize("point", ["seal:written", "seal:sealed"])
-def test_a_server_killed_mid_seal_loses_and_duplicates_nothing(world: Any, point: str):
-    world.start_worker()
+def test_a_worker_killed_mid_seal_loses_and_duplicates_nothing(world: Any, point: str):
+    worker = world.start_worker()
     world.arm(point)
     world.start_server()
     assert [post(world, {"id": n}) for n in range(1, EVENTS + 1)] == [202] * EVENTS
 
     [who] = world.wait_for_point(point)
-    assert world.worker_of(who) == "server"
-    world.kill("server")
+    assert world.worker_of(who) == worker  # its host seals: the server has none of the package's code
+    world.kill(worker)
     if point == "seal:written":
         assert keys_by_version(world) == {}  # written, and not sealed
     else:
@@ -73,7 +76,9 @@ def test_a_server_killed_mid_seal_loses_and_duplicates_nothing(world: Any, point
             "pending"
         ]  # sealed, not submitted
 
-    world.start_server()  # its sealer finds the events, or its sweeper the pending deliveries
+    world.start_worker(
+        worker
+    )  # its host's sealer finds the events, or the server's sweeper the pending deliveries
     assert_each_event_sealed_once_and_written_once(world)
 
 

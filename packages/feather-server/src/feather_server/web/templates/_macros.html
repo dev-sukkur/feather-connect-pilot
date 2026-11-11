@@ -94,6 +94,7 @@
       <div><dt>Deliveries</dt><dd>{{ preview.impact.deliveries }}</dd></div>
       <div><dt>Estimated budget units</dt><dd>{% if preview.impact.estimated_budget_units is none %}unknown{% else %}{{ preview.impact.estimated_budget_units }}{% endif %}</dd></div>
     </dl>
+    {% if preview.impact.note %}<p class="muted">{{ preview.impact.note }}</p>{% endif %}
     {% if preview.impact.samples %}<p class="muted">For example: {{ preview.impact.samples | join(", ") }}</p>{% endif %}
     <form method="post" action="{{ action }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

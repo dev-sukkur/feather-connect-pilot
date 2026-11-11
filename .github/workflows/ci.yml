@@ -124,7 +124,7 @@ jobs:
       - if: steps.changes.outputs.run == 'true'
         run: uv sync --all-extras
       - if: steps.changes.outputs.run == 'true'
-        run: uv run pytest tests/chaos tests/perf tests/hard_cases tests/e2e/test_webhook_latency.py tests/e2e/test_webhook_to_http_latency.py -s
+        run: uv run pytest tests/perf tests/chaos tests/hard_cases tests/e2e/test_webhook_latency.py tests/e2e/test_webhook_to_http_latency.py -s
 
   # The dashboard in Chromium: the operator journeys and axe's WCAG 2.1 AA checks, on the stack and the test Postgres.
   dashboard:
@@ -149,7 +149,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - run: uv sync --all-extras
-      - run: uv run playwright install --with-deps chromium
+      # The runner image has Chromium's system libraries; apt's mirrors are sometimes out of the runner's reach.
+      - run: uv run playwright install --with-deps chromium || uv run playwright install chromium
       - run: uv run pytest tests/dashboard -q
 
   # The images and the Compose stack: built for linux/amd64 and checked by tests/deploy, every night and on a pull

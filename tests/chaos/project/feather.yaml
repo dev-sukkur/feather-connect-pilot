@@ -14,3 +14,9 @@ connections:
   big_sink: {connector: chaos.slow_sink}
   hooks: {connector: simulation.source}
   push_sink: {connector: chaos.slow_sink}
+webhooks:
+  hooks: # the server keeps each event; the package's own code, on its host, parses it (flow packages §7.2)
+    dataset: hooks
+    verify: {scheme: bearer}
+    secret: ${secret:env:FEATHER_CHAOS_HOOK_TOKEN}
+    key: $.id

@@ -554,7 +554,7 @@ def flow_detail(request: Request, actor: CurrentActor, name: str) -> HTMLRespons
 
 def _back(name: str, **query: str) -> RedirectResponse:
     suffix = f"?{urlencode(query)}" if query else ""
-    return RedirectResponse(f"/flows/{quote(name, safe='')}{suffix}", status_code=303)
+    return RedirectResponse(f"/flows/{quote(name, safe='/')}{suffix}", status_code=303)
 
 
 @router.post("/flows/{name:path}/run", dependencies=[Depends(require_csrf)])
@@ -714,7 +714,7 @@ def partitions(request: Request, actor: CurrentActor, dataset: str) -> HTMLRespo
 
 def _partitions_url(dataset: str, **query: str) -> str:
     suffix = f"?{urlencode(query)}" if query else ""
-    return f"/datasets/{quote(dataset, safe='')}/partitions{suffix}"
+    return f"/datasets/{quote(dataset, safe='/')}/partitions{suffix}"
 
 
 @router.post("/datasets/{dataset:path}/partitions/rerun/preview", dependencies=[Depends(require_csrf)])
@@ -727,7 +727,7 @@ def rerun_preview(
         return _not_found(request, f"No dataset named {dataset!r}.")
     except ValueError as error:
         return _grid_page(request, actor, dataset, status=422, notice=("bad", str(error)))
-    action = f"/datasets/{quote(dataset, safe='')}/partitions/rerun/confirm"
+    action = f"/datasets/{quote(dataset, safe='/')}/partitions/rerun/confirm"
     return _grid_page(
         request, actor, dataset, preview=preview, confirm_action=action, confirm_label="Read them again"
     )
@@ -757,7 +757,12 @@ def verify_partition(request: Request, actor: CurrentActor, dataset: str, partit
         return _not_found(request, f"No dataset named {dataset!r}.")
     except (ValueError, PermanentError) as error:
         return _grid_page(request, actor, dataset, status=422, notice=("bad", str(error)))
-    label = request.app.state.feather.runtime.dataset(dataset).partition.label_of(partition)
+    except TimeoutError as error:  # a packaged dataset's host is slow to answer: the run will hold the answer
+        return _grid_page(request, actor, dataset, status=202, notice=("warn", str(error)))
+    try:
+        label = request.app.state.feather.runtime.dataset(dataset).partition.label_of(partition)
+    except KeyError:  # a packaged dataset: its scheme, which labels partitions, is in its code
+        label = partition
     if not (found.upserts or found.deletes):
         return _grid_page(
             request, actor, dataset, notice=("ok", f"{label} matches its source. Nothing was changed.")
@@ -794,7 +799,7 @@ def replay_preview(
         return _not_found(request, f"No dataset named {dataset!r}.")
     except ValueError as error:
         return _grid_page(request, actor, dataset, status=422, notice=("bad", str(error)))
-    action = f"/routes/{quote(route, safe='')}/partitions/{quote(partition, safe='/')}/replay/confirm"
+    action = f"/routes/{quote(route, safe='/')}/partitions/{quote(partition, safe='/')}/replay/confirm"
     return _grid_page(
         request,
         actor,
@@ -1449,7 +1454,7 @@ def deliveries_confirm(
         return _delivery_page(request, actor, origin, route, status=422, notice=("bad", str(error)))
     done = urlencode({"done": len(moved)})
     if origin == "deliveries" and route:
-        return RedirectResponse(f"/routes/{quote(route, safe='')}/deliveries?{done}", status_code=303)
+        return RedirectResponse(f"/routes/{quote(route, safe='/')}/deliveries?{done}", status_code=303)
     return RedirectResponse(f"/failures?{done}", status_code=303)
 
 
@@ -1785,15 +1790,15 @@ def _search(request: Request, actor: Actor, q: str) -> list[Found]:
     summaries = reads(request).flows()  # the flows here and the active flows of installed packages
     for flow in summaries:
         if _matches(wanted, flow.name, flow.owner, *flow.tags):
-            found.append(Found("flow", flow.name, f"/flows/{quote(flow.name, safe='')}", "Flow"))
+            found.append(Found("flow", flow.name, f"/flows/{quote(flow.name, safe='/')}", "Flow"))
     for flow in summaries:
         for dataset in flow.datasets:
             if _matches(wanted, dataset.name):
-                href = f"/datasets/{quote(dataset.name, safe='')}/partitions"
+                href = f"/datasets/{quote(dataset.name, safe='/')}/partitions"
                 found.append(Found("dataset", dataset.name, href, f"Dataset of {flow.name}"))
         for route in flow.routes:
             if _matches(wanted, route.name):
-                href = f"/routes/{quote(route.name, safe='')}/deliveries"
+                href = f"/routes/{quote(route.name, safe='/')}/deliveries"
                 found.append(Found("route", route.name, href, f"Route of {flow.name}"))
     names = set(request.app.state.feather.project.connections)
     names |= {e["name"] for e in request.app.state.environment.connections()}

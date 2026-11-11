@@ -1,5 +1,7 @@
 """NFR-02: at least 20,000 rows/s per worker from source batch to spool, excluding source-side limits."""
 
+import subprocess
+import sys
 import time
 
 import pytest
@@ -20,8 +22,19 @@ ROWS = 500_000
 TARGET_ROWS_PER_SECOND = 20_000
 
 
+def busiest() -> str:
+    """The machine's busiest processes, on Linux; a CI runner shared with what earlier tests left behind shows it."""
+    if sys.platform == "win32":
+        return ""
+    found = subprocess.run(
+        ["ps", "-eo", "pid,ppid,pcpu,etime,args", "--sort=-pcpu"], capture_output=True, text=True, check=False
+    )
+    return "\n".join(found.stdout.splitlines()[:15])
+
+
 @pytest.mark.timeout(300)
 def test_extract_to_spool_meets_20k_rows_per_second(record_property):
+    print("\n" + busiest())  # what else has the machine, for a slow number to be read against
     source = simulation.Source(  # made before the clock starts: a row's generation isn't the worker's work
         "src",
         generator={

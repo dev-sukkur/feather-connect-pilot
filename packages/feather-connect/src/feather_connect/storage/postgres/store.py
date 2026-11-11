@@ -180,6 +180,7 @@ def _run(r: Row) -> Run:
         r["reason"],
         r["created_at"],
         r["updated_at"],
+        None if r.get("result") is None else _unjson(r["result"]),
     )
 
 
@@ -280,6 +281,15 @@ class _Runs(RunJournal):
                 """update feather.run set status = %s, reason = coalesce(%s, reason), updated_at = %s
                    where tenant_id = %s and run_id = %s""",
                 (status, reason, self._db.clock.now(), self._db.tenant, run_id),
+            )
+        if changed.rowcount == 0:
+            raise KeyError(run_id)
+
+    def set_run_result(self, run_id: str, result: Mapping[str, Any]) -> None:
+        with self._db.tx() as conn:
+            changed = conn.execute(
+                """update feather.run set result = %s, updated_at = %s where tenant_id = %s and run_id = %s""",
+                (_json(dict(result)), self._db.clock.now(), self._db.tenant, run_id),
             )
         if changed.rowcount == 0:
             raise KeyError(run_id)
@@ -2945,46 +2955,55 @@ class _Inbox(InboxStore):
         """One transaction and few round trips however many events, which is what lets ingress keep up with a burst."""
         day = self._db.clock.now().date()
         self._ensure_day(day)
-        named = [(dataset, event_id) for dataset, _, event_id in events if event_id is not None]
         with self._db.tx() as conn:
-            new: set[tuple[str, str]] = set()
-            if named:
-                rows = conn.execute(
-                    """insert into feather.inbox_event_id (tenant_id, dataset, event_id, day)
-                       select %s, n.dataset, n.event_id, %s from unnest(%s::text[], %s::text[]) n(dataset, event_id)
-                       on conflict do nothing returning dataset, event_id""",
-                    (self._db.tenant, day, [n[0] for n in named], [n[1] for n in named]),
-                ).fetchall()
-                new = {(row["dataset"], row["event_id"]) for row in rows}
-            stored: list[bool] = []
-            kept: list[tuple[str, InboundRequest, str | None]] = []
-            for dataset, request, event_id in events:
-                is_new = event_id is None or (dataset, event_id) in new
-                if event_id is not None:
-                    new.discard((dataset, event_id))  # a repeat within these events is a repeat too
-                stored.append(is_new)
-                if is_new:
-                    kept.append((dataset, request, event_id))
-            if kept:
-                conn.execute(
-                    """insert into feather.inbox (tenant_id, day, dataset, event_id, method, path, headers, body, received_at)
-                       select %s, %s, t.dataset, t.event_id, t.method, t.path, t.headers, t.body, t.received_at
-                       from unnest(
-                         %s::text[], %s::text[], %s::text[], %s::text[], %s::jsonb[], %s::bytea[], %s::timestamptz[])
-                       with ordinality as t(dataset, event_id, method, path, headers, body, received_at, n)
-                       order by t.n""",
-                    (
-                        self._db.tenant,
-                        day,
-                        [k[0] for k in kept],
-                        [k[2] for k in kept],
-                        [k[1].method for k in kept],
-                        [k[1].path for k in kept],
-                        [Jsonb(dict(k[1].headers)) for k in kept],
-                        [k[1].body for k in kept],
-                        [k[1].received_at for k in kept],
-                    ),
-                )
+            return self.put_many_in(conn, day, events)
+
+    def put_many_in(
+        self,
+        conn: psycopg.Connection[DictRow],
+        day: date,
+        events: Sequence[tuple[str, InboundRequest, str | None]],
+    ) -> list[bool]:
+        """`put_many` in the caller's transaction, on a day whose partition is there."""
+        named = [(dataset, event_id) for dataset, _, event_id in events if event_id is not None]
+        new: set[tuple[str, str]] = set()
+        if named:
+            rows = conn.execute(
+                """insert into feather.inbox_event_id (tenant_id, dataset, event_id, day)
+                   select %s, n.dataset, n.event_id, %s from unnest(%s::text[], %s::text[]) n(dataset, event_id)
+                   on conflict do nothing returning dataset, event_id""",
+                (self._db.tenant, day, [n[0] for n in named], [n[1] for n in named]),
+            ).fetchall()
+            new = {(row["dataset"], row["event_id"]) for row in rows}
+        stored: list[bool] = []
+        kept: list[tuple[str, InboundRequest, str | None]] = []
+        for dataset, request, event_id in events:
+            is_new = event_id is None or (dataset, event_id) in new
+            if event_id is not None:
+                new.discard((dataset, event_id))  # a repeat within these events is a repeat too
+            stored.append(is_new)
+            if is_new:
+                kept.append((dataset, request, event_id))
+        if kept:
+            conn.execute(
+                """insert into feather.inbox (tenant_id, day, dataset, event_id, method, path, headers, body, received_at)
+                   select %s, %s, t.dataset, t.event_id, t.method, t.path, t.headers, t.body, t.received_at
+                   from unnest(
+                     %s::text[], %s::text[], %s::text[], %s::text[], %s::jsonb[], %s::bytea[], %s::timestamptz[])
+                   with ordinality as t(dataset, event_id, method, path, headers, body, received_at, n)
+                   order by t.n""",
+                (
+                    self._db.tenant,
+                    day,
+                    [k[0] for k in kept],
+                    [k[2] for k in kept],
+                    [k[1].method for k in kept],
+                    [k[1].path for k in kept],
+                    [Jsonb(dict(k[1].headers)) for k in kept],
+                    [k[1].body for k in kept],
+                    [k[1].received_at for k in kept],
+                ),
+            )
         return stored
 
     def take(self, dataset: str, limit: int, max_bytes: int | None = None) -> list[InboxEvent]:
@@ -3317,8 +3336,53 @@ class _Secrets(SecretStore):
 
 
 class _Webhooks(WebhookEventStore):
-    def __init__(self, db: _Db) -> None:
+    def __init__(self, db: _Db, inbox: _Inbox) -> None:
         self._db = db
+        self._inbox = inbox
+
+    def keep_many(self, events: Sequence[tuple[WebhookEvent, str, InboundRequest]]) -> list[bool]:
+        """One transaction and few round trips however many events, as `_Inbox.put_many`: a burst comes through here."""
+        if not events:
+            return []
+        day = self._db.clock.now().date()
+        self._inbox._ensure_day(day)  # pyright: ignore[reportPrivateUsage]
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """insert into feather.webhook_event (tenant_id, package, webhook, event_key, stamp, body, headers,
+                       received_at, processed_at)
+                   select %s, t.package, t.webhook, t.event_key, t.stamp, t.body, t.headers, t.received_at,
+                       t.received_at
+                   from unnest(%s::text[], %s::text[], %s::text[], %s::text[], %s::bytea[], %s::jsonb[],
+                       %s::timestamptz[]) with ordinality as t(package, webhook, event_key, stamp, body, headers,
+                       received_at, n)
+                   order by t.n
+                   on conflict (tenant_id, package, webhook, event_key) do nothing
+                   returning package, webhook, event_key""",
+                (
+                    self._db.tenant,
+                    [e.package for e, _, _ in events],
+                    [e.webhook for e, _, _ in events],
+                    [e.key for e, _, _ in events],
+                    [e.stamp for e, _, _ in events],
+                    [e.body for e, _, _ in events],
+                    [_json(dict(e.headers)) for e, _, _ in events],
+                    [e.received_at for e, _, _ in events],
+                ),
+            ).fetchall()
+            new = {(r["package"], r["webhook"], r["event_key"]) for r in rows}
+            kept: list[bool] = []
+            for event, _, _ in events:
+                found = (event.package, event.webhook, event.key)
+                kept.append(found in new)
+                new.discard(found)  # a repeat within these events is a repeat too
+            into = [
+                (dataset, request, event.key)
+                for (event, dataset, request), k in zip(events, kept, strict=True)
+                if k
+            ]
+            if into:
+                self._inbox.put_many_in(conn, day, into)
+        return kept
 
     def add(self, event: WebhookEvent) -> bool:
         with self._db.tx() as conn:
@@ -3390,6 +3454,7 @@ class PostgresStore(Store):
     def __init__(self, pool: Pool, clock: Clock | None = None, tenant: str = "default") -> None:
         db = _Db(pool, clock or SystemClock(), tenant)
         versions = _Versions(db)
+        inbox = _Inbox(db, versions)
         super().__init__(
             runs=_Runs(db),
             versions=versions,
@@ -3404,13 +3469,13 @@ class PostgresStore(Store):
             users=_Users(db),
             audit=_Audit(db),
             reads=_Reads(db),
-            inbox=_Inbox(db, versions),
+            inbox=inbox,
             responses=_Responses(db),
             registry=_Registry(db),
             packages=_Packages(db),
             env_config=_EnvConfig(db),
             secrets=_Secrets(db),
-            webhooks=_Webhooks(db),
+            webhooks=_Webhooks(db, inbox),
         )
         object.__setattr__(self, "_pool", pool)  # `Store` is frozen
         object.__setattr__(self, "_db", db)

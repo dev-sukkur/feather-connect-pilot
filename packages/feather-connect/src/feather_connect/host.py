@@ -7,7 +7,7 @@ version's dependency environment, an environment holding no secret of the worker
 host role's, `FEATHER_HOST_DATABASE_URL`, where one is set up), and a pipe to itself on stdin and stdout
 (`packages.link`). The host:
 
-- stops when that pipe closes, and on Linux when its parent dies (`PR_SET_PDEATHSIG`), so that it never outlives its
+- stops when that pipe closes, and on Linux is killed when its parent dies (`PR_SET_PDEATHSIG`), so that it never outlives its
   supervisor; and holds a Postgres advisory lock on its id from before it takes work, so that a second host with the
   same id, started by a supervisor that replaced a dead one, refuses to start while the first still runs (§7.1);
 - loads the version's stored wheel, its sha256 checked again (§11), from the database, never from a registry, and its
@@ -28,6 +28,7 @@ host role's, `FEATHER_HOST_DATABASE_URL`, where one is set up), and a pipe to it
 """
 
 import argparse
+import functools
 import logging
 import os
 import shutil
@@ -58,7 +59,7 @@ from feather_connect.project import (
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.runtime.sealer import seal_once
 from feather_connect.runtime.sweeper import resubmit_lost
-from feather_connect.storage.port import Run, Store, check_wheel
+from feather_connect.storage.port import STREAM_TRIGGER, Run, Store, check_wheel
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.leader import KeyLocks, PostgresLeaderLock, advisory_key
 
@@ -310,6 +311,9 @@ def run_host(
         def tagged(run: Run) -> bool:
             return run.params.get("package") == package and run.params.get("version") == version
 
+        def owned(run: Run, serving: set[str]) -> bool:
+            return tagged(run) or (run.trigger == STREAM_TRIGGER and run.flow in serving)
+
         def background(stopping: threading.Event) -> None:
             if link is not None:
                 link.send("ready")  # taking work: the supervisor moves the flows' triggers here (§6)
@@ -322,13 +326,25 @@ def run_host(
                 try:
                     for run_id in take_queued(runtime, package, version, submitted):
                         log.info("took run %s of %s %s", run_id, package, version)
-                    if any(a.package == package and a.version == version for a in store.packages.active()):
+                    serving = {
+                        a.flow
+                        for a in store.packages.active()
+                        if a.package == package and a.version == version
+                    }
+                    if serving:
                         seal_once(
                             runtime, now=datetime.now(UTC)
                         )  # its push datasets: their parse is its code
                     if time.monotonic() - swept >= SWEEP_EVERY_S:
                         swept = time.monotonic()
-                        resubmit_lost(store, runtime, now=datetime.now(UTC), owns=tagged)
+                        # A day's stream run holds the versions of its flow's push datasets and pollers, whichever
+                        # version sealed them: the one active now delivers what a crash left pending.
+                        resubmit_lost(
+                            store,
+                            runtime,
+                            now=datetime.now(UTC),
+                            owns=functools.partial(owned, serving=serving),
+                        )
                 except Exception:  # a database that is away for a moment must not end the thread
                     log.warning("could not take queued runs of %s %s", package, version, exc_info=True)
 
@@ -355,7 +371,9 @@ def _die_with_parent(parent: int | None) -> None:
 
         libc = ctypes.CDLL(None, use_errno=True)
         pr_set_pdeathsig = 1
-        libc.prctl(pr_set_pdeathsig, signal.SIGTERM, 0, 0, 0)
+        # SIGKILL, as the Job Object on Windows: a supervisor that stops on purpose drains its hosts over the pipe
+        # first, so this only comes when it dies, and a host left to drain then, stopped mid-call, could outlive it.
+        libc.prctl(pr_set_pdeathsig, signal.SIGKILL, 0, 0, 0)
         if parent is not None and os.getppid() != parent:
             raise SystemExit("the supervisor that started this host is gone")
 

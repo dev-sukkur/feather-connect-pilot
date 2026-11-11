@@ -29,7 +29,7 @@ What a host gets (§11): an environment with no secret of the worker's (no maste
 to this process (`packages.link`) on which it asks for the credentials of its version's own connections, which this
 process resolves with the environment's vault and checks against the version's manifest and configuration. A host is
 a process tree of its own (a Job Object on Windows), killed with the supervisor's when it ends; on Linux it is also
-sent SIGTERM when this process dies (`PR_SET_PDEATHSIG`), and on every system it stops when the pipe closes.
+sent SIGKILL when this process dies (`PR_SET_PDEATHSIG`), and on every system it stops when the pipe closes.
 """
 
 import argparse

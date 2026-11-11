@@ -261,8 +261,9 @@ Installing a package runs its code on the workers. So:
 ## 12. Limits of this design
 
 - A package can't bring its own **webhook source connector**: the server, which doesn't load package code, verifies every event. It declares its webhooks instead (§7.2), and its own code parses them on its host. Its own polling sources and sinks are fine.
-- **What the server knows of a packaged flow** is its catalogue spec: no partition labels, no write cost, and no backfill or partition check from the dashboard yet.
+- **What the server knows of a packaged flow** is its catalogue spec: no partition labels and no write cost. Work that needs the package's code goes to the active version's host as a run: a **backfill** is queued by its days (`params.backfill`), and the host names their partitions as it plans; a **partition check** is a `verify` run, which the host answers on the run (`feather.run.result`, migration 0027) while the server waits up to 60 seconds. A backfill's preview counts days, not partitions.
 - **Hosts have the worker's network.** Egress rules belong to the deployment.
+- **A tick of a packaged flow is a run of its own**, queued for the version's host, where an M1 poller attached its ticks to one stream run a day. A frequent poller writes many runs; bringing back the stream run is an M2 item.
 - The **dashboard can't show a package's transforms** as code. It shows the spec, as today.
 - **Old Python versions:** every package runs on the worker image's Python (3.13 today).
 - `feather dev` installs the project folder as the next dev version on each save (§13).

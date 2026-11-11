@@ -1,6 +1,8 @@
 """Two concerns of the F4 and F12 fixes that only real DBOS can answer: durable sleeps and retries, and step records that
 two executions of one workflow share."""
 
+import time
+
 import pytest
 
 from feather_connect.storage.port import BudgetSpec, Window
@@ -11,47 +13,34 @@ KEYS = {str(n) for n in range(1, 101)}
 
 
 @pytest.mark.timeout(300)
-@pytest.mark.parametrize("older_goes_first", [True, False], ids=["older_first", "newer_first"])
-def test_overlapping_extracts_end_with_the_run_succeeded(world, older_goes_first):
-    """F4's liveness concern: each execution claims the version as it starts reading, so could a stale copy's retry claim
-    it back, and the two use up their attempts shutting each other out?
-
-    On real DBOS, no. `recover_worker` takes the workflow from the older execution, and DBOS refuses the step record of
-    an execution that no longer owns its workflow, with a `BaseException` that no task code catches, and parks it. So the
-    older one is refused once and never retries, whichever way round the two finish, and no attempt is used up.
-    """
+def test_a_recovered_extract_waits_for_the_stopped_one_and_the_run_succeeds(world):
+    """F4's liveness concern, as hosts now settle it: an extract holds an advisory lock on its dataset's partition
+    (flow packages §7.1), so the copy `recover_worker` starts elsewhere can't read beside the stopped one. It waits;
+    the stopped one, refused its next step record because it no longer owns the workflow, is parked by DBOS and lets
+    go; the copy then goes on from the steps recorded, seals one whole version, and no attempt is used up."""
     point = "read:source:1"
-    world.arm(point, holds=2)
+    world.arm(point)  # the first execution only: the copy goes through
     world.start_worker(), world.start_worker()
-    run = world.runtime.start_run("main")
+    run = world.start_run("main")
 
     [older] = world.wait_for_point(point)
-    recovered = world.engine.recover_worker(world.worker_of(older))
+    recovered = world.engine.recover_worker(world.host_of(world.worker_of(older)))
     [extract_ref] = [task for task in recovered if task.startswith("extract:")]
-    world.wait_for_point(
-        point, count=2
-    )  # the newer one is stopped too, having claimed the version after the older
+    time.sleep(10)  # time for the copy to start on either host: it waits for the lock, and reads nothing
+    assert len(world.reads("source")) == 1, world.state()
 
-    older_is_parked = lambda: world.parked(world.worker_of(older), extract_ref)
-    sealed = lambda: world.store.versions.sealed_for_run(run, "main_rows")
-    if older_goes_first:
-        world.release(point, nth=0)  # its next chunk is refused (`StaleWriter`), and DBOS parks it
-        world.wait(older_is_parked, 60, "the older execution to be parked")
-        assert not sealed() and world.store.runs.get_run(run).status == "running"
-        world.release(point, nth=1)
-    else:
-        world.release(point, nth=1)  # the newer one seals, and the older one then finds the version sealed
-        world.wait(sealed, 60, "the newer execution to seal")
-        world.release(point, nth=0)
-        world.wait(older_is_parked, 60, "the older execution to be parked")
+    world.release(
+        point
+    )  # its next step is refused, and DBOS parks it, which lets go of the lock; the copy goes on
+    world.wait(
+        lambda: world.parked(world.worker_of(older), extract_ref), 60, "the older execution to be parked"
+    )
 
     assert world.wait_for_run(run) == "succeeded", world.state()
     [extract] = [task for task in world.store.runs.list_tasks(run) if task.kind == "extract"]
     assert (extract.status, extract.attempt) == ("succeeded", 1), world.state()  # neither used up an attempt
-    assert (
-        len(world.reads("source")) == 2
-    )  # the two executions read once each: the overlap happened, and no retry
-    [version] = sealed()
+    assert len(world.reads("source")) <= 2  # never beside each other: the copy read after, if at all
+    [version] = world.store.versions.sealed_for_run(run, world.name("main_rows"))
     assert (version.upserts, version.deletes) == (100, 0)
     assert sum(chunk.rows for chunk in world.spool.list_chunks(version.version_id)) == 100
     for route in ("slow_a", "slow_b", "slow_c"):
@@ -69,7 +58,7 @@ def test_a_multi_call_read_that_fits_its_budget_finishes_after_waiting(world):
     world.start_worker()  # first, since a worker defines the budgets of the project
     world.store.budgets.define(BudgetSpec("fits_budget", (Window(2, 130),)))
     assert world.store.budgets.acquire("fits_budget", 2).granted
-    run = world.runtime.start_run("fits")
+    run = world.start_run("fits")
 
     assert world.wait_for_run(run, timeout=330) == "succeeded", world.state()
     assert world.sink_keys("fits_sink") == {"1", "2"}
@@ -80,7 +69,7 @@ def test_a_multi_call_read_that_fits_its_budget_finishes_after_waiting(world):
 def test_a_read_bigger_than_its_budget_fails_for_good_and_names_the_budget(world):
     """F12: five calls, of a window that holds three."""
     world.start_worker()
-    run = world.runtime.start_run("too_big")
+    run = world.start_run("too_big")
 
     assert world.wait_for_run(run, timeout=120) == "failed", world.state()
     reason = world.store.runs.get_run(run).reason

@@ -81,6 +81,7 @@ class Run:
     reason: str | None
     created_at: datetime
     updated_at: datetime
+    result: Mapping[str, Any] | None = None  # what a run that answers a question found
 
 
 @dataclass(frozen=True)
@@ -236,6 +237,10 @@ class RunJournal(Protocol):
     ) -> str: ...
     def set_run_status(self, run_id: str, status: str, reason: str | None = None) -> None:
         """Set the status, and the reason when one is given."""
+        ...
+
+    def set_run_result(self, run_id: str, result: Mapping[str, Any]) -> None:
+        """Keep what the run found, such as a partition check's counts."""
         ...
 
     def get_run(self, run_id: str) -> Run: ...
@@ -1677,6 +1682,12 @@ class WebhookEventStore(Protocol):
 
     def add(self, event: WebhookEvent) -> bool:
         """Keep the event. Returns False, and keeps nothing, when an event of that webhook has its key already."""
+        ...
+
+    def keep_many(self, events: "Sequence[tuple[WebhookEvent, str, InboundRequest]]") -> list[bool]:
+        """Keep each event as processed, and put each new one into the inbox of the push dataset named beside it, under
+        its key: all in one transaction, all or none. Says of each whether it was new; a repeat of a key, of one kept
+        before or earlier in these events, keeps nothing and goes into no inbox."""
         ...
 
     def events(self, package: str, webhook: str, limit: int = 100) -> list[WebhookEvent]:

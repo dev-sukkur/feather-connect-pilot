@@ -40,6 +40,11 @@ def _connect() -> psycopg.Connection[Any]:
     )
 
 
+def _short(route: str) -> str:
+    """A route's name without its package's prefix: the tests name routes as the project does."""
+    return route.rpartition("/")[2]
+
+
 def pass_point(conn: psycopg.Connection[Any], point: str) -> None:
     """Stop here until the test releases this process, if the test has armed `point` and it has holds left.
 
@@ -145,12 +150,12 @@ class SlowSink:
             attempt = conn.execute(
                 """insert into chaos.attempts (route, idempotency_key, chunk_no, who) values (%s, %s, %s, %s)
                    returning id""",
-                (batch.route, batch.idempotency_key, batch.chunk_no, _who()),
+                (_short(batch.route), batch.idempotency_key, batch.chunk_no, _who()),
             ).fetchone()
             assert attempt is not None
             half = len(batch.records) // 2
             self._write(conn, batch, batch.records[:half])
-            pass_point(conn, f"apply:{batch.route}:{batch.chunk_no}")
+            pass_point(conn, f"apply:{_short(batch.route)}:{batch.chunk_no}")
             time.sleep(SLOW_S)
             self._write(conn, batch, batch.records[half:])
             conn.execute("update chaos.attempts set finished = true where id = %s", (attempt[0],))
@@ -161,7 +166,7 @@ class SlowSink:
         conn.execute(
             """insert into chaos.sink_rows (route, idempotency_key, key)
                select %s, %s, unnest(%s::text[]) on conflict do nothing""",
-            (batch.route, batch.idempotency_key, [str(record.key) for record in records]),
+            (_short(batch.route), batch.idempotency_key, [str(record.key) for record in records]),
         )
 
 

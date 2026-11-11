@@ -24,13 +24,15 @@ from real_stack import (
     wait_until,
 )
 
-from feather_connect.project import load_project
+from feather_connect.host import PoolEngine
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.postgres.connect import connect
 from feather_connect.storage.postgres.migrate import migrate
 from feather_engine_dbos import DbosEngine
 
 PROJECT = Path(__file__).with_name("project")
+PACKAGE = "chaos-project"  # what the project installs as: its flows and datasets are `chaos-project/<name>`
+HOOK_TOKEN = "chaos-hook-token"
 CONTAINER = "feather-chaos-postgres"
 CONTAINER_PORT = 25434  # the busy ports of the development machine are 5432, 55432, 7077 and 8888
 CONTAINER_URL = f"postgresql://feather:feather@127.0.0.1:{CONTAINER_PORT}/feather_chaos"
@@ -62,11 +64,12 @@ class World:
         self.conn = psycopg.connect(url, autocommit=True)
         self.conn.execute(DDL)
         self.store, self.spool = connect(url)
-        self.engine = DbosEngine(url)
-        self.project = load_project(PROJECT, "dev")
-        self.runtime = Runtime(self.project.flows, self.store, self.spool, self.engine)
+        self.engine = DbosEngine(url)  # for `recover_worker`: the tests' runs are planned by the hosts
+        # The server's runtime, for a sweep run here: no package's flows, each task sent to its run's version's pool.
+        self.runtime = Runtime([], self.store, self.spool, PoolEngine(self.engine, "server", self.store))
         self.procs: dict[str, subprocess.Popen[bytes]] = {}  # the current process of each worker id
         self.starts: dict[str, int] = {}
+        self.hook_token = HOOK_TOKEN  # the bearer token of the declared webhook
         self.port = free_port()  # a server's, kept across its restarts
 
     def reconnect(self) -> None:
@@ -85,17 +88,50 @@ class World:
         """Start a worker, and return its id once it is registered. An id given again is a restart."""
         worker_id = worker_id or "w-" + uuid.uuid4().hex[:8]
         self.starts[worker_id] = self.starts.get(worker_id, 0) + 1
-        env = {"FEATHER_CHAOS_URL": self.url, "FEATHER_CHAOS_WHO": self.who(worker_id)}
         with (self.logs / f"{worker_id}.log").open("ab") as log:
-            self.procs[worker_id] = start_worker(PROJECT, self.url, worker_id, env=env, log=log)
-        wait_until(lambda: worker_id in [w.worker_id for w in self.store.workers.list_workers()], 60)
+            self.procs[worker_id] = start_worker(
+                PROJECT, self.url, worker_id, env=self._env(worker_id), log=log
+            )
+        host = self.host_of(worker_id)
+        wait_until(lambda: host in [w.worker_id for w in self.store.workers.list_workers()], 120)
         return worker_id
+
+    def _env(self, process_id: str) -> dict[str, str]:
+        return {
+            "FEATHER_CHAOS_URL": self.url,
+            "FEATHER_CHAOS_WHO": self.who(process_id),
+            "FEATHER_CHAOS_HOOK_TOKEN": HOOK_TOKEN,
+        }
+
+    def version(self) -> str:
+        """The installed version, which the project's flows are active on once a worker has started."""
+        versions = self.store.packages.versions(PACKAGE)
+        assert versions, "no worker has installed the project yet"
+        return versions[-1].version
+
+    def host_of(self, worker_id: str) -> str:
+        """The id of the worker's package host, which runs the tasks: `<worker>/<package>@<version>`."""
+        return f"{worker_id}/{PACKAGE}@{self.version()}"
+
+    @staticmethod
+    def name(short: str) -> str:
+        """A flow's or dataset's name as installed."""
+        return f"{PACKAGE}/{short}"
+
+    def start_run(self, flow: str) -> str:
+        """Queue a run of the flow as the server or a tick does: tagged with the active version, whose host plans it."""
+        name, version = self.name(flow), self.version()
+        active = lambda: any(
+            a.flow == name and a.state == "active" for a in self.store.packages.activations(PACKAGE)
+        )
+        wait_until(active, 120)
+        return self.store.runs.create_run(name, "manual", "chaos", {"package": PACKAGE, "version": version})
 
     def start_server(self, server_id: str = "server") -> str:
         """Start a server, which runs the sealer and the sweeper, and return its id once it answers. An id given again
         is a restart, on the same port."""
         self.starts[server_id] = self.starts.get(server_id, 0) + 1
-        env = {"FEATHER_CHAOS_URL": self.url, "FEATHER_CHAOS_WHO": self.who(server_id)}
+        env = self._env(server_id)
         log_file = self.logs / f"{server_id}.log"
         with log_file.open("ab") as log:
             proc = start_server(PROJECT, self.url, self.port, env=env, log=log)
@@ -214,7 +250,7 @@ class World:
         return [row[0] for row in rows.fetchall()]
 
     def deliveries(self, route: str) -> list[str]:
-        return [delivery.status for delivery in self.store.ledger.list_deliveries(route=route)]
+        return [delivery.status for delivery in self.store.ledger.list_deliveries(route=self.name(route))]
 
     def state(self) -> dict[str, Any]:
         """What a failing test should show."""

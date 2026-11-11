@@ -1894,6 +1894,30 @@ class StoreContract(
         store.webhooks.processed("acme", "orders", ["o-2"], T0)
         assert store.webhooks.purge(T0) == 0  # received after the cut
 
+    def test_webhook_events_are_kept_many_at_once_and_only_the_new_reach_the_inbox(self, store: Store):
+        from feather_connect.storage.port import WebhookEvent
+
+        def event(key: str, body: bytes = b"{}") -> tuple[WebhookEvent, str, InboundRequest]:
+            return WebhookEvent("acme", "orders", key, None, body, {}, T0), "acme/orders", inbound(body)
+
+        store.webhooks.add(event("old")[0])
+        kept = store.webhooks.keep_many(
+            [event("o-1", b"1"), event("old"), event("o-2", b"2"), event("o-1", b"x")]
+        )
+        assert kept == [
+            True,
+            False,
+            True,
+            False,
+        ]  # a repeat, of one kept before or earlier in these, is not new
+        assert [e.request.body for e in store.inbox.take("acme/orders", 10)] == [b"1", b"2"]
+        assert {e.key: e.processed_at for e in store.webhooks.events("acme", "orders")} == {
+            "old": None,
+            "o-1": T0,
+            "o-2": T0,
+        }
+        assert store.webhooks.keep_many([]) == []
+
     def test_registries_are_added_listed_and_removed(self, store: Store):
         store.registry.add_registry("zeta", "https://z.example.com/simple/", None, "root")
         added = store.registry.add_registry(
