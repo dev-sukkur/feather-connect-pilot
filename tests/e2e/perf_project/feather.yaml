@@ -1,10 +1,11 @@
 name: perf-project
 modules: [flows.perf]
 connections:
-  perf_hooks:
-    connector: perf.source
-    auth: {signature_secret: "${secret:env:HOOK_SECRET}"}
-  perf_ticks: {connector: perf.clock_source}
-  perf_cron: {connector: perf.clock_source}
+  perf_hooks: {connector: simulation.source}
   perf_sink: {connector: perf.sink}
-  perf_cron_sink: {connector: perf.sink}
+webhooks:
+  perf-hooks: # the server verifies and keeps each event; the package's code, on its host, parses it
+    dataset: perf_hooks
+    verify: {scheme: hmac-sha256, header: x-signature, encoding: hex, timestamp_header: x-timestamp}
+    secret: ${secret:env:HOOK_SECRET}
+    key: $.id

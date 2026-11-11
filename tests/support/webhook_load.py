@@ -23,7 +23,7 @@ from feather_connect.connectors.simulation import SIGNATURE_HEADER, TIMESTAMP_HE
 from feather_connect.core.webhooks import sign
 
 CONNECTIONS = 64
-PATH = "/ingress/default/perf_hooks"
+PATH = "/ingress/default/perf-project/perf-hooks"  # the package's declared webhook
 ERROR_BODY = 300
 
 
@@ -51,7 +51,7 @@ def _request(host: str, secret: str, number: int) -> bytes:
     stamp = str(int(sent_at))
     head = (
         f"POST {PATH} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n"
-        f"Content-Length: {len(body)}\r\n{SIGNATURE_HEADER}: {sign(secret, body, stamp)}\r\n"
+        f"Content-Length: {len(body)}\r\n{SIGNATURE_HEADER}: {sign(secret, body, None)}\r\n"
         f"{TIMESTAMP_HEADER}: {stamp}\r\n\r\n"
     )
     return head.encode() + body

@@ -25,6 +25,10 @@ from real_stack import wait_until
 pytestmark = [pytest.mark.postgres, pytest.mark.perf]
 
 PROJECT = Path(__file__).with_name("perf_project")
+SCHEDULES = Path(__file__).with_name(
+    "perf_schedules"
+)  # a package of its own, so no poller ticks beside a latency check
+HOOKS = "perf-project/perf_hooks"
 LOAD = Path(__file__).parents[1] / "support" / "webhook_load.py"
 SECRET = "perf-signature-secret"
 DDL = """
@@ -43,7 +47,7 @@ DRAIN_S = 120.0  # how long the rest may take to arrive once sending has ended, 
 BUCKET_S = 10
 STAYS_RECOVERED_S = 30  # how long p95 has to stay under target to count as recovered
 TICK = timedelta(seconds=5)
-POLLER, BY_CRON = "perf_poller", "perf_by_cron"
+POLLER, BY_CRON = "perf-schedules/perf_poller", "perf-schedules/perf_by_cron"
 TRIGGER = "every:5s"
 
 
@@ -129,11 +133,12 @@ def start_load(url: str, out: Path, *phases: tuple[float, float]) -> Load:
 
 
 def rows_of(stack: Any, since: float = 0.0) -> list[tuple[str, float, float, float]]:
-    """Return each key's first write: key, sent, received, applied."""
+    """Return each key's first write: key, sent, received (the server's, from the inbox), applied."""
     return stack.conn.execute(
-        """select key, min(sent_at), min(received_at), min(applied_at) from perf.sink_rows
-           where received_at >= %s group by key""",
-        (since,),
+        """select s.key, min(s.sent_at), min(extract(epoch from i.received_at))::float8, min(s.applied_at)
+           from perf.sink_rows s join feather.inbox i on i.dataset = %s and i.event_id = s.key
+           group by s.key having min(extract(epoch from i.received_at)) >= %s""",
+        (HOOKS, since),
     ).fetchall()
 
 
@@ -202,7 +207,7 @@ def print_numbers(name: str, numbers: dict[str, Any]) -> None:
 
 @pytest.fixture
 def push_stack(stack: Callable[..., Any]) -> Any:
-    return stack(PROJECT, env={"FEATHER_PERF_FLOWS": "push", "HOOK_SECRET": SECRET}, ddl=DDL)
+    return stack(PROJECT, env={"HOOK_SECRET": SECRET}, ddl=DDL)
 
 
 @pytest.mark.timeout(420)
@@ -307,37 +312,30 @@ def test_burst_at_10x_loses_nothing_and_recovers(
 class Schedules:
     stack: Any
 
-    def stream_runs(self) -> list[Any]:
-        return [r for r in self.stack.store.runs.list_runs(flow=POLLER, limit=50) if r.trigger == "stream"]
+    def tick_runs(self) -> list[Any]:
+        """The poller's ticks. A packaged flow's tick is a run of its own, queued for its version's host, not a task
+        of a day's stream run as in M1 (an M2 item: flow packages §12)."""
+        return [r for r in self.stack.store.runs.list_runs(flow=POLLER, limit=200) if r.trigger == TRIGGER]
 
     def tick_times(self) -> list[datetime]:
         """The due time of every tick that went ahead, oldest first, with repeats if a tick fired twice."""
-        found: list[datetime] = []
-        for run in self.stream_runs():
-            for task in self.stack.store.runs.list_tasks(run.run_id):
-                if task.kind == "plan":
-                    at = task.ref.removeprefix(f"tick:{run.run_id}:{TRIGGER}@").removesuffix(":plan")
-                    found.append(datetime.fromisoformat(at))
-        return sorted(found)
+        return sorted(
+            datetime.fromisoformat(r.params["due_at"]) for r in self.tick_runs() if r.status != "skipped"
+        )
 
     def skipped_ticks(self) -> list[str | None]:
-        return [
-            task.error
-            for run in self.stream_runs()
-            for task in self.stack.store.runs.list_tasks(run.run_id)
-            if task.kind == "skip"
-        ]
+        return [r.reason for r in self.tick_runs() if r.status == "skipped"]
 
     def cron_runs(self) -> list[Any]:
         return self.stack.store.runs.list_runs(flow=BY_CRON, limit=50)
 
     def versions(self) -> list[Any]:
-        return self.stack.store.versions.list_versions("perf_ticks")
+        return self.stack.store.versions.list_versions("perf-schedules/perf_ticks")
 
 
 @pytest.fixture
 def schedules(stack: Callable[..., Any]) -> Schedules:
-    return Schedules(stack(PROJECT, env={"FEATHER_PERF_FLOWS": "schedules"}, ddl=DDL))
+    return Schedules(stack(SCHEDULES, ddl=DDL))
 
 
 def assert_no_tick_fired_twice(found: Schedules) -> None:
@@ -361,11 +359,11 @@ def test_scheduled_flow_runs_by_itself(schedules: Schedules) -> None:
     )
     wait_until(lambda: writes_of(schedules.stack) >= wanted_ticks, 30)
 
-    runs = schedules.stream_runs()
+    runs = schedules.tick_runs()
     versions = schedules.versions()
     ticks = schedules.tick_times()
     numbers = {
-        "stream_runs": len(runs),
+        "tick_runs": len(runs),
         "ticks": len(ticks),
         "versions": len(versions),
         "skipped": schedules.skipped_ticks(),
@@ -373,9 +371,7 @@ def test_scheduled_flow_runs_by_itself(schedules: Schedules) -> None:
         "writes": writes_of(schedules.stack),
     }
     print_numbers("schedules", numbers)
-    assert len({run.created_at.date() for run in runs}) == len(runs) and len(runs) in (1, 2), (
-        numbers
-    )  # midnight
+    assert all(run.status in ("succeeded", "skipped", "running", "queued") for run in runs), numbers
     assert len({v.version_id for v in versions}) == len(versions) >= wanted_ticks - 1, numbers
     assert {v.run_id for v in versions} <= {run.run_id for run in runs}, numbers
     assert_no_tick_fired_twice(schedules)
@@ -409,4 +405,3 @@ def test_restarting_the_server_keeps_scheduling(schedules: Schedules) -> None:
     print_numbers("restart", numbers)
     assert_no_tick_fired_twice(schedules)
     assert_each_minute_fired_once(schedules)
-    assert len(schedules.stream_runs()) in (1, 2), numbers

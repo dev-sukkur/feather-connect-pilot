@@ -23,17 +23,17 @@ def test_overlapping_extracts_end_with_the_run_succeeded(world, older_goes_first
     point = "read:source:1"
     world.arm(point, holds=2)
     world.start_worker(), world.start_worker()
-    run = world.runtime.start_run("main")
+    run = world.start_run("main")
 
     [older] = world.wait_for_point(point)
-    recovered = world.engine.recover_worker(world.worker_of(older))
+    recovered = world.engine.recover_worker(world.host_of(world.worker_of(older)))
     [extract_ref] = [task for task in recovered if task.startswith("extract:")]
     world.wait_for_point(
         point, count=2
     )  # the newer one is stopped too, having claimed the version after the older
 
     older_is_parked = lambda: world.parked(world.worker_of(older), extract_ref)
-    sealed = lambda: world.store.versions.sealed_for_run(run, "main_rows")
+    sealed = lambda: world.store.versions.sealed_for_run(run, world.name("main_rows"))
     if older_goes_first:
         world.release(point, nth=0)  # its next chunk is refused (`StaleWriter`), and DBOS parks it
         world.wait(older_is_parked, 60, "the older execution to be parked")
@@ -69,7 +69,7 @@ def test_a_multi_call_read_that_fits_its_budget_finishes_after_waiting(world):
     world.start_worker()  # first, since a worker defines the budgets of the project
     world.store.budgets.define(BudgetSpec("fits_budget", (Window(2, 130),)))
     assert world.store.budgets.acquire("fits_budget", 2).granted
-    run = world.runtime.start_run("fits")
+    run = world.start_run("fits")
 
     assert world.wait_for_run(run, timeout=330) == "succeeded", world.state()
     assert world.sink_keys("fits_sink") == {"1", "2"}
@@ -80,7 +80,7 @@ def test_a_multi_call_read_that_fits_its_budget_finishes_after_waiting(world):
 def test_a_read_bigger_than_its_budget_fails_for_good_and_names_the_budget(world):
     """F12: five calls, of a window that holds three."""
     world.start_worker()
-    run = world.runtime.start_run("too_big")
+    run = world.start_run("too_big")
 
     assert world.wait_for_run(run, timeout=120) == "failed", world.state()
     reason = world.store.runs.get_run(run).reason

@@ -1,0 +1,7 @@
+name: perf-schedules
+modules: [flows.schedules]
+connections:
+  perf_ticks: {connector: perf.clock_source}
+  perf_cron: {connector: perf.clock_source}
+  perf_sink: {connector: perf.sink}
+  perf_cron_sink: {connector: perf.sink}

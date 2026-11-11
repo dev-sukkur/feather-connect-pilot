@@ -21,9 +21,9 @@ EVENTS = 30  # two chunks of `CHUNK_ROWS`, so that a kill mid-apply finds a chun
 
 def post(world: Any, event: dict[str, Any]) -> int:
     request = urllib.request.Request(
-        f"{world.server_address}/ingress/default/hooks",
+        f"{world.server_address}/ingress/default/chaos-project/hooks",  # the package's declared webhook
         data=json.dumps(event).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {world.hook_token}"},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=30) as response:
@@ -33,7 +33,7 @@ def post(world: Any, event: dict[str, Any]) -> int:
 def keys_by_version(world: Any) -> dict[str, list[str]]:
     """The record keys of each sealed version of the push dataset."""
     found: dict[str, list[str]] = {}
-    for version in world.store.versions.list_versions("hooks", limit=1000):
+    for version in world.store.versions.list_versions(world.name("hooks"), limit=1000):
         if version.status != "sealed":
             continue
         found[version.version_id] = [
@@ -52,7 +52,9 @@ def assert_each_event_sealed_once_and_written_once(world: Any) -> None:
     assert world.max_writes_per_key() == 1, world.state()
     world.wait(lambda: set(world.deliveries("push_sink")) == {"applied"}, 60, "every delivery to be applied")
     first_seq = min(e for e in world.conn.execute("select event_seq from feather.inbox").fetchall())[0]
-    assert stable_id("hooks", "_", str(first_seq)) in keys_by_version(world)  # named after its first event
+    assert stable_id(world.name("hooks"), "_", str(first_seq)) in keys_by_version(
+        world
+    )  # named after its first event
 
 
 @pytest.mark.timeout(400)
