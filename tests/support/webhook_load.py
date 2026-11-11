@@ -11,6 +11,7 @@ of what 500 a second can afford.
 
 import asyncio
 import json
+import os
 import sys
 import threading
 import time
@@ -23,7 +24,10 @@ from feather_connect.connectors.simulation import SIGNATURE_HEADER, TIMESTAMP_HE
 from feather_connect.core.webhooks import sign
 
 CONNECTIONS = 64
-PATH = "/ingress/default/perf-project/perf-hooks"  # the package's declared webhook
+# Where to send, and whether the signature is bound to the timestamp (`http.Webhook`'s, the default) or of the body
+# alone (a package's declared HMAC webhook, which holds the timestamp only to its tolerance).
+PATH = os.environ.get("FEATHER_LOAD_PATH", "/ingress/default/perf_hooks")
+BODY_ONLY = os.environ.get("FEATHER_LOAD_SIGN") == "body"
 ERROR_BODY = 300
 
 
@@ -51,7 +55,7 @@ def _request(host: str, secret: str, number: int) -> bytes:
     stamp = str(int(sent_at))
     head = (
         f"POST {PATH} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n"
-        f"Content-Length: {len(body)}\r\n{SIGNATURE_HEADER}: {sign(secret, body, None)}\r\n"
+        f"Content-Length: {len(body)}\r\n{SIGNATURE_HEADER}: {sign(secret, body, None if BODY_ONLY else stamp)}\r\n"
         f"{TIMESTAMP_HEADER}: {stamp}\r\n\r\n"
     )
     return head.encode() + body

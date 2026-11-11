@@ -1,5 +1,6 @@
-"""The push path's crash safety: the server, which runs the sealer, killed between writing a batch's chunks and
-`seal_batch`, or between `seal_batch` and submitting the applies, and a worker killed mid-apply of a webhook version.
+"""The push path's crash safety: a worker, whose host of the active version runs the push dataset's sealer (flow
+packages §7.1), killed between writing a batch's chunks and `seal_batch`, or between `seal_batch` and submitting the
+applies, and a worker killed mid-apply of a webhook version.
 
 Whatever is killed is started again, and every accepted event must reach the sink once: none lost, no effective write
 twice (see `SlowSink`), and each event in one sealed version only, which is what one version per first event comes to.
@@ -59,15 +60,15 @@ def assert_each_event_sealed_once_and_written_once(world: Any) -> None:
 
 @pytest.mark.timeout(400)
 @pytest.mark.parametrize("point", ["seal:written", "seal:sealed"])
-def test_a_server_killed_mid_seal_loses_and_duplicates_nothing(world: Any, point: str):
-    world.start_worker()
+def test_a_worker_killed_mid_seal_loses_and_duplicates_nothing(world: Any, point: str):
+    worker = world.start_worker()
     world.arm(point)
     world.start_server()
     assert [post(world, {"id": n}) for n in range(1, EVENTS + 1)] == [202] * EVENTS
 
     [who] = world.wait_for_point(point)
-    assert world.worker_of(who) == "server"
-    world.kill("server")
+    assert world.worker_of(who) == worker  # its host seals: the server has none of the package's code
+    world.kill(worker)
     if point == "seal:written":
         assert keys_by_version(world) == {}  # written, and not sealed
     else:
@@ -75,7 +76,9 @@ def test_a_server_killed_mid_seal_loses_and_duplicates_nothing(world: Any, point
             "pending"
         ]  # sealed, not submitted
 
-    world.start_server()  # its sealer finds the events, or its sweeper the pending deliveries
+    world.start_worker(
+        worker
+    )  # its host's sealer finds the events, or the server's sweeper the pending deliveries
     assert_each_event_sealed_once_and_written_once(world)
 
 

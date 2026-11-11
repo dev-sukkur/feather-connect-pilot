@@ -9,6 +9,7 @@ achieved rate is asserted too, or a slow generator would pass for a fast system.
 import ctypes
 import itertools
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -128,7 +129,14 @@ class Load:
 
 def start_load(url: str, out: Path, *phases: tuple[float, float]) -> Load:
     specs = [f"{rate}:{seconds}" for rate, seconds in phases]
-    proc = subprocess.Popen([sys.executable, str(LOAD), url, SECRET, str(out), *specs], stdin=subprocess.PIPE)
+    env = {
+        **os.environ,
+        "FEATHER_LOAD_PATH": f"/ingress/default/{HOOKS.replace('_', '-')}",
+        "FEATHER_LOAD_SIGN": "body",
+    }
+    proc = subprocess.Popen(
+        [sys.executable, str(LOAD), url, SECRET, str(out), *specs], stdin=subprocess.PIPE, env=env
+    )
     return Load(proc, out)
 
 
