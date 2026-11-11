@@ -145,3 +145,14 @@ def test_the_host_answers_a_check_and_changes_nothing(world: World) -> None:
     refused = world.store.runs.get_run(wrong)
     assert refused.status == "failed" and refused.result is not None
     assert "is not a partition of" in refused.result["error"]
+
+
+def test_links_to_a_packaged_flow_keep_its_slash(app: FastAPI, state: AppState):
+    operator = sign_in(app)
+    page = operator.get(f"/flows/{FLOW}")
+    assert page.status_code == 200 and "%2F" not in page.text
+    csrf = page.text.split('name="csrf_token" value="', 1)[1].split('"', 1)[0]
+    paused = operator.post(f"/flows/{FLOW}/pause", data={"csrf_token": csrf})
+    assert paused.status_code == 303 and paused.headers["location"].startswith(f"/flows/{FLOW}?")
+    found = operator.get("/search.json", params={"q": "invoices"}).text
+    assert f"/flows/{FLOW}" in found and "%2F" not in found
