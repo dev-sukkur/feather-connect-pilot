@@ -4,7 +4,7 @@
 - **Sponsor's answers (8 Nov 2026):** flow packages come first in M1.1, then readiness; `on_late="rerun"` is the default; a skipped version counts as delivered
 - **Date:** 2026-11-08
 - **Decision record:** [ADR-0012](adr/0012-readiness-triggers.md)
-- **Milestone:** M1.1, brought forward from M2 together with flow packages ([milestones](../04-plan/milestones-and-scope.md))
+- **Milestone:** early M2. Brought forward to M1.1 on 8 Nov 2026, then moved back to the start of M2 by the sponsor on 10 Nov 2026 ([milestones](../04-plan/milestones-and-scope.md))
 - **Builds on:** design §4.6 (readiness and consistent cuts), requirements FR-B7 and FR-D3, hard case H13
 
 ## 1. The problem

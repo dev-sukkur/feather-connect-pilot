@@ -73,7 +73,7 @@ A task number such as `2.3` means Plan 2, Task 3.
 
 ### 3.5 Left out of M1 on purpose
 
-`fc.reconcile` and H5; readiness (now M1.1); side-effect routes and approvals; overrides beyond pause and resume; RBAC; MCP; alerts; the budgets page; row-level security (M3); `sink.confirm` (M2, with Magento); handling after a backup restore (M3). See the [plan README](README.md#deferred-past-m1).
+`fc.reconcile` and H5; readiness (M2, after a stop in M1.1); side-effect routes and approvals; overrides beyond pause and resume; RBAC; MCP; alerts; the budgets page; row-level security (M3); `sink.confirm` (M2, with Magento); handling after a backup restore (M3). See the [plan README](README.md#deferred-past-m1).
 
 ### 3.6 Known open items after M1
 

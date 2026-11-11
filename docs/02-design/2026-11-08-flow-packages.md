@@ -155,7 +155,17 @@ A `feather-worker` container runs a **supervisor** that doesn't import any flow 
 - starts one **package host** per active package version: a child process running the existing worker loop (`run_worker`) in that package's environment, on its stored wheel;
 - labels each host with its package and version, so tasks reach only the host whose code they were started with;
 - stops a host with SIGTERM, which drains it as any worker drains today, when its version is no longer active;
-- restarts a host that crashes, with back-off, and reports a crash loop on the package's page.
+- restarts a host that crashes, with back-off, and reports a crash loop on the package's page;
+- heartbeats as a worker of its own, labelled `role: supervisor` with no slots, so the fleet view shows it before any package is active; its hosts register as `<worker>/<package>@<version>`.
+
+**As built (P4–P6):**
+
+- A version is **prepared** before it can be activated: the supervisor builds its environment and load-checks it there, and records it `ready` or `failed`. An install leaves it `preparing`; activating a version that isn't ready is refused (409).
+- **Switching** follows §6: the new version's host starts and says `ready` on its pipe, and only then are the flows' triggers moved to it. The old host keeps running while runs tagged with its version are queued or running, so they finish on the code they started with.
+- **Tasks follow their run's version.** Every task carries the pool of the version its run is tagged with, whichever process submits it: a host, or the server when an operator retries, replays or skips a delivery. A plan or extract also holds an advisory lock on its concurrency key, so two versions never read one partition at once.
+- **Push datasets are sealed on their host.** The server's ingress verifies and keeps an event; the host of the active version seals the dataset's inbox, since only its code can parse the events.
+- **Environments** are built with `uv` from the package's lock, binary wheels only, one per lock hash, shared between versions with the same lock. Unused ones are removed every 10 minutes.
+- Under `feather dev`, the supervisor gets a working folder (`--workdir`, the project folder): hosts run in it, and a relative `${secret:file:…}` is read against it, so a project's relative paths keep their meaning.
 
 Each host is today's worker, so retries, checkpoints, heartbeats and the sweeper work unchanged. A host that dies hands its tasks on, exactly as a killed worker does in M1.
 
@@ -170,8 +180,8 @@ Each host is today's worker, so retries, checkpoints, heartbeats and the sweeper
 | Part | Reads | Notes |
 |---|---|---|
 | Scheduler | The triggers of active flows, from the catalogue | It refreshes on NOTIFY. A flow activated at 10:00:05 fires at its next tick |
-| Webhook ingress | Push datasets of active flows, and their connections' settings and secret references, from the package's configuration | It verifies and parses with the installed `http.Webhook` connector, which is Feather Connect code, not package code. A package that brings its own webhook connector is refused at install in this design (§12) |
-| Dashboard and API | The catalogue, as today | Adds the Packages pages (§10) |
+| Webhook ingress | Webhooks a package declares in `feather.yaml`, and push datasets of active flows whose source is Feather Connect's own | It verifies the signature with a built-in scheme (HMAC, Shopify, Stripe, Zoho, bearer), keeps each event once by its key, and puts it in the push dataset's inbox. The package's own code parses it, on the active version's host. A package that brings its own webhook source as code is refused at install (§12) |
+| Dashboard and API | The catalogue, as today | Adds the Packages pages (§10). A packaged dataset or route is described from its flow's catalogue spec, which names things but holds no code: its partitions show by key, not by label, and its write cost is unknown |
 | Budgets | Defined at environment level (§8) | As today |
 
 ## 8. Connections, budgets and names across packages
@@ -240,14 +250,22 @@ Installing a package runs its code on the workers. So:
 - **Who may install.** Only the *admin* role may add registries, install, promote or uninstall. Activating and deactivating need the *operator* role. Because this work comes before the rest of M2, these two roles are pulled forward from M2's RBAC (design §9): users and API tokens get a role, `admin` or `operator`, and the rest of RBAC follows in M2. Existing users become `admin`, so nothing changes for them.
 - **What is installed.** Only from registries the environment trusts. The sha256 is recorded and checked on every load. Optionally, a signing key per environment: a package must be signed with it (minisign or Sigstore), checked at install.
 - **Where it runs.** Package hosts run as the worker's unprivileged user, in the worker container. There is no sandbox inside it. Packages from parties you don't trust belong in a separate environment.
-- **Secrets.** As today, packages hold only references. Values come from the environment, and logs mask them.
+- **What a host can reach** (amended 11 Nov 2026, as built in P4). A host is a process tree of its own (a Job Object on Windows), killed with its supervisor, and it gets less than the worker has:
+  - **No secret of the worker's.** Its environment holds only what Python needs and the variables named in `FEATHER_HOST_ENV_PASS`; never the master key, the session key or the worker's database URL.
+  - **Its own connections' credentials only.** It asks the supervisor for each over a pipe; the supervisor resolves the reference with the environment's vault and checks it against the version's manifest and configuration, so a host gets only the secrets of connections its package declares.
+  - **A database role of its own**, `feather_host` (`FEATHER_HOST_DATABASE_URL`): the run, task, version and delivery tables it needs, and not the secrets, users or tokens tables. Without it, hosts connect as the worker, which can read every table, and the supervisor warns.
+  - **The network**, as the worker has. Limiting it is left to the deployment (§12).
+- **The install-time load check** runs the package in a child process with an empty environment and a temporary home folder, so code that reads a variable or a file when imported must have a default.
+- **Secrets.** As today, packages hold only references. Values come from the environment or, encrypted, from the database, and logs mask them.
 
 ## 12. Limits of this design
 
-- A package can't bring its own **webhook source connector**, because ingress runs in the server, which doesn't load package code. Its own polling sources and sinks are fine. Lifting this needs ingress to hand parsing to a host; that is left for later.
+- A package can't bring its own **webhook source connector**: the server, which doesn't load package code, verifies every event. It declares its webhooks instead (§7.2), and its own code parses them on its host. Its own polling sources and sinks are fine.
+- **What the server knows of a packaged flow** is its catalogue spec: no partition labels, no write cost, and no backfill or partition check from the dashboard yet.
+- **Hosts have the worker's network.** Egress rules belong to the deployment.
 - The **dashboard can't show a package's transforms** as code. It shows the spec, as today.
 - **Old Python versions:** every package runs on the worker image's Python (3.13 today).
-- `feather dev` still runs one project folder from source and reloads on save (§13). `feather dev --packages` to rehearse an install locally could follow.
+- `feather dev` installs the project folder as the next dev version on each save (§13).
 
 ## 13. Compatibility with M1
 
@@ -256,7 +274,9 @@ Packages are the **only** way to deploy flows. The M1 project mode, where a depl
 - **Deployments.** `deploy/compose.yaml` drops the `/project` mount and `FEATHER_PROJECT_DIR`. The server and workers start with no flows and run what is installed and active.
 - **Existing projects.** A project becomes a package with `feather package build` once `feather.yaml` has a `version:`, and it gets a package name.
 - **Upgrading a running environment.** The upgrade builds the mounted project into a package, installs it and activates the flows that were running, before the mount is removed. Names gain the package prefix, and the migration renames the existing datasets, routes and watermarks to match, so no history, watermark or delivery is lost.
-- **Local work.** `feather dev` still runs a project folder from source and reloads on save. It is an authoring tool, not a deployment mode, and it applies the package prefix the same way, so names match what an install gives.
+- **Local work.** `feather dev` installs the project folder as `<version>.dev<N>` on start and on each save, activates its flows, and keeps the last three dev versions. A save that doesn't load leaves the running version alone.
+
+**As built (P6):** `feather server upgrade --project <dir>` does the upgrade in one transaction. It installs the project as a package, renames runs, schedules, datasets and deliveries to `<package>/<name>`, records each old name in `feather.renamed`, and refuses while an M1 worker is alive. Running it twice changes nothing. Old names keep working: API calls redirect with 308, and dashboard pages with 302 or 307. `FEATHER_PROJECT` is ignored with a warning.
 
 ## 14. Plan
 
@@ -292,3 +312,16 @@ Packages are the **only** way to deploy flows. The M1 project mode, where a depl
 | 3 | Running runs on deactivate | They finish (§6) |
 | 4 | Names | Always prefixed with the package name (§8) |
 | 5 | Keep the M1 project mode for small deployments, or move every environment to packages | Packages only. The project mode is retired, and running environments upgrade in place (§13) |
+
+## 16. Settled while building (P1–P6, 9–11 Nov 2026)
+
+| Question | As built |
+|---|---|
+| Connection settings and secrets | Settings that aren't secret are plain values in the database, visible and editable, each change audited. Secrets are encrypted with a master key per environment, kept outside the database, and never shown again once set |
+| Webhooks in packages | Declared in `feather.yaml` and verified by the server's built-in schemes; the package's code parses (§7.2) |
+| Install states | `preparing`, then `ready` or `failed` once a supervisor has built and load-checked the version (§7.1) |
+| Promotion | `feather package promote` exports a wheel from one environment and imports it into another by sha256; there is no server-to-server path |
+| Uninstall | Keeps the version's row as `uninstalled`; deletes the wheel unless another version shares it. An uninstalled version can't be installed again |
+| Signing | ed25519 over the wheel's `RECORD`, with the signature in `.dist-info/feather-signature.json`. The settings `trusted_package_keys` and `require_signed_packages`; the `signature` check comes after `not_yanked` |
+| Packaged flow pages | `/packages/<package>/flows/<flow>` has Activate, Switch, Rollback and Deactivate; the Flows list shows packaged flows beside any others |
+| Hosts | No master key; credentials over a pipe; a `feather_host` database role (§11) |

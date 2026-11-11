@@ -6,7 +6,7 @@
 
 ## Context
 
-In M1 a flow starts on a clock, by hand, or when webhook events arrive. A flow that depends on another flow's output, such as Postgres → SAP after Zakya → Postgres, runs on its own clock. It can read a half-written run, run on stale data when the upstream flow failed, and can't wait for several datasets of one store-day. Design §4.6 and requirements FR-B7 and FR-D3 planned readiness for M2. The sponsor brought it forward to M1.1, with flow packages.
+In M1 a flow starts on a clock, by hand, or when webhook events arrive. A flow that depends on another flow's output, such as Postgres → SAP after Zakya → Postgres, runs on its own clock. It can read a half-written run, run on stale data when the upstream flow failed, and can't wait for several datasets of one store-day. Design §4.6 and requirements FR-B7 and FR-D3 planned readiness for M2. The sponsor brought it forward to M1.1, with flow packages, and on 2026-11-10 moved it back to the start of M2, so M1.1 closed with flow packages.
 
 ## Decision
 
