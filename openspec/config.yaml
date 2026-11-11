@@ -1,0 +1,43 @@
+schema: spec-driven
+
+context: |
+  Feather Connect is an open-source (MIT), code-first integration hub in Python: one data model for ETL and
+  application events, flows written as code, and a dashboard that monitors and acts.
+
+  These specs were distilled from the pilot repository (dev-sukkur/feather-connect-pilot) on 2026-11-11.
+  Every requirement ends with a line `*Pilot: <status> · Trace: ...*`:
+    verified  - built in the pilot, and a pilot test proves it
+    built     - built in the pilot, not proved by a passing pilot test
+    partial   - built in part; the requirement text says which part
+    corrected - the pilot does this wrong; the requirement states the right behaviour
+  Trace IDs (FR-, NFR-, I1-I10, H1-H17, design sections, ADRs) point into the pilot repository's docs/.
+  Trace paths: `core/...`, `runtime/...`, `storage/...`, `packages/...`, `testing/...` are under
+  packages/feather-connect/src/feather_connect/; `feather_server/...` and `feather_cli/...` are under their
+  package's src/; `<package>/tests/...` is under packages/; `tests/...` is the repository's top-level tests/.
+
+  Constraints an agent can't infer from the code:
+  - Python 3.12 or later only. No Node toolchain, no TypeScript, no single-page-app framework.
+  - Postgres 15 or later is the only required database, with no extensions. No Redis, Kafka or SQLite.
+  - The durable engine sits behind the engine port. Nothing outside the engine adapter may name DBOS.
+  - Engine task arguments carry ids only, never data.
+  - Every table has tenant_id in its primary key and unique indexes; all data access goes through the
+    tenant-bound store (ADR-0013).
+  - Every action goes through the one service layer, which checks the role and writes the audit row.
+  - Secrets are references or encrypted values. They are never logged, shown or sent to a browser.
+  - Distributed packages must not depend on copyleft code.
+  - Data people may query, verify or retry goes in a table or object storage, never only in a log.
+  - Plain British English in documents, with short sentences.
+
+rules:
+  proposal:
+    - State the exit criteria as checks someone can run.
+    - Name what is out of scope.
+  specs:
+    - "Keep the status line (Pilot, then Trace) on requirements that came from the pilot."
+    - "A new requirement with no pilot history ends with a status line that says Pilot new."
+    - Every requirement has at least one scenario that can be turned into a test as written.
+  design:
+    - Name the pilot's lessons that apply, and what is done differently because of them.
+  tasks:
+    - Start each group with the tests, then the code that makes them pass.
+    - End with the stage's exit criteria as a checklist.
