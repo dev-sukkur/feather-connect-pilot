@@ -19,7 +19,7 @@ In M1 an environment runs one project, which the server and every worker load wh
 - Shared connections and budgets live at environment level.
 - **Packages are the only way to deploy.** The M1 project mode is retired. Upgrading turns a running project into its first package, with history and watermarks kept. `feather dev` still runs a project folder for local work.
 
-Details: [the flow packages design](../02-design/2026-11-08-flow-packages.md).
+Details: [the flow packages design](../2026-11-08-flow-packages.md).
 
 ## Consequences
 

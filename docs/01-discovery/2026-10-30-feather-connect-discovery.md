@@ -2,7 +2,7 @@
 
 > SDLC phase 1 of 7 · Version 0.3 (draft for review) · 30 October 2026
 > Owner: OSS Dev1 · Prepared with Claude Code
-> Next: [Design specification](../02-design/2026-10-30-feather-connect-design.md) · [Decision records](../adr/README.md)
+> Next: [Design specification](../02-design/2026-10-30-feather-connect-design.md) · [Decision records](../02-design/adr/README.md)
 
 | Version | Date | Author | Change |
 |---|---|---|---|
@@ -360,17 +360,17 @@ These facts were observed on vendor pages and in documentation during the refere
 
 | Topic | Decision | Record |
 |---|---|---|
-| Language | Python throughout: SDK, runtime, server and dashboard | [ADR-0001](../adr/0001-python-throughout-html-dashboard.md) |
-| Front end | Server-rendered HTML (Jinja2 templates, CSS, HTMX for partial refresh); no SPA framework, TypeScript or Node build | [ADR-0001](../adr/0001-python-throughout-html-dashboard.md) |
-| Architecture | Our own SDK, control plane and dashboard; engine behind a port | [ADR-0002](../adr/0002-own-control-plane-engine-behind-port.md) |
-| Engine | DBOS Transact, chosen by a conformance spike | [ADR-0003](../adr/0003-durable-engine-selection-by-spike.md) |
-| Data model | Dataset, record, partition, version, route ledger for both ETL and events | [ADR-0004](../adr/0004-unified-data-model.md) (proposed, confirm at design review) |
-| Database | Postgres is the only required database, holding the spool too; object storage optional; no Kafka in v1 | [ADR-0005](../adr/0005-postgres-only-required-database.md) |
-| Environments and tenancy | An environment is a deployment; a tenant is a namespace | [ADR-0006](../adr/0006-environment-is-deployment-tenant-is-namespace.md) |
-| Authoring | Full-code flows; knobs via config and audited overrides; no visual designer in v1 | [ADR-0007](../adr/0007-full-code-flows-no-visual-designer.md) |
-| AI | An MCP server with the same RBAC and audit as humans; no in-product LLM in v1 | [ADR-0008](../adr/0008-ai-operability-via-mcp.md) |
-| Licence | MIT | [ADR-0009](../adr/0009-mit-licence.md) |
-| Deployment | Docker Compose plus `feather dev`; Helm later | [ADR-0010](../adr/0010-compose-and-feather-dev-deployment.md) |
+| Language | Python throughout: SDK, runtime, server and dashboard | [ADR-0001](../02-design/adr/0001-python-throughout-html-dashboard.md) |
+| Front end | Server-rendered HTML (Jinja2 templates, CSS, HTMX for partial refresh); no SPA framework, TypeScript or Node build | [ADR-0001](../02-design/adr/0001-python-throughout-html-dashboard.md) |
+| Architecture | Our own SDK, control plane and dashboard; engine behind a port | [ADR-0002](../02-design/adr/0002-own-control-plane-engine-behind-port.md) |
+| Engine | DBOS Transact, chosen by a conformance spike | [ADR-0003](../02-design/adr/0003-durable-engine-selection-by-spike.md) |
+| Data model | Dataset, record, partition, version, route ledger for both ETL and events | [ADR-0004](../02-design/adr/0004-unified-data-model.md) (proposed, confirm at design review) |
+| Database | Postgres is the only required database, holding the spool too; object storage optional; no Kafka in v1 | [ADR-0005](../02-design/adr/0005-postgres-only-required-database.md) |
+| Environments and tenancy | An environment is a deployment; a tenant is a namespace | [ADR-0006](../02-design/adr/0006-environment-is-deployment-tenant-is-namespace.md) |
+| Authoring | Full-code flows; knobs via config and audited overrides; no visual designer in v1 | [ADR-0007](../02-design/adr/0007-full-code-flows-no-visual-designer.md) |
+| AI | An MCP server with the same RBAC and audit as humans; no in-product LLM in v1 | [ADR-0008](../02-design/adr/0008-ai-operability-via-mcp.md) |
+| Licence | MIT | [ADR-0009](../02-design/adr/0009-mit-licence.md) |
+| Deployment | Docker Compose plus `feather dev`; Helm later | [ADR-0010](../02-design/adr/0010-compose-and-feather-dev-deployment.md) |
 | Latency and volume | Seconds of latency, moderate volume | ADR-0005 |
 | v1 connectors | In-memory, JSON simulation, Postgres, S3, REST/GraphQL, webhook, HTTP, SAP, Zoho Zakya, GoFrugal, Magento, DuckDB/MotherDuck | FR-J2 |
 

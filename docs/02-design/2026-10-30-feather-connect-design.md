@@ -2,7 +2,7 @@
 
 > SDLC phase 2 of 7 · Version 0.2 (draft for review) · 30 October 2026
 > Owner: OSS Dev1 · Prepared with Claude Code
-> Implements: [Discovery v0.2](../01-discovery/2026-10-30-feather-connect-discovery.md) · Decisions: [ADRs](../adr/README.md)
+> Implements: [Discovery v0.2](../01-discovery/2026-10-30-feather-connect-discovery.md) · Decisions: [ADRs](adr/README.md)
 
 | Version | Date | Author | Change |
 |---|---|---|---|
@@ -23,7 +23,7 @@ This specification describes how Feather Connect v1.0 (milestones M1–M3) is bu
 - AI operability and observability;
 - testing, the repository, deployment and the delivery plan.
 
-Decisions with lasting consequences are recorded as ADRs in [`docs/adr`](../adr/README.md). The durable engine is DBOS Transact (ADR-0003), and the design keeps it behind a small port (§6.8).
+Decisions with lasting consequences are recorded as ADRs in [`docs/02-design/adr`](adr/README.md). The durable engine is DBOS Transact (ADR-0003), and the design keeps it behind a small port (§6.8).
 
 ## 2. Design principles
 

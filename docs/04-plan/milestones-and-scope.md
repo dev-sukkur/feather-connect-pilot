@@ -9,12 +9,12 @@ What each milestone includes, where its scope is defined, and what the short IDs
 
 | Question | Source of truth |
 |---|---|
-| What is in v1.0, later, or not planned at all | [Discovery §5](01-discovery/2026-10-30-feather-connect-discovery.md#5-scope) |
-| Which milestone each requirement lands in | [Discovery §7–§8](01-discovery/2026-10-30-feather-connect-discovery.md#7-functional-requirements), the *Milestone* column |
-| Each milestone's scope and exit criteria | [Design §19](02-design/2026-10-30-feather-connect-design.md#19-delivery-plan) |
-| How M1 was split into plans, tasks and stages | [Plan README](04-plan/README.md) and its six plan files |
-| What M1 proved, with measured numbers | [M1 exit report](06-release/m1-exit-report.md) |
-| M1.1: what is brought forward from later milestones | §4 of this page; the [flow packages design](02-design/2026-11-08-flow-packages.md) with [ADR-0011](adr/0011-flow-packages-hot-install.md), and the [readiness design](02-design/2026-11-08-readiness.md) with [ADR-0012](adr/0012-readiness-triggers.md) |
+| What is in v1.0, later, or not planned at all | [Discovery §5](../01-discovery/2026-10-30-feather-connect-discovery.md#5-scope) |
+| Which milestone each requirement lands in | [Discovery §7–§8](../01-discovery/2026-10-30-feather-connect-discovery.md#7-functional-requirements), the *Milestone* column |
+| Each milestone's scope and exit criteria | [Design §19](../02-design/2026-10-30-feather-connect-design.md#19-delivery-plan) |
+| How M1 was split into plans, tasks and stages | [Plan README](README.md) and its six plan files |
+| What M1 proved, with measured numbers | [M1 exit report](../06-release/m1-exit-report.md) |
+| M1.1: what is brought forward from later milestones | §4 of this page; the [flow packages design](../02-design/2026-11-08-flow-packages.md) with [ADR-0011](../02-design/adr/0011-flow-packages-hot-install.md), and the [readiness design](../02-design/2026-11-08-readiness.md) with [ADR-0012](../02-design/adr/0012-readiness-triggers.md) |
 
 If this page and one of those disagree, the source wins. Fix this page.
 
@@ -71,11 +71,11 @@ A task number such as `2.3` means Plan 2, Task 3.
 
 ### 3.5 Left out of M1 on purpose
 
-`fc.reconcile` and H5; readiness (now M1.1); side-effect routes and approvals; overrides beyond pause and resume; RBAC; MCP; alerts; the budgets page; row-level security (M3); `sink.confirm` (M2, with Magento); handling after a backup restore (M3). See the [plan README](04-plan/README.md#deferred-past-m1).
+`fc.reconcile` and H5; readiness (now M1.1); side-effect routes and approvals; overrides beyond pause and resume; RBAC; MCP; alerts; the budgets page; row-level security (M3); `sink.confirm` (M2, with Magento); handling after a backup restore (M3). See the [plan README](README.md#deferred-past-m1).
 
 ### 3.6 Known open items after M1
 
-From the [exit report §5–§6](06-release/m1-exit-report.md#5-open): pyright can't follow the namespace packages; OAuth2 tokens are shared per process, not across processes (M2); `feather dev` helpers on macOS; a lookback made longer later doesn't reach older versions; an `Idempotency-Key` race in the API; `feather new --template` loses YAML comments; a scheduler tick lost on a crash; the server image carries the demo's `erp-token.txt` (m1); `latest_watermark` locks needlessly (m2); `feather server` binds 0.0.0.0 by default (m3).
+From the [exit report §5–§6](../06-release/m1-exit-report.md#5-open): pyright can't follow the namespace packages; OAuth2 tokens are shared per process, not across processes (M2); `feather dev` helpers on macOS; a lookback made longer later doesn't reach older versions; an `Idempotency-Key` race in the API; `feather new --template` loses YAML comments; a scheduler tick lost on a crash; the server image carries the demo's `erp-token.txt` (m1); `latest_watermark` locks needlessly (m2); `feather server` binds 0.0.0.0 by default (m3).
 
 Also found since: `feather validate` misses duplicate route names across flows, and `feather run --sim` fails with signed webhook sources.
 
@@ -86,9 +86,9 @@ M1.1 holds everything brought forward from M2 or later, after M1 closed (sponsor
 | Piece | From | Status | Design |
 |---|---|---|---|
 | **Record trace** and the run page's **Records** panel | M2 | Done: PR 10 (`/trace`, migration 0013) and PR 15 (Records panel, migration 0014) | — |
-| **Readiness** (`fc.ready`, `fc.on_ready`) | M2 (FR-B7, FR-D3) | Designed, awaiting review (ADR-0012 proposed) | [Readiness design](02-design/2026-11-08-readiness.md) |
-| **A full Zoho Zakya connector** (`feather-zakya`) | M2 (FR-J2) | Done: PR 21 (the live run is deferred, see below) | [Design §8.3–§8.4](02-design/2026-10-30-feather-connect-design.md#83-v1-catalogue) |
-| **Flow packages**, with the `admin` and `operator` roles | M2 (promotion, part of RBAC) | In progress: P1–P3 merged (PRs 20, 22, 23) | [Flow packages design](02-design/2026-11-08-flow-packages.md) |
+| **Readiness** (`fc.ready`, `fc.on_ready`) | M2 (FR-B7, FR-D3) | Designed, awaiting review (ADR-0012 proposed) | [Readiness design](../02-design/2026-11-08-readiness.md) |
+| **A full Zoho Zakya connector** (`feather-zakya`) | M2 (FR-J2) | Done: PR 21 (the live run is deferred, see below) | [Design §8.3–§8.4](../02-design/2026-10-30-feather-connect-design.md#83-v1-catalogue) |
+| **Flow packages**, with the `admin` and `operator` roles | M2 (promotion, part of RBAC) | In progress: P1–P3 merged (PRs 20, 22, 23) | [Flow packages design](../02-design/2026-11-08-flow-packages.md) |
 
 Order (sponsor, 8 Nov 2026): **flow packages first, then readiness.** The Zakya connector (added 9 Nov 2026) can go before, between or after them; it touches neither.
 
@@ -137,7 +137,7 @@ Order (sponsor, 9 Nov 2026): P1, Z, P2, P3, U, P4, P5, P6, R1–R3, D. Stage U c
 - Roles `admin` and `operator`, pulled forward from M2's RBAC.
 - Packages are the only way to deploy. The M1 project mode is retired, and M1 environments upgrade in place.
 
-**Plan:** tasks 0–12 in [design §14](02-design/2026-11-08-flow-packages.md#14-plan).
+**Plan:** tasks 0–12 in [design §14](../02-design/2026-11-08-flow-packages.md#14-plan).
 
 **Exit criteria:** in a running Compose environment, with no container restarted, a customer installs a package built in another repository, activates a flow and sees it run; upgrades it, rolls it back and deactivates it; and another package keeps running throughout, with no run lost or doubled.
 
@@ -149,7 +149,7 @@ Order (sponsor, 9 Nov 2026): P1, Z, P2, P3, U, P4, P5, P6, R1–R3, D. Stage U c
 - Exactly one run per (flow, set, period, scope); late data reruns, warns or is ignored, per flow.
 - A Readiness page, lines on the flow and run pages, *Fire now* and *Close partition*, the CLI and the JSON API.
 
-**Plan:** tasks 1–10 in [design §10](02-design/2026-11-08-readiness.md#10-plan).
+**Plan:** tasks 1–10 in [design §10](../02-design/2026-11-08-readiness.md#10-plan).
 
 **Exit criteria:** the Zakya chain runs with SAP and the warehouse starting only after an ingest run is in staging; a store-day posting waits for all three of its datasets, store by store; H13 passes, and new hard cases H16 (leader killed while firing) and H17 (late data reruns once) pass.
 
@@ -179,7 +179,7 @@ Order (sponsor, 9 Nov 2026): P1, Z, P2, P3, U, P4, P5, P6, R1–R3, D. Stage U c
 ## 6. M3: enterprise and v1.0 (~8 weeks)
 
 **Scope (design §19):**
-- **Tenancy:** light, by [ADR-0013](adr/0013-light-tenancy-and-non-prod-layout.md): the `tenant_id` foundation from M1 and the single `default` tenant. Full multi-tenancy is M5. Its eight rules apply to every change.
+- **Tenancy:** light, by [ADR-0013](../02-design/adr/0013-light-tenancy-and-non-prod-layout.md): the `tenant_id` foundation from M1 and the single `default` tenant. Full multi-tenancy is M5. Its eight rules apply to every change.
 - **Environments:** environment peers and the fleet view; protections for protected environments. A Compose layout for the test environments on one machine, a database each (ADR-0013, layout B).
 - **Integrations:** OIDC SSO. Vault secret providers, Postgres CDC and Prometheus/OpenTelemetry export moved to M4; v1 reads secrets from environment variables and files.
 - **Hardening:** chaos and performance suites with published results; a security review.
@@ -204,7 +204,7 @@ Moved out of v1 by the sponsor on 9 Nov 2026.
 
 ## 8. M5: full multi-tenancy (after M4)
 
-Moved here from "after v1" on 9 Nov 2026; [ADR-0013](adr/0013-light-tenancy-and-non-prod-layout.md) keeps it cheap to add.
+Moved here from "after v1" on 9 Nov 2026; [ADR-0013](../02-design/adr/0013-light-tenancy-and-non-prod-layout.md) keeps it cheap to add.
 
 **Scope (FR-I2 to FR-I4):** the tenant chosen per request and per task; Postgres row-level security; per-tenant connections, secrets, budgets, quotas, alert channels, users and roles; dedicated worker pools; a tenant switcher; cross-tenant tests on every route; test environments as tenants of one non-prod deployment.
 
@@ -212,7 +212,7 @@ Moved here from "after v1" on 9 Nov 2026; [ADR-0013](adr/0013-light-tenancy-and-
 
 ## 9. Later, and not planned
 
-From [discovery §5](01-discovery/2026-10-30-feather-connect-discovery.md#5-scope), plus **sandbox refresh** from [ADR-0013](adr/0013-light-tenancy-and-non-prod-layout.md) (`feather env refresh` with a masked sample or a full masked copy of production).
+From [discovery §5](../01-discovery/2026-10-30-feather-connect-discovery.md#5-scope), plus **sandbox refresh** from [ADR-0013](../02-design/adr/0013-light-tenancy-and-non-prod-layout.md) (`feather env refresh` with a masked sample or a full masked copy of production).
 
 | Later (after 1.0) | Not planned |
 |---|---|
@@ -233,14 +233,14 @@ From [discovery §5](01-discovery/2026-10-30-feather-connect-discovery.md#5-scop
 | Q1–Q11 | Open questions for the sponsor | Discovery §15 |
 | D1–D8 | Open design questions | Design §20 |
 | H1–H17 | Hard cases: scenarios every milestone must pass (M1: H1–H4, H6, H14; M1.1: H13, H16, H17; M2: all) | Design §16 (H16 and H17: readiness design §11); first run in spike SP2 |
-| SP1–SP4 | Spikes: SP1 engine (DBOS chosen), SP2 core model, SP3 connector research, SP4 Postgres spool | [Spikes](03-spikes/README.md) |
-| 1–6 (plans), `2.3` (tasks) | The six M1 plans; `2.3` is Plan 2, Task 3 | [Plan README](04-plan/README.md) |
+| SP1–SP4 | Spikes: SP1 engine (DBOS chosen), SP2 core model, SP3 connector research, SP4 Postgres spool | [Spikes](../03-spikes/README.md) |
+| 1–6 (plans), `2.3` (tasks) | The six M1 plans; `2.3` is Plan 2, Task 3 | [Plan README](README.md) |
 | Stage 1–5 | The order M1's tasks were built in | Plan README, *Build order* |
 | F1–F15 | Stage 2 review findings | §10.1 below |
 | S1–S23 (findings) | Stage 3 review findings | §10.2 below |
 | B1–B6, rulings 1–12 | Stage 4 preflight: blockers, and binding rulings | §10.3 below |
-| I1–I4, m1–m4 | End of M1 review (Stage 5): Important and Minor findings | [Exit report §6](06-release/m1-exit-report.md#6-end-of-stage-review) |
-| ADR-0001 … 0013 | Architecture decision records | [ADR index](adr/README.md) |
+| I1–I4, m1–m4 | End of M1 review (Stage 5): Important and Minor findings | [Exit report §6](../06-release/m1-exit-report.md#6-end-of-stage-review) |
+| ADR-0001 … 0013 | Architecture decision records | [ADR index](../02-design/adr/README.md) |
 
 The review notes behind §10.1–§10.3 are kept outside the repository, so their findings are summarised here.
 

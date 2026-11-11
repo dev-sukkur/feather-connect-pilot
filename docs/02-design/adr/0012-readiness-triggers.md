@@ -17,7 +17,7 @@ In M1 a flow starts on a clock, by hand, or when webhook events arrive. A flow t
 - **Late data** for a fired period reruns it by default (`on_late="rerun"`), or warns, or is ignored, per flow.
 - **Readiness never blocks** routes, the upstream flow, or any flow that doesn't ask for it (H13).
 
-Details: [the readiness design](../02-design/2026-11-08-readiness.md).
+Details: [the readiness design](../2026-11-08-readiness.md).
 
 ## Consequences
 
