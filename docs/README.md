@@ -13,6 +13,7 @@ The project follows an SDLC flow. Each phase ends at a review gate, and the next
 | 6. Test and release | `06-release/`: the M1 and M1.1 exit reports so far | Started | Release checklist; go/no-go |
 | 7. Operate | `07-operate/` runbooks (to be written) | Not started | — |
 | — | [Spec extraction and rebuild plan](08-rebuild/2026-11-11-spec-extraction-and-rebuild-plan.md), with the OpenSpec specification in [`openspec/`](../openspec/specs) and the staged seed in [`rebuild/`](../rebuild/README.md) | Proposed, awaiting review | Sponsor approves the rebuild and its order |
+| — | [Bare-repository approach assessment](08-rebuild/2026-11-11-bare-repo-approach-assessment.md): whether to rebuild in the empty `feather-connect` repository under its intent-driven process | Assessment, awaiting review | Sponsor picks an option and agrees the five rulings |
 
 **Milestones, scope and IDs:** [milestones and scope](04-plan/milestones-and-scope.md) is the one source for what each milestone includes, its status, which requirement lands in which, and what IDs such as SP1, S5, H4, F12 and FR-B2 mean.
 
