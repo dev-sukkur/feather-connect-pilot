@@ -2959,7 +2959,10 @@ class _Inbox(InboxStore):
             return self.put_many_in(conn, day, events)
 
     def put_many_in(
-        self, conn: psycopg.Connection[DictRow], day: date, events: Sequence[tuple[str, InboundRequest, str | None]]
+        self,
+        conn: psycopg.Connection[DictRow],
+        day: date,
+        events: Sequence[tuple[str, InboundRequest, str | None]],
     ) -> list[bool]:
         """`put_many` in the caller's transaction, on a day whose partition is there."""
         named = [(dataset, event_id) for dataset, _, event_id in events if event_id is not None]
@@ -3372,7 +3375,11 @@ class _Webhooks(WebhookEventStore):
                 found = (event.package, event.webhook, event.key)
                 kept.append(found in new)
                 new.discard(found)  # a repeat within these events is a repeat too
-            into = [(dataset, request, event.key) for (event, dataset, request), k in zip(events, kept, strict=True) if k]
+            into = [
+                (dataset, request, event.key)
+                for (event, dataset, request), k in zip(events, kept, strict=True)
+                if k
+            ]
             if into:
                 self._inbox.put_many_in(conn, day, into)
         return kept

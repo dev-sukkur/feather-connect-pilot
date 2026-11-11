@@ -1901,8 +1901,15 @@ class StoreContract(
             return WebhookEvent("acme", "orders", key, None, body, {}, T0), "acme/orders", inbound(body)
 
         store.webhooks.add(event("old")[0])
-        kept = store.webhooks.keep_many([event("o-1", b"1"), event("old"), event("o-2", b"2"), event("o-1", b"x")])
-        assert kept == [True, False, True, False]  # a repeat, of one kept before or earlier in these, is not new
+        kept = store.webhooks.keep_many(
+            [event("o-1", b"1"), event("old"), event("o-2", b"2"), event("o-1", b"x")]
+        )
+        assert kept == [
+            True,
+            False,
+            True,
+            False,
+        ]  # a repeat, of one kept before or earlier in these, is not new
         assert [e.request.body for e in store.inbox.take("acme/orders", 10)] == [b"1", b"2"]
         assert {e.key: e.processed_at for e in store.webhooks.events("acme", "orders")} == {
             "old": None,

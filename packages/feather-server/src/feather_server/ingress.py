@@ -309,7 +309,7 @@ class _Arrival:
 
     @property
     def name(self) -> str:
-        return self.to.name if isinstance(self.to, Dataset) else f"{self.to.package}/{self.to.hook.name}"
+        return f"{self.to.package}/{self.to.hook.name}" if isinstance(self.to, _Declared) else self.to.name
 
 
 def _give_answers(answers: Sequence[tuple[_Arrival, Response]]) -> None:
@@ -398,14 +398,14 @@ class IngressWorker:
         to_keep: list[tuple[_Arrival, _Kept]] = []
         for arrival in batch:
             try:
-                if isinstance(arrival.to, Dataset):
-                    refused = _refusal(self._state, arrival.to, arrival.request, self._limiter)
-                else:
+                if isinstance(arrival.to, _Declared):
                     checked = _check_declared(self._state, arrival.to, arrival.request)
                     if isinstance(checked, _Kept):
                         to_keep.append((arrival, checked))
                         continue
                     refused = checked
+                else:
+                    refused = _refusal(self._state, arrival.to, arrival.request, self._limiter)
             except Exception as error:  # noqa: BLE001 - the message may quote the body
                 log.error("ingress %s: could not check an event: %s", arrival.name, type(error).__name__)
                 refused = _problem(503, _RETRY_AFTER)
