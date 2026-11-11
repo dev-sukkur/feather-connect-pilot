@@ -8,7 +8,7 @@
 
 **Tech Stack:** psycopg 3 with pool, Alembic (raw SQL migrations), DBOS Transact 3.4.0 (pinned), PyYAML, Docker for the test Postgres.
 
-**Spec:** [design v0.2](../02-design/2026-10-30-feather-connect-design.md) §5.6, §6.5, §6.8, §6.11, §6.12, §7; [ADR-0003](../adr/0003-durable-engine-selection-by-spike.md), [ADR-0005](../adr/0005-postgres-only-required-database.md). Spike code in `spikes/engine` shows working DBOS calls, but don't import it.
+**Spec:** [design v0.2](../02-design/2026-10-30-feather-connect-design.md) §5.6, §6.5, §6.8, §6.11, §6.12, §7; [ADR-0003](../02-design/adr/0003-durable-engine-selection-by-spike.md), [ADR-0005](../02-design/adr/0005-postgres-only-required-database.md). Spike code in `spikes/engine` shows working DBOS calls, but don't import it.
 
 ## Global Constraints
 

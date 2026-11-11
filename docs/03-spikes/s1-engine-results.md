@@ -179,4 +179,4 @@ Its gaps fall in the control plane we already planned to build, which has a lead
 - a need for engine-level automatic takeover without writing our own;
 - a team that values Hatchet's free UI for engine debugging over the extra container.
 
-**Decision (30 Oct 2026):** the sponsor chose DBOS and asked to keep Hatchet on a side branch, `side/hatchet-engine`, for use if needed later ([ADR-0003](../adr/0003-durable-engine-selection-by-spike.md)).
+**Decision (30 Oct 2026):** the sponsor chose DBOS and asked to keep Hatchet on a side branch, `side/hatchet-engine`, for use if needed later ([ADR-0003](../02-design/adr/0003-durable-engine-selection-by-spike.md)).
