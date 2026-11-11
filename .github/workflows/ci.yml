@@ -129,7 +129,7 @@ jobs:
   # The dashboard in Chromium: the operator journeys and axe's WCAG 2.1 AA checks, on the stack and the test Postgres.
   dashboard:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # playwright's --with-deps can't reach apt's mirrors from the newer image
     timeout-minutes: 30
     services:
       postgres:
