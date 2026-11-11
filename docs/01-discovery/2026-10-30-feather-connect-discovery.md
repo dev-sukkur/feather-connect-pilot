@@ -102,164 +102,166 @@ Stakeholders: the sponsor and product owner (OSS Dev1), the reference organisati
 
 ## 6. Key use cases
 
-| ID | Use case | Example from the reference organisation | Persona | Milestone |
-|---|---|---|---|---|
-| UC-01 | Replicate a database table incrementally into a warehouse | Postgres table → MotherDuck bronze | P1 | M1 |
-| UC-02 | Pull a SaaS API into the warehouse within a shared daily call budget | Zakya invoices (list + detail) → MotherDuck bronze | P1, P2 | M2 |
-| UC-03 | Fan out one source to many destinations | SAP prices → Zakya, GoFrugal and Magento | P1 | M2 |
-| UC-04 | Receive webhooks and deliver to an API within seconds | Magento order → SAP sales order | P1 | M1 (generic), M2 (SAP) |
-| UC-05 | Load files dropped in object storage | S3 CSV/Parquet → Postgres | P1 | M1 |
-| UC-06 | Reverse ETL: diff a warehouse view and push only the changes | Today's effective price → POS | P1 | M2 |
-| UC-07 | Post sales to the ERP with approval and compensation | Store-day POS sales → SAP postings | P1, P5 | M2 |
-| UC-08 | Re-run or backfill a business slice from the dashboard | Re-run "store 1509, 18 Oct" | P2 | M1 |
-| UC-09 | Replay history to a newly added destination | Add GoFrugal as a third price channel | P2 | M1 |
-| UC-10 | Diagnose and fix a failed delivery; trace a record by business key | "Where is invoice INV-1001?" | P2, P4 | M1 (fix), M2 (trace) |
-| UC-11 | Generate a flow with AI, validate it, run it on simulated data, promote it via CI | New supplier feed | P1, P4 | M1 |
-| UC-12 | Agent operates via MCP within its permissions | Agent investigates overnight failures and requests a re-run | P4 | M2 |
-| UC-13 | Onboard a tenant with its own connections, budgets and users | A franchise group | P3 | M3 |
-| UC-14 | Promote a flow dev → qa → uat → prod | Release 1.4 of the price flow | P1, P3 | M2 |
-| UC-15 | Simulate a source for demos and QA, including fault injection | JSON simulation with duplicates, late rows and 429s | P1 | M1 |
+The milestone of each use case is in [milestones and scope](../04-plan/milestones-and-scope.md#requirements-by-milestone).
+
+| ID | Use case | Example from the reference organisation | Persona |
+|---|---|---|---|
+| UC-01 | Replicate a database table incrementally into a warehouse | Postgres table → MotherDuck bronze | P1 |
+| UC-02 | Pull a SaaS API into the warehouse within a shared daily call budget | Zakya invoices (list + detail) → MotherDuck bronze | P1, P2 |
+| UC-03 | Fan out one source to many destinations | SAP prices → Zakya, GoFrugal and Magento | P1 |
+| UC-04 | Receive webhooks and deliver to an API within seconds | Magento order → SAP sales order | P1 |
+| UC-05 | Load files dropped in object storage | S3 CSV/Parquet → Postgres | P1 |
+| UC-06 | Reverse ETL: diff a warehouse view and push only the changes | Today's effective price → POS | P1 |
+| UC-07 | Post sales to the ERP with approval and compensation | Store-day POS sales → SAP postings | P1, P5 |
+| UC-08 | Re-run or backfill a business slice from the dashboard | Re-run "store 1509, 18 Oct" | P2 |
+| UC-09 | Replay history to a newly added destination | Add GoFrugal as a third price channel | P2 |
+| UC-10 | Diagnose and fix a failed delivery; trace a record by business key | "Where is invoice INV-1001?" | P2, P4 |
+| UC-11 | Generate a flow with AI, validate it, run it on simulated data, promote it via CI | New supplier feed | P1, P4 |
+| UC-12 | Agent operates via MCP within its permissions | Agent investigates overnight failures and requests a re-run | P4 |
+| UC-13 | Onboard a tenant with its own connections, budgets and users | A franchise group | P3 |
+| UC-14 | Promote a flow dev → qa → uat → prod | Release 1.4 of the price flow | P1, P3 |
+| UC-15 | Simulate a source for demos and QA, including fault injection | JSON simulation with duplicates, late rows and 429s | P1 |
 
 ## 7. Functional requirements
 
-Priorities use MoSCoW. Milestones: **M1** MVP, **M2** business connectors and operations, **M3** enterprise and v1.0 (design §19).
+Priorities use MoSCoW. Which milestone delivers each use case and requirement is kept in one place, the [milestones and scope](../04-plan/milestones-and-scope.md#requirements-by-milestone) document; this one says what is needed, not when.
 
 ### A. Authoring
 
-| ID | Requirement | Priority | Milestone |
-|---|---|---|---|
-| FR-A1 | Flows are Python modules built with the `feather_connect` SDK. There is no proprietary DSL, XML or visual format. | Must | M1 |
-| FR-A2 | A dataset is declared by its source, key, partition scheme, change strategy and optional schema. Behaviour beyond the defaults is added through Python hooks (custom planner, diff, mapping, sink), not configuration flags. | Must | M1 |
-| FR-A3 | `feather new flow` and `feather new connector` scaffold code, config and tests, optionally from a template. | Must | M1 |
-| FR-A4 | `feather run --local` runs a flow in-process against in-memory or simulated connectors. | Must | M1 |
-| FR-A5 | `feather validate` checks a project statically (references, budgets, partition schemes, schemas, config) and returns machine-readable results. | Must | M1 |
-| FR-A6 | A test harness (`feather_connect.testing`) lets flow tests load source records, run the flow, and assert sink outputs, ledger states and holds. | Must | M1 |
-| FR-A7 | Templates for well-known flows can be instantiated and then edited freely (design §8.6). | Must | M1 generic, M2 retail |
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-A1 | Flows are Python modules built with the `feather_connect` SDK. There is no proprietary DSL, XML or visual format. | Must |
+| FR-A2 | A dataset is declared by its source, key, partition scheme, change strategy and optional schema. Behaviour beyond the defaults is added through Python hooks (custom planner, diff, mapping, sink), not configuration flags. | Must |
+| FR-A3 | `feather new flow` and `feather new connector` scaffold code, config and tests, optionally from a template. | Must |
+| FR-A4 | `feather run --local` runs a flow in-process against in-memory or simulated connectors. | Must |
+| FR-A5 | `feather validate` checks a project statically (references, budgets, partition schemes, schemas, config) and returns machine-readable results. | Must |
+| FR-A6 | A test harness (`feather_connect.testing`) lets flow tests load source records, run the flow, and assert sink outputs, ledger states and holds. | Must |
+| FR-A7 | Templates for well-known flows can be instantiated and then edited freely (design §8.6). | Must |
 
 ### B. Data movement
 
-| ID | Requirement | Priority | Milestone |
-|---|---|---|---|
-| FR-B1 | One dataset can be delivered to any number of destinations ("routes"). Each route progresses, fails and recovers independently. | Must | M1 |
-| FR-B2 | Change strategies, plus custom strategies via a hook:<br>• `by_stamp`: incremental, with lookback;<br>• `snapshot_diff`: hashes and diffs a slice, and detects hard deletes;<br>• `replace`: reloads the full slice;<br>• `push`: webhook or CDC. | Must | M1 (CDC M4) |
-| FR-B3 | Partitions name business slices, such as store × day with an explicit timezone. They are the unit of planning, re-runs, verification and backfills. | Must | M1 |
-| FR-B4 | Each extraction produces an immutable version: upserts plus deletes, marked complete or incomplete. Versions are retained according to policy. | Must | M1 |
-| FR-B5 | Extraction never waits for destinations. Data is spooled first, so a destination outage cannot lose a read. | Must | M1 |
-| FR-B6 | A route applies a partition's versions in order, and push datasets keep per-key order. As an opt-in, a whole-document event can supersede an older failed version. | Must | M1 |
-| FR-B7 | Readiness ("this dataset or group is complete through T") is tracked and can gate or trigger downstream flows. It never blocks unrelated routes. | Should | M1.1 |
-| FR-B8 | Any retained version can be replayed to a route, and a newly added route can be bootstrapped from history. | Must | M1 replay, M2 bootstrap |
-| FR-B9 | Schema evolution policy: additive changes apply automatically. Drops, narrowing and type changes are held for approval. The policy can be overridden per dataset. | Should | M2 |
-| FR-B10 | Event latency from webhook receipt to the destination being updated is ≤ 30 s at p95 (target 5 s) under normal load. | Must | M1 |
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-B1 | One dataset can be delivered to any number of destinations ("routes"). Each route progresses, fails and recovers independently. | Must |
+| FR-B2 | Change strategies, plus custom strategies via a hook:<br>• `by_stamp`: incremental, with lookback;<br>• `snapshot_diff`: hashes and diffs a slice, and detects hard deletes;<br>• `replace`: reloads the full slice;<br>• `push`: webhook or CDC. | Must |
+| FR-B3 | Partitions name business slices, such as store × day with an explicit timezone. They are the unit of planning, re-runs, verification and backfills. | Must |
+| FR-B4 | Each extraction produces an immutable version: upserts plus deletes, marked complete or incomplete. Versions are retained according to policy. | Must |
+| FR-B5 | Extraction never waits for destinations. Data is spooled first, so a destination outage cannot lose a read. | Must |
+| FR-B6 | A route applies a partition's versions in order, and push datasets keep per-key order. As an opt-in, a whole-document event can supersede an older failed version. | Must |
+| FR-B7 | Readiness ("this dataset or group is complete through T") is tracked and can gate or trigger downstream flows. It never blocks unrelated routes. | Should |
+| FR-B8 | Any retained version can be replayed to a route, and a newly added route can be bootstrapped from history. | Must |
+| FR-B9 | Schema evolution policy: additive changes apply automatically. Drops, narrowing and type changes are held for approval. The policy can be overridden per dataset. | Should |
+| FR-B10 | Event latency from webhook receipt to the destination being updated is ≤ 30 s at p95 (target 5 s) under normal load. | Must |
 
 ### C. Transformation (ETL)
 
-| ID | Requirement | Priority | Milestone |
-|---|---|---|---|
-| FR-C1 | Per-route record-level map and filter functions, and batch transforms over Arrow or Polars. | Must | M1 |
-| FR-C2 | SQL transforms over versions, using embedded DuckDB. | Should | M4 |
-| FR-C3 | Validation contracts (Pydantic or Arrow schema). Invalid records are quarantined with reasons while the rest of the version proceeds; this behaviour is configurable. | Must | M1 |
-| FR-C4 | Derived datasets whose source is a query over other datasets or the warehouse (for example, today's effective price), recomputed on a schedule. | Should | M4 |
-| FR-C5 | Cached reference lookups for enrichment. | Could | M4 |
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-C1 | Per-route record-level map and filter functions, and batch transforms over Arrow or Polars. | Must |
+| FR-C2 | SQL transforms over versions, using embedded DuckDB. | Should |
+| FR-C3 | Validation contracts (Pydantic or Arrow schema). Invalid records are quarantined with reasons while the rest of the version proceeds; this behaviour is configurable. | Must |
+| FR-C4 | Derived datasets whose source is a query over other datasets or the warehouse (for example, today's effective price), recomputed on a schedule. | Should |
+| FR-C5 | Cached reference lookups for enrichment. | Could |
 
 ### D. Triggers and scheduling
 
-| ID | Requirement | Priority | Milestone |
-|---|---|---|---|
-| FR-D1 | Triggers: cron with a timezone, fixed intervals (down to seconds, for pollers), and manual runs from the dashboard, CLI or MCP. | Must | M1 |
-| FR-D2 | Event triggers: webhook arrivals (M1) and database CDC (M4). | Must | M1 / M4 |
-| FR-D3 | Readiness triggers: run when a dataset group is complete through a period. | Should | M1.1 |
-| FR-D4 | Backfill plans over a partition range, with concurrency and budget limits, previewed before execution. | Must | M1 |
-| FR-D5 | Pause and resume per flow and per route. Connection availability windows (for example, ERP reads only 22:00–05:00). | Should | M1 pause/resume, M4 windows |
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-D1 | Triggers: cron with a timezone, fixed intervals (down to seconds, for pollers), and manual runs from the dashboard, CLI or MCP. | Must |
+| FR-D2 | Event triggers: webhook arrivals (M1) and database CDC (M4). | Must |
+| FR-D3 | Readiness triggers: run when a dataset group is complete through a period. | Should |
+| FR-D4 | Backfill plans over a partition range, with concurrency and budget limits, previewed before execution. | Must |
+| FR-D5 | Pause and resume per flow and per route. Connection availability windows (for example, ERP reads only 22:00–05:00). | Should |
 
 ### E. Reliability
 
-| ID | Requirement | Priority | Milestone |
-|---|---|---|---|
-| FR-E1 | Durable execution: killing any process loses no acknowledged work. | Must | M1 |
-| FR-E2 | Retries with backoff and jitter (honouring `Retry-After`), step timeouts and heartbeats. | Must | M1 |
-| FR-E3 | Effectively-once delivery per (route, version), through a ledger check plus idempotent sinks (natural keys, idempotency keys or content guards). | Must | M1 |
-| FR-E4 | No silent failures. Every scheduled tick and every delivery is recorded, including skips and their reasons. | Must | M1 |
-| FR-E5 | Side-effect sinks implement `apply` and `compensate`. Postings can require approval by policy. | Should | M2 |
-| FR-E6 | Named rate budgets shared across flows and routes, with multiple windows (per second up to per day) and priority reserves. | Must | M1 windows, M2 priorities and UI |
-| FR-E7 | Concurrency control: one writer per (route, partition) by default, configurable parallelism, and fairness between tenants. | Must | M1 |
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-E1 | Durable execution: killing any process loses no acknowledged work. | Must |
+| FR-E2 | Retries with backoff and jitter (honouring `Retry-After`), step timeouts and heartbeats. | Must |
+| FR-E3 | Effectively-once delivery per (route, version), through a ledger check plus idempotent sinks (natural keys, idempotency keys or content guards). | Must |
+| FR-E4 | No silent failures. Every scheduled tick and every delivery is recorded, including skips and their reasons. | Must |
+| FR-E5 | Side-effect sinks implement `apply` and `compensate`. Postings can require approval by policy. | Should |
+| FR-E6 | Named rate budgets shared across flows and routes, with multiple windows (per second up to per day) and priority reserves. | Must |
+| FR-E7 | Concurrency control: one writer per (route, partition) by default, configurable parallelism, and fairness between tenants. | Must |
 
 ### F. Dashboard: monitor
 
-| ID | Requirement | Priority | Milestone |
-|---|---|---|---|
-| FR-F1 | Health overview: failures, stale datasets, budget use and worker status (M1); pending holds, alerts and agent status once those features arrive (M2). | Must | M1 |
-| FR-F2 | Flow catalogue and detail: a graph from sources through routes to destinations, the effective config and where each value came from, and the code version. | Must | M1 |
-| FR-F3 | Partition grid: the status of every dataset × partition × route over time, with drill-down. | Must | M1 |
-| FR-F4 | Runs and tasks: timeline, inputs, logs and attempts. | Must | M1 |
-| FR-F5 | Delivery ledger, and failures grouped by error. | Must | M1 |
-| FR-F6 | Record trace by business key across versions and routes; version diffs; masked samples. | Should | M1.1 trace; M2 diffs and masked samples |
-| FR-F7 | Freshness/SLA and volume-anomaly views. | Should | M4 |
-| FR-F8 | A fleet view across registered environments. | Should | M3 |
-| FR-F9 | Audit log view. | Must | M2 |
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-F1 | Health overview: failures, stale datasets, budget use and worker status (M1); pending holds, alerts and agent status once those features arrive (M2). | Must |
+| FR-F2 | Flow catalogue and detail: a graph from sources through routes to destinations, the effective config and where each value came from, and the code version. | Must |
+| FR-F3 | Partition grid: the status of every dataset × partition × route over time, with drill-down. | Must |
+| FR-F4 | Runs and tasks: timeline, inputs, logs and attempts. | Must |
+| FR-F5 | Delivery ledger, and failures grouped by error. | Must |
+| FR-F6 | Record trace by business key across versions and routes; version diffs; masked samples. | Should |
+| FR-F7 | Freshness/SLA and volume-anomaly views. | Should |
+| FR-F8 | A fleet view across registered environments. | Should |
+| FR-F9 | Audit log view. | Must |
 
 ### G. Dashboard: act
 
-| ID | Requirement | Priority | Milestone |
-|---|---|---|---|
-| FR-G1 | Run now, re-run partitions, backfill, cancel. | Must | M1 |
-| FR-G2 | Retry, skip, quarantine and replay deliveries, singly or in bulk, with an impact preview before execution. | Must | M1 |
-| FR-G3 | Approve or reject holds, with a reason. | Should | M2 |
-| FR-G4 | Runtime overrides of operational knobs (pause, budgets, concurrency, schedules, availability windows), each with a reason, an audit record and an optional expiry. Drift from git is shown. | Should | M4 |
-| FR-G5 | Test a connection. | Must | M1 |
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-G1 | Run now, re-run partitions, backfill, cancel. | Must |
+| FR-G2 | Retry, skip, quarantine and replay deliveries, singly or in bulk, with an impact preview before execution. | Must |
+| FR-G3 | Approve or reject holds, with a reason. | Should |
+| FR-G4 | Runtime overrides of operational knobs (pause, budgets, concurrency, schedules, availability windows), each with a reason, an audit record and an optional expiry. Drift from git is shown. | Should |
+| FR-G5 | Test a connection. | Must |
 
 ### H. Environments
 
-| ID | Requirement | Priority | Milestone |
-|---|---|---|---|
-| FR-H1 | dev, qa, uat and prod are separate deployments of the same images, configured by per-environment overlays. | Must | M1 |
-| FR-H2 | Promotion by git tag and CI. Each environment shows the code version every flow runs. | Must | M1.1, as flow package promotion by checksum (ADR-0011) |
-| FR-H3 | Production protections: a preview and a reason for mass actions, approval for destructive actions, and least-privilege defaults. | Should | M3 |
-| FR-H4 | The dashboard can register several environments and switch between them. | Should | M3 |
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-H1 | dev, qa, uat and prod are separate deployments of the same images, configured by per-environment overlays. | Must |
+| FR-H2 | Promotion by git tag and CI. Each environment shows the code version every flow runs. | Must |
+| FR-H3 | Production protections: a preview and a reason for mass actions, approval for destructive actions, and least-privilege defaults. | Should |
+| FR-H4 | The dashboard can register several environments and switch between them. | Should |
 
 ### I. Multi-tenancy
 
-| ID | Requirement | Priority | Milestone |
-|---|---|---|---|
-| FR-I1 | Every operational record carries a tenant. Single-tenant installs use an implicit default tenant. | Must | M1 |
-| FR-I2 | Per-tenant connections, secrets, budgets, quotas, alert channels, users and roles. | Should | M5 (ADR-0013) |
-| FR-I3 | Tenant isolation is enforced in the database (row-level security) as well as in the API. | Must, once there is more than one tenant | M5 (ADR-0013) |
-| FR-I4 | Optional dedicated worker pools or agents per tenant. | Could | M5 (ADR-0013) |
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-I1 | Every operational record carries a tenant. Single-tenant installs use an implicit default tenant. | Must |
+| FR-I2 | Per-tenant connections, secrets, budgets, quotas, alert channels, users and roles. | Should |
+| FR-I3 | Tenant isolation is enforced in the database (row-level security) as well as in the API. | Must, once there is more than one tenant |
+| FR-I4 | Optional dedicated worker pools or agents per tenant. | Could |
 
 ### J. Connectors
 
-| ID | Requirement | Priority | Milestone |
-|---|---|---|---|
-| FR-J1 | Connector SDK: source and sink protocols, declared capabilities and config schema, plus `check` and `discover`. | Must | M1 |
-| FR-J2 | Connector catalogue:<br>• **M1:** in-memory, JSON simulation, Postgres, S3-compatible storage, REST, GraphQL, webhook, HTTP, DuckDB/MotherDuck;<br>• **M2:** SAP, Zoho Zakya, Magento, and GoFrugal if its API docs arrive by M1's end (otherwise M3);<br>• **M3:** Postgres CDC. | Must | M1–M3 |
-| FR-J3 | A conformance kit that every connector must pass to be labelled beta or stable. | Must | M1 |
-| FR-J4 | Connectors install as optional packages or extras. Third-party connectors work without forking. | Must | M1 |
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-J1 | Connector SDK: source and sink protocols, declared capabilities and config schema, plus `check` and `discover`. | Must |
+| FR-J2 | Connector catalogue:<br>• **M1:** in-memory, JSON simulation, Postgres, S3-compatible storage, REST, GraphQL, webhook, HTTP, DuckDB/MotherDuck;<br>• **M2:** SAP, Zoho Zakya, Magento, and GoFrugal if its API docs arrive by M1's end (otherwise M3);<br>• **M3:** Postgres CDC. | Must |
+| FR-J3 | A conformance kit that every connector must pass to be labelled beta or stable. | Must |
+| FR-J4 | Connectors install as optional packages or extras. Third-party connectors work without forking. | Must |
 
 ### K. Security
 
-| ID | Requirement | Priority | Milestone |
-|---|---|---|---|
-| FR-K1 | Local users and API tokens (M1); OIDC single sign-on (M3). | Must | M1 / M3 |
-| FR-K2 | Role-based access (viewer, operator, developer, admin, plus approver and PII-reader grants), scoped by tenant and environment. | Must | M1.1 admin and operator; M2 the rest |
-| FR-K3 | Secrets are referenced, never stored. Environment variables and files are supported in M1; Vault and the AWS, Azure and GCP secret stores in M3. Secrets are never logged or displayed. | Must | M1 env and files; M4 vaults |
-| FR-K4 | An immutable audit record for every action by a human, an agent or the system. | Must | M2 |
-| FR-K5 | PII fields are tagged and masked in dashboard, CLI and MCP output. | Should | M2 |
-| FR-K6 | Webhook signature verification and replay protection. | Must | M1 |
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-K1 | Local users and API tokens (M1); OIDC single sign-on (M3). | Must |
+| FR-K2 | Role-based access (viewer, operator, developer, admin, plus approver and PII-reader grants), scoped by tenant and environment. | Must |
+| FR-K3 | Secrets are referenced, never stored. Environment variables and files are supported in M1; Vault and the AWS, Azure and GCP secret stores in M3. Secrets are never logged or displayed. | Must |
+| FR-K4 | An immutable audit record for every action by a human, an agent or the system. | Must |
+| FR-K5 | PII fields are tagged and masked in dashboard, CLI and MCP output. | Should |
+| FR-K6 | Webhook signature verification and replay protection. | Must |
 
 ### L. AI operability
 
-| ID | Requirement | Priority | Milestone |
-|---|---|---|---|
-| FR-L1 | An MCP server exposes read, act and authoring tools under the same RBAC and audit as the API. | Must | M4 |
-| FR-L2 | AI-ready projects: AGENTS.md conventions, JSON output from every CLI command, and connector descriptions that agents can query. | Must | M1 |
-| FR-L3 | In production, an agent action that changes state creates a hold for human approval unless policy allows it. | Should | M4 |
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-L1 | An MCP server exposes read, act and authoring tools under the same RBAC and audit as the API. | Must |
+| FR-L2 | AI-ready projects: AGENTS.md conventions, JSON output from every CLI command, and connector descriptions that agents can query. | Must |
+| FR-L3 | In production, an agent action that changes state creates a hold for human approval unless policy allows it. | Should |
 
 ### M. Observability
 
-| ID | Requirement | Priority | Milestone |
-|---|---|---|---|
-| FR-M1 | Structured logs carrying correlation ids (tenant, flow, run, task, dataset, partition, version, route). | Must | M1 |
-| FR-M2 | Optional export of Prometheus metrics and OpenTelemetry traces. The dashboard works without them. | Should | M4 |
-| FR-M3 | Alert rules (failures, staleness, missing partitions, budgets, volume anomalies, waiting holds, agent down) sent to email, Slack, Teams and webhooks. | Must | M2 |
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-M1 | Structured logs carrying correlation ids (tenant, flow, run, task, dataset, partition, version, route). | Must |
+| FR-M2 | Optional export of Prometheus metrics and OpenTelemetry traces. The dashboard works without them. | Should |
+| FR-M3 | Alert rules (failures, staleness, missing partitions, budgets, volume anomalies, waiting holds, agent down) sent to email, Slack, Teams and webhooks. | Must |
 
 ## 8. Non-functional requirements
 
@@ -452,7 +454,7 @@ L = likelihood, I = impact (H/M/L).
 | 2. Design | [Design specification](../02-design/2026-10-30-feather-connect-design.md) + ADRs | Sponsor approves the architecture | Done (draft) |
 | 3. Spikes | Engine choice (ADR-0003), a core-model prototype run against the hard cases, connector API findings (Zakya, GoFrugal, SAP, Magento), the `feather dev` approach | Spike report reviewed; ADR-0003 accepted | 2 weeks |
 | 4. Plan | Implementation plan per milestone (tasks, tests, owners) | Plan approved | 3–4 days |
-| 5. Build | M1 MVP, M2 business connectors and operations, M3 enterprise and hardening | Milestone exit criteria (design §19) | ~8 weeks each |
+| 5. Build | M1 MVP, M2 business connectors and operations, M3 enterprise and hardening | Milestone exit criteria ([milestones and scope](../04-plan/milestones-and-scope.md)) | ~8 weeks each |
 | 6. Test and release | v1.0.0 on PyPI and GHCR, docs site | Release checklist; go/no-go | 2 weeks hardening, overlapping M3 |
 | 7. Operate | Runbooks, support, community | Ongoing | — |
 
