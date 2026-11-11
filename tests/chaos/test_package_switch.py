@@ -80,7 +80,7 @@ def test_kill_9_of_a_host_during_a_switch_loses_and_duplicates_nothing(hosts: Ho
 
 def test_kill_9_of_the_supervisor_leaves_no_host_behind_and_each_task_runs_once(hosts: HostWorld):
     """A supervisor killed with `kill -9` takes its hosts with it: on Windows their Job Object dies with it, on Linux
-    the kernel sends them SIGTERM, and on both they see their pipe close. Its replacement starts the host again under
+    the kernel sends them SIGKILL, and on both they see their pipe close. Its replacement starts the host again under
     the same id, which the advisory lock on the id keeps from running beside an orphan, and nothing runs twice."""
     from collections import Counter
 

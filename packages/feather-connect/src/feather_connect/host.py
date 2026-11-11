@@ -7,7 +7,7 @@ version's dependency environment, an environment holding no secret of the worker
 host role's, `FEATHER_HOST_DATABASE_URL`, where one is set up), and a pipe to itself on stdin and stdout
 (`packages.link`). The host:
 
-- stops when that pipe closes, and on Linux when its parent dies (`PR_SET_PDEATHSIG`), so that it never outlives its
+- stops when that pipe closes, and on Linux is killed when its parent dies (`PR_SET_PDEATHSIG`), so that it never outlives its
   supervisor; and holds a Postgres advisory lock on its id from before it takes work, so that a second host with the
   same id, started by a supervisor that replaced a dead one, refuses to start while the first still runs (§7.1);
 - loads the version's stored wheel, its sha256 checked again (§11), from the database, never from a registry, and its
@@ -371,7 +371,9 @@ def _die_with_parent(parent: int | None) -> None:
 
         libc = ctypes.CDLL(None, use_errno=True)
         pr_set_pdeathsig = 1
-        libc.prctl(pr_set_pdeathsig, signal.SIGTERM, 0, 0, 0)
+        # SIGKILL, as the Job Object on Windows: a supervisor that stops on purpose drains its hosts over the pipe
+        # first, so this only comes when it dies, and a host left to drain then, stopped mid-call, could outlive it.
+        libc.prctl(pr_set_pdeathsig, signal.SIGKILL, 0, 0, 0)
         if parent is not None and os.getppid() != parent:
             raise SystemExit("the supervisor that started this host is gone")
 

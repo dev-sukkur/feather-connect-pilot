@@ -140,7 +140,7 @@ def kill_abruptly(proc: subprocess.Popen[bytes]) -> None:
     if sys.platform == "win32":
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], check=False, capture_output=True)
     else:
-        try:  # a worker's whole group, as a container's end takes it: its hosts drain on SIGTERM, and a kill doesn't
+        try:  # the worker's group, as a container's end takes it; its hosts, in sessions of their own, get SIGKILL as it dies
             group = os.getpgid(proc.pid)
             if group == proc.pid:
                 os.killpg(group, signal.SIGKILL)
