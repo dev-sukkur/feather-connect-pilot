@@ -1756,8 +1756,19 @@ class _Secrets(SecretStore):
 
 
 class _Webhooks(WebhookEventStore):
-    def __init__(self, data: _Data) -> None:
+    def __init__(self, data: _Data, inbox: "_Inbox") -> None:
         self._d = data
+        self._inbox = inbox
+
+    def keep_many(self, events: Sequence[tuple[WebhookEvent, str, InboundRequest]]) -> list[bool]:
+        kept: list[bool] = []
+        with self._d.lock:
+            for event, dataset, request in events:
+                new = self.add(replace(event, processed_at=event.received_at))
+                if new:
+                    self._inbox.put(dataset, request, event.key)
+                kept.append(new)
+        return kept
 
     def add(self, event: WebhookEvent) -> bool:
         key = (event.package, event.webhook, event.key)
@@ -2069,6 +2080,7 @@ class MemoryStore(Store):
     def __init__(self, clock: Clock | None = None) -> None:
         data = _Data(clock or SystemClock())
         versions = _Versions(data)
+        inbox = _Inbox(data, versions)
         super().__init__(
             runs=_Runs(data),
             versions=versions,
@@ -2083,11 +2095,11 @@ class MemoryStore(Store):
             users=_Users(data),
             audit=_Audit(data),
             reads=_Reads(data),
-            inbox=_Inbox(data, versions),
+            inbox=inbox,
             responses=_Responses(data),
             registry=_Registry(data),
             packages=_Packages(data),
             env_config=_EnvConfig(data),
             secrets=_Secrets(data),
-            webhooks=_Webhooks(data),
+            webhooks=_Webhooks(data, inbox),
         )

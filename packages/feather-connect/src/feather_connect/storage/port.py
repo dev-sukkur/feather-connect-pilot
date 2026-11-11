@@ -1684,6 +1684,12 @@ class WebhookEventStore(Protocol):
         """Keep the event. Returns False, and keeps nothing, when an event of that webhook has its key already."""
         ...
 
+    def keep_many(self, events: "Sequence[tuple[WebhookEvent, str, InboundRequest]]") -> list[bool]:
+        """Keep each event as processed, and put each new one into the inbox of the push dataset named beside it, under
+        its key: all in one transaction, all or none. Says of each whether it was new; a repeat of a key, of one kept
+        before or earlier in these events, keeps nothing and goes into no inbox."""
+        ...
+
     def events(self, package: str, webhook: str, limit: int = 100) -> list[WebhookEvent]:
         """The webhook's events, oldest first."""
         ...

@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 from feather_connect.connectors.simulation import SIGNATURE_HEADER, TIMESTAMP_HEADER
 from feather_connect.core.webhooks import sign
 
-CONNECTIONS = 160  # at 10x the server answers in ~0.2 s on a CI runner; 64 would cap the rate near 320/s
+CONNECTIONS = 64
 # Where to send, and whether the signature is bound to the timestamp (`http.Webhook`'s, the default) or of the body
 # alone (a package's declared HMAC webhook, which holds the timestamp only to its tolerance).
 PATH = os.environ.get("FEATHER_LOAD_PATH", "/ingress/default/perf_hooks")

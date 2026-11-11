@@ -288,14 +288,28 @@ def _as_stored(dataset: Dataset, request: InboundRequest) -> tuple[str, InboundR
     return dataset.name, replace(request, headers=kept), _event_id(dataset, source, request)
 
 
+@dataclass(frozen=True)
+class _Declared:
+    """A request to a webhook a package declares, to be verified and kept by `_check_declared`."""
+
+    package: str
+    hook: Webhook
+    headers: dict[str, str]
+    body: bytes
+
+
 @dataclass
 class _Arrival:
-    """A request waiting for its answer, on the event loop that will give it."""
+    """A request waiting for its answer, on the event loop that will give it: to a push dataset or a declared webhook."""
 
-    dataset: Dataset
+    to: Dataset | _Declared
     request: InboundRequest
     loop: asyncio.AbstractEventLoop
     answer: asyncio.Future[Response]
+
+    @property
+    def name(self) -> str:
+        return self.to.name if isinstance(self.to, Dataset) else f"{self.to.package}/{self.to.hook.name}"
 
 
 def _give_answers(answers: Sequence[tuple[_Arrival, Response]]) -> None:
@@ -325,23 +339,23 @@ class IngressWorker:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
-    async def handle(self, dataset: Dataset, request: InboundRequest) -> Response:
+    async def handle(self, to: Dataset | _Declared, request: InboundRequest) -> Response:
         """Verify and store the request, and return what to answer."""
         with self._lock:  # started by the first event, as most apps get none
             if self._thread is None:
                 self._thread = threading.Thread(target=self._run, name="ingress", daemon=True)
                 self._thread.start()
         loop = asyncio.get_running_loop()
-        arrival = _Arrival(dataset, request, loop, loop.create_future())
+        arrival = _Arrival(to, request, loop, loop.create_future())
         try:
             self._queue.put_nowait(arrival)
         except queue.Full:
-            log.warning("ingress %s: refused: too many requests wait to be stored", dataset.name)
+            log.warning("ingress %s: refused: too many requests wait to be stored", arrival.name)
             return _problem(503, _RETRY_AFTER)
         try:
             return await asyncio.wait_for(arrival.answer, self._state.settings.ingress_wait_s)
         except TimeoutError:  # the answer is cancelled, which tells the worker to pass it by
-            log.warning("ingress %s: refused: not stored in time", dataset.name)
+            log.warning("ingress %s: refused: not stored in time", arrival.name)
             return _problem(503, _RETRY_AFTER)
 
     def close(self) -> None:
@@ -381,13 +395,19 @@ class IngressWorker:
     def _answers(self, batch: Sequence[_Arrival]) -> list[tuple[_Arrival, Response]]:
         answers: list[tuple[_Arrival, Response]] = []
         to_store: list[_Arrival] = []
+        to_keep: list[tuple[_Arrival, _Kept]] = []
         for arrival in batch:
             try:
-                refused = _refusal(self._state, arrival.dataset, arrival.request, self._limiter)
+                if isinstance(arrival.to, Dataset):
+                    refused = _refusal(self._state, arrival.to, arrival.request, self._limiter)
+                else:
+                    checked = _check_declared(self._state, arrival.to, arrival.request)
+                    if isinstance(checked, _Kept):
+                        to_keep.append((arrival, checked))
+                        continue
+                    refused = checked
             except Exception as error:  # noqa: BLE001 - the message may quote the body
-                log.error(
-                    "ingress %s: could not check an event: %s", arrival.dataset.name, type(error).__name__
-                )
+                log.error("ingress %s: could not check an event: %s", arrival.name, type(error).__name__)
                 refused = _problem(503, _RETRY_AFTER)
             if refused is None:
                 to_store.append(arrival)
@@ -395,11 +415,34 @@ class IngressWorker:
                 answers.append((arrival, refused))
         if to_store:
             answers += self._stored(to_store)
+        if to_keep:
+            answers += self._kept(to_keep)
         return answers
+
+    def _kept(self, kept: Sequence[tuple[_Arrival, "_Kept"]]) -> list[tuple[_Arrival, Response]]:
+        """Keep declared webhooks' events in one transaction, or else one at a time, as `_stored` does."""
+        webhooks = self._state.store.webhooks
+        try:
+            new: list[bool | None] = list(webhooks.keep_many([k.event for _, k in kept]))
+        except Exception as error:  # noqa: BLE001 - whose fault it is shows below, one at a time
+            log.error("ingress: could not keep %s webhook events: %s", len(kept), type(error).__name__)
+            if self._state.store.is_unavailable(error):
+                return [(arrival, _problem(503, _RETRY_AFTER)) for arrival, _ in kept]
+            new = []
+            for arrival, k in kept:
+                try:
+                    new += webhooks.keep_many([k.event])
+                except Exception as alone:  # noqa: BLE001 - the message of a database's error may quote the row
+                    log.error("ingress %s: could not keep an event: %s", arrival.name, type(alone).__name__)
+                    new.append(None)
+        return [
+            (arrival, _problem(503, _RETRY_AFTER) if was is None else _kept_answer(k.hook, was))
+            for (arrival, k), was in zip(kept, new, strict=True)
+        ]
 
     def _stored(self, arrivals: Sequence[_Arrival]) -> list[tuple[_Arrival, Response]]:
         inbox = self._state.store.inbox
-        events = [_as_stored(arrival.dataset, arrival.request) for arrival in arrivals]
+        events = [_as_stored(cast(Dataset, arrival.to), arrival.request) for arrival in arrivals]
         try:
             inbox.put_many(events)
         except Exception as error:  # noqa: BLE001 - whose fault it is shows below, one at a time
@@ -474,10 +517,22 @@ async def _pushed(request: Request, state: "AppState", dataset: Dataset, source:
 # Webhooks a package declares (flow packages §7.2): verified, deduplicated and kept raw here, parsed on a worker.
 
 
-def _keep_declared(
-    state: "AppState", package: str, hook: Webhook, headers: dict[str, str], body: bytes
-) -> Response:
-    now = state.clock.now()
+@dataclass(frozen=True)
+class _Kept:
+    """A declared webhook's event that verified: what `WebhookEventStore.keep_many` takes, and the hook it answers by."""
+
+    hook: Webhook
+    event: tuple[WebhookEvent, str, InboundRequest]
+
+
+def _kept_answer(hook: Webhook, new: bool) -> Response:
+    return JSONResponse({"status": "accepted" if new else "duplicate"}, hook.ack)
+
+
+def _check_declared(state: "AppState", declared: _Declared, request: InboundRequest) -> "Response | _Kept":
+    """Verify a declared webhook's event, and return what to keep of it, or else the answer that refuses it."""
+    package, hook, headers, body = declared.package, declared.hook, declared.headers, declared.body
+    now = request.received_at
     bound = f"${{secret:db:{webhook_secret_name(package, hook.name)}}}"
     if hook.secret.startswith("${secret:db:") and hook.secret != bound:
         log.error("webhook %s/%s: its secret must be %s", package, hook.name, bound)
@@ -501,17 +556,11 @@ def _keep_declared(
     if hook.timestamp_header:
         dropped |= {hook.timestamp_header.lower()}
     kept = {k: v for k, v in headers.items() if k not in dropped}
-    event_id = key[:_MAX_EVENT_ID]
-    new = state.store.webhooks.add(WebhookEvent(package, hook.name, event_id, stamp, body, kept, now))
-    if new:
-        # Into the push dataset's inbox, which its stream run reads on the package's host, where its transform parses
-        # the event (§7.2). The raw copy is then processed: retention may delete it.
-        path = f"/ingress/{_TENANT}/{package}/{hook.name}"
-        state.store.inbox.put(
-            f"{package}/{hook.dataset}", InboundRequest("POST", path, kept, body, now), event_id
-        )
-        state.store.webhooks.processed(package, hook.name, [event_id], now)
-    return JSONResponse({"status": "accepted" if new else "duplicate"}, hook.ack)
+    event = WebhookEvent(package, hook.name, key[:_MAX_EVENT_ID], stamp, body, kept, now)
+    # Into the push dataset's inbox, which its stream run reads on the package's host, where its transform parses the
+    # event (§7.2). The raw copy is kept as processed: retention may delete it.
+    path = f"/ingress/{_TENANT}/{package}/{hook.name}"
+    return _Kept(hook, (event, f"{package}/{hook.dataset}", InboundRequest("POST", path, kept, body, now)))
 
 
 @router.post("/ingress/{tenant}/{package}/{webhook}")
@@ -538,7 +587,9 @@ async def declared_webhook(request: Request, tenant: str, package: str, webhook:
     except ClientDisconnect:
         return _problem(400)
     headers = {name.lower(): value for name, value in request.headers.items()}
-    return await run_in_threadpool(_keep_declared, state, package, hook, headers, body)
+    inbound = InboundRequest(request.method, request.url.path, headers, body, state.clock.now())
+    worker = cast(IngressWorker, request.app.state.ingress_worker)
+    return await worker.handle(_Declared(package, hook, headers, body), inbound)
 
 
 class _NoLineForAnAcceptedEvent(logging.Filter):
