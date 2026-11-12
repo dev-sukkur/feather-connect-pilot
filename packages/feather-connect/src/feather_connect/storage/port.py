@@ -6,7 +6,7 @@ dataclasses so that they pickle, which the engine needs for step results.
 
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -1861,6 +1861,87 @@ class ReadinessStore(Protocol):
         ...
 
 
+AlertState = Literal["firing", "cleared"]
+SEVERITIES = ("warning", "critical")  # least first
+
+
+@dataclass(frozen=True)
+class AlertRow:
+    """One alert (M2 plan 2 O6): a rule firing for a subject, such as a route's delivery or a budget's window. While it
+    fires, it is the one row of its (rule, subject); it clears when the rule no longer finds it. `notified_at` is None
+    until its channels were told, so a notice that failed is retried."""
+
+    alert_id: str
+    rule: str
+    subject: str
+    severity: str
+    message: str
+    state: AlertState
+    fired_at: datetime
+    last_seen_at: datetime
+    cleared_at: datetime | None = None
+    acked_by: str | None = None
+    acked_at: datetime | None = None
+    snoozed_until: datetime | None = None
+    notified_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class AlertRuleRow:
+    """A rule as the environment set it: on or off, its parameters, and the channels it tells."""
+
+    name: str
+    enabled: bool
+    params: Mapping[str, Any]
+    channels: tuple[str, ...]
+    updated_at: datetime
+
+
+class AlertStore(Protocol):
+    def fire(self, rule: str, subject: str, severity: str, message: str) -> tuple[AlertRow, bool]:
+        """Raise the alert of (rule, subject), or refresh the one firing. True when it is new, or critical now where it
+        was a warning: then its channels are to be told (again)."""
+        ...
+
+    def clear(self, rule: str, firing: Collection[str]) -> list[AlertRow]:
+        """Clear the rule's firing alerts whose subject is not in `firing`; return them, cleared."""
+        ...
+
+    def list_alerts(self, state: AlertState | None = None, limit: int = 100) -> list[AlertRow]:
+        """Newest first."""
+        ...
+
+    def get_alert(self, alert_id: str) -> AlertRow:
+        """Raises `KeyError` when there is no such alert."""
+        ...
+
+    def ack(self, alert_id: str, actor: str) -> AlertRow:
+        """Acknowledge it: it stays until it clears, but its channels hear no more of it. Raises `KeyError`."""
+        ...
+
+    def snooze(self, alert_id: str, until: datetime | None) -> AlertRow:
+        """Keep it quiet until then, or no longer with None. Raises `KeyError`."""
+        ...
+
+    def mark_notified(self, alert_id: str) -> None: ...
+
+    def unnotified(self) -> list[AlertRow]:
+        """The firing alerts whose channels haven't been told, oldest first."""
+        ...
+
+    def rules(self) -> list[AlertRuleRow]:
+        """By name."""
+        ...
+
+    def set_rule(
+        self, name: str, enabled: bool, params: Mapping[str, Any], channels: Sequence[str]
+    ) -> AlertRuleRow: ...
+
+    def delete_rule(self, name: str) -> None:
+        """Back to the rule's default. Raises `KeyError` when the environment hasn't set it."""
+        ...
+
+
 @dataclass(frozen=True)
 class Store:
     """The ports together. A backend provides one of these."""
@@ -1886,6 +1967,7 @@ class Store:
     secrets: SecretStore
     webhooks: WebhookEventStore
     readiness: ReadinessStore
+    alerts: AlertStore
 
     def is_unavailable(self, error: BaseException) -> bool:
         """Whether `error` says that the store can't be reached, or can't keep up, just now, so that the same call may

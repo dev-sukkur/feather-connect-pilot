@@ -5,7 +5,7 @@ import json
 import math
 import threading
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from fractions import Fraction
@@ -20,10 +20,15 @@ from feather_connect.storage.port import (
     GRANTS,
     MAX_ENV_ROWS,
     MAX_PACKAGE_ROWS,
+    SEVERITIES,
     STREAM_TRIGGER,
     WAITS_KEPT,
     AccessGrant,
     ActivationState,
+    AlertRow,
+    AlertRuleRow,
+    AlertState,
+    AlertStore,
     Attempt,
     AuditRow,
     AuditStore,
@@ -177,6 +182,8 @@ class _Data:
         default_factory=dict[tuple[str, str, str], WebhookEvent]
     )  # by (package, webhook, key), in arrival order
     audit: list[AuditRow] = field(default_factory=list[AuditRow])
+    alerts: dict[str, AlertRow] = field(default_factory=dict[str, AlertRow])
+    alert_rules: dict[str, AlertRuleRow] = field(default_factory=dict[str, AlertRuleRow])
     # The key index, by (dataset, key): (version, partition, op, row hash, chunk), in seal order.
     keys: dict[tuple[str, str], list[tuple[str, str, str, int, int]]] = field(
         default_factory=dict[tuple[str, str], list[tuple[str, str, str, int, int]]]
@@ -1870,6 +1877,94 @@ class _Webhooks(WebhookEventStore):
         return len(old)
 
 
+class _Alerts(AlertStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def _firing(self, rule: str, subject: str) -> AlertRow | None:
+        return next(
+            (a for a in self._d.alerts.values() if (a.rule, a.subject, a.state) == (rule, subject, "firing")),
+            None,
+        )
+
+    def fire(self, rule: str, subject: str, severity: str, message: str) -> tuple[AlertRow, bool]:
+        with self._d.lock:
+            now = self._d.clock.now()
+            found = self._firing(rule, subject)
+            if found is None:
+                row = AlertRow(new_id(), rule, subject, severity, message, "firing", now, now)
+                self._d.alerts[row.alert_id] = row
+                return row, True
+            worse = SEVERITIES.index(severity) > SEVERITIES.index(found.severity)
+            row = replace(
+                found,
+                severity=severity,
+                message=message,
+                last_seen_at=now,
+                notified_at=None if worse else found.notified_at,
+            )
+            self._d.alerts[row.alert_id] = row
+            return row, worse
+
+    def clear(self, rule: str, firing: Collection[str]) -> list[AlertRow]:
+        with self._d.lock:
+            now = self._d.clock.now()
+            cleared: list[AlertRow] = []
+            for a in list(self._d.alerts.values()):
+                if a.rule == rule and a.state == "firing" and a.subject not in firing:
+                    row = replace(a, state="cleared", cleared_at=now)
+                    self._d.alerts[a.alert_id] = row
+                    cleared.append(row)
+            return cleared
+
+    def list_alerts(self, state: AlertState | None = None, limit: int = 100) -> list[AlertRow]:
+        with self._d.lock:
+            rows = [a for a in self._d.alerts.values() if state is None or a.state == state]
+        return sorted(rows, key=lambda a: (a.fired_at, a.alert_id), reverse=True)[:limit]
+
+    def get_alert(self, alert_id: str) -> AlertRow:
+        with self._d.lock:
+            return self._d.alerts[alert_id]
+
+    def _change(self, alert_id: str, **changes: Any) -> AlertRow:
+        with self._d.lock:
+            row = replace(self._d.alerts[alert_id], **changes)
+            self._d.alerts[alert_id] = row
+            return row
+
+    def ack(self, alert_id: str, actor: str) -> AlertRow:
+        return self._change(alert_id, acked_by=actor, acked_at=self._d.clock.now())
+
+    def snooze(self, alert_id: str, until: datetime | None) -> AlertRow:
+        return self._change(alert_id, snoozed_until=until)
+
+    def mark_notified(self, alert_id: str) -> None:
+        self._change(alert_id, notified_at=self._d.clock.now())
+
+    def unnotified(self) -> list[AlertRow]:
+        with self._d.lock:
+            rows = [a for a in self._d.alerts.values() if a.state == "firing" and a.notified_at is None]
+        return sorted(rows, key=lambda a: (a.fired_at, a.alert_id))
+
+    def rules(self) -> list[AlertRuleRow]:
+        with self._d.lock:
+            return sorted(self._d.alert_rules.values(), key=lambda r: r.name)
+
+    def set_rule(
+        self, name: str, enabled: bool, params: Mapping[str, Any], channels: Sequence[str]
+    ) -> AlertRuleRow:
+        with self._d.lock:
+            row = AlertRuleRow(
+                name, enabled, copy.deepcopy(dict(params)), tuple(channels), self._d.clock.now()
+            )
+            self._d.alert_rules[name] = row
+            return row
+
+    def delete_rule(self, name: str) -> None:
+        with self._d.lock:
+            del self._d.alert_rules[name]
+
+
 class _Audit(AuditStore):
     def __init__(self, data: _Data) -> None:
         self._d = data
@@ -2269,4 +2364,5 @@ class MemoryStore(Store):
             secrets=_Secrets(data),
             webhooks=_Webhooks(data, inbox),
             readiness=_Readiness(data, runs, inbox),
+            alerts=_Alerts(data),
         )

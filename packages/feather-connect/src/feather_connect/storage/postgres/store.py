@@ -9,7 +9,7 @@ import json
 import logging
 import math
 import threading
-from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from fractions import Fraction
@@ -29,10 +29,15 @@ from feather_connect.storage.port import (
     MAX_ENV_ROWS,
     MAX_PACKAGE_ROWS,
     READY_CHANNEL,
+    SEVERITIES,
     SHARED_TENANT,
     STREAM_TRIGGER,
     WAITS_KEPT,
     AccessGrant,
+    AlertRow,
+    AlertRuleRow,
+    AlertState,
+    AlertStore,
     Attempt,
     AuditRow,
     AuditStore,
@@ -2905,6 +2910,163 @@ class _Audit(AuditStore):
         return [_audit_row(r) for r in rows]
 
 
+class _Alerts(AlertStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def fire(self, rule: str, subject: str, severity: str, message: str) -> tuple[AlertRow, bool]:
+        now = self._db.clock.now()
+        with self._db.tx() as conn:
+            found = conn.execute(
+                """select * from feather.alert where tenant_id = %s and rule = %s and subject = %s and state = 'firing'
+                   for update""",
+                (self._db.tenant, rule, subject),
+            ).fetchone()
+            if found is None:
+                row = conn.execute(
+                    """insert into feather.alert (tenant_id, alert_id, rule, subject, severity, message, state,
+                                                  fired_at, last_seen_at)
+                       values (%s, %s, %s, %s, %s, %s, 'firing', %s, %s) returning *""",
+                    (self._db.tenant, new_id(), rule, subject, severity, message, now, now),
+                ).fetchone()
+                assert row is not None
+                return _alert_row(row), True
+            worse = SEVERITIES.index(severity) > SEVERITIES.index(found["severity"])
+            row = conn.execute(
+                """update feather.alert set severity = %s, message = %s, last_seen_at = %s,
+                          notified_at = case when %s then null else notified_at end
+                   where tenant_id = %s and alert_id = %s returning *""",
+                (severity, message, now, worse, self._db.tenant, found["alert_id"]),
+            ).fetchone()
+            assert row is not None
+            return _alert_row(row), worse
+
+    def clear(self, rule: str, firing: Collection[str]) -> list[AlertRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """update feather.alert set state = 'cleared', cleared_at = %s
+                   where tenant_id = %s and rule = %s and state = 'firing' and not (subject = any(%s))
+                   returning *""",
+                (self._db.clock.now(), self._db.tenant, rule, list(firing)),
+            ).fetchall()
+        return [_alert_row(r) for r in rows]
+
+    def list_alerts(self, state: AlertState | None = None, limit: int = 100) -> list[AlertRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.alert where tenant_id = %s and (%s::text is null or state = %s)
+                   order by fired_at desc, alert_id desc limit %s""",
+                (self._db.tenant, state, state, limit),
+            ).fetchall()
+        return [_alert_row(r) for r in rows]
+
+    def get_alert(self, alert_id: str) -> AlertRow:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                "select * from feather.alert where tenant_id = %s and alert_id = %s",
+                (self._db.tenant, alert_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(alert_id)
+        return _alert_row(row)
+
+    def _change(
+        self, alert_id: str, acked_by: str | None, snoozed: bool, until: datetime | None, notified: bool
+    ) -> AlertRow:
+        now = self._db.clock.now()
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """update feather.alert set
+                       acked_by = coalesce(%(acked_by)s, acked_by),
+                       acked_at = case when %(acked_by)s::text is null then acked_at else %(now)s end,
+                       snoozed_until = case when %(snoozed)s then %(until)s else snoozed_until end,
+                       notified_at = case when %(notified)s then %(now)s else notified_at end
+                   where tenant_id = %(tenant)s and alert_id = %(alert_id)s returning *""",
+                {
+                    "acked_by": acked_by,
+                    "now": now,
+                    "snoozed": snoozed,
+                    "until": until,
+                    "notified": notified,
+                    "tenant": self._db.tenant,
+                    "alert_id": alert_id,
+                },
+            ).fetchone()
+        if row is None:
+            raise KeyError(alert_id)
+        return _alert_row(row)
+
+    def ack(self, alert_id: str, actor: str) -> AlertRow:
+        return self._change(alert_id, actor, False, None, False)
+
+    def snooze(self, alert_id: str, until: datetime | None) -> AlertRow:
+        return self._change(alert_id, None, True, until, False)
+
+    def mark_notified(self, alert_id: str) -> None:
+        self._change(alert_id, None, False, None, True)
+
+    def unnotified(self) -> list[AlertRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.alert where tenant_id = %s and state = 'firing' and notified_at is null
+                   order by fired_at, alert_id""",
+                (self._db.tenant,),
+            ).fetchall()
+        return [_alert_row(r) for r in rows]
+
+    def rules(self) -> list[AlertRuleRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                "select * from feather.alert_rule where tenant_id = %s order by name", (self._db.tenant,)
+            ).fetchall()
+        return [_rule_row(r) for r in rows]
+
+    def set_rule(
+        self, name: str, enabled: bool, params: Mapping[str, Any], channels: Sequence[str]
+    ) -> AlertRuleRow:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """insert into feather.alert_rule (tenant_id, name, enabled, params, channels, updated_at)
+                   values (%s, %s, %s, %s, %s, %s)
+                   on conflict (tenant_id, name) do update set enabled = excluded.enabled, params = excluded.params,
+                       channels = excluded.channels, updated_at = excluded.updated_at
+                   returning *""",
+                (self._db.tenant, name, enabled, _json(dict(params)), list(channels), self._db.clock.now()),
+            ).fetchone()
+        assert row is not None
+        return _rule_row(row)
+
+    def delete_rule(self, name: str) -> None:
+        with self._db.tx() as conn:
+            gone = conn.execute(
+                "delete from feather.alert_rule where tenant_id = %s and name = %s", (self._db.tenant, name)
+            )
+        if gone.rowcount == 0:
+            raise KeyError(name)
+
+
+def _alert_row(r: Row) -> AlertRow:
+    return AlertRow(
+        r["alert_id"],
+        r["rule"],
+        r["subject"],
+        r["severity"],
+        r["message"],
+        r["state"],
+        r["fired_at"],
+        r["last_seen_at"],
+        r["cleared_at"],
+        r["acked_by"],
+        r["acked_at"],
+        r["snoozed_until"],
+        r["notified_at"],
+    )
+
+
+def _rule_row(r: Row) -> AlertRuleRow:
+    return AlertRuleRow(r["name"], r["enabled"], _unjson(r["params"]), tuple(r["channels"]), r["updated_at"])
+
+
 def _audit_row(r: Row) -> AuditRow:
     return AuditRow(
         r["audit_id"],
@@ -3769,6 +3931,7 @@ class PostgresStore(Store):
             secrets=_Secrets(db),
             webhooks=_Webhooks(db, inbox),
             readiness=_Readiness(db),
+            alerts=_Alerts(db),
         )
         object.__setattr__(self, "_pool", pool)  # `Store` is frozen
         object.__setattr__(self, "_db", db)

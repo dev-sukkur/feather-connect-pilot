@@ -942,6 +942,41 @@ class StoreContract(
             "ann",
         ]
 
+    def test_an_alert_fires_once_escalates_and_clears(self, store: Store):  # M2 plan 2 O6
+        first, new = store.alerts.fire("budget_high", "api", "warning", "api at 81%")
+        assert new and first.state == "firing" and store.alerts.unnotified() == [first]
+        store.alerts.mark_notified(first.alert_id)
+        again, new = store.alerts.fire("budget_high", "api", "warning", "api at 85%")
+        assert not new and again.alert_id == first.alert_id and again.message == "api at 85%"
+        assert store.alerts.unnotified() == []
+        worse, new = store.alerts.fire("budget_high", "api", "critical", "api at 96%")
+        assert new and worse.notified_at is None and worse.alert_id == first.alert_id
+        other, _ = store.alerts.fire("budget_high", "erp", "warning", "erp at 80%")
+        [cleared] = store.alerts.clear("budget_high", ["erp"])
+        assert (
+            cleared.alert_id == first.alert_id
+            and cleared.state == "cleared"
+            and cleared.cleared_at is not None
+        )
+        assert [a.alert_id for a in store.alerts.list_alerts("firing")] == [other.alert_id]
+        fresh, new = store.alerts.fire("budget_high", "api", "warning", "api at 82%")
+        assert new and fresh.alert_id != first.alert_id  # a new alert once the old cleared
+        acked = store.alerts.ack(other.alert_id, "ann")
+        assert acked.acked_by == "ann" and acked.acked_at is not None
+        assert store.alerts.snooze(other.alert_id, None).snoozed_until is None
+        with pytest.raises(KeyError):
+            store.alerts.get_alert("nope")
+
+    def test_alert_rules_are_set_and_reset(self, store: Store):
+        rule = store.alerts.set_rule("delivery_failed", True, {"after": "30m"}, ["ops-slack"])
+        assert (rule.enabled, dict(rule.params), rule.channels) == (True, {"after": "30m"}, ("ops-slack",))
+        store.alerts.set_rule("delivery_failed", False, {}, [])
+        assert [(r.name, r.enabled) for r in store.alerts.rules()] == [("delivery_failed", False)]
+        store.alerts.delete_rule("delivery_failed")
+        assert store.alerts.rules() == []
+        with pytest.raises(KeyError):
+            store.alerts.delete_rule("delivery_failed")
+
     def test_all_applied(self, store: Store):
         assert store.ledger.all_applied()
         seal(store, "v1", ["a"])
