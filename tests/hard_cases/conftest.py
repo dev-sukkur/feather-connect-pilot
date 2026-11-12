@@ -29,7 +29,8 @@ from feather_server.auth import issue_token
 ROOT = Path(__file__).resolve().parents[2]
 PROJECT = Path(__file__).resolve().parent / "project"
 TARGETS = ROOT / "examples" / "demo" / "sims" / "targets.py"
-CASES = ("h1", "h2", "h3", "h4", "h6")
+CASES = ("h1", "h2", "h3", "h4", "h6", "h5", "h7high", "h7low", "h8", "h10", "h11", "h12", "h15")
+ERPS = ("erp", "erp7high", "erp7low", "erp8", "erp10", "erp15")
 DDL = """
 create schema hard;
 create table hard.h1_upsert (id text primary key, day text, v int);
@@ -38,6 +39,10 @@ create table hard.h2 (id text primary key, v text);
 create table hard.h3 (sku text primary key, row_id int, p int);
 create table hard.h4 (id text, u text, v int);
 create table hard.h6 (id text primary key, v text);
+create table hard.h5 (id text primary key, u text, v int);
+create table hard.h11_a (id text primary key, u text);
+create table hard.h11_b (id text primary key, u text);
+create table hard.h12 (id text primary key, v text, w text);
 """
 SETTLE = 180
 
@@ -119,6 +124,14 @@ class Cases:
         assert answer.status_code == 202, answer.text
         return answer.json()["run_id"]
 
+    def routes_of_h11(self, *routes: str) -> None:
+        """Deploy H11's flow with these routes: write them where its code reads them, and install the project again."""
+        (self.fixtures / "h11_routes.json").write_text(json.dumps(list(routes)), encoding="utf-8")
+        self.stack.reinstall()
+
+    def deliveries(self, route: str) -> list[Any]:
+        return self.stack.store.ledger.list_deliveries(route=f"{PACKAGE}/{route}")
+
     def worker_log(self) -> str:
         path = self.stack.logs / "worker.log"
         return path.read_text(encoding="utf-8", errors="replace")[-3000:] if path.exists() else ""
@@ -155,7 +168,7 @@ def cases(tmp_path_factory: pytest.TempPathFactory, erp: Erp) -> Iterator[Cases]
     project, fixtures = root / "project", root / "fixtures"
     shutil.copytree(PROJECT, project, ignore=shutil.ignore_patterns("__pycache__"))
     (project / "env" / "dev.yaml").write_text(  # JSON is YAML
-        json.dumps({"connections": {"erp": {"base_url": erp.url}}}), encoding="utf-8"
+        json.dumps({"connections": {name: {"base_url": erp.url} for name in ERPS}}), encoding="utf-8"
     )
     fixtures.mkdir()
     for case in CASES:

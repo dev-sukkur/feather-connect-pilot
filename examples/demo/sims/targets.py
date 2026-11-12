@@ -86,6 +86,10 @@ def make_app(erp: Erp) -> Starlette:
             body = json.loads(await request.body() or b"null")
         except ValueError:
             return JSONResponse({"error": "the body is not JSON"}, status_code=400)
+        if isinstance(body, dict) and body.get(
+            "reject"
+        ):  # a record the ERP turns down, for a test to quarantine
+            return JSONResponse({"error": "the ERP turned this order down"}, status_code=422)
         erp.take(order_id, body, request.headers.get(KEY_HEADER))
         return JSONResponse({"order_id": order_id})
 
