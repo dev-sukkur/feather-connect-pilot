@@ -54,6 +54,7 @@ class PackageDataset:
     config: ConnectionConfig
     timezone: str
     strategy: _Strategy = _Strategy()
+    tenant: str = "default"
 
     def context(self, now: datetime) -> Context:
         try:
@@ -61,7 +62,7 @@ class PackageDataset:
         except ProjectError as error:
             raise PermanentError(f"connection {self.config.name!r}: {error}") from None
         register_secrets(*(resolved[key] for key in self.config.secret_refs))
-        return Context(resolved, logging.getLogger(self.config.name), now, self.timezone, tenant="default")
+        return Context(resolved, logging.getLogger(self.config.name), now, self.timezone, tenant=self.tenant)
 
 
 class PackagePushes:
@@ -115,7 +116,9 @@ class PackagePushes:
             log.warning("ingress %s: the connection %s isn't configured", push.dataset, push.connection)
             return None
         timezone = str(self._settings().get("timezone") or "UTC")
-        return PackageDataset(push.dataset, source, push.package, config, timezone)
+        return PackageDataset(
+            push.dataset, source, push.package, config, timezone, tenant=self._store.secrets.tenant
+        )
 
     def _settings(self) -> Mapping[str, Any]:
         return {e.name: e.value for e in self._store.env_config.entries(self._env, "setting")}

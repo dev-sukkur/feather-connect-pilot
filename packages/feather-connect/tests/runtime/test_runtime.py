@@ -24,7 +24,7 @@ from feather_connect.storage.spool import MemorySpool
 
 T0 = datetime(2026, 10, 18, 10, tzinfo=UTC)
 ROWS = [{"id": 1, "v": "a"}, {"id": 2, "v": "b"}]
-ALLOWED_ARGS = {"run_id", "flow", "dataset", "partition", "route", "version_id"}
+ALLOWED_ARGS = {"run_id", "flow", "dataset", "partition", "route", "version_id", "tenant"}
 DAY_16, DAY_17, DAY_18 = "date=2026-10-16", "date=2026-10-17", "date=2026-10-18"
 
 
@@ -89,11 +89,22 @@ def test_a_run_fans_out_to_all_routes() -> None:
     ]
 
 
+def test_a_task_of_another_tenant_is_refused() -> None:  # ADR-0013 rules 4 and 7
+    h = Harness(by_day(), rows=on(DAY_17))
+
+    class Ctx:
+        task_ref, attempt = "ref", 1
+
+    with pytest.raises(RuntimeError, match="tenant 'acme' reached a worker of tenant 'default'"):
+        h.rt.tasks()["feather.plan"](Ctx(), {"run_id": "r", "flow": "f", "tenant": "acme"})  # type: ignore[arg-type]
+
+
 def test_task_args_carry_ids_only() -> None:  # I8
     h = Harness(by_day(), rows=on(DAY_17, DAY_18))
     h.run()
     for call in h.engine.submitted():
         assert set(call.args) <= ALLOWED_ARGS
+        assert call.args["tenant"] == "default"  # ADR-0013 rule 4
         assert len(json.dumps(call.args)) < 64_000
 
 
