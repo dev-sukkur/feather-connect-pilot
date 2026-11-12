@@ -1,0 +1,10 @@
+# Changes to authentication, access control, secrets and migrations need the owner's review (M3 plan 1 X1).
+/packages/feather-server/src/feather_server/auth.py                     @dev-sukkur
+/packages/feather-server/src/feather_server/services/access.py          @dev-sukkur
+/packages/feather-server/src/feather_server/services/accounts.py        @dev-sukkur
+/packages/feather-server/src/feather_server/ingress.py                  @dev-sukkur
+/packages/feather-connect/src/feather_connect/vault.py                  @dev-sukkur
+/packages/feather-connect/src/feather_connect/storage/postgres/host_role.py @dev-sukkur
+/packages/feather-connect/src/feather_connect/storage/postgres/migrations/ @dev-sukkur
+/.github/workflows/                                                     @dev-sukkur
+/deploy/                                                                @dev-sukkur
