@@ -331,8 +331,10 @@ class Runtime:
         partitions: Sequence[str] | None = None,
         reason: str | None = None,
         max_concurrent: int | None = None,
+        params: Mapping[str, Any] | None = None,
     ) -> str:
         """Create a run and submit its plan. `partitions` overrides what would be planned, for a re-run of a slice.
+        `params` go on the run as they are, such as a reconcile's lookback.
 
         `max_concurrent` limits how many of the run's extract tasks are submitted at once, as a backfill needs: the
         plan submits that many, and each extract that ends submits the next.
@@ -344,7 +346,7 @@ class Runtime:
             raise ValueError(f"max_concurrent is {max_concurrent}: it must be at least 1")
         if self.is_flow_paused(flow):
             raise FlowPaused(f"flow {flow!r} is paused{self._pause_note(f'flow:{flow}')}")
-        params: dict[str, Any] = {} if partitions is None else {"partitions": list(partitions)}
+        params = {**(params or {}), **({} if partitions is None else {"partitions": list(partitions)})}
         if max_concurrent is not None:
             params["max_concurrent"] = max_concurrent
         run_id = self._deps.store.runs.create_run(flow, trigger, actor, params, reason=reason)

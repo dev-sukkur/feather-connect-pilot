@@ -25,6 +25,15 @@ class Every:
 
 
 @dataclass(frozen=True)
+class Reconcile:
+    """Starts a run each `interval` that reads the `lookback` before it again, for the rows a `by_stamp` read missed:
+    those stamped late, such as back-dated into a closed period (design H5). What it finds unchanged is dropped."""
+
+    interval: timedelta
+    lookback: timedelta
+
+
+@dataclass(frozen=True)
 class Manual:
     """Starts a run only when someone asks for one."""
 
@@ -36,7 +45,7 @@ class OnEvent:
     dataset: Dataset
 
 
-Trigger = Cron | Every | Manual | OnEvent | OnReady
+Trigger = Cron | Every | Reconcile | Manual | OnEvent | OnReady
 
 # An interval under this is a high-frequency poller: its ticks are tasks of one daily run, not a run each (design 6.3).
 STREAM_BELOW = timedelta(minutes=5)
@@ -63,6 +72,15 @@ def every(interval: str) -> Every:
     if step <= timedelta(0):
         raise ValueError(f"every needs an interval above zero, got {interval!r}")
     return Every(step)
+
+
+def reconcile(*, every: str, lookback: str) -> Reconcile:
+    """Return a trigger that runs each `every`, such as `1d`, reading the `lookback` before then again, such as `30d`,
+    for a flow whose datasets use `by_stamp`. Its runs find rows whose stamp put them before the watermark."""
+    step, back = parse_duration(every), parse_duration(lookback)
+    if step <= timedelta(0) or back <= timedelta(0):
+        raise ValueError(f"reconcile needs every and lookback above zero, got {every!r} and {lookback!r}")
+    return Reconcile(step, back)
 
 
 def manual() -> Manual:

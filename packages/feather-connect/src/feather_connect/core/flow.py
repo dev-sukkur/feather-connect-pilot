@@ -15,7 +15,7 @@ from feather_connect.core.partitions import none
 from feather_connect.core.readiness import OnReady, dataset_spec
 from feather_connect.core.records import Record
 from feather_connect.core.schema_policy import SchemaPolicy
-from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Trigger, is_stream
+from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Reconcile, Trigger, is_stream
 from feather_connect.storage.port import Priority
 
 Overlap = Literal["queue", "skip", "cancel_previous"]
@@ -175,6 +175,12 @@ def _trigger_dict(trigger: Trigger) -> dict[str, Any]:
             return {"kind": "cron", "expr": expr, "tz": tz}
         case Every(interval):
             return {"kind": "every", "seconds": interval.total_seconds()}
+        case Reconcile(interval, lookback):
+            return {
+                "kind": "reconcile",
+                "seconds": interval.total_seconds(),
+                "lookback": lookback.total_seconds(),
+            }
         case Manual():
             return {"kind": "manual"}
         case OnEvent(dataset):
@@ -317,6 +323,18 @@ class Flow:
             names.add(route.name)
         problems += self._poller_problems()
         for i, trigger in enumerate(self.triggers):
+            if isinstance(trigger, Reconcile) and not any(
+                d.strategy.name == "by_stamp" for d in self.datasets
+            ):
+                problems.append(
+                    Problem(
+                        "error",
+                        "reconcile_needs_by_stamp",
+                        "reconcile reads a lookback window again, but no dataset of the flow uses by_stamp",
+                        f"triggers[{i}]",
+                        "a complete strategy (snapshot_diff, replace) reads it all each run already: drop reconcile",
+                    )
+                )
             if isinstance(trigger, OnEvent) and trigger.dataset.strategy.name != "push":
                 problems.append(
                     Problem(

@@ -25,7 +25,7 @@ from feather_connect.core.flow import Flow, to
 from feather_connect.core.readiness import on_ready, ready
 from feather_connect.core.records import Record
 from feather_connect.core.transforms import batch_map
-from feather_connect.core.triggers import cron, every, manual, on_event
+from feather_connect.core.triggers import cron, every, manual, on_event, reconcile
 
 __version__ = "0.1.0"
 
@@ -56,6 +56,7 @@ __all__ = [
     "on_ready",
     "partition",
     "ready",
+    "reconcile",
     "strategy",
     "to",
 ]

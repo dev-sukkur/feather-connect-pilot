@@ -10,7 +10,7 @@ import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast, overload
 
@@ -49,6 +49,9 @@ def version_id_of(run_id: str, dataset: str, partition: str, tick: str | None = 
     if tick is None:
         return stable_id(run_id, dataset, partition)
     return stable_id(run_id, dataset, partition, tick)
+
+
+RECONCILE = "reconcile_s"  # a run's param: the lookback, in seconds, of a reconcile read (H5)
 
 
 class ExtractFailed(Exception):
@@ -531,6 +534,27 @@ def _verify(dataset: Dataset, partition: str, deps: RuntimeDeps) -> VerifyResult
     return VerifyResult(upserts, deletes)
 
 
+def _reconcile_since(dataset: Dataset, run_id: str, since: Any, deps: RuntimeDeps) -> Any:
+    """Where a reconcile run reads from: its lookback before now, when that is earlier than `since` (H5). Other runs
+    read from `since`."""
+    try:
+        lookback = deps.store.runs.get_run(run_id).params.get(RECONCILE)
+    except KeyError:  # an extract of no stored run, as a test makes
+        return since
+    if lookback is None:
+        return since
+    start = deps.clock.now() - timedelta(seconds=float(lookback))
+    if isinstance(since, datetime):
+        found: Any = start if since.tzinfo is not None else start.replace(tzinfo=None)
+    elif isinstance(since, date):
+        found = start.date()
+    else:
+        raise ExtractFailed(
+            f"dataset {dataset.name!r}: a reconcile reads a time window again, and its stamps are numbers"
+        )
+    return min(since, found)
+
+
 def _fresh_routes(dataset: Dataset, routes: Sequence[RouteSpec], deps: RuntimeDeps) -> list[str]:
     """The routes that have had no delivery of the dataset yet while it has a sealed history, which its read
     bootstraps (M2 plan 2 D2). A dataset's first read has nothing to bootstrap from: what it reads is all new."""
@@ -566,6 +590,8 @@ def _read_and_stage(
     fresh = _fresh_routes(dataset, routes, deps)
     watermark = None if by_stamp is None else deps.store.versions.latest_watermark(dataset.name)
     since = None if by_stamp is None else _read_since(dataset, by_stamp, watermark)
+    if by_stamp is not None and since is not None:
+        since = _reconcile_since(dataset, run_id, since, deps)
     cutoff = since if fresh else None
     stamp_kind = None if watermark is None else _stamp_kind(watermark)
     read = _Read(
