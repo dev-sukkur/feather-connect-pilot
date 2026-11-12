@@ -17,6 +17,7 @@ members = [
     "feather-postgres",
     "feather-retail",
     "feather-s3",
+    "feather-sap-cpi",
     "feather-server",
     "feather-zakya",
 ]
@@ -1120,6 +1121,23 @@ requires-dist = [
     { name = "fsspec", specifier = ">=2024.6" },
     { name = "pyarrow" },
     { name = "s3fs", specifier = ">=2024.6" },
+]
+
+[[package]]
+name = "feather-sap-cpi"
+version = "0.1.0"
+source = { editable = "packages/connectors/feather-sap-cpi" }
+dependencies = [
+    { name = "feather-connect" },
+    { name = "feather-http" },
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "feather-connect", editable = "packages/feather-connect" },
+    { name = "feather-http", editable = "packages/connectors/feather-http" },
+    { name = "httpx" },
 ]
 
 [[package]]
