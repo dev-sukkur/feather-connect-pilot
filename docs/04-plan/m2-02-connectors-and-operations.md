@@ -51,4 +51,22 @@ each stage.
 
 ## 4. Where it stands
 
-Filled in as the stages land.
+All stages are built on `feat/m2-readiness` (PR 30), 12 Nov 2026.
+
+| # | State |
+|---|---|
+| A1, A2 | Done: holds, approve and reject (API, CLI `feather holds`, Holds page); `compensate` on side-effect routes (`feather deliveries compensate`) |
+| C1 | Done: `feather-sap-cpi` (`sap_cpi.Source`, `sap_cpi.Post`), OAuth2 client credentials, CSRF, idempotent resend, reversal; `sims/cpi.py` |
+| C2 | Done: `examples/zakya-demo` Zakya → staging → SAP with approval above 5 lakh; `tests/demo` runs the chain on Postgres |
+| D1 | Done: `schema_policy` default, strict, permissive or a function, per dataset or route. A field is typed from the version's rows; a held delivery's reason starts `schema_change` |
+| D2 | Done: a new route's first delivery in a partition is the whole slice; by_stamp reads from the start for it, the other routes get only what changed |
+| D3 | Done: `fc.reconcile(every=, lookback=)`, fired before ordinary ticks, the newest due tick only |
+| O1 | Done: Budgets page and API; waits longer than a minute are listed (shorter ones are handled in the task). The page also lists budgets a package host defined |
+| O2 | Done: viewer, operator, developer, admin; grants approver and pii-reader; `settings.protected` makes a developer's capabilities an admin's |
+| O3 | Done: Audit page and `GET /api/v1/audit`, filtered by actor, action and the start of a target |
+| O4 | Done: `pii=[...]` masks fields in records, versions, traces and diffs; `unmask` needs pii-reader and is audited. Keys are not masked |
+| O5 | Done: `/versions/{id}/diff`, `feather diff`, `feather trace`; nets the versions between two of a partition |
+| O6 | Done: six rules, webhook, Slack and SMTP channels, ack and snooze, rules per environment (`alert_rule`, `alert`, migration 0032) |
+| H | H5, H7, H8, H10–H12, H15 added to `tests/hard_cases` and pass on the full stack. H9: `tests/chaos/test_kill_mid_apply.py` (no duplicate) and the demo chain's compensate. H7 and H8 use hour windows and check the wait, the reserve and the cap without waiting the hour out |
+
+Open: whether a Railway deployment belongs to M2 (sponsor to say).
