@@ -676,6 +676,24 @@ docker compose -f deploy/compose.yaml exec feather-server feather server create-
   <p class="prose">A <code>by_stamp</code> read misses a row whose stamp put it before the watermark, such as one back-dated into a closed period. <code>triggers=[fc.every("15m"), fc.reconcile(every="1d", lookback="30d")]</code> reads the last 30 days again once a day; what it finds unchanged goes nowhere, and what it finds new or changed is delivered as any read's.</p>
 </section>
 
+<section id="m3-protected">
+  <h2><span class="n">8e</span>Protected and test environments (M3)</h2>
+  <h3 id="protected">A protected environment</h3>
+  <p class="prose">Set <code>settings: {protected: true}</code> in an environment file and import it with <code>feather config import uat.yaml --env uat --reason "uat is protected"</code>. The status bar then says <b>protected</b> beside the environment, and three things change. <b>Every change needs a reason</b>: a pause, a retry, a role, a secret, a registry, an alert's snooze. The API answers <code>422</code> with <code>"check": "reason_required"</code> when there is none, and changes nothing; the dashboard asks for it on a page that keeps what the form held and sends it again; the CLI takes <code>--reason</code>. Looking (verifying a partition, checking a connection) needs none. <b>A new token is a viewer</b> unless <code>--role</code> asks for more. And <b>compensating a delivery or skipping deliveries waits for a second person</b>, below. What a developer does there is an admin's, as before.</p>
+  <h3 id="second-person">Two people for what can't be taken back</h3>
+  <p class="prose">In a protected environment, <code>feather deliveries compensate</code>, a skip from the dashboard or <code>POST /api/v1/deliveries:skip</code> doesn't act: it is kept as a request, audited as <code>requested</code>, and the API answers <code>202</code> with the request. The <b>Holds</b> page lists it under <b>Asked for</b>, with who asked and why. An approver other than the one who asked approves it, with a reason, and it is done then as it was asked, in the asker's name and with their reason, or rejects it, with a reason, and nothing is done. The asker sees <i>Yours: another approver decides</i>; if they try, the API answers <code>403</code> with <code>"check": "second_person"</code>. Each request is decided once.</p>
+  <div class="scroll"><table>
+    <tr><th>To</th><th>Do</th></tr>
+    <tr><td>See what waits</td><td><code>feather holds requests</code> (<code>--status all</code> for the decided ones too), the Holds page, or <code>GET /api/v1/action-requests?status=waiting</code></td></tr>
+    <tr><td>Approve</td><td><code>feather holds approve-request ID --reason "checked with finance"</code> or <code>POST /api/v1/action-requests/{id}:approve</code> with <code>{"reason": ...}</code></td></tr>
+    <tr><td>Reject</td><td><code>feather holds reject-request ID --reason ...</code> or <code>POST /api/v1/action-requests/{id}:reject</code>; a reason is required</td></tr>
+  </table></div>
+  <h3 id="test-environments">qa and uat on one machine</h3>
+  <p class="prose"><code>deploy/compose.nonprod.yaml</code> runs the two test environments side by side: one Postgres server with a database each, <code>feather_qa</code> and <code>feather_uat</code>, each owned by its own database user that can't open the other's, and a server and a worker per environment, each with its own <code>.env</code>, secret key and port (8180 and 8280). There is no dev environment: developers use <code>feather dev</code>. They share the Postgres server, so a heavy run in qa slows uat. Production runs on its own deployment with <code>deploy/compose.yaml</code>, never here. The Deploying README has the steps.</p>
+  <h3 id="tenants">Tenants</h3>
+  <p class="prose">Every table carries a <code>tenant_id</code> and every key and unique index starts with it, so a store opened for one tenant sees only that tenant's rows; the test suite runs the whole store contract as a second tenant beside the first to prove it. Each tenant's workflows have their own DBOS system schema (<code>dbos</code> for the default tenant, <code>dbos_&lt;tenant&gt;</code> otherwise), its own leader locks, and a worker refuses a task of another tenant. A deployment serves one tenant, <code>default</code>; serving several from one server waits for M9, and may not come.</p>
+</section>
+
 <section id="limits">
   <h2><span class="n">10</span>Not in M1</h2>
   <div class="scroll"><table>

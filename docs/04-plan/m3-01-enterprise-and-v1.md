@@ -109,4 +109,19 @@ Questions for the sponsor, also in the ledger:
 
 ## 5. Where it stands
 
-Planned, 12 Nov 2026. Nothing built yet.
+Planned, 12 Nov 2026. T1, E3 and E4 built on 12 Nov 2026 (branch `feat/m3-dev`); the second PR is next.
+
+- **T1.** A test checks every key and unique index of all 50 tables starts with `tenant_id`, and the store and spool
+  contracts run again as a second tenant, `acme`, beside data in `default`. What the test found and fixed: leader
+  locks were one per name, now one per tenant and name (the default tenant keeps its M1 keys); DBOS queues and
+  workflows shared one system schema, now `dbos_<tenant>` for any tenant but the default; a task carries its tenant and
+  a worker refuses another's; ingress and package push used a fixed tenant. Accepted as they are, since a deployment
+  serves one tenant: day-partition maintenance and the seal lock are shared, and the OAuth token cache is keyed by
+  credentials, not tenant.
+- **E3.** In a protected environment every change needs a reason (API `422 reason_required`, a page that asks for
+  it, `--reason`), new tokens are viewers, and compensating or skipping deliveries is a request a second approver
+  decides (migration 0033, `feather.action_request`; API `/action-requests`, the Holds page, `feather holds
+  requests`). The status bar says protected.
+- **E4.** `deploy/compose.nonprod.yaml` with `nonprod-init.sh` and the three `.env` examples; the databases' isolation
+  was checked on a scratch Postgres (qa's user is refused `connect` on uat's database). Not yet run as a whole: that is
+  Q1's, when access comes.
