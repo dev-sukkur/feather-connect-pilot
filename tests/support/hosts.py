@@ -197,21 +197,30 @@ class HostWorld:
         row = self.store.packages.version(name, version)
         return "missing" if row is None else row.state
 
-    def activate(self, name: str, version: str) -> None:
+    def activate(self, name: str, version: str, flow: str = FLOW) -> None:
         """Ask for the version, as the server's activate does: it is activating until its host says ready."""
-        self.store.packages.activate(f"{name}/{FLOW}", name, version, "ops", datetime.now(UTC))
+        self.store.packages.activate(f"{name}/{flow}", name, version, "ops", datetime.now(UTC))
 
-    def activation(self, name: str, version: str) -> str:
-        found = [a for a in self.store.packages.activations(name, version) if a.flow == f"{name}/{FLOW}"]
+    def activation(self, name: str, version: str, flow: str = FLOW) -> str:
+        found = [a for a in self.store.packages.activations(name, version) if a.flow == f"{name}/{flow}"]
         return found[0].state if found else "missing"
 
-    def active(self, name: str) -> str | None:
+    def active(self, name: str, flow: str = FLOW) -> str | None:
         """The version whose triggers fire, if any."""
-        found = [a.version for a in self.store.packages.active() if a.flow == f"{name}/{FLOW}"]
+        found = [a.version for a in self.store.packages.active() if a.flow == f"{name}/{flow}"]
         return found[0] if found else None
 
-    def deactivate(self, name: str) -> None:
-        self.store.packages.deactivate(f"{name}/{FLOW}", "ops", datetime.now(UTC))
+    def deactivate(self, name: str, flow: str = FLOW) -> None:
+        self.store.packages.deactivate(f"{name}/{flow}", "ops", datetime.now(UTC))
+
+    def ticks(self, name: str, code: str | None = None) -> list[Any]:
+        """The ticks of the poller's stream runs that ran, and of `code` if given, by the rows they delivered."""
+        found = self.conn.execute(
+            "select distinct idempotency_key from hosted.rows where route = %s"
+            + (" and code = %s" if code else ""),
+            (f"{name}/poll-out", code) if code else (f"{name}/poll-out",),
+        ).fetchall()
+        return [r[0] for r in found]
 
     def fail_load(self, version: str) -> None:
         self.conn.execute("insert into hosted.fail_load (code) values (%s)", (version,))

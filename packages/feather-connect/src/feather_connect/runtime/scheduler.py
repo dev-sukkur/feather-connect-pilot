@@ -74,17 +74,24 @@ def _due(trigger: Trigger, last: datetime, now: datetime) -> tuple[list[datetime
             return [], 0
 
 
-def tick(runtime: Runtime, *, now: datetime) -> list[TickResult]:
+def tick(
+    runtime: Runtime, *, now: datetime, streams_of: "set[str] | frozenset[str] | None" = None
+) -> list[TickResult]:
     """Start the runs that are due as of `now`, and return what became of each tick.
 
     A trigger seen for the first time only notes `now`: nothing before the start is made up. The last tick is
     stored before any run is started, so a crash in between loses a tick, which shows in the log, and never repeats
     one. A flow that can't be ticked is logged and left, so the others carry on.
+
+    `streams_of` ticks only the high-frequency pollers of those flows: a package host does so for its active flows,
+    adding their ticks to the day's stream run, while the server's catalogue ticks the others as runs.
     """
     results: list[TickResult] = []
     for flow in runtime.flows():
+        if streams_of is not None and flow.name not in streams_of:
+            continue
         for trigger in flow.triggers:
-            if (tid := trigger_id(trigger)) is None:
+            if (tid := trigger_id(trigger)) is None or (streams_of is not None and not is_stream(trigger)):
                 continue
             try:
                 results += _tick_trigger(runtime, flow, trigger, tid, now)

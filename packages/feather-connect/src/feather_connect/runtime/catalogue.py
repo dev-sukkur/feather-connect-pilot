@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, cast
 
-from feather_connect.core.triggers import Cron, Every, Trigger
+from feather_connect.core.triggers import Cron, Every, Trigger, is_stream
 from feather_connect.packages.webhooks import Webhook, parse_webhooks
 from feather_connect.runtime.scheduler import MAX_CATCH_UP, _due, trigger_id  # pyright: ignore[reportPrivateUsage]
 from feather_connect.storage.port import PackageVersion, Store
@@ -226,7 +226,7 @@ class Catalogue:
                 continue
             for trigger in flow.triggers:
                 tid = trigger_id(trigger)
-                if tid is None:
+                if tid is None or is_stream(trigger):  # a poller's ticks join its stream run, on the host
                     continue
                 try:
                     runs += self._tick(flow, trigger, tid, now)
