@@ -14,7 +14,7 @@ from cronsim import CronSim
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.flow import Flow
 from feather_connect.core.readiness import OnReady
-from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Trigger
+from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Reconcile, Trigger
 from feather_connect.project import ConfigValue, effective_config
 from feather_connect.runtime.retention import kept_days, kept_inbox_days
 from feather_connect.storage.port import (
@@ -140,6 +140,39 @@ class WindowUse:
 class BudgetUse:
     name: str
     windows: tuple[WindowUse, ...]
+
+
+@dataclass(frozen=True)
+class BudgetWindow:
+    """One window of a budget: its limit, what is used of it now, and how much of it `high` work keeps."""
+
+    units: int
+    seconds: int
+    used: float
+    kept_for_high: float
+
+
+@dataclass(frozen=True)
+class BudgetWaiting:
+    """A task that waits for the budget, and the run and flow it is of."""
+
+    task_ref: str
+    run_id: str | None
+    flow: str | None
+    first_at: datetime
+    until: datetime
+    waits: int
+
+
+@dataclass(frozen=True)
+class BudgetDetail:
+    """A budget as the Budgets page shows it (M2 plan 2 O1)."""
+
+    name: str
+    account: str | None
+    reserve: Mapping[str, float]
+    windows: tuple[BudgetWindow, ...]
+    waiting: tuple[BudgetWaiting, ...]
 
 
 @dataclass(frozen=True)
@@ -273,6 +306,8 @@ def _describe(trigger: Trigger) -> str:
             return f"cron {expr} ({tz})"
         case Every(interval):
             return f"every {span(interval)}"  # 15 min, not 0:15:00 (Stage 2 M13)
+        case Reconcile(interval, lookback):
+            return f"reconcile every {span(interval)}, {span(lookback)} back"
         case Manual():
             return "manual"
         case OnEvent(dataset):
@@ -488,6 +523,48 @@ class Reads:
             raise KeyError(f"no budget named {name!r}")
         found = next((b for b in self._budgets() if b.name == name), None)
         return found or BudgetUse(name, ())
+
+    def budget_details(self) -> list[BudgetDetail]:
+        """Every budget of the project with its windows, reserve and the tasks waiting for it."""
+        return [self.budget_detail(name) for name in sorted(self._state.project.budgets)]
+
+    def budget_detail(self, name: str) -> BudgetDetail:
+        """One budget's windows, reserve and waiting tasks. Raises `KeyError` for one the project doesn't define."""
+        spec = self._state.project.budgets.get(name)
+        if spec is None:
+            raise KeyError(f"no budget named {name!r}")
+        high = float(spec.reserve.get("high", 0.0))
+        try:
+            usage = self._store.budgets.usage(name)
+            waits = self._store.budgets.waits(name)
+        except KeyError:  # defined in the project but not in the store yet
+            usage, waits = [], []
+        flows: dict[str, str | None] = {}
+        for wait in waits:
+            if wait.run_id is not None and wait.run_id not in flows:
+                try:
+                    flows[wait.run_id] = self._store.runs.get_run(wait.run_id).flow
+                except KeyError:
+                    flows[wait.run_id] = None
+        return BudgetDetail(
+            name,
+            spec.account,
+            dict(spec.reserve),
+            tuple(
+                BudgetWindow(u.window.units, u.window.seconds, u.used, u.window.units * high) for u in usage
+            ),
+            tuple(
+                BudgetWaiting(
+                    w.task_ref,
+                    w.run_id,
+                    flows.get(w.run_id) if w.run_id else None,
+                    w.first_at,
+                    w.until,
+                    w.waits,
+                )
+                for w in waits
+            ),
+        )
 
     def _kept(self) -> tuple[KeptDay, ...]:
         """Why old days are being kept, worked out here because retention's own report is only on the replica that

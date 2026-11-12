@@ -76,6 +76,8 @@ def test_compensate_needs_a_reason_and_a_side_effect_route(state: AppState):
     assert api.post("/api/v1/routes/acme/sap/deliveries/v2:compensate", json={}).status_code in (400, 422)
     done = api.post("/api/v1/routes/acme/sap/deliveries/v2:compensate", json={"reason": "posted twice"})
     assert done.status_code == 202, done.text  # a packaged route: its host runs the reversal
-    assert next(r.result for r in state.store.audit.list_audit(20) if r.action == "compensate_delivery") == "ok"
+    assert (
+        next(r.result for r in state.store.audit.list_audit(20) if r.action == "compensate_delivery") == "ok"
+    )
     page = sign_in(create_app(state=state, loops=lambda s: [])).get("/routes/acme/sap/deliveries/v2")
     assert page.status_code == 200

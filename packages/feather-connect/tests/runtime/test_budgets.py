@@ -403,3 +403,25 @@ def test_waits_under_contention_stop_doubling_at_the_short_window_that_holds_the
     world.engine.run_until_idle()
     assert world.store.runs.get_run(run).status == "succeeded"  # it never gave up while it fits
     assert world.clock.now() - T0 <= timedelta(minutes=12)  # each wait at most the minute window, not a day
+
+
+def test_a_deferred_task_notes_its_wait_on_the_budget(monkeypatch):  # M2 plan 2 O1, for the Budgets page
+    both = days(1, 2)
+    dataset = by_day_dataset("d", Source("src", rows_on(both, 1)))
+    world = World(
+        BudgetSpec("z", parse_limits(["1/hour"])),
+        [fc.Flow("f", reads=dataset, deliver=[fc.to(MeteredSink("dst"), name="r")])],
+        {"dst": "z"},
+    )
+    noted: list[tuple[str, str, str | None, datetime]] = []
+    real = world.store.budgets.note_wait
+
+    def spy(name: str, task_ref: str, run_id: str | None, until: datetime) -> None:
+        noted.append((name, task_ref, run_id, until))
+        real(name, task_ref, run_id, until)
+
+    monkeypatch.setattr(world.store.budgets, "note_wait", spy)
+    run = world.runtime.start_run("f", partitions=both)
+    world.engine.run_until_idle()
+    assert noted and all(name == "z" and run_id == run for name, _, run_id, _ in noted)
+    assert all(ref.startswith("apply:") for _, ref, _, _ in noted)

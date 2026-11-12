@@ -26,7 +26,14 @@ from feather_connect.core.flow import Flow, RouteSpec
 from feather_connect.engine.port import Engine, RetryPolicy, TaskCall, TaskContext, TaskFn
 from feather_connect.ids import new_id
 from feather_connect.logs import bind, redact
-from feather_connect.runtime.apply import fail_open, oldest_open, replay_gap, run_apply, run_compensate
+from feather_connect.runtime.apply import (
+    fail_open,
+    note_wait,
+    oldest_open,
+    replay_gap,
+    run_apply,
+    run_compensate,
+)
 from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import ExtractFailed, VerifyResult, discard_abandoned, run_extract
@@ -768,7 +775,7 @@ class Runtime:
             flow, dataset = self.flow(args["flow"]), self.dataset(args["dataset"])
             sliced = ctx.step("sliced", lambda: bool(versions.slices_for_run(run_id, dataset.name)))
             extract = lambda: self._extract(flow, dataset, run_id, partition, sliced, tick)
-            found = self._read_through_deferrals(ctx, dataset, extract)
+            found = self._read_through_deferrals(ctx, dataset, extract, run_id)
             if not sliced:
                 ctx.step("submit_applies", lambda: self._submit_applies(flow, run_id, found.version_ids))
             elif ctx.step(
@@ -875,7 +882,9 @@ class Runtime:
         message = redact(str(error))
         ctx.step("failed", lambda: self._finish_task(ctx.task_ref, run_id, "failed", message))
 
-    def _read_through_deferrals[T](self, ctx: TaskContext, dataset: Dataset, read: Callable[[], T]) -> T:
+    def _read_through_deferrals[T](
+        self, ctx: TaskContext, dataset: Dataset, read: Callable[[], T], run_id: str | None = None
+    ) -> T:
         """Run a read as a step, sleeping off each budget deferral, or end it when waiting can't help (design 6.6).
 
         A deferral is a wait, not a failure: the sleep is durable, and uses up no attempt. But a read has no checkpoint,
@@ -914,6 +923,9 @@ class Runtime:
                         "in one go: raise the budget's limit, or read less at a time"
                     ) from deferred
                 wait = max(deferred.wait, min(last * 2, cap))
+                note_wait(
+                    self._deps, ctx.task_ref, run_id, BudgetDeferred(wait, deferred.budget, deferred.taken)
+                )
                 log.warning(
                     "dataset %s: budget %s is used up after %d calls, and the read starts again in %s",
                     dataset.name,

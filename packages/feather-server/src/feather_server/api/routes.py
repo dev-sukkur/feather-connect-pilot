@@ -1300,6 +1300,12 @@ def budgets(reads: See, _: CurrentActor) -> JSONResponse:
     return ok({"items": reads.budgets(), "next_cursor": None})
 
 
+@router.get("/budgets/{name}")
+def budget_detail(name: str, reads: See, _: CurrentActor) -> JSONResponse:
+    """The budget's windows with their use and the share `high` work keeps, and the tasks waiting for it."""
+    return ok(call(lambda: reads.budget_detail(name)))
+
+
 @router.get("/budgets/{name}/usage")
 def budget_usage(name: str, reads: See, _: CurrentActor) -> JSONResponse:
     return ok(call(lambda: reads.budget(name)))

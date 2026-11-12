@@ -61,6 +61,7 @@ def test_openapi_is_3_1_and_lists_every_endpoint(api: TestClient) -> None:
         "/deliveries:skip:preview",
         "/deliveries:replay:preview",
         "/budgets",
+        "/budgets/{name}",
         "/budgets/{name}/usage",
         "/connections",
         "/connections/{name}:check",

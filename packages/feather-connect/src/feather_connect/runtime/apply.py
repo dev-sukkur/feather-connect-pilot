@@ -574,7 +574,23 @@ def _finish(
         _supersede(delivery, plan, deps)
 
 
-def _step_durably[T](ctx: TaskContext, name: str, fn: Callable[[], T], retry: RetryPolicy) -> T:
+def note_wait(deps: RuntimeDeps, task_ref: str, run_id: str | None, deferred: BudgetDeferred) -> None:
+    """Note on the budget that the task waits for it (O1), for the Budgets page. A note that can't be written is
+    logged: it is no reason to stop the work."""
+    try:
+        until = deps.clock.now() + deferred.wait
+        deps.store.budgets.note_wait(deferred.budget, task_ref, run_id, until)
+    except Exception:
+        log.exception("could not note that task %s waits for budget %s", task_ref, deferred.budget)
+
+
+def _step_durably[T](
+    ctx: TaskContext,
+    name: str,
+    fn: Callable[[], T],
+    retry: RetryPolicy,
+    note: Callable[[BudgetDeferred], None] | None = None,
+) -> T:
     """Run a step, and sleep off a budget deferral before running it again.
 
     An error for the engine to retry goes to the engine. On the task's last attempt the engine won't, while a delivery
@@ -591,6 +607,8 @@ def _step_durably[T](ctx: TaskContext, name: str, fn: Callable[[], T], retry: Re
         except PermanentError:
             raise
         except BudgetDeferred as deferred:
+            if note is not None:
+                note(deferred)
             if deferred.wait < _SLEEP_FROM and not last_attempt:
                 raise
             ctx.sleep(deferred.wait)
@@ -739,6 +757,8 @@ def _deliver(
     """Apply one delivery and return True, or return False if it failed or is held, which blocks its partition."""
     version_id = delivery.version_id
     totals: list[_Counts] = []
+    run_id = deps.store.versions.get(version_id).run_id
+    waits = partial(note_wait, deps, ctx.task_ref, run_id)
     try:
         schema = partial(_hold_for_schema, dataset, route, delivery, deps)
         if _step_durably(ctx, f"schema:{version_id}", schema, deps.retry):
@@ -754,7 +774,7 @@ def _deliver(
             _step_durably(ctx, f"maps:{version_id}", sender.check_maps, deps.retry)
         for chunk_no in plan.chunks:
             send = partial(sender.send, chunk_no)
-            totals.append(_step_durably(ctx, f"chunk:{version_id}:{chunk_no}", send, deps.retry))
+            totals.append(_step_durably(ctx, f"chunk:{version_id}:{chunk_no}", send, deps.retry, waits))
     except PermanentError as error:
         message = str(error)
         ctx.step(f"fail:{version_id}", lambda: _fail(delivery, message, deps))

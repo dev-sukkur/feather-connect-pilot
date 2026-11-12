@@ -78,6 +78,7 @@ NAV: list[NavItem] = [
     NavItem("Failures", "/failures", "failures"),
     NavItem("Quarantine", "/quarantine", "quarantine"),
     NavItem("Connections", "/connections", "connections"),
+    NavItem("Budgets", "/budgets", "budgets"),
     NavItem("Secrets", "/secrets", "secrets"),
     NavItem("Users", "/users", "users", needs="users.manage"),
     NavItem("Packages", "/packages", "packages"),
@@ -1813,6 +1814,34 @@ def _holds_page(
         tiles=tiles,
         q=q,
         notice=notice,
+    )
+
+
+BUDGET_HIGH = 0.8  # a window this full shows as a warning
+
+
+@router.get("/budgets", response_class=HTMLResponse)
+def budgets_page(request: Request, actor: CurrentActor) -> HTMLResponse:
+    details = reads(request).budget_details()
+    waiting = sum(len(b.waiting) for b in details)
+    busiest = max((w.used / w.units for b in details for w in b.windows if w.units), default=0.0)
+    tiles = [
+        Tile("Budgets", len(details)),
+        Tile("Tasks waiting", waiting, "warn" if waiting else ""),
+        Tile("Busiest window", f"{busiest:.0%}", "warn" if busiest >= BUDGET_HIGH else ""),
+    ]
+    return render(request, "budgets.html", title="Budgets", actor=actor, budgets=details, tiles=tiles)
+
+
+@router.get("/budgets/{name}", response_class=HTMLResponse)
+def budget_page(name: str, request: Request, actor: CurrentActor) -> HTMLResponse:
+    try:
+        detail = reads(request).budget_detail(name)
+    except KeyError:
+        return _not_found(request, f"No budget is named {name!r}.")
+    tiles = [Tile("Windows", len(detail.windows)), Tile("Tasks waiting", len(detail.waiting))]
+    return render(
+        request, "budgets.html", title=f"Budget {name}", actor=actor, budgets=[detail], tiles=tiles, one=True
     )
 
 

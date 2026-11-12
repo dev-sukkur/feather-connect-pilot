@@ -18,7 +18,7 @@
       <td>{{ r.partition or "all" }}</td>
       <td><span class="state tone-warn"><span class="dot" aria-hidden="true"></span>{{ r.reason or r.kind }}</span></td>
       <td data-col="held">{{ r.held_at or "" }}</td>
-      <td>{% if r.kind == "approval" and actor and can(actor, "holds.decide") %}
+      <td>{% if actor and can(actor, "holds.decide") %}
         <form method="post" action="/holds/decide" class="inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="route" value="{{ r.route }}">

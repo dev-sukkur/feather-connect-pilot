@@ -20,12 +20,14 @@ from feather_connect.storage.port import (
     MAX_ENV_ROWS,
     MAX_PACKAGE_ROWS,
     STREAM_TRIGGER,
+    WAITS_KEPT,
     ActivationState,
     Attempt,
     AuditRow,
     AuditStore,
     BudgetSpec,
     BudgetStore,
+    BudgetWait,
     CatalogStore,
     Delivery,
     DeliveryStatus,
@@ -1107,6 +1109,7 @@ class _Budgets(BudgetStore):
         self._d = data
         self._specs: dict[str, BudgetSpec] = {}
         self._buckets: dict[str, list[_Bucket]] = {}
+        self._waits: dict[tuple[str, str], BudgetWait] = {}
 
     def define(self, spec: BudgetSpec) -> None:
         with self._d.lock:
@@ -1166,6 +1169,26 @@ class _Budgets(BudgetStore):
                 WindowUsage(window, float(window.units - bucket.tokens))
                 for window, bucket in zip(spec.windows, buckets, strict=True)
             ]
+
+    def note_wait(self, name: str, task_ref: str, run_id: str | None, until: datetime) -> None:
+        with self._d.lock:
+            now = self._d.clock.now()
+            for key in [k for k, w in self._waits.items() if w.until < now - WAITS_KEPT]:
+                del self._waits[key]
+            found = self._waits.get((name, task_ref))
+            self._waits[(name, task_ref)] = (
+                BudgetWait(name, task_ref, run_id, now, until, 1)
+                if found is None
+                else replace(found, until=until, waits=found.waits + 1, run_id=run_id or found.run_id)
+            )
+
+    def waits(self, name: str) -> list[BudgetWait]:
+        with self._d.lock:
+            now = self._d.clock.now()
+            return sorted(
+                (w for (budget, _), w in self._waits.items() if budget == name and w.until > now),
+                key=lambda w: (w.until, w.task_ref),
+            )
 
 
 def _latest[R: (FlowRow, RouteRow)](rows: Sequence[R], retired: set[str]) -> list[R]:

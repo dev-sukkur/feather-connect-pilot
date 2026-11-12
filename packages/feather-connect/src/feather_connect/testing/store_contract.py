@@ -896,6 +896,19 @@ class StoreContract(
         assert store.ledger.delivered_routes("d", []) == set()
         assert store.ledger.has_deliveries("d") and not store.ledger.has_deliveries("other")
 
+    def test_a_task_waiting_for_a_budget_is_listed_until_its_wait_ends(
+        self, store: Store, clock: FrozenClock
+    ):
+        store.budgets.note_wait("api", "t1", "r1", clock.now() + timedelta(minutes=5))
+        store.budgets.note_wait("api", "t2", None, clock.now() + timedelta(minutes=2))
+        store.budgets.note_wait("api", "t1", None, clock.now() + timedelta(minutes=10))
+        store.budgets.note_wait("other", "t3", None, clock.now() + timedelta(minutes=10))
+        found = store.budgets.waits("api")
+        assert [(w.task_ref, w.run_id, w.waits) for w in found] == [("t2", None, 1), ("t1", "r1", 2)]
+        assert found[1].until == clock.now() + timedelta(minutes=10) and found[1].first_at == clock.now()
+        clock.advance(timedelta(minutes=3))
+        assert [w.task_ref for w in store.budgets.waits("api")] == ["t1"]
+
     def test_all_applied(self, store: Store):
         assert store.ledger.all_applied()
         seal(store, "v1", ["a"])

@@ -30,11 +30,13 @@ from feather_connect.storage.port import (
     READY_CHANNEL,
     SHARED_TENANT,
     STREAM_TRIGGER,
+    WAITS_KEPT,
     Attempt,
     AuditRow,
     AuditStore,
     BudgetSpec,
     BudgetStore,
+    BudgetWait,
     CatalogStore,
     Delivery,
     DeliveryStatus,
@@ -1816,6 +1818,42 @@ class PostgresBudgets(BudgetStore):
         if not rows:
             raise KeyError(name)
         return [WindowUsage(Window(r["units"], r["seconds"]), float(r["units"] - r["tokens"])) for r in rows]
+
+    def note_wait(self, name: str, task_ref: str, run_id: str | None, until: datetime) -> None:
+        now = self._db.clock.now()
+        with self._db.tx() as conn:
+            conn.execute(
+                "delete from feather.budget_wait where tenant_id = %(tenant)s and until < %(old)s",
+                {"tenant": self._db.tenant, "old": now - WAITS_KEPT},
+            )
+            conn.execute(
+                """insert into feather.budget_wait (tenant_id, budget, task_ref, run_id, first_at, until, waits)
+                   values (%(tenant)s, %(budget)s, %(task)s, %(run)s, %(now)s, %(until)s, 1)
+                   on conflict (tenant_id, budget, task_ref) do update
+                   set until = excluded.until, waits = feather.budget_wait.waits + 1,
+                       run_id = coalesce(excluded.run_id, feather.budget_wait.run_id)""",
+                {
+                    "tenant": self._db.tenant,
+                    "budget": name,
+                    "task": task_ref,
+                    "run": run_id,
+                    "now": now,
+                    "until": until,
+                },
+            )
+
+    def waits(self, name: str) -> list[BudgetWait]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.budget_wait
+                   where tenant_id = %(tenant)s and budget = %(budget)s and until > %(now)s
+                   order by until, task_ref""",
+                {"tenant": self._db.tenant, "budget": name, "now": self._db.clock.now()},
+            ).fetchall()
+        return [
+            BudgetWait(r["budget"], r["task_ref"], r["run_id"], r["first_at"], r["until"], r["waits"])
+            for r in rows
+        ]
 
 
 class _Catalog(CatalogStore):

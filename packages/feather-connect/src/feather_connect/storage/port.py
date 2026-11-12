@@ -903,6 +903,21 @@ def parse_limits(limits: Sequence[str]) -> tuple[Window, ...]:
     return tuple(windows)
 
 
+@dataclass(frozen=True)
+class BudgetWait:
+    """A task that waits for a budget: since `first_at`, `waits` times, now until `until`."""
+
+    budget: str
+    task_ref: str
+    run_id: str | None
+    first_at: datetime
+    until: datetime
+    waits: int
+
+
+WAITS_KEPT = timedelta(days=1)  # how long a wait's row stays after its `until`
+
+
 class BudgetStore(Protocol):
     """Shared rate budgets. Each window refills continuously, as a token bucket, by the store's clock."""
 
@@ -923,6 +938,15 @@ class BudgetStore(Protocol):
         ...
 
     def usage(self, name: str) -> list[WindowUsage]: ...
+
+    def note_wait(self, name: str, task_ref: str, run_id: str | None, until: datetime) -> None:
+        """Note that the task waits for the budget until `until` (M2 plan 2 O1): the first wait of a task makes its
+        row, and each later one moves `until` and counts. Rows a day past their `until` go."""
+        ...
+
+    def waits(self, name: str) -> list[BudgetWait]:
+        """The tasks still waiting for the budget by the store's clock, the soonest to go on first."""
+        ...
 
 
 @dataclass(frozen=True)
