@@ -6,9 +6,9 @@ Compose layout for the test environments, hardening with published results, and 
 fleet view and SSO on 12 Nov 2026 (section 4). M3 ends with the reference chain in the reference organisation's qa/uat and the
 cut-over to prod. The Railway deployment comes after M3.
 
-Requirements: FR-H3 (production protections) and the NFRs as the release checklist checks them. UC-13 is M5 (ADR-0013
-moved full tenancy there). FR-F8 (fleet view), FR-H4 (several environments on one dashboard) and FR-K1's SSO half come
-after v1, not scheduled yet.
+Requirements: FR-H3 (production protections) and the NFRs as the release checklist checks them. UC-13 and full tenancy
+are M9, not planned. FR-F8 (fleet view), FR-H4 (several environments on one dashboard) and FR-K1's SSO half went to M9
+too.
 
 ## 1. What is there already
 
@@ -78,13 +78,13 @@ Each NFR (discovery §8), and how v1.0.0 shows it is met.
 Decided by the sponsor, 12 Nov 2026:
 
 - **No fleet view in v1** (E1, E2 cut). The test environments are used to test, not watched all the time, so one
-  dashboard per environment is enough. FR-F8 and FR-H4 come after v1.
+  dashboard per environment is enough. FR-F8 and FR-H4 go to M9.
 - **No dev environment.** Developers use `feather dev`; the shared test environments are qa and uat, or one of them.
 - **Test environments by layout B, a database each**, not Salesforce-style tenants. With two environments the machine
   is most of the cost. A tenant per process saves only a database, and depends on our tenant filtering with no
-  row-level security behind it; one server and one set of workers for both is most of M5. T1's rule 7 fixes keep that
+  row-level security behind it; one server and one set of workers for both is most of full multi-tenancy, now M9. T1's rule 7 fixes keep that
   step small for later.
-- **No SSO in v1 for now** (S1 cut). Local users and tokens, as today. FR-K1's SSO half comes after v1, not scheduled.
+- **No SSO in v1 for now** (S1 cut). Local users and tokens, as today. FR-K1's SSO half goes to M9.
 - **No restore cleanup stage** (R1 cut). With everything in Postgres, one restore brings chunks, ledger and engine
   state back to the same moment, and deliveries sent again after it are deduplicated by the destination (idempotency
   keys, upserts). P2's restore drill checks it. Marking versions with missing chunks `lost` comes with the

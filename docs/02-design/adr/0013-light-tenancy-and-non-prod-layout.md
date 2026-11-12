@@ -15,7 +15,7 @@ Two questions came up on 8 Nov 2026: is full multi-tenancy needed for v1, and sh
 
 **1. Light multi-tenancy in v1.**
 - v1 keeps the M1 foundation and the single `default` tenant.
-- Full multi-tenancy moves **after v1**, to milestone M5 (set on 9 Nov 2026): choosing the tenant per request and per task, row-level security, per-tenant config, secrets, budgets and roles, quotas, worker pools, a tenant switcher and cross-tenant tests (FR-I2, FR-I3, FR-I4).
+- Full multi-tenancy moves **after v1**, to milestone M5 (set on 9 Nov 2026; moved on 12 Nov 2026 to M9, not planned and maybe never built): choosing the tenant per request and per task, row-level security, per-tenant config, secrets, budgets and roles, quotas, worker pools, a tenant switcher and cross-tenant tests (FR-I2, FR-I3, FR-I4).
 - Serving several customers in v1 means a deployment per customer per environment.
 
 **2. Rules that keep full multi-tenancy cheap to add.** Every builder follows them from now on, and reviews check them:
@@ -29,7 +29,7 @@ Two questions came up on 8 Nov 2026: is full multi-tenancy needed for v1, and sh
 8. Vendor budgets get a scope that can be wider than one tenant, because two tenants may share one vendor account.
    - *How (added 9 Nov 2026, with the Zakya connector):* a budget may name an `account` (for Zakya, `zakya:<organization_id>`; `feather validate` checks it against the connection). The windows of an account live in rows with tenant `*`, migration 0017, shared by every tenant that names that account. This is the one sanctioned cross-tenant row; it holds only counters, never data.
    - Every tenant naming an account must define the same windows; a different definition is refused, naming the other budget only when it is the same tenant's, and nothing is reset.
-   - M5 note: row-level security policies must let the `*` budget rows through, and only an admin path may create or change an account's windows.
+   - Note for full multi-tenancy (M9): row-level security policies must let the `*` budget rows through, and only an admin path may create or change an account's windows.
 
 **3. Production stays on its own; the test environments share one machine (layout B).**
 - Production is always its own deployment, on its own machines, as ADR-0006 says.
