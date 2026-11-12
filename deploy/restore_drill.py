@@ -153,7 +153,7 @@ def drill(keep: bool = False) -> dict[str, Any]:
             try:
                 migrate(url)
                 break
-            except Exception:  # the server of the image's first start goes away once; try again
+            except Exception:  # noqa: BLE001  # the image's first-start server goes away once; try again
                 time.sleep(1)
         else:
             migrate(url)
@@ -223,7 +223,7 @@ def drill(keep: bool = False) -> dict[str, Any]:
         )
         report["ok"] = bool(report["mistake_undone"]) and rto <= RTO_TARGET_S
         return report
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001  # any failure is the drill's finding, reported
         report.update(ok=False, error=str(error))
         return report
     finally:
