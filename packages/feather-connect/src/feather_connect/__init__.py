@@ -21,6 +21,7 @@ from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import PermanentError, RecordRejected, TransientError
 from feather_connect.core.flow import Flow, to
+from feather_connect.core.readiness import on_ready, ready
 from feather_connect.core.records import Record
 from feather_connect.core.transforms import batch_map
 from feather_connect.core.triggers import cron, every, manual, on_event
@@ -50,7 +51,9 @@ __all__ = [
     "every",
     "manual",
     "on_event",
+    "on_ready",
     "partition",
+    "ready",
     "strategy",
     "to",
 ]

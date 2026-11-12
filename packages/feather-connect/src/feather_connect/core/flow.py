@@ -11,6 +11,7 @@ from feather_connect.core.connector import RouteMode, Sink
 from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.partitions import none
+from feather_connect.core.readiness import OnReady, dataset_spec
 from feather_connect.core.records import Record
 from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Trigger, is_stream
 from feather_connect.storage.port import Priority
@@ -165,6 +166,8 @@ def _trigger_dict(trigger: Trigger) -> dict[str, Any]:
             return {"kind": "manual"}
         case OnEvent(dataset):
             return {"kind": "on_event", "dataset": dataset.name}
+        case OnReady():
+            return trigger.spec()
 
 
 class Flow:
@@ -221,6 +224,7 @@ class Flow:
                     "complete": d.strategy.complete,
                     "priority": d.priority,
                     "keep_state": d.keep_state,
+                    **dataset_spec(d),
                     **({"push": push} if (push := push_spec(d)) is not None else {}),
                 }
                 for d in self.datasets

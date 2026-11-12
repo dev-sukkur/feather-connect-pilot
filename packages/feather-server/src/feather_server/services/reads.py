@@ -13,6 +13,7 @@ from cronsim import CronSim
 
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.flow import Flow
+from feather_connect.core.readiness import OnReady
 from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Trigger
 from feather_connect.project import ConfigValue, effective_config
 from feather_connect.runtime.retention import kept_days, kept_inbox_days
@@ -276,6 +277,8 @@ def _describe(trigger: Trigger) -> str:
             return "manual"
         case OnEvent(dataset):
             return f"on events for {dataset.name}"
+        case OnReady(ready=sets, each=each):
+            return f"when {', '.join(sets.datasets)} are ready, each {each}"
 
 
 def _interval(flow: Flow, now: datetime) -> timedelta | None:

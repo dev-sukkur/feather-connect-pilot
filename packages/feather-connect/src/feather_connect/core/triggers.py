@@ -5,6 +5,7 @@ from datetime import timedelta
 from zoneinfo import ZoneInfo
 
 from feather_connect.core.dataset import Dataset
+from feather_connect.core.readiness import OnReady
 from feather_connect.core.strategies import parse_duration
 
 
@@ -35,7 +36,7 @@ class OnEvent:
     dataset: Dataset
 
 
-Trigger = Cron | Every | Manual | OnEvent
+Trigger = Cron | Every | Manual | OnEvent | OnReady
 
 # An interval under this is a high-frequency poller: its ticks are tasks of one daily run, not a run each (design 6.3).
 STREAM_BELOW = timedelta(minutes=5)

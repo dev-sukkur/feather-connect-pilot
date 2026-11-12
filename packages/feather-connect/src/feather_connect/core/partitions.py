@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from itertools import product
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
@@ -303,3 +303,32 @@ def by_bucket(field: str, n: int) -> PartitionScheme:
     if n < 1:
         raise ValueError(f"by_bucket needs at least one bucket, got {n}")
     return _Bucket(field, n)
+
+
+def scheme_spec(scheme: PartitionScheme) -> dict[str, Any]:
+    """The scheme as JSON, for the catalogue: what a server with no package code needs to read partition keys by
+    their fields, such as readiness's store-days (M2 plan 1 §1.1). A scheme of a package's own is `custom`."""
+    match scheme:
+        case _Unpartitioned():
+            return {"kind": "none"}
+        case _Field(field=name):
+            return {"kind": "field", "field": name}
+        case _Day(field=name, zone=zone):
+            return {"kind": "day", "field": name, "tz": zone.key}
+        case _Month(field=name, zone=zone):
+            return {"kind": "month", "field": name, "tz": zone.key}
+        case _Bucket(field=name, n=n):
+            return {"kind": "bucket", "field": name, "n": n}
+        case _Fields(parts=parts):
+            return {"kind": "fields", "parts": [scheme_spec(p) for p in parts]}
+        case _:
+            return {"kind": "custom"}
+
+
+def spec_fields(spec: Mapping[str, Any]) -> list[str]:
+    """The record fields a scheme's spec partitions by, in key order. A bucket's is its hashed field."""
+    if spec.get("kind") == "fields":
+        parts = cast("list[Mapping[str, Any]]", spec.get("parts") or [])
+        return [f for part in parts for f in spec_fields(part)]
+    field = spec.get("field")
+    return [str(field)] if field else []

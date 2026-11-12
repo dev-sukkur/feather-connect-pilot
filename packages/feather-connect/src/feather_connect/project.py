@@ -29,6 +29,8 @@ import yaml
 
 from feather_connect.core.connector import is_unsigned, signature_secret_of
 from feather_connect.core.flow import Flow, Problem, RouteSpec
+from feather_connect.core.readiness import OnReady, readiness_problems
+from feather_connect.core.readiness import prefixed as ready_prefixed
 from feather_connect.core.triggers import OnEvent, Trigger, cron, every, manual
 from feather_connect.storage.port import BudgetSpec, parse_limits
 
@@ -801,7 +803,7 @@ def validate_project(project: Project) -> list[Problem]:
 
     Nothing is run, no connection is opened and no secret is resolved.
     """
-    problems: list[Problem] = []
+    problems: list[Problem] = readiness_problems(project.flows)
     for flow in project.flows:
         problems += [replace(p, path=f"{flow.name}.{p.path}") for p in flow.validate()]
         uses: list[tuple[str, Any]] = [(f"reads[{i}]", d.source) for i, d in enumerate(flow.datasets)]
@@ -867,7 +869,10 @@ def prefixed(flows: Sequence[Flow], package: str) -> tuple[Flow, ...]:
         changed.name = f"{package}/{flow.name}"
         changed.datasets = list(datasets.values())
         changed.routes = routes
-        changed.triggers = tuple(_retargeted(t, datasets) for t in flow.triggers)
+        changed.triggers = tuple(
+            ready_prefixed(t, package) if isinstance(t, OnReady) else _retargeted(t, datasets)
+            for t in flow.triggers
+        )
         found.append(changed)
     return tuple(found)
 
