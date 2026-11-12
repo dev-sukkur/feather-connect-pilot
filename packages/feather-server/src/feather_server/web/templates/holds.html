@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{{ m.page_head("Holds", tiles, "Deliveries that wait for a decision: held for an approver, or by the schema policy. Nothing of a held delivery is applied, and the versions behind it in its partition wait too.") }}
+{{ m.notice_of(notice) }}
+{% call m.toolbar("/holds", q, "holds", columns=[("dataset", "Dataset"), ("held", "Held")], table="holds") %}{% endcall %}
+<div id="live">
+{% if rows %}
+<div class="table-wrap scroll"><table class="data" data-table="holds">
+  <caption class="sr-only">Held deliveries</caption>
+  <thead><tr><th scope="col" data-sort>Route</th><th scope="col" data-sort>Version</th><th scope="col" data-col="dataset" data-sort>Dataset</th><th scope="col" data-sort>Partition</th><th scope="col">Why</th><th scope="col" data-col="held" data-sort>Held</th><th scope="col">Decision</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <th scope="row"><a href="/routes/{{ r.route | urlencode }}">{{ r.route }}</a></th>
+      <td><a href="/versions/{{ r.version_id }}">{{ r.version_id[:12] }}</a></td>
+      <td data-col="dataset">{{ r.dataset }}</td>
+      <td>{{ r.partition or "all" }}</td>
+      <td><span class="state tone-warn"><span class="dot" aria-hidden="true"></span>{{ r.reason or r.kind }}</span></td>
+      <td data-col="held">{{ r.held_at or "" }}</td>
+      <td>{% if actor and can(actor, "holds.decide") %}
+        <form method="post" action="/holds/decide" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="route" value="{{ r.route }}">
+          <input type="hidden" name="version_id" value="{{ r.version_id }}">
+          <label class="sr-only" for="hold-reason-{{ loop.index }}">Reason for {{ r.route }} {{ r.version_id }}</label>
+          <input id="hold-reason-{{ loop.index }}" name="reason" type="text" maxlength="500" placeholder="Reason">
+          <button type="submit" name="decision" value="approve">Approve</button>
+          <button type="submit" name="decision" value="reject">Reject</button>
+        </form>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{{ m.table_foot(rows | length, "hold", "holds") }}
+{% else %}
+<p class="empty">Nothing is held. A route with <code>approval=fc.approval.when(...)</code> holds a delivery here until it is approved.</p>
+{% endif %}
+</div>
+{% endblock %}

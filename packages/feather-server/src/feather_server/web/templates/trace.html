@@ -2,6 +2,7 @@
 {% import "_macros.html" as m with context %}
 {% block content %}
 <h1>{% if trace %}Trace of <code>{{ trace.key }}</code> in {{ trace.dataset }}{% else %}Trace a record{% endif %}</h1>
+{% include "_pii.html" %}
 
 <form class="trace-search" method="get" action="/trace" role="search" aria-label="Trace a record">
   <p>

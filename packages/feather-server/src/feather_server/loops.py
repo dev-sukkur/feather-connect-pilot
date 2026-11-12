@@ -12,11 +12,13 @@ from typing import TYPE_CHECKING
 
 from feather_connect.runtime.catalogue import Catalogue
 from feather_connect.runtime.leader import AlwaysLeader, LeaderLock, leader_key
+from feather_connect.runtime.ready_eval import evaluate as evaluate_readiness
 from feather_connect.runtime.retention import RetentionReport, retention_once
 from feather_connect.runtime.scheduler import tick
 from feather_connect.runtime.sealer import seal_once
 from feather_connect.runtime.sweeper import SweepReport, sweep_once
 from feather_connect.storage.postgres.leader import PostgresLeaderLock
+from feather_server.services.alerts import evaluate_once as evaluate_alerts
 
 if TYPE_CHECKING:
     from feather_server.app import AppState
@@ -25,6 +27,10 @@ log = logging.getLogger(__name__)
 
 _JOIN_S = 30.0
 _NAMED = 5  # items of a list that a log line spells out
+
+
+READY_POLL_S = 10.0  # the readiness loop's poll when NOTIFY wakes it
+ALERTS_POLL_S = 30.0
 
 
 class LoopRunner:
@@ -43,14 +49,20 @@ class LoopRunner:
         self._fn = fn
         self._lock = lock
         self._stopping = threading.Event()
+        self._woken = threading.Event()
         self._thread = threading.Thread(target=self._run, name=f"loop-{name}", daemon=True)
 
     def start(self) -> None:
         self._thread.start()
 
+    def wake(self) -> None:
+        """Run the next pass now rather than at the end of the interval."""
+        self._woken.set()
+
     def stop(self) -> None:
         """Stop after the pass that is running, give up the lock and wait for the thread."""
         self._stopping.set()
+        self._woken.set()
         if self._thread.is_alive():
             self._thread.join(_JOIN_S)
         self._lock.release()  # the thread does so too; if it never started, this is the only release
@@ -62,7 +74,8 @@ class LoopRunner:
                 self.leading = self._lock.try_acquire()
                 if self.leading:
                     self._once()
-                self._stopping.wait(self.interval_s)
+                self._woken.wait(self.interval_s)
+                self._woken.clear()
         finally:
             self._lock.release()
 
@@ -172,10 +185,33 @@ def default_loops(state: "AppState") -> list[LoopRunner]:
     def seal() -> None:
         seal_once(state.runtime, now=state.clock.now())
 
+    def alert() -> None:  # alerts (M2 plan 2 O6): fire, clear and tell the channels
+        report = evaluate_alerts(state)
+        if report.fired or report.cleared or report.failed:
+            log.info(
+                "alerts: %d fired, %d cleared, %d told, %d to retry",
+                len(report.fired),
+                len(report.cleared),
+                len(report.notified),
+                len(report.failed),
+            )
+
+    def ready() -> None:  # readiness (M2 plan 1): fires what is ready, from the catalogue and the store
+        evaluate_readiness(state.store, catalogue.flows(), state.clock.now())
+
+    # Woken by a seal or an applied delivery (NOTIFY feather_ready); the poll is for the clock: a period ending, a
+    # settle passing. Without a database nothing notifies, so it polls as often as it waits for a seal elsewhere.
+    readiness = LoopRunner(
+        "readiness", ready, READY_POLL_S if state.settings.database_url else 2.0, lock("readiness")
+    )
+    state.closers.append(state.store.readiness.listen(readiness.wake))
+
     return [
         LoopRunner("scheduler", schedule, 1.0, lock("scheduler")),
         LoopRunner("sweeper", sweep, 5.0, lock("sweeper")),
         LoopRunner("retention", retain, 3600.0, lock("retention")),
         # Often enough that a batch waits about `max_age` (1 s), and no more than a quarter of that again.
         LoopRunner("sealer", seal, 0.25, lock("sealer")),
+        readiness,
+        LoopRunner("alerts", alert, ALERTS_POLL_S, lock("alerts")),
     ]

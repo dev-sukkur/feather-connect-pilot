@@ -49,7 +49,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - run: uv sync --all-extras
-      - run: uv run pytest packages/feather-connect/tests packages/feather-engine-dbos/tests packages/feather-server/tests packages/feather-cli/tests packages/connectors packages/templates tests/templates tests/e2e tests/dev --cov=feather_connect --cov=feather_engine_dbos --cov=feather_server --cov=feather_cli --cov-fail-under=85
+      - run: uv run pytest packages/feather-connect/tests packages/feather-engine-dbos/tests packages/feather-server/tests packages/feather-cli/tests packages/connectors packages/templates tests/templates tests/demo tests/e2e tests/dev --cov=feather_connect --cov=feather_engine_dbos --cov=feather_server --cov=feather_cli --cov-fail-under=85
 
   # The engine conformance suite starts real worker processes and takes minutes. It runs every night, and on a
   # pull request only when the change touches the engine.

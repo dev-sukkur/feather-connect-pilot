@@ -1,5 +1,6 @@
-"""The roles admin and operator (flow packages design §11 and §14 task 0): one check in the service layer, used alike by
-the API, the dashboard and the CLI; a token's role is capped by its user's; refusals and role changes are audited."""
+"""The roles viewer, operator, developer and admin, and the grants approver and pii-reader (design §13.2, flow packages
+§11, M2 plan 2 O2): one check in the service layer, used alike by the API, the dashboard and the CLI; a token's role is
+capped by its user's; refusals, role and grant changes are audited."""
 
 import re
 from datetime import timedelta
@@ -43,7 +44,7 @@ def _refusals(store: Store) -> list[tuple[str, str, str]]:
 
 
 def test_an_operator_may_not_install_a_package_and_the_refusal_is_audited(store: Store) -> None:
-    with pytest.raises(Forbidden, match="packages.install needs the admin role"):
+    with pytest.raises(Forbidden, match="packages.install needs the developer role"):
         require(OPERATOR, "packages.install", store.audit, "package:shop")
     require(ADMIN, "packages.install", store.audit, "package:shop")
     [row] = [a for a in store.audit.list_audit() if a.action == "packages.install"]
@@ -51,29 +52,77 @@ def test_an_operator_may_not_install_a_package_and_the_refusal_is_audited(store:
         "op",
         "package:shop",
         {"role": "operator"},
-        "refused: needs the admin role",
+        "refused: needs the developer role",
     )
 
 
-def test_the_capabilities_are_split_between_the_two_roles() -> None:
+VIEWER = Actor("human", "vi", "viewer", "vi")
+DEVELOPER = Actor("human", "dev", "developer", "dev")
+
+
+def test_the_capabilities_are_split_between_the_roles_by_design_13_2() -> None:  # M2 plan 2 O2
     admin_only: set[Capability] = {c for c, role in NEEDS.items() if role == "admin"}
-    assert admin_only == {
-        "users.manage",
-        "tokens.manage",
-        "roles.manage",
+    developer: set[Capability] = {c for c, role in NEEDS.items() if role == "developer"}
+    assert admin_only == {"users.manage", "tokens.manage", "roles.manage", "packages.publish"}
+    assert developer == {
         "packages.install",
         "packages.promote",
         "packages.uninstall",
         "registries.manage",
-        "packages.publish",
         "packages.yank",
         "environment.manage",
         "secrets.manage",
+        "alerts.manage",
     }
     assert NEEDS["flows.activate"] == "operator"
-    assert all(NEEDS[c] == "operator" for c in CAPABILITIES.values())  # all M1 actions stay an operator's
-    assert all(can(ADMIN, c) for c in NEEDS) and not any(can(OPERATOR, c) for c in admin_only)
+    granted = {"holds.decide", "pii.unmask"}
+    assert all(
+        NEEDS[c] == "operator" for c in CAPABILITIES.values() if c not in granted
+    )  # M1's stay an operator's
+    assert all(can(ADMIN, c) for c in NEEDS) and not any(can(OPERATOR, c) for c in admin_only | developer)
+    assert all(can(DEVELOPER, c) for c in developer) and not any(can(DEVELOPER, c) for c in admin_only)
+    assert not any(can(VIEWER, c) for c in NEEDS)  # a viewer only sees
     assert lower("admin", "operator") == lower("operator", "admin") == "operator"
+    assert lower("developer", "viewer") == "viewer"
+
+
+def test_a_protected_environment_keeps_a_developers_rights_for_an_admin() -> None:
+    protected = Actor("human", "dev", "developer", "dev", protected=True)
+    assert not can(protected, "environment.manage") and not can(protected, "packages.install")
+    assert can(protected, "runs.start")  # what an operator does stays
+    assert can(Actor("human", "root", "admin", "root", protected=True), "environment.manage")
+
+
+def test_deciding_holds_and_unmasking_need_their_grants(store: Store) -> None:
+    assert not can(OPERATOR, "holds.decide") and not can(OPERATOR, "pii.unmask")
+    approver = Actor("human", "ap", "viewer", "ap", grants=frozenset({"approver"}))
+    assert (
+        can(approver, "holds.decide") and not can(approver, "pii.unmask") and not can(approver, "runs.start")
+    )
+    reader = Actor("human", "pr", "operator", "pr", grants=frozenset({"pii-reader"}))
+    assert can(reader, "pii.unmask") and not can(reader, "holds.decide")
+    assert can(ADMIN, "holds.decide") and can(ADMIN, "pii.unmask")  # an admin, who can grant them anyway
+    with pytest.raises(Forbidden, match="needs the approver grant"):
+        require(OPERATOR, "holds.decide", store.audit, "route:sap")
+    assert _refusals(store) == [("op", "holds.decide", "refused: needs the approver grant")]
+
+
+def test_grants_are_set_audited_and_reach_the_users_tokens(world: World) -> None:
+    accounts = Accounts(world.store, world.clock)
+    accounts.create_user(CLI, "root", "pw")
+    accounts.create_user(CLI, "ann", "pw")
+    assert accounts.set_grants(ADMIN, "ann", ["approver"], reason="month end").grants == ("approver",)
+    with pytest.raises(ValueError, match="not a grant"):
+        accounts.set_grants(ADMIN, "ann", ["boss"])
+    with pytest.raises(Forbidden):
+        accounts.set_grants(OPERATOR, "ann", ["pii-reader"])
+    [row] = [a for a in world.store.audit.list_audit() if a.action == "set_grants" and a.result == "ok"]
+    assert row.request == {"from": [], "to": ["approver"], "reason": "month end"}
+    api = _bearer(world, "operator", "ann")
+    held = api.post(f"{API}/routes/r/deliveries/v:approve", json={})
+    assert held.status_code == 404  # past the check: there is no such delivery, but ann may decide
+    accounts.set_grants(ADMIN, "ann", [])
+    assert api.post(f"{API}/routes/r/deliveries/v:approve", json={}).status_code == 403
 
 
 def test_an_operator_does_what_an_m1_operator_does(world: World) -> None:
@@ -91,8 +140,9 @@ def test_the_first_user_is_an_admin_and_the_next_an_operator(world: World) -> No
     assert accounts.create_user(CLI, "root", "pw").role == "admin"
     assert accounts.create_user(CLI, "ann", "pw").role == "operator"
     assert accounts.create_user(CLI, "bob", "pw", "admin").role == "admin"
+    assert accounts.create_user(CLI, "cy", "pw", "viewer").role == "viewer"
     with pytest.raises(ValueError, match="not a role"):
-        accounts.create_user(CLI, "cy", "pw", "viewer")
+        accounts.create_user(CLI, "dee", "pw", "owner")
 
 
 def test_a_role_change_is_audited_and_the_last_admin_keeps_theirs(world: World) -> None:

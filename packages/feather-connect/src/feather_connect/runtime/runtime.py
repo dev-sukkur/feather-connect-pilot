@@ -18,6 +18,7 @@ from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from feather_connect.clock import Clock, SystemClock
+from feather_connect.core.approval import APPROVED
 from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import BudgetDeferred, PermanentError
@@ -25,7 +26,14 @@ from feather_connect.core.flow import Flow, RouteSpec
 from feather_connect.engine.port import Engine, RetryPolicy, TaskCall, TaskContext, TaskFn
 from feather_connect.ids import new_id
 from feather_connect.logs import bind, redact
-from feather_connect.runtime.apply import fail_open, oldest_open, replay_gap, run_apply
+from feather_connect.runtime.apply import (
+    fail_open,
+    note_wait,
+    oldest_open,
+    replay_gap,
+    run_apply,
+    run_compensate,
+)
 from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import ExtractFailed, VerifyResult, discard_abandoned, run_extract
@@ -235,6 +243,7 @@ class Runtime:
             "feather.extract": self._logged(self._extract_task),
             "feather.seal_run": self._logged(self._seal_task),
             "feather.apply": self._logged(self._apply_task),
+            "feather.compensate": self._logged(self._compensate_task),
         }
 
     def _logged(self, task: TaskFn) -> TaskFn:
@@ -329,8 +338,10 @@ class Runtime:
         partitions: Sequence[str] | None = None,
         reason: str | None = None,
         max_concurrent: int | None = None,
+        params: Mapping[str, Any] | None = None,
     ) -> str:
         """Create a run and submit its plan. `partitions` overrides what would be planned, for a re-run of a slice.
+        `params` go on the run as they are, such as a reconcile's lookback.
 
         `max_concurrent` limits how many of the run's extract tasks are submitted at once, as a backfill needs: the
         plan submits that many, and each extract that ends submits the next.
@@ -342,7 +353,7 @@ class Runtime:
             raise ValueError(f"max_concurrent is {max_concurrent}: it must be at least 1")
         if self.is_flow_paused(flow):
             raise FlowPaused(f"flow {flow!r} is paused{self._pause_note(f'flow:{flow}')}")
-        params: dict[str, Any] = {} if partitions is None else {"partitions": list(partitions)}
+        params = {**(params or {}), **({} if partitions is None else {"partitions": list(partitions)})}
         if max_concurrent is not None:
             params["max_concurrent"] = max_concurrent
         run_id = self._deps.store.runs.create_run(flow, trigger, actor, params, reason=reason)
@@ -585,6 +596,49 @@ class Runtime:
             f"and replaying it would put older data in route {route!r}: replay {latest.version_id} instead"
         )
 
+    def approve(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
+        """Approve a delivery held for approval: it applies as it is, as a new task. `InvalidTransition` unless held."""
+        self._require(route, version_id, "held", "be approved")
+        self._reopen(route, version_id, "pending", actor, f"{APPROVED}: {reason}" if reason else APPROVED)
+
+    def reject(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
+        """Reject a delivery held for approval: it is skipped, and the versions behind it go ahead."""
+        self._require(route, version_id, "held", "be rejected")
+        self._reopen(route, version_id, "skipped", actor, f"rejected: {reason}" if reason else "rejected")
+
+    def compensate(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
+        """Reverse an applied delivery of a side-effect route, as a task on the code of its version (design §6.5).
+        `InvalidTransition` unless it is applied, or when its sink can't compensate."""
+        self._require(route, version_id, "applied", "be compensated")
+        try:
+            spec = self.route(route)
+        except KeyError:
+            spec = None  # a packaged route: its host checks the sink
+        if spec is not None and not spec.sink.spec.side_effect:
+            raise InvalidTransition(f"route {route!r} is not a side-effect route: its sink can't compensate")
+        deps = self._deps
+        delivery = deps.store.ledger.get(route, version_id)
+        run_id = deps.store.versions.get(version_id).run_id
+        ref = f"compensate:{route}:{version_id}"
+        self._open_row(run_id, "compensate", ref, delivery.dataset, delivery.partition, route)
+        self._engine.submit(
+            TaskCall(
+                "feather.compensate",
+                {
+                    "run_id": run_id,
+                    "dataset": delivery.dataset,
+                    "partition": delivery.partition,
+                    "route": route,
+                    "version_id": version_id,
+                    "actor": actor,
+                    "reason": reason,
+                },
+                ref,
+                f"apply:{_TENANT}:{route}:{delivery.partition}",
+                retry=deps.retry,
+            )
+        )
+
     def skip(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
         """Give up on a failed delivery, so that the versions behind it can go ahead."""
         self._reopen(route, version_id, "skipped", actor, reason)
@@ -721,7 +775,7 @@ class Runtime:
             flow, dataset = self.flow(args["flow"]), self.dataset(args["dataset"])
             sliced = ctx.step("sliced", lambda: bool(versions.slices_for_run(run_id, dataset.name)))
             extract = lambda: self._extract(flow, dataset, run_id, partition, sliced, tick)
-            found = self._read_through_deferrals(ctx, dataset, extract)
+            found = self._read_through_deferrals(ctx, dataset, extract, run_id)
             if not sliced:
                 ctx.step("submit_applies", lambda: self._submit_applies(flow, run_id, found.version_ids))
             elif ctx.step(
@@ -763,6 +817,24 @@ class Runtime:
             ctx.step("close", lambda: self._close_delivery(args["route"], version_id, message))
 
         self._tracked(ctx, run_id, body, on_failure=close)
+
+    def _compensate_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
+        run_id = args["run_id"]
+
+        def body() -> None:
+            route, dataset = self.route(args["route"]), self.dataset(args["dataset"])
+            run_compensate(
+                ctx,
+                dataset,
+                route,
+                args["version_id"],
+                self._deps,
+                actor=args["actor"],
+                reason=args.get("reason"),
+            )
+            self._finish_step(ctx, run_id)
+
+        self._tracked(ctx, run_id, body)
 
     def _tracked(
         self,
@@ -810,7 +882,9 @@ class Runtime:
         message = redact(str(error))
         ctx.step("failed", lambda: self._finish_task(ctx.task_ref, run_id, "failed", message))
 
-    def _read_through_deferrals[T](self, ctx: TaskContext, dataset: Dataset, read: Callable[[], T]) -> T:
+    def _read_through_deferrals[T](
+        self, ctx: TaskContext, dataset: Dataset, read: Callable[[], T], run_id: str | None = None
+    ) -> T:
         """Run a read as a step, sleeping off each budget deferral, or end it when waiting can't help (design 6.6).
 
         A deferral is a wait, not a failure: the sleep is durable, and uses up no attempt. But a read has no checkpoint,
@@ -849,6 +923,9 @@ class Runtime:
                         "in one go: raise the budget's limit, or read less at a time"
                     ) from deferred
                 wait = max(deferred.wait, min(last * 2, cap))
+                note_wait(
+                    self._deps, ctx.task_ref, run_id, BudgetDeferred(wait, deferred.budget, deferred.taken)
+                )
                 log.warning(
                     "dataset %s: budget %s is used up after %d calls, and the read starts again in %s",
                     dataset.name,
@@ -965,15 +1042,22 @@ class Runtime:
 
     def _apply_ref(self, delivery: Delivery, run_id: str) -> str:
         """Return the key of the delivery's next apply task: `_apply_key`, and `#n` after it once `n` tasks of it ended
-        because the route was paused, since an engine runs a key only once."""
+        because the route was paused or held it (for an approver, M2 plan 2 A1) and it was let go again, since an
+        engine runs a key only once."""
         base = _apply_key(delivery)
         rows = self._deps.store.runs.tasks_by_ref(run_id, base)
-        held = sum(
+        paused = sum(
             1
             for r in rows
             if r.status == "cancelled" and r.error == _PAUSED and r.ref.partition("#")[0] == base
         )
-        return f"{base}#{held}" if held else base
+        released = sum(
+            1
+            for a in self._deps.store.ledger.attempts(delivery.route, delivery.version_id)
+            if a.from_status == "held" and a.to_status == "pending"
+        )
+        ended = paused + released
+        return f"{base}#{ended}" if ended else base
 
     def _submit_next(self, delivery: Delivery) -> None:
         """Submit what comes next in the delivery's stream, unless that is blocked."""

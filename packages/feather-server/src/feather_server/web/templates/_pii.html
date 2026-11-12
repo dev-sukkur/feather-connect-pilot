@@ -1,0 +1,1 @@
+{% if pii and pii.fields %}<p class="notice pii" role="note">{% if pii.masked %}The PII fields {{ pii.fields | join(", ") }} are masked.{% if pii.may_unmask %} <a href="{{ unmask_href }}">Show them</a> (this is audited).{% endif %}{% else %}The PII fields {{ pii.fields | join(", ") }} are shown as they are; this was audited.{% endif %}</p>{% endif %}

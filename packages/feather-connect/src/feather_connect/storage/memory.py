@@ -5,7 +5,7 @@ import json
 import math
 import threading
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from fractions import Fraction
@@ -17,15 +17,24 @@ from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
     ENV_KINDS,
+    GRANTS,
     MAX_ENV_ROWS,
     MAX_PACKAGE_ROWS,
+    SEVERITIES,
     STREAM_TRIGGER,
+    WAITS_KEPT,
+    AccessGrant,
     ActivationState,
+    AlertRow,
+    AlertRuleRow,
+    AlertState,
+    AlertStore,
     Attempt,
     AuditRow,
     AuditStore,
     BudgetSpec,
     BudgetStore,
+    BudgetWait,
     CatalogStore,
     Delivery,
     DeliveryStatus,
@@ -38,6 +47,7 @@ from feather_connect.storage.port import (
     EnvKind,
     EnvState,
     FailureGroup,
+    Firing,
     FlowActivation,
     FlowRow,
     Grant,
@@ -56,10 +66,12 @@ from feather_connect.storage.port import (
     PackageState,
     PackageStore,
     PackageVersion,
+    PartitionClose,
     PartitionRow,
     Priority,
     QuarantineRow,
     QuarantineStore,
+    ReadinessStore,
     ReadStore,
     RecordStateStore,
     RegistryFile,
@@ -72,6 +84,7 @@ from feather_connect.storage.port import (
     Run,
     RunJournal,
     ScheduleStore,
+    SealedPartition,
     SealedSecret,
     SecretStore,
     SliceFinished,
@@ -169,6 +182,8 @@ class _Data:
         default_factory=dict[tuple[str, str, str], WebhookEvent]
     )  # by (package, webhook, key), in arrival order
     audit: list[AuditRow] = field(default_factory=list[AuditRow])
+    alerts: dict[str, AlertRow] = field(default_factory=dict[str, AlertRow])
+    alert_rules: dict[str, AlertRuleRow] = field(default_factory=dict[str, AlertRuleRow])
     # The key index, by (dataset, key): (version, partition, op, row hash, chunk), in seal order.
     keys: dict[tuple[str, str], list[tuple[str, str, str, int, int]]] = field(
         default_factory=dict[tuple[str, str], list[tuple[str, str, str, int, int]]]
@@ -842,6 +857,37 @@ class _Ledger(Ledger):
         ]
         return found[:limit]
 
+    def latest_before(
+        self,
+        route: str,
+        partition: str,
+        dataset: str,
+        before_seq: int,
+        status: DeliveryStatus | None = "applied",
+    ) -> Delivery | None:
+        with self._d.lock:
+            found = [
+                d
+                for d in self._d.deliveries.values()
+                if d.route == route
+                and d.partition == partition
+                and d.dataset == dataset
+                and (status is None or d.status == status)
+                and d.seal_seq < before_seq
+            ]
+        return max(found, key=lambda d: d.seal_seq, default=None)
+
+    def delivered_routes(self, dataset: str, routes: Sequence[str]) -> set[str]:
+        wanted = set(routes)
+        with self._d.lock:
+            return {
+                d.route for d in self._d.deliveries.values() if d.dataset == dataset and d.route in wanted
+            }
+
+    def has_deliveries(self, dataset: str) -> bool:
+        with self._d.lock:
+            return any(d.dataset == dataset for d in self._d.deliveries.values())
+
     def count_by_status(
         self, routes: Sequence[str], statuses: Sequence[DeliveryStatus]
     ) -> dict[tuple[str, DeliveryStatus], int]:
@@ -1072,6 +1118,7 @@ class _Budgets(BudgetStore):
         self._d = data
         self._specs: dict[str, BudgetSpec] = {}
         self._buckets: dict[str, list[_Bucket]] = {}
+        self._waits: dict[tuple[str, str], BudgetWait] = {}
 
     def define(self, spec: BudgetSpec) -> None:
         with self._d.lock:
@@ -1084,6 +1131,10 @@ class _Budgets(BudgetStore):
             self._specs[spec.name] = spec
             if not shared or spec.key not in self._buckets:
                 self._buckets[spec.key] = [_Bucket(Fraction(w.units), now) for w in spec.windows]
+
+    def specs(self) -> list[BudgetSpec]:
+        with self._d.lock:
+            return sorted(self._specs.values(), key=lambda s: s.name)
 
     def _refilled(self, name: str) -> tuple[BudgetSpec, list[_Bucket]]:
         """Bring the buckets of the budget up to now, and return them."""
@@ -1131,6 +1182,26 @@ class _Budgets(BudgetStore):
                 WindowUsage(window, float(window.units - bucket.tokens))
                 for window, bucket in zip(spec.windows, buckets, strict=True)
             ]
+
+    def note_wait(self, name: str, task_ref: str, run_id: str | None, until: datetime) -> None:
+        with self._d.lock:
+            now = self._d.clock.now()
+            for key in [k for k, w in self._waits.items() if w.until < now - WAITS_KEPT]:
+                del self._waits[key]
+            found = self._waits.get((name, task_ref))
+            self._waits[(name, task_ref)] = (
+                BudgetWait(name, task_ref, run_id, now, until, 1)
+                if found is None
+                else replace(found, until=until, waits=found.waits + 1, run_id=run_id or found.run_id)
+            )
+
+    def waits(self, name: str) -> list[BudgetWait]:
+        with self._d.lock:
+            now = self._d.clock.now()
+            return sorted(
+                (w for (budget, _), w in self._waits.items() if budget == name and w.until > now),
+                key=lambda w: (w.until, w.task_ref),
+            )
 
 
 def _latest[R: (FlowRow, RouteRow)](rows: Sequence[R], retired: set[str]) -> list[R]:
@@ -1326,6 +1397,11 @@ class _Users(UserStore):
     def set_role(self, username: str, role: Role) -> None:
         with self._d.lock:
             self._d.users[username] = replace(self._d.users[username], role=role)
+
+    def set_grants(self, username: str, grants: Sequence[AccessGrant]) -> None:
+        with self._d.lock:
+            kept = tuple(g for g in GRANTS if g in grants)
+            self._d.users[username] = replace(self._d.users[username], grants=kept)
 
     def create_token(
         self,
@@ -1805,6 +1881,94 @@ class _Webhooks(WebhookEventStore):
         return len(old)
 
 
+class _Alerts(AlertStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def _firing(self, rule: str, subject: str) -> AlertRow | None:
+        return next(
+            (a for a in self._d.alerts.values() if (a.rule, a.subject, a.state) == (rule, subject, "firing")),
+            None,
+        )
+
+    def fire(self, rule: str, subject: str, severity: str, message: str) -> tuple[AlertRow, bool]:
+        with self._d.lock:
+            now = self._d.clock.now()
+            found = self._firing(rule, subject)
+            if found is None:
+                row = AlertRow(new_id(), rule, subject, severity, message, "firing", now, now)
+                self._d.alerts[row.alert_id] = row
+                return row, True
+            worse = SEVERITIES.index(severity) > SEVERITIES.index(found.severity)
+            row = replace(
+                found,
+                severity=severity,
+                message=message,
+                last_seen_at=now,
+                notified_at=None if worse else found.notified_at,
+            )
+            self._d.alerts[row.alert_id] = row
+            return row, worse
+
+    def clear(self, rule: str, firing: Collection[str]) -> list[AlertRow]:
+        with self._d.lock:
+            now = self._d.clock.now()
+            cleared: list[AlertRow] = []
+            for a in list(self._d.alerts.values()):
+                if a.rule == rule and a.state == "firing" and a.subject not in firing:
+                    row = replace(a, state="cleared", cleared_at=now)
+                    self._d.alerts[a.alert_id] = row
+                    cleared.append(row)
+            return cleared
+
+    def list_alerts(self, state: AlertState | None = None, limit: int = 100) -> list[AlertRow]:
+        with self._d.lock:
+            rows = [a for a in self._d.alerts.values() if state is None or a.state == state]
+        return sorted(rows, key=lambda a: (a.fired_at, a.alert_id), reverse=True)[:limit]
+
+    def get_alert(self, alert_id: str) -> AlertRow:
+        with self._d.lock:
+            return self._d.alerts[alert_id]
+
+    def _change(self, alert_id: str, **changes: Any) -> AlertRow:
+        with self._d.lock:
+            row = replace(self._d.alerts[alert_id], **changes)
+            self._d.alerts[alert_id] = row
+            return row
+
+    def ack(self, alert_id: str, actor: str) -> AlertRow:
+        return self._change(alert_id, acked_by=actor, acked_at=self._d.clock.now())
+
+    def snooze(self, alert_id: str, until: datetime | None) -> AlertRow:
+        return self._change(alert_id, snoozed_until=until)
+
+    def mark_notified(self, alert_id: str) -> None:
+        self._change(alert_id, notified_at=self._d.clock.now())
+
+    def unnotified(self) -> list[AlertRow]:
+        with self._d.lock:
+            rows = [a for a in self._d.alerts.values() if a.state == "firing" and a.notified_at is None]
+        return sorted(rows, key=lambda a: (a.fired_at, a.alert_id))
+
+    def rules(self) -> list[AlertRuleRow]:
+        with self._d.lock:
+            return sorted(self._d.alert_rules.values(), key=lambda r: r.name)
+
+    def set_rule(
+        self, name: str, enabled: bool, params: Mapping[str, Any], channels: Sequence[str]
+    ) -> AlertRuleRow:
+        with self._d.lock:
+            row = AlertRuleRow(
+                name, enabled, copy.deepcopy(dict(params)), tuple(channels), self._d.clock.now()
+            )
+            self._d.alert_rules[name] = row
+            return row
+
+    def delete_rule(self, name: str) -> None:
+        with self._d.lock:
+            del self._d.alert_rules[name]
+
+
 class _Audit(AuditStore):
     def __init__(self, data: _Data) -> None:
         self._d = data
@@ -1834,11 +1998,25 @@ class _Audit(AuditStore):
             )
             return audit_id
 
-    def list_audit(self, limit: int = 100, cursor: str | None = None) -> list[AuditRow]:
+    def list_audit(
+        self,
+        limit: int = 100,
+        cursor: str | None = None,
+        *,
+        actor: str | None = None,
+        action: str | None = None,
+        target: str | None = None,
+    ) -> list[AuditRow]:
         with self._d.lock:
             rows = sorted(self._d.audit, key=lambda r: r.audit_id, reverse=True)
-        if cursor is not None:
-            rows = [r for r in rows if r.audit_id < cursor]
+        rows = [
+            r
+            for r in rows
+            if (cursor is None or r.audit_id < cursor)
+            and (actor is None or r.actor == actor)
+            and (action is None or r.action == action)
+            and (target is None or (r.target or "").startswith(target))
+        ]
         return rows[:limit]
 
     def for_target(self, target: str, since: datetime | None = None, limit: int = 500) -> list[AuditRow]:
@@ -1934,6 +2112,83 @@ class _Reads(ReadStore):
             return found
 
 
+class _Readiness(ReadinessStore):
+    def __init__(self, data: _Data, runs: RunJournal, inbox: "_Inbox") -> None:
+        self._d = data
+        self._runs = runs
+        self._inbox = inbox
+        self._closes: dict[tuple[str, str], PartitionClose] = {}
+        self._firings: dict[tuple[str, str, str, str, int], Firing] = {}
+
+    def listen(self, callback: Callable[[], None]) -> Callable[[], None]:
+        return lambda: None  # nothing to wake: in one process the evaluator's poll is as quick
+
+    def close(self, dataset: str, partition: str, actor: str, reason: str, at: datetime) -> PartitionClose:
+        with self._d.lock:
+            return self._closes.setdefault(
+                (dataset, partition), PartitionClose(dataset, partition, at, actor, reason)
+            )
+
+    def closes(self, dataset: str, partitions: Sequence[str]) -> dict[str, PartitionClose]:
+        with self._d.lock:
+            return {p: c for p in partitions if (c := self._closes.get((dataset, p))) is not None}
+
+    def fire(self, firing: Firing, params: Mapping[str, Any]) -> str | None:
+        key = (firing.flow, firing.ready_set, firing.period, firing.scope, firing.seq)
+        with self._d.lock:
+            if key in self._firings:
+                return None
+            run_id = self._runs.create_run(firing.flow, "ready", firing.actor, params)
+            self._firings[key] = replace(firing, run_id=run_id)
+            return run_id
+
+    def firings(self, flow: str, ready_set: str | None = None, limit: int = 200) -> list[Firing]:
+        with self._d.lock:
+            found = [
+                f
+                for f in self._firings.values()
+                if f.flow == flow and (ready_set is None or f.ready_set == ready_set)
+            ]
+        found.sort(key=lambda f: (f.fired_at, f.seq), reverse=True)
+        return found[: max(0, min(limit, 1000))]
+
+    def _sealed(self, v: Version) -> SealedPartition:
+        run = self._d.runs[v.run_id]
+        assert v.seal_seq is not None and v.sealed_at is not None
+        return SealedPartition(
+            v.partition, v.version_id, v.seal_seq, v.run_id, run.status, run.created_at, v.sealed_at
+        )
+
+    def _sealed_of(self, dataset: str) -> list[Version]:
+        found = [v for v in self._d.versions.values() if v.dataset == dataset and v.status == "sealed"]
+        return sorted(found, key=lambda v: v.seal_seq or 0)
+
+    def latest_sealed(self, dataset: str, since: datetime) -> dict[str, SealedPartition]:
+        with self._d.lock:
+            versions = self._sealed_of(dataset)
+            recent = {v.partition for v in versions if v.sealed_at is not None and v.sealed_at >= since}
+            return {v.partition: self._sealed(v) for v in versions if v.partition in recent}  # the last wins
+
+    def sealed_since(self, dataset: str, since: datetime) -> list[SealedPartition]:
+        with self._d.lock:
+            return [
+                self._sealed(v)
+                for v in self._sealed_of(dataset)
+                if v.sealed_at is not None and v.sealed_at >= since
+            ]
+
+    def open_deliveries(self, route: str, dataset: str) -> dict[str, int]:
+        found: dict[str, int] = {}
+        with self._d.lock:
+            for d in self._d.deliveries.values():
+                if d.route == route and d.dataset == dataset and d.status not in CLOSED:
+                    found[d.partition] = min(found.get(d.partition, d.seal_seq), d.seal_seq)
+        return found
+
+    def oldest_unsealed(self, dataset: str) -> datetime | None:
+        return self._inbox.oldest_unsealed(dataset)
+
+
 @dataclass
 class _InboxRow:
     event: InboxEvent
@@ -1949,6 +2204,15 @@ class _Inbox(InboxStore):
         self._rows: dict[int, _InboxRow] = {}
         self._seen: dict[tuple[str, str], date] = {}
         self._seq = 0
+
+    def oldest_unsealed(self, dataset: str) -> datetime | None:
+        with self._d.lock:
+            found = [
+                r.event.received_at
+                for r in self._rows.values()
+                if r.event.dataset == dataset and r.sealed_at is None and not r.held
+            ]
+        return min(found, default=None)
 
     def ensure_partitions(self, days_ahead: int = 7) -> None:
         """Memory needs no partitions."""
@@ -2081,8 +2345,9 @@ class MemoryStore(Store):
         data = _Data(clock or SystemClock())
         versions = _Versions(data)
         inbox = _Inbox(data, versions)
+        runs = _Runs(data)
         super().__init__(
-            runs=_Runs(data),
+            runs=runs,
             versions=versions,
             ledger=_Ledger(data),
             state=_State(data),
@@ -2102,4 +2367,6 @@ class MemoryStore(Store):
             env_config=_EnvConfig(data),
             secrets=_Secrets(data),
             webhooks=_Webhooks(data, inbox),
+            readiness=_Readiness(data, runs, inbox),
+            alerts=_Alerts(data),
         )

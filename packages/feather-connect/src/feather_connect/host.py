@@ -57,6 +57,7 @@ from feather_connect.project import (
     use_secret_broker,
 )
 from feather_connect.runtime.runtime import Runtime
+from feather_connect.runtime.scheduler import tick
 from feather_connect.runtime.sealer import seal_once
 from feather_connect.runtime.sweeper import resubmit_lost
 from feather_connect.storage.port import STREAM_TRIGGER, Run, Store, check_wheel
@@ -335,6 +336,8 @@ def run_host(
                         seal_once(
                             runtime, now=datetime.now(UTC)
                         )  # its push datasets: their parse is its code
+                        # Its pollers' ticks are tasks of the day's stream run, not a run each (M2 plan 1 §3).
+                        tick(runtime, now=datetime.now(UTC), streams_of=serving)
                     if time.monotonic() - swept >= SWEEP_EVERY_S:
                         swept = time.monotonic()
                         # A day's stream run holds the versions of its flow's push datasets and pollers, whichever

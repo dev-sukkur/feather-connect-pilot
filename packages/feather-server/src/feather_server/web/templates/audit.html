@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{{ m.page_head("Audit", tiles, "Who did what, newest first: every action an operator, a developer, an admin, a token or the server took, refused ones too, with what was asked and why.") }}
+<form method="get" action="/audit" class="toolbar filters" role="search" aria-label="Filter the audit log">
+  <label for="audit-actor">Actor</label>
+  <input id="audit-actor" name="actor" type="text" value="{{ wanted.actor }}" maxlength="200" placeholder="ann">
+  <label for="audit-action">Action</label>
+  <input id="audit-action" name="action" type="text" value="{{ wanted.action }}" maxlength="200" placeholder="retry">
+  <label for="audit-target">Target starts with</label>
+  <input id="audit-target" name="target" type="text" value="{{ wanted.target }}" maxlength="200" placeholder="route:">
+  <button type="submit">Filter</button>
+  {% if wanted.actor or wanted.action or wanted.target %}<a href="/audit">Clear</a>{% endif %}
+</form>
+<div id="live">
+{% if rows %}
+<div class="table-wrap scroll"><table class="data" data-table="audit">
+  <caption class="sr-only">Audit log</caption>
+  <thead><tr><th scope="col">When</th><th scope="col">Actor</th><th scope="col">Action</th><th scope="col">Target</th><th scope="col">Asked</th><th scope="col">Result</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <th scope="row"><time datetime="{{ r.at.isoformat() }}">{{ r.at | stamp }}</time></th>
+      <td><a href="/audit?actor={{ r.actor | urlencode }}">{{ r.actor }}</a> <span class="muted">{{ r.actor_type }}</span></td>
+      <td><a href="/audit?action={{ r.action | urlencode }}">{{ r.action }}</a></td>
+      <td>{% if r.target %}<a href="/audit?target={{ r.target | urlencode }}">{{ r.target }}</a>{% endif %}</td>
+      <td><code>{{ r.request | tojson }}</code></td>
+      <td>{% if r.result == "ok" %}<span class="state tone-ok"><span class="dot" aria-hidden="true"></span>ok</span>{% else %}<span class="state tone-{{ 'warn' if r.result.startswith('refused') else 'bad' }}"><span class="dot" aria-hidden="true"></span>{{ r.result }}</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% if next_href %}<p><a href="{{ next_href }}">Older</a></p>{% endif %}
+{% else %}
+<p class="empty">Nothing in the audit log matches.</p>
+{% endif %}
+</div>
+{% endblock %}

@@ -5,6 +5,7 @@
 <h1>Delivery of {{ m.partition_label(d.dataset, d.partition) }} to {{ d.route }}</h1>
 <p>{% if run %}<a href="/runs/{{ run | urlencode }}">&larr; The run</a> &middot; {% endif %}<a href="/routes/{{ d.route | urlencode }}/deliveries?partition={{ d.partition | urlencode }}">All deliveries of the partition</a> &middot; <a href="/versions/{{ d.version_id | urlencode }}">What was read</a> &middot; <a href="#h-responses">What the destination answered</a></p>
 
+{{ m.notice_of(notice) }}
 <section aria-labelledby="h-facts">
   <h2 id="h-facts">Delivery</h2>
   <dl class="facts">
@@ -16,6 +17,17 @@
   </dl>
 </section>
 
+{% if d.status == "applied" and actor and can(actor, "deliveries.compensate") %}
+<section aria-labelledby="h-compensate">
+  <h2 id="h-compensate">Compensate</h2>
+  <p class="muted">For a side-effect route, such as postings to SAP: the sink reverses what this delivery applied, chunk by chunk, and the delivery ends compensated. Kept in the audit log.</p>
+  <form method="post" action="/routes/{{ d.route | urlencode }}/deliveries/{{ d.version_id | urlencode }}/compensate">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p><label for="compensate-reason">Reason</label><br><input id="compensate-reason" name="reason" type="text" maxlength="500" required></p>
+    <p><button type="submit">Compensate</button></p>
+  </form>
+</section>
+{% endif %}
 <section aria-labelledby="h-responses">
   <h2 id="h-responses">What the destination answered</h2>
   {% if detail.responses %}

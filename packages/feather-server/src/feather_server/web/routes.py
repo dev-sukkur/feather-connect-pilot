@@ -20,9 +20,11 @@ from fastapi.templating import Jinja2Templates
 from feather_connect.core.errors import PermanentError
 from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.storage.port import (
+    GRANTS,
     ROLES,
     STREAM_TRIGGER,
     DeliveryStatus,
+    InvalidTransition,
     Run,
     delivery_cursor,
     failure_cursor,
@@ -33,6 +35,7 @@ from feather_server.api.paging import decode, encode
 from feather_server.auth import Actor, CurrentActor, csrf_token, current_actor, require_csrf
 from feather_server.catalog_view import dataset_of, route_of
 from feather_server.services import actions as action_limits
+from feather_server.services import alerts, diff, pii
 from feather_server.services.access import Capability, Forbidden, can
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
@@ -71,12 +74,17 @@ NAV: list[NavItem] = [
     NavItem("Flows", "/flows", "flows"),
     NavItem("Runs", "/runs", "runs", ("/tasks",)),
     NavItem("Datasets", "/datasets", "datasets", ("/versions",)),
+    NavItem("Readiness", "/readiness", "readiness"),
     NavItem("Deliveries", "/deliveries", "deliveries", ("/routes",)),
+    NavItem("Holds", "/holds", "holds"),
     NavItem("Failures", "/failures", "failures"),
     NavItem("Quarantine", "/quarantine", "quarantine"),
     NavItem("Connections", "/connections", "connections"),
+    NavItem("Budgets", "/budgets", "budgets"),
     NavItem("Secrets", "/secrets", "secrets"),
     NavItem("Users", "/users", "users", needs="users.manage"),
+    NavItem("Audit", "/audit", "audit", needs="audit.read"),
+    NavItem("Alerts", "/alerts", "alerts"),
     NavItem("Packages", "/packages", "packages"),
     NavItem("Registries", "/registries", "registries"),
     NavItem("Trace a record", "/trace", "trace"),
@@ -1021,6 +1029,10 @@ def task_records(
         return _not_found(request, f"Run {run_id!r} has no task {task_id!r}.")
     except (ApiProblem, ValueError):
         return _bad_cursor(request)
+    shown = _masking(request, actor, found.dataset, f"task:{run_id}/{task_id}")
+    if not isinstance(shown, pii.Masking):
+        return shown
+    found = pii.mask_task_records(found, shown.hidden)
     return render(
         request,
         "task_records.html",
@@ -1031,7 +1043,28 @@ def task_records(
         run_id=run_id,
         next_cursor=encode(found.next_cursor),
         first_page=not cursor,
+        pii=shown,
+        unmask_href=_unmask_href(request),
     )
+
+
+def _masking(request: Request, actor: Actor, dataset: str, target: str) -> "pii.Masking | HTMLResponse":
+    """How a page shows the dataset's PII, `?unmask=1` asking to see it; a refusal is the page answered."""
+    try:
+        return pii.masking(
+            request.app.state.feather,
+            actor,
+            dataset,
+            unmask=request.query_params.get("unmask") == "1",
+            target=target,
+        )
+    except Forbidden as error:
+        return render(request, "error.html", status=403, title="Not allowed", message=str(error))
+
+
+def _unmask_href(request: Request) -> str:
+    query = {k: v for k, v in request.query_params.items() if k != "unmask"}
+    return f"{request.url.path}?{urlencode({**query, 'unmask': '1'})}"
 
 
 @router.get("/tasks/{task_id}/logs", response_class=HTMLResponse)
@@ -1278,7 +1311,34 @@ def delivery_detail(request: Request, actor: CurrentActor, route: str, version_i
         actor=actor,
         detail=detail,
         run=request.query_params.get("run", ""),
+        notice=("ok", "Compensating: the reversal runs as a task.")
+        if request.query_params.get("done") == "compensating"
+        else None,
     )
+
+
+@router.post("/routes/{route:path}/deliveries/{version_id}/compensate", dependencies=[Depends(require_csrf)])
+def delivery_compensate(
+    request: Request, actor: CurrentActor, route: str, version_id: str, reason: Reason = ""
+) -> Response:
+    back = f"/routes/{quote(route, safe='/')}/deliveries/{quote(version_id, safe='')}"
+    try:
+        actions(request).compensate(actor, route, version_id, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No delivery of {version_id!r} to {route!r}.")
+    except (ValueError, InvalidTransition) as error:
+        detail = reads(request).delivery_detail(route, version_id)
+        return render(
+            request,
+            "delivery_detail.html",
+            status=422,
+            title=f"{route} delivery",
+            actor=actor,
+            detail=detail,
+            run="",
+            notice=("bad", str(error)),
+        )
+    return RedirectResponse(f"{back}?done=compensating", status_code=303)
 
 
 # Versions.
@@ -1345,6 +1405,10 @@ def version_detail(
         key = request.app.state.feather.runtime.dataset(version.dataset).key
     except KeyError:
         key = ()
+    shown = _masking(request, actor, version.dataset, f"version:{version_id}")
+    if not isinstance(shown, pii.Masking):
+        return shown
+    records = [dict(r) for r in pii.mask_rows(records, shown.hidden)]
     columns, rows = _record_rows(records, (key,) if isinstance(key, str) else tuple(key))
     return render(
         request,
@@ -1356,6 +1420,44 @@ def version_detail(
         rows=rows,
         next_cursor=encode(next_raw),
         first_page=not cursor,
+        pii=shown,
+        unmask_href=_unmask_href(request),
+    )
+
+
+@router.get("/versions/{version_id}/diff", response_class=HTMLResponse)
+def version_diff(request: Request, actor: CurrentActor, version_id: str, against: str = "") -> HTMLResponse:
+    """What a version added, removed and changed against the partition's one before it, or `against`."""
+    state = request.app.state.feather
+    try:
+        version = state.store.versions.get(version_id)
+    except KeyError:
+        return _not_found(request, f"No version {version_id!r}.")
+    shown = _masking(request, actor, version.dataset, f"version:{version_id}")
+    if not isinstance(shown, pii.Masking):
+        return shown
+    try:
+        found = diff.diff_versions(state, version_id, against or None, hidden=shown.hidden)
+    except KeyError:
+        return _not_found(request, f"No version {against!r}.")
+    except diff.NotComparable as error:
+        return render(request, "error.html", status=422, title="Not comparable", message=str(error))
+    counts = found.counts
+    tiles = [
+        Tile("Added", counts["added"], "ok" if counts["added"] else ""),
+        Tile("Changed", counts["changed"], "warn" if counts["changed"] else ""),
+        Tile("Removed", counts["removed"], "bad" if counts["removed"] else ""),
+        Tile("Unchanged", found.unchanged),
+    ]
+    return render(
+        request,
+        "version_diff.html",
+        title=f"Diff of {version.dataset}",
+        actor=actor,
+        diff=found,
+        tiles=tiles,
+        pii=shown,
+        unmask_href=_unmask_href(request),
     )
 
 
@@ -1365,11 +1467,16 @@ def record_trace(request: Request, actor: CurrentActor, dataset: str = "", key: 
     tracer = Tracer(request.app.state.feather)
     datasets = tracer.datasets()
     found = None
+    shown = None
     if dataset and key:
         try:
             found = tracer.trace(dataset, key)
         except KeyError:
             return _not_found(request, f"No dataset {dataset!r}.")
+        shown = _masking(request, actor, dataset, f"record:{dataset}/{key}")
+        if not isinstance(shown, pii.Masking):
+            return shown
+        found = pii.mask_trace(found, shown.hidden)
     return render(
         request,
         "trace.html",
@@ -1379,6 +1486,8 @@ def record_trace(request: Request, actor: CurrentActor, dataset: str = "", key: 
         dataset=dataset or (datasets[0] if datasets else ""),
         key=key,
         trace=found,
+        pii=shown,
+        unmask_href=_unmask_href(request),
     )
 
 
@@ -1649,7 +1758,7 @@ def _users_page(
     tiles = [
         Tile("Users", len(everyone)),
         Tile("Admins", sum(1 for u in everyone if u.role == "admin")),
-        Tile("Operators", sum(1 for u in everyone if u.role == "operator")),
+        Tile("Approvers", sum(1 for u in everyone if "approver" in u.grants or u.role == "admin")),
     ]
     return render(
         request,
@@ -1661,6 +1770,7 @@ def _users_page(
         tiles=tiles,
         q=q,
         roles=ROLES,
+        grants=GRANTS,
         notice=notice,
     )
 
@@ -1680,6 +1790,21 @@ def set_role(request: Request, actor: CurrentActor, username: str, role: Annotat
     except ValueError as error:
         return _users_page(request, actor, status=422, notice=("bad", str(error)))
     return _users_page(request, actor, notice=("ok", f"{username} is now an {role}."))
+
+
+@router.post("/users/{username}/grants", dependencies=[Depends(require_csrf)])
+async def set_grants(request: Request, actor: CurrentActor, username: str) -> Response:
+    accounts: Accounts = request.app.state.accounts
+    form = await request.form()
+    chosen = [str(g) for g in form.getlist("grant")]
+    try:
+        accounts.set_grants(actor, username, chosen)
+    except KeyError:
+        return _not_found(request, f"No user named {username!r}.")
+    except ValueError as error:
+        return _users_page(request, actor, status=422, notice=("bad", str(error)))
+    said = ", ".join(chosen) if chosen else "no grants"
+    return _users_page(request, actor, notice=("ok", f"{username} has {said} now."))
 
 
 # Datasets and routes: the lists the sidebar's Datasets and Deliveries open.
@@ -1707,6 +1832,296 @@ def datasets(request: Request, actor: CurrentActor) -> HTMLResponse:
         tiles=tiles,
         q=q,
     )
+
+
+_READY_NOTICES = {
+    "closed": "The partition is closed: what waits for it can fire once its last version is sealed."
+}
+
+
+def _readiness_page(
+    request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
+) -> HTMLResponse:
+    sets = actions(request).readiness()
+    q = request.query_params.get("q", "")[:200]
+    rows = [
+        {**row, "flow": s["flow"], "set": s["set"], "each": s["each"], "datasets": s["datasets"]}
+        for s in sets
+        for row in s["periods"]
+        if _matches(q, s["flow"], row["period"], row["scope"], *s["datasets"])
+    ]
+    counts = {
+        state: sum(1 for r in rows if r["state"] == state) for state in ("waiting", "ready", "fired", "late")
+    }
+    tiles = [
+        Tile("Waiting flows", len(sets)),
+        Tile("Waiting", counts["waiting"]),
+        Tile("Fired", counts["fired"]),
+        Tile("Late", counts["late"], "warn" if counts["late"] else ""),
+    ]
+    fired = request.query_params.get("fired")
+    done = request.query_params.get("done")
+    if notice is None and fired:
+        notice = ("ok", f"Fired: run {fired} is queued.")
+    elif notice is None and done in _READY_NOTICES:
+        notice = ("ok", _READY_NOTICES[done])
+    datasets = sorted({d for s in sets for d in s["datasets"]})
+    return render(
+        request,
+        "readiness.html",
+        status=status,
+        title="Readiness",
+        actor=actor,
+        rows=rows,
+        sets=sets,
+        datasets=datasets,
+        tiles=tiles,
+        q=q,
+        notice=notice,
+    )
+
+
+def _holds_page(
+    request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
+) -> HTMLResponse:
+    q = request.query_params.get("q", "")[:200]
+    rows = [
+        h
+        for h in actions(request).holds()
+        if _matches(q, h["route"], h["version_id"], h["dataset"], h["partition"], h["reason"] or "")
+    ]
+    approvals = sum(1 for h in rows if h["kind"] == "approval")
+    tiles = [Tile("Held", len(rows), "warn" if rows else ""), Tile("For approval", approvals)]
+    done = request.query_params.get("done")
+    if notice is None and done in ("approved", "rejected"):
+        word = (
+            "it applies now" if done == "approved" else "it is skipped, and the versions behind it go ahead"
+        )
+        notice = ("ok", f"{done.capitalize()}: {word}.")
+    return render(
+        request,
+        "holds.html",
+        status=status,
+        title="Holds",
+        actor=actor,
+        rows=rows,
+        tiles=tiles,
+        q=q,
+        notice=notice,
+    )
+
+
+def _alerts_page(
+    request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
+) -> HTMLResponse:
+    state = request.app.state.feather
+    shown = request.query_params.get("state", "firing")
+    wanted = shown if shown in ("firing", "cleared") else None
+    rows = state.store.alerts.list_alerts(wanted, 200)  # pyright: ignore[reportArgumentType]
+    now = state.clock.now()
+    firing = state.store.alerts.list_alerts("firing", 1000)
+    tiles = [
+        Tile(
+            "Firing",
+            len(firing),
+            "bad" if any(a.severity == "critical" for a in firing) else "warn" if firing else "",
+        ),
+        Tile("Unacknowledged", sum(1 for a in firing if a.acked_by is None)),
+        Tile("Snoozed", sum(1 for a in firing if a.snoozed_until is not None and a.snoozed_until > now)),
+    ]
+    return render(
+        request,
+        "alerts.html",
+        status=status,
+        title="Alerts",
+        actor=actor,
+        rows=rows,
+        tiles=tiles,
+        shown=shown,
+        now=now,
+        rules=alerts.rules(state),
+        channels=sorted(alerts.channels_of(state)),
+        notice=notice,
+    )
+
+
+@router.get("/alerts", response_class=HTMLResponse)
+def alerts_page(request: Request, actor: CurrentActor) -> HTMLResponse:
+    return _alerts_page(request, actor)
+
+
+@router.post("/alerts/{alert_id}/ack", dependencies=[Depends(require_csrf)])
+def alerts_ack(request: Request, actor: CurrentActor, alert_id: str) -> Response:
+    try:
+        alerts.AlertActions(request.app.state.feather).ack(actor, alert_id)
+    except KeyError:
+        return _not_found(request, f"No alert {alert_id!r}.")
+    except Forbidden as error:
+        return _alerts_page(request, actor, status=403, notice=("bad", str(error)))
+    return _alerts_page(request, actor, notice=("ok", "Acknowledged: its channels hear no more of it."))
+
+
+@router.post("/alerts/{alert_id}/snooze", dependencies=[Depends(require_csrf)])
+def alerts_snooze(
+    request: Request, actor: CurrentActor, alert_id: str, minutes: Annotated[int, Form(ge=0, le=10080)]
+) -> Response:
+    try:
+        alerts.AlertActions(request.app.state.feather).snooze(actor, alert_id, minutes)
+    except KeyError:
+        return _not_found(request, f"No alert {alert_id!r}.")
+    except Forbidden as error:
+        return _alerts_page(request, actor, status=403, notice=("bad", str(error)))
+    except ValueError as error:
+        return _alerts_page(request, actor, status=422, notice=("bad", str(error)))
+    said = f"Snoozed for {minutes} minutes." if minutes else "No longer snoozed."
+    return _alerts_page(request, actor, notice=("ok", said))
+
+
+@router.post("/alerts/rules/{name}", dependencies=[Depends(require_csrf)])
+async def alerts_rule(request: Request, actor: CurrentActor, name: str) -> Response:
+    form = await request.form()
+    channels = [str(c) for c in form.getlist("channel")]
+    defaults = alerts.RULES.get(name, {})
+    params: dict[str, Any] = {}
+    for key, default in defaults.items():
+        raw = str(form.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            params[key] = type(default)(raw) if not isinstance(default, str) else raw
+        except ValueError:
+            return _alerts_page(request, actor, status=422, notice=("bad", f"{key} {raw!r} is not a number."))
+    doing = alerts.AlertActions(request.app.state.feather)
+    try:
+        if form.get("reset"):
+            doing.reset_rule(actor, name)
+        else:
+            doing.set_rule(actor, name, enabled=form.get("enabled") == "on", params=params, channels=channels)
+    except KeyError:
+        return _alerts_page(request, actor, notice=("ok", f"{name} has its default already."))
+    except Forbidden as error:
+        return _alerts_page(request, actor, status=403, notice=("bad", str(error)))
+    except ValueError as error:
+        return _alerts_page(request, actor, status=422, notice=("bad", str(error)))
+    return _alerts_page(request, actor, notice=("ok", f"Rule {name} is saved."))
+
+
+@router.get("/audit", response_class=HTMLResponse)
+def audit_page(request: Request, actor: CurrentActor) -> HTMLResponse:
+    query = request.query_params
+    wanted = {name: query.get(name, "")[:200].strip() for name in ("actor", "action", "target")}
+    cursor = query.get("cursor") or None
+    try:
+        rows, next_cursor = reads(request).audit(
+            actor, actor=wanted["actor"], action=wanted["action"], target=wanted["target"], cursor=cursor
+        )
+    except Forbidden as error:
+        return render(request, "error.html", status=403, title="Not allowed", message=str(error))
+    refused = sum(1 for r in rows if r.result.startswith("refused"))
+    tiles = [Tile("Shown", len(rows)), Tile("Refused", refused, "warn" if refused else "")]
+    later = {k: v for k, v in wanted.items() if v}
+    return render(
+        request,
+        "audit.html",
+        title="Audit",
+        actor=actor,
+        rows=rows,
+        tiles=tiles,
+        wanted=wanted,
+        next_href=f"/audit?{urlencode({**later, 'cursor': next_cursor})}" if next_cursor else None,
+    )
+
+
+BUDGET_HIGH = 0.8  # a window this full shows as a warning
+
+
+@router.get("/budgets", response_class=HTMLResponse)
+def budgets_page(request: Request, actor: CurrentActor) -> HTMLResponse:
+    details = reads(request).budget_details()
+    waiting = sum(len(b.waiting) for b in details)
+    busiest = max((w.used / w.units for b in details for w in b.windows if w.units), default=0.0)
+    tiles = [
+        Tile("Budgets", len(details)),
+        Tile("Tasks waiting", waiting, "warn" if waiting else ""),
+        Tile("Busiest window", f"{busiest:.0%}", "warn" if busiest >= BUDGET_HIGH else ""),
+    ]
+    return render(request, "budgets.html", title="Budgets", actor=actor, budgets=details, tiles=tiles)
+
+
+@router.get("/budgets/{name}", response_class=HTMLResponse)
+def budget_page(name: str, request: Request, actor: CurrentActor) -> HTMLResponse:
+    try:
+        detail = reads(request).budget_detail(name)
+    except KeyError:
+        return _not_found(request, f"No budget is named {name!r}.")
+    tiles = [Tile("Windows", len(detail.windows)), Tile("Tasks waiting", len(detail.waiting))]
+    return render(
+        request, "budgets.html", title=f"Budget {name}", actor=actor, budgets=[detail], tiles=tiles, one=True
+    )
+
+
+@router.get("/holds", response_class=HTMLResponse)
+def holds(request: Request, actor: CurrentActor) -> HTMLResponse:
+    return _holds_page(request, actor)
+
+
+@router.post("/holds/decide", dependencies=[Depends(require_csrf)])
+def holds_decide(
+    request: Request,
+    actor: CurrentActor,
+    route: Annotated[str, Form(max_length=500)],
+    version_id: Annotated[str, Form(max_length=200)],
+    decision: Annotated[str, Form(max_length=10)],
+    reason: Reason = "",
+) -> Response:
+    try:
+        actions(request).decide_hold(
+            actor, route, version_id, approve=decision == "approve", reason=_reason(reason)
+        )
+    except KeyError:
+        return _not_found(request, f"No delivery of {version_id!r} on route {route!r}.")
+    except (ValueError, InvalidTransition) as error:
+        return _holds_page(request, actor, status=422, notice=("bad", str(error)))
+    word = "approved" if decision == "approve" else "rejected"
+    return RedirectResponse(f"/holds?done={word}", status_code=303)
+
+
+@router.get("/readiness", response_class=HTMLResponse)
+def readiness(request: Request, actor: CurrentActor) -> HTMLResponse:
+    return _readiness_page(request, actor)
+
+
+@router.post("/readiness/fire", dependencies=[Depends(require_csrf)])
+def readiness_fire(
+    request: Request,
+    actor: CurrentActor,
+    flow: Annotated[str, Form(max_length=500)],
+    period: Annotated[str, Form(max_length=100)] = "",
+    scope: Annotated[str, Form(max_length=500)] = "",
+    reason: Reason = "",
+) -> Response:
+    try:
+        run_id = actions(request).fire_ready(actor, flow, period=period, scope=scope, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No waiting flow named {flow!r}.")
+    except (ValueError, FlowPaused) as error:
+        return _readiness_page(request, actor, status=422, notice=("bad", str(error)))
+    return RedirectResponse(f"/readiness?{urlencode({'fired': run_id})}", status_code=303)
+
+
+@router.post("/readiness/close", dependencies=[Depends(require_csrf)])
+def readiness_close(
+    request: Request,
+    actor: CurrentActor,
+    dataset: Annotated[str, Form(max_length=500)],
+    partition: Annotated[str, Form(max_length=500)] = "",
+    reason: Reason = "",
+) -> Response:
+    try:
+        actions(request).close_partition(actor, dataset, partition.strip(), reason=_reason(reason))
+    except ValueError as error:
+        return _readiness_page(request, actor, status=422, notice=("bad", str(error)))
+    return RedirectResponse("/readiness?done=closed", status_code=303)
 
 
 @router.get("/deliveries", response_class=HTMLResponse)

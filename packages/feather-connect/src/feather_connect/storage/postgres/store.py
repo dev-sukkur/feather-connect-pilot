@@ -9,7 +9,7 @@ import json
 import logging
 import math
 import threading
-from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from fractions import Fraction
@@ -25,15 +25,25 @@ from feather_connect.core.connector import InboundRequest
 from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
+    GRANTS,
     MAX_ENV_ROWS,
     MAX_PACKAGE_ROWS,
+    READY_CHANNEL,
+    SEVERITIES,
     SHARED_TENANT,
     STREAM_TRIGGER,
+    WAITS_KEPT,
+    AccessGrant,
+    AlertRow,
+    AlertRuleRow,
+    AlertState,
+    AlertStore,
     Attempt,
     AuditRow,
     AuditStore,
     BudgetSpec,
     BudgetStore,
+    BudgetWait,
     CatalogStore,
     Delivery,
     DeliveryStatus,
@@ -46,6 +56,7 @@ from feather_connect.storage.port import (
     EnvKind,
     EnvState,
     FailureGroup,
+    Firing,
     FlowActivation,
     FlowRow,
     Grant,
@@ -64,10 +75,12 @@ from feather_connect.storage.port import (
     PackageState,
     PackageStore,
     PackageVersion,
+    PartitionClose,
     PartitionRow,
     Priority,
     QuarantineRow,
     QuarantineStore,
+    ReadinessStore,
     ReadStore,
     RecordStateStore,
     RegistryFile,
@@ -80,6 +93,7 @@ from feather_connect.storage.port import (
     Run,
     RunJournal,
     ScheduleStore,
+    SealedPartition,
     SealedSecret,
     SecretStore,
     SliceFinished,
@@ -696,6 +710,8 @@ class _Versions(VersionStore):
         if missing := next((v for v in version_ids if v not in found), None):
             raise KeyError(f"no such version: {missing}")  # before sealing any, so it is all or nothing
         now = self._db.clock.now()
+        if any(found[v]["status"] != "sealed" for v in version_ids):  # readiness looks again (M2 plan 1)
+            conn.execute("select pg_notify(%s, %s)", (READY_CHANNEL, self._db.tenant))
         for version_id in version_ids:
             if found[version_id]["status"] == "sealed":
                 continue
@@ -1141,6 +1157,8 @@ class _Ledger(Ledger):
             current = _delivery(row)
             check_transition(current.status, to)
             applied = to == "applied"
+            if to in ("applied", "skipped"):  # what is delivered through moved: readiness looks again
+                conn.execute("select pg_notify(%s, %s)", (READY_CHANNEL, self._db.tenant))
             updated = conn.execute(
                 """update feather.delivery set status = %(to)s, attempts = attempts + %(started)s::int,
                        last_error = case when %(applied)s then null else coalesce(%(error)s, last_error) end,
@@ -1246,6 +1264,53 @@ class _Ledger(Ledger):
                 },
             ).fetchall()
         return [_delivery(r) for r in rows]
+
+    def latest_before(
+        self,
+        route: str,
+        partition: str,
+        dataset: str,
+        before_seq: int,
+        status: DeliveryStatus | None = "applied",
+    ) -> Delivery | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select * from feather.delivery
+                   where tenant_id = %(tenant)s and route = %(route)s and partition = %(partition)s
+                     and dataset = %(dataset)s and seal_seq < %(before)s
+                     and (%(status)s::text is null or status = %(status)s)
+                   order by seal_seq desc limit 1""",
+                {
+                    "tenant": self._db.tenant,
+                    "route": route,
+                    "partition": partition,
+                    "dataset": dataset,
+                    "before": before_seq,
+                    "status": status,
+                },
+            ).fetchone()
+        return None if row is None else _delivery(row)
+
+    def delivered_routes(self, dataset: str, routes: Sequence[str]) -> set[str]:
+        if not routes:
+            return set()
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select r.route from unnest(%(routes)s::text[]) as r(route)
+                   where exists (select 1 from feather.delivery d
+                                 where d.tenant_id = %(tenant)s and d.route = r.route and d.dataset = %(dataset)s)""",
+                {"tenant": self._db.tenant, "routes": list(routes), "dataset": dataset},
+            ).fetchall()
+        return {r["route"] for r in rows}
+
+    def has_deliveries(self, dataset: str) -> bool:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select exists (select 1 from feather.delivery where tenant_id = %(tenant)s and dataset = %(dataset)s)
+                   as found""",
+                {"tenant": self._db.tenant, "dataset": dataset},
+            ).fetchone()
+        return bool(row and row["found"])
 
     def count_by_status(
         self, routes: Sequence[str], statuses: Sequence[DeliveryStatus]
@@ -1761,6 +1826,65 @@ class PostgresBudgets(BudgetStore):
             raise KeyError(name)
         return [WindowUsage(Window(r["units"], r["seconds"]), float(r["units"] - r["tokens"])) for r in rows]
 
+    def specs(self) -> list[BudgetSpec]:
+        with self._db.tx() as conn:
+            budgets = conn.execute(
+                "select name, reserve, account from feather.budget where tenant_id = %s order by name",
+                (self._db.tenant,),
+            ).fetchall()
+            found: list[BudgetSpec] = []
+            for b in budgets:
+                tenant, key = self._owner(b["account"], b["name"])
+                windows = conn.execute(
+                    "select units, seconds from feather.budget_window where tenant_id = %s and name = %s order by idx",
+                    (tenant, key),
+                ).fetchall()
+                found.append(
+                    BudgetSpec(
+                        b["name"],
+                        tuple(Window(w["units"], w["seconds"]) for w in windows),
+                        reserve=dict(_unjson(b["reserve"]) or {}),
+                        account=b["account"],
+                    )
+                )
+        return found
+
+    def note_wait(self, name: str, task_ref: str, run_id: str | None, until: datetime) -> None:
+        now = self._db.clock.now()
+        with self._db.tx() as conn:
+            conn.execute(
+                "delete from feather.budget_wait where tenant_id = %(tenant)s and until < %(old)s",
+                {"tenant": self._db.tenant, "old": now - WAITS_KEPT},
+            )
+            conn.execute(
+                """insert into feather.budget_wait (tenant_id, budget, task_ref, run_id, first_at, until, waits)
+                   values (%(tenant)s, %(budget)s, %(task)s, %(run)s, %(now)s, %(until)s, 1)
+                   on conflict (tenant_id, budget, task_ref) do update
+                   set until = excluded.until, waits = feather.budget_wait.waits + 1,
+                       run_id = coalesce(excluded.run_id, feather.budget_wait.run_id)""",
+                {
+                    "tenant": self._db.tenant,
+                    "budget": name,
+                    "task": task_ref,
+                    "run": run_id,
+                    "now": now,
+                    "until": until,
+                },
+            )
+
+    def waits(self, name: str) -> list[BudgetWait]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.budget_wait
+                   where tenant_id = %(tenant)s and budget = %(budget)s and until > %(now)s
+                   order by until, task_ref""",
+                {"tenant": self._db.tenant, "budget": name, "now": self._db.clock.now()},
+            ).fetchall()
+        return [
+            BudgetWait(r["budget"], r["task_ref"], r["run_id"], r["first_at"], r["until"], r["waits"])
+            for r in rows
+        ]
+
 
 class _Catalog(CatalogStore):
     """The catalogue tables hold a row for each (name, code SHA). The latest registration of a name is current,
@@ -2068,7 +2192,14 @@ class _Users(UserStore):
 
     @staticmethod
     def _user(row: Mapping[str, Any]) -> UserRow:
-        return UserRow(row["user_id"], row["username"], row["password_hash"], row["created_at"], row["role"])
+        return UserRow(
+            row["user_id"],
+            row["username"],
+            row["password_hash"],
+            row["created_at"],
+            row["role"],
+            tuple(g for g in GRANTS if g in (row["grants"] or ())),
+        )
 
     def get_user(self, username: str) -> UserRow | None:
         with self._db.tx() as conn:
@@ -2100,6 +2231,15 @@ class _Users(UserStore):
             changed = conn.execute(
                 "update feather.app_user set role = %s where tenant_id = %s and username = %s",
                 (role, self._db.tenant, username),
+            )
+        if changed.rowcount == 0:
+            raise KeyError(username)
+
+    def set_grants(self, username: str, grants: Sequence[AccessGrant]) -> None:
+        with self._db.tx() as conn:
+            changed = conn.execute(
+                "update feather.app_user set grants = %s where tenant_id = %s and username = %s",
+                ([g for g in GRANTS if g in grants], self._db.tenant, username),
             )
         if changed.rowcount == 0:
             raise KeyError(username)
@@ -2628,27 +2768,7 @@ class _Packages(PackageStore):
         return [self._activation(r) for r in rows]
 
     def listen(self, callback: Callable[[], None]) -> Callable[[], None]:
-        stop = threading.Event()
-        given = self._db.pool.conninfo
-        conninfo = given() if callable(given) else given
-        tenant = self._db.tenant
-
-        def run() -> None:
-            while not stop.is_set():
-                try:
-                    with psycopg.connect(conninfo, autocommit=True) as conn:
-                        conn.execute(sql.SQL("listen {}").format(sql.Identifier(CATALOG_CHANNEL)))
-                        callback()  # anything missed while not listening
-                        while not stop.is_set():
-                            for note in conn.notifies(timeout=1.0, stop_after=1):
-                                if note.payload == tenant:
-                                    callback()
-                except psycopg.Error:
-                    log.warning("listening for catalogue changes failed; trying again", exc_info=True)
-                    stop.wait(5)
-
-        threading.Thread(target=run, name="catalog-listen", daemon=True).start()
-        return stop.set
+        return _listen(self._db, CATALOG_CHANNEL, callback, "catalog-listen")
 
     def prepared(
         self,
@@ -2769,12 +2889,36 @@ class _Audit(AuditStore):
             )
         return audit_id
 
-    def list_audit(self, limit: int = 100, cursor: str | None = None) -> list[AuditRow]:
+    def list_audit(
+        self,
+        limit: int = 100,
+        cursor: str | None = None,
+        *,
+        actor: str | None = None,
+        action: str | None = None,
+        target: str | None = None,
+    ) -> list[AuditRow]:
+        prefix = (
+            None
+            if target is None
+            else target.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        )
         with self._db.tx() as conn:
             rows = conn.execute(
-                """select * from feather.audit where tenant_id = %s and (%s::text is null or audit_id < %s)
-                   order by audit_id desc limit %s""",
-                (self._db.tenant, cursor, cursor, limit),
+                """select * from feather.audit where tenant_id = %(tenant)s
+                     and (%(cursor)s::text is null or audit_id < %(cursor)s)
+                     and (%(actor)s::text is null or actor = %(actor)s)
+                     and (%(action)s::text is null or action = %(action)s)
+                     and (%(target)s::text is null or target like %(target)s)
+                   order by audit_id desc limit %(limit)s""",
+                {
+                    "tenant": self._db.tenant,
+                    "cursor": cursor,
+                    "actor": actor,
+                    "action": action,
+                    "target": prefix,
+                    "limit": limit,
+                },
             ).fetchall()
         return [_audit_row(r) for r in rows]
 
@@ -2787,6 +2931,163 @@ class _Audit(AuditStore):
                 (self._db.tenant, target, since, since, limit),
             ).fetchall()
         return [_audit_row(r) for r in rows]
+
+
+class _Alerts(AlertStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def fire(self, rule: str, subject: str, severity: str, message: str) -> tuple[AlertRow, bool]:
+        now = self._db.clock.now()
+        with self._db.tx() as conn:
+            found = conn.execute(
+                """select * from feather.alert where tenant_id = %s and rule = %s and subject = %s and state = 'firing'
+                   for update""",
+                (self._db.tenant, rule, subject),
+            ).fetchone()
+            if found is None:
+                row = conn.execute(
+                    """insert into feather.alert (tenant_id, alert_id, rule, subject, severity, message, state,
+                                                  fired_at, last_seen_at)
+                       values (%s, %s, %s, %s, %s, %s, 'firing', %s, %s) returning *""",
+                    (self._db.tenant, new_id(), rule, subject, severity, message, now, now),
+                ).fetchone()
+                assert row is not None
+                return _alert_row(row), True
+            worse = SEVERITIES.index(severity) > SEVERITIES.index(found["severity"])
+            row = conn.execute(
+                """update feather.alert set severity = %s, message = %s, last_seen_at = %s,
+                          notified_at = case when %s then null else notified_at end
+                   where tenant_id = %s and alert_id = %s returning *""",
+                (severity, message, now, worse, self._db.tenant, found["alert_id"]),
+            ).fetchone()
+            assert row is not None
+            return _alert_row(row), worse
+
+    def clear(self, rule: str, firing: Collection[str]) -> list[AlertRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """update feather.alert set state = 'cleared', cleared_at = %s
+                   where tenant_id = %s and rule = %s and state = 'firing' and not (subject = any(%s))
+                   returning *""",
+                (self._db.clock.now(), self._db.tenant, rule, list(firing)),
+            ).fetchall()
+        return [_alert_row(r) for r in rows]
+
+    def list_alerts(self, state: AlertState | None = None, limit: int = 100) -> list[AlertRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.alert where tenant_id = %s and (%s::text is null or state = %s)
+                   order by fired_at desc, alert_id desc limit %s""",
+                (self._db.tenant, state, state, limit),
+            ).fetchall()
+        return [_alert_row(r) for r in rows]
+
+    def get_alert(self, alert_id: str) -> AlertRow:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                "select * from feather.alert where tenant_id = %s and alert_id = %s",
+                (self._db.tenant, alert_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(alert_id)
+        return _alert_row(row)
+
+    def _change(
+        self, alert_id: str, acked_by: str | None, snoozed: bool, until: datetime | None, notified: bool
+    ) -> AlertRow:
+        now = self._db.clock.now()
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """update feather.alert set
+                       acked_by = coalesce(%(acked_by)s, acked_by),
+                       acked_at = case when %(acked_by)s::text is null then acked_at else %(now)s end,
+                       snoozed_until = case when %(snoozed)s then %(until)s else snoozed_until end,
+                       notified_at = case when %(notified)s then %(now)s else notified_at end
+                   where tenant_id = %(tenant)s and alert_id = %(alert_id)s returning *""",
+                {
+                    "acked_by": acked_by,
+                    "now": now,
+                    "snoozed": snoozed,
+                    "until": until,
+                    "notified": notified,
+                    "tenant": self._db.tenant,
+                    "alert_id": alert_id,
+                },
+            ).fetchone()
+        if row is None:
+            raise KeyError(alert_id)
+        return _alert_row(row)
+
+    def ack(self, alert_id: str, actor: str) -> AlertRow:
+        return self._change(alert_id, actor, False, None, False)
+
+    def snooze(self, alert_id: str, until: datetime | None) -> AlertRow:
+        return self._change(alert_id, None, True, until, False)
+
+    def mark_notified(self, alert_id: str) -> None:
+        self._change(alert_id, None, False, None, True)
+
+    def unnotified(self) -> list[AlertRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.alert where tenant_id = %s and state = 'firing' and notified_at is null
+                   order by fired_at, alert_id""",
+                (self._db.tenant,),
+            ).fetchall()
+        return [_alert_row(r) for r in rows]
+
+    def rules(self) -> list[AlertRuleRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                "select * from feather.alert_rule where tenant_id = %s order by name", (self._db.tenant,)
+            ).fetchall()
+        return [_rule_row(r) for r in rows]
+
+    def set_rule(
+        self, name: str, enabled: bool, params: Mapping[str, Any], channels: Sequence[str]
+    ) -> AlertRuleRow:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """insert into feather.alert_rule (tenant_id, name, enabled, params, channels, updated_at)
+                   values (%s, %s, %s, %s, %s, %s)
+                   on conflict (tenant_id, name) do update set enabled = excluded.enabled, params = excluded.params,
+                       channels = excluded.channels, updated_at = excluded.updated_at
+                   returning *""",
+                (self._db.tenant, name, enabled, _json(dict(params)), list(channels), self._db.clock.now()),
+            ).fetchone()
+        assert row is not None
+        return _rule_row(row)
+
+    def delete_rule(self, name: str) -> None:
+        with self._db.tx() as conn:
+            gone = conn.execute(
+                "delete from feather.alert_rule where tenant_id = %s and name = %s", (self._db.tenant, name)
+            )
+        if gone.rowcount == 0:
+            raise KeyError(name)
+
+
+def _alert_row(r: Row) -> AlertRow:
+    return AlertRow(
+        r["alert_id"],
+        r["rule"],
+        r["subject"],
+        r["severity"],
+        r["message"],
+        r["state"],
+        r["fired_at"],
+        r["last_seen_at"],
+        r["cleared_at"],
+        r["acked_by"],
+        r["acked_at"],
+        r["snoozed_until"],
+        r["notified_at"],
+    )
+
+
+def _rule_row(r: Row) -> AlertRuleRow:
+    return AlertRuleRow(r["name"], r["enabled"], _unjson(r["params"]), tuple(r["channels"]), r["updated_at"])
 
 
 def _audit_row(r: Row) -> AuditRow:
@@ -3445,6 +3746,182 @@ class _Webhooks(WebhookEventStore):
         return done.rowcount
 
 
+def _listen(db: "_Db", channel: str, callback: Callable[[], None], name: str) -> Callable[[], None]:
+    """Call `callback` on each NOTIFY on `channel` for this tenant, and once each time it starts listening, for what it
+    missed meanwhile; on a dedicated connection, on a daemon thread. Returns what stops it."""
+    stop = threading.Event()
+    given = db.pool.conninfo
+    conninfo = given() if callable(given) else given
+    tenant = db.tenant
+
+    def run() -> None:
+        while not stop.is_set():
+            try:
+                with psycopg.connect(conninfo, autocommit=True) as conn:
+                    conn.execute(sql.SQL("listen {}").format(sql.Identifier(channel)))
+                    callback()  # anything missed while not listening
+                    while not stop.is_set():
+                        for note in conn.notifies(timeout=1.0, stop_after=1):
+                            if note.payload == tenant:
+                                callback()
+            except psycopg.Error:
+                log.warning("listening on %s failed; trying again", channel, exc_info=True)
+                stop.wait(5)
+
+    threading.Thread(target=run, name=name, daemon=True).start()
+    return stop.set
+
+
+class _Readiness(ReadinessStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def listen(self, callback: Callable[[], None]) -> Callable[[], None]:
+        return _listen(self._db, READY_CHANNEL, callback, "ready-listen")
+
+    def close(self, dataset: str, partition: str, actor: str, reason: str, at: datetime) -> PartitionClose:
+        with self._db.tx() as conn:
+            conn.execute(
+                """insert into feather.readiness_close (tenant_id, dataset, partition, closed_at, closed_by, reason)
+                   values (%s, %s, %s, %s, %s, %s) on conflict do nothing""",
+                (self._db.tenant, dataset, partition, at, actor, reason),
+            )
+            row = conn.execute(
+                """select * from feather.readiness_close where tenant_id = %s and dataset = %s and partition = %s""",
+                (self._db.tenant, dataset, partition),
+            ).fetchone()
+            conn.execute("select pg_notify(%s, %s)", (READY_CHANNEL, self._db.tenant))
+        assert row is not None
+        return _close(row)
+
+    def closes(self, dataset: str, partitions: Sequence[str]) -> dict[str, PartitionClose]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.readiness_close
+                   where tenant_id = %s and dataset = %s and partition = any(%s)""",
+                (self._db.tenant, dataset, list(partitions)),
+            ).fetchall()
+        return {r["partition"]: _close(r) for r in rows}
+
+    def fire(self, firing: Firing, params: Mapping[str, Any]) -> str | None:
+        run_id = new_id()
+        now = self._db.clock.now()
+        with self._db.tx() as conn:
+            done = conn.execute(
+                """insert into feather.readiness_firing (tenant_id, flow, ready_set, period, scope, seq, reason,
+                       versions, fired_at, actor, run_id)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) on conflict do nothing""",
+                (
+                    self._db.tenant,
+                    firing.flow,
+                    firing.ready_set,
+                    firing.period,
+                    firing.scope,
+                    firing.seq,
+                    firing.reason,
+                    _json(dict(firing.versions)),
+                    firing.fired_at,
+                    firing.actor,
+                    run_id,
+                ),
+            )
+            if done.rowcount == 0:
+                return None
+            conn.execute(
+                """insert into feather.run (tenant_id, run_id, flow, trigger, actor, params, status, reason,
+                                            created_at, updated_at)
+                   values (%s, %s, %s, 'ready', %s, %s, 'queued', null, %s, %s)""",
+                (self._db.tenant, run_id, firing.flow, firing.actor, _json(dict(params)), now, now),
+            )
+        return run_id
+
+    def firings(self, flow: str, ready_set: str | None = None, limit: int = 200) -> list[Firing]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.readiness_firing
+                   where tenant_id = %s and flow = %s and (%s::text is null or ready_set = %s)
+                   order by fired_at desc, seq desc limit %s""",
+                (self._db.tenant, flow, ready_set, ready_set, max(0, min(limit, 1000))),
+            ).fetchall()
+        return [
+            Firing(
+                r["flow"],
+                r["ready_set"],
+                r["period"],
+                r["scope"],
+                r["seq"],
+                r["reason"],
+                _unjson(r["versions"]),
+                r["fired_at"],
+                r["actor"],
+                r["run_id"],
+            )
+            for r in rows
+        ]
+
+    def latest_sealed(self, dataset: str, since: datetime) -> dict[str, SealedPartition]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                f"""select distinct on (v.partition) * from ({_SEALED}
+                        where v.tenant_id = %(t)s and v.dataset = %(d)s and v.status = 'sealed'
+                          and v.partition in (select partition from feather.version
+                                              where tenant_id = %(t)s and dataset = %(d)s and status = 'sealed'
+                                                and sealed_at >= %(since)s)) v
+                    order by v.partition, v.seal_seq desc""",
+                {"t": self._db.tenant, "d": dataset, "since": since},
+            ).fetchall()
+        return {r["partition"]: _sealed(r) for r in rows}
+
+    def sealed_since(self, dataset: str, since: datetime) -> list[SealedPartition]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                f"""{_SEALED} where v.tenant_id = %s and v.dataset = %s and v.status = 'sealed' and v.sealed_at >= %s
+                    order by v.seal_seq""",
+                (self._db.tenant, dataset, since),
+            ).fetchall()
+        return [_sealed(r) for r in rows]
+
+    def open_deliveries(self, route: str, dataset: str) -> dict[str, int]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select partition, min(seal_seq) as seq from feather.delivery
+                   where tenant_id = %s and route = %s and dataset = %s and status <> all(%s)
+                   group by partition""",
+                (self._db.tenant, route, dataset, sorted(CLOSED)),
+            ).fetchall()
+        return {r["partition"]: r["seq"] for r in rows}
+
+    def oldest_unsealed(self, dataset: str) -> datetime | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select min(received_at) as at from feather.inbox
+                   where tenant_id = %s and dataset = %s and sealed_at is null and held_at is null""",
+                (self._db.tenant, dataset),
+            ).fetchone()
+        return None if row is None else row["at"]
+
+
+_SEALED = """select v.partition, v.version_id, v.seal_seq, v.run_id, v.sealed_at, r.status as run_status,
+                     r.created_at as run_created_at
+              from feather.version v join feather.run r on r.tenant_id = v.tenant_id and r.run_id = v.run_id"""
+
+
+def _sealed(r: Row) -> SealedPartition:
+    return SealedPartition(
+        r["partition"],
+        r["version_id"],
+        r["seal_seq"],
+        r["run_id"],
+        r["run_status"],
+        r["run_created_at"],
+        r["sealed_at"],
+    )
+
+
+def _close(r: Row) -> PartitionClose:
+    return PartitionClose(r["dataset"], r["partition"], r["closed_at"], r["closed_by"], r["reason"])
+
+
 class PostgresStore(Store):
     """A `Store` that keeps everything in Postgres, for one tenant. `clock` defaults to the system clock."""
 
@@ -3476,6 +3953,8 @@ class PostgresStore(Store):
             env_config=_EnvConfig(db),
             secrets=_Secrets(db),
             webhooks=_Webhooks(db, inbox),
+            readiness=_Readiness(db),
+            alerts=_Alerts(db),
         )
         object.__setattr__(self, "_pool", pool)  # `Store` is frozen
         object.__setattr__(self, "_db", db)

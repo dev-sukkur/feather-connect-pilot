@@ -27,6 +27,7 @@ from feather_server.api.errors import ApiProblem, translate
 from feather_server.api.paging import check_limit, decode, page
 from feather_server.auth import Actor, CurrentActor, require_csrf
 from feather_server.catalog_view import dataset_of, route_of
+from feather_server.services import alerts, diff, pii
 from feather_server.services import task_records as records
 from feather_server.services.access import require
 from feather_server.services.accounts import Accounts
@@ -46,6 +47,12 @@ _MAX_KEY = 200
 router = APIRouter(prefix=PREFIX, tags=["api"], dependencies=[Depends(require_csrf)])
 
 Limit = Annotated[int, Query(description="Items on a page, from 1 to 500.")]
+Unmask = Annotated[
+    bool,
+    Query(
+        description="Show the dataset's PII fields as they are: needs the pii-reader grant, and is audited."
+    ),
+]
 Cursor = Annotated[str | None, Query(description="The `next_cursor` of the page before.")]
 IdempotencyKey = Annotated[str | None, Header(alias="Idempotency-Key")]
 
@@ -246,6 +253,16 @@ def flows(reads: See, _: CurrentActor) -> JSONResponse:
     return ok({"items": reads.flows(), "next_cursor": None})
 
 
+@router.get("/readiness")
+def readiness(actions: Do, _: CurrentActor) -> JSONResponse:
+    return ok(call(lambda: {"sets": actions.readiness()}))
+
+
+@router.get("/flows/{flow:path}/readiness")
+def flow_readiness(flow: str, actions: Do, _: CurrentActor) -> JSONResponse:
+    return ok(call(lambda: {"sets": actions.readiness(flow)}))
+
+
 @router.get("/flows/{flow:path}")
 def flow(flow: str, reads: See, _: CurrentActor) -> JSONResponse:
     return ok(call(lambda: reads.flow_detail(flow)))
@@ -368,10 +385,11 @@ def task_records(
     run_id: str,
     task_id: str,
     request: Request,
-    _: CurrentActor,
+    who: CurrentActor,
     limit: Annotated[int, Query(description="Records on a page, from 1 to 500.")] = records.PAGE,
     cursor: Cursor = None,
     q: Annotated[str, Query(description="Only the keys that start with this.")] = "",
+    unmask: Unmask = False,
 ) -> JSONResponse:
     """The records of an extract task's versions, or of an apply task's version with what its route made of each, a
     page at a time by key. `not_indexed` says the version was sealed before records were indexed."""
@@ -386,8 +404,12 @@ def task_records(
             raise ApiProblem(
                 422, "Unprocessable Content", "this cursor is not one this server handed out"
             ) from None
+        state = request.app.state.feather
+        shown = pii.masking(state, who, found.dataset, unmask=unmask, target=f"task:{run_id}/{task_id}")
+        found = pii.mask_task_records(found, shown.hidden)
         return {
             **records.as_json(found),
+            **pii.as_json(shown),
             **page([records.item_json(r) for r in found.records], found.next_cursor),
         }
 
@@ -416,6 +438,116 @@ def run_flow(
         lambda: {"run_id": actions.run_flow(actor, flow, reason=wanted.reason, partitions=wanted.partitions)},
         202,
     )
+
+
+class FireBody(Reason):
+    period: str = ""
+    scope: str = ""
+
+
+@router.post("/flows/{flow:path}/readiness:fire", status_code=202)
+def fire_ready(
+    flow: str,
+    request: Request,
+    actions: Do,
+    actor: CurrentActor,
+    body: FireBody,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    return _once(
+        request,
+        actor,
+        key,
+        lambda: {
+            "run_id": actions.fire_ready(
+                actor, flow, period=body.period, scope=body.scope, reason=body.reason
+            )
+        },
+        202,
+    )
+
+
+@router.post("/datasets/{dataset:path}/partitions/{partition:path}:close")
+def close_partition(
+    dataset: str,
+    partition: str,
+    request: Request,
+    actions: Do,
+    actor: CurrentActor,
+    body: Reason,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    def close() -> dict[str, Any]:
+        found = actions.close_partition(actor, dataset, partition, reason=body.reason)
+        return {
+            "dataset": found.dataset,
+            "partition": found.partition,
+            "closed_at": found.closed_at.isoformat(),
+            "closed_by": found.closed_by,
+            "reason": found.reason,
+        }
+
+    return _once(request, actor, key, close)
+
+
+@router.get("/holds")
+def holds(actions: Do, _: CurrentActor, route: str | None = None) -> JSONResponse:
+    return ok(call(lambda: {"holds": actions.holds(route)}))
+
+
+def _decide(
+    request: Request, actions: Do, actor: Actor, key: str | None, route: str, version_id: str, *, approve: bool,
+    reason: str | None,
+) -> JSONResponse:  # fmt: skip
+    def decide() -> dict[str, Any]:
+        actions.decide_hold(actor, route, version_id, approve=approve, reason=reason)
+        return {"route": route, "version_id": version_id, "status": "pending" if approve else "skipped"}
+
+    return _once(request, actor, key, decide)
+
+
+@router.post("/routes/{route:path}/deliveries/{version_id}:approve")
+def approve_delivery(
+    route: str,
+    version_id: str,
+    request: Request,
+    actions: Do,
+    actor: CurrentActor,
+    key: IdempotencyKey = None,
+    body: Reason | None = None,
+) -> JSONResponse:
+    reason = (body or Reason()).reason
+    return _decide(request, actions, actor, key, route, version_id, approve=True, reason=reason)
+
+
+@router.post("/routes/{route:path}/deliveries/{version_id}:reject")
+def reject_delivery(
+    route: str,
+    version_id: str,
+    request: Request,
+    actions: Do,
+    actor: CurrentActor,
+    body: Reason,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    return _decide(request, actions, actor, key, route, version_id, approve=False, reason=body.reason)
+
+
+@router.post("/routes/{route:path}/deliveries/{version_id}:compensate", status_code=202)
+def compensate_delivery(
+    route: str,
+    version_id: str,
+    request: Request,
+    actions: Do,
+    actor: CurrentActor,
+    body: Reason,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    def do() -> dict[str, Any]:
+        actions.compensate(actor, route, version_id, reason=body.reason)
+        return {"route": route, "version_id": version_id, "status": "compensating"}
+
+    return _once(request, actor, key, do, 202)
 
 
 @router.post("/runs/{run_id}:cancel")
@@ -573,7 +705,9 @@ def backfill(
 # Versions.
 
 
-def _version_records(request: Request, version_id: str, limit: int, cursor: str | None) -> dict[str, Any]:
+def _version_records(
+    request: Request, who: Actor, version_id: str, limit: int, cursor: str | None, unmask: bool
+) -> dict[str, Any]:
     reads: Reads = request.app.state.reads
     try:
         version, records, next_raw = reads.version_records(version_id, limit, cursor)
@@ -581,7 +715,13 @@ def _version_records(request: Request, version_id: str, limit: int, cursor: str 
         raise ApiProblem(
             422, "Unprocessable Content", "this cursor is not one this server handed out"
         ) from None
-    return {"version_id": version.version_id, "masked": False, **page(records, next_raw)}
+    state = request.app.state.feather
+    shown = pii.masking(state, who, version.dataset, unmask=unmask, target=f"version:{version_id}")
+    return {
+        "version_id": version.version_id,
+        **pii.as_json(shown),
+        **page(pii.mask_rows(records, shown.hidden), next_raw),
+    }
 
 
 @router.get("/versions/{version_id}")
@@ -591,20 +731,62 @@ def version(version_id: str, request: Request, _: CurrentActor) -> JSONResponse:
 
 @router.get("/versions/{version_id}/records")
 def version_records(
-    version_id: str, request: Request, _: CurrentActor, limit: Limit = 100, cursor: Cursor = None
+    version_id: str,
+    request: Request,
+    who: CurrentActor,
+    limit: Limit = 100,
+    cursor: Cursor = None,
+    unmask: Unmask = False,
 ) -> JSONResponse:
-    """The version's records, a page at a time. Masking comes in M2: until then `masked` is false."""
-    return ok(call(lambda: _version_records(request, version_id, check_limit(limit), decode(cursor))))
+    """The version's records, a page at a time, the dataset's PII fields masked unless `unmask` is asked for."""
+    return ok(
+        call(lambda: _version_records(request, who, version_id, check_limit(limit), decode(cursor), unmask))
+    )
+
+
+@router.get("/versions/{version_id}/diff")
+def version_diff(
+    version_id: str,
+    request: Request,
+    who: CurrentActor,
+    against: Annotated[
+        str | None,
+        Query(description="The version to compare with; the partition's one before, if not given."),
+    ] = None,
+    unmask: Unmask = False,
+) -> JSONResponse:
+    """The keys this version added, removed and changed against another of its partition, with the changed fields."""
+
+    def read() -> dict[str, Any]:
+        state = request.app.state.feather
+        version = state.store.versions.get(version_id)
+        shown = pii.masking(state, who, version.dataset, unmask=unmask, target=f"version:{version_id}")
+        try:
+            found = diff.diff_versions(state, version_id, against, hidden=shown.hidden)
+        except diff.NotComparable as error:
+            raise ApiProblem(422, "Unprocessable Content", str(error)) from None
+        return {**diff.as_json(found), **pii.as_json(shown)}
+
+    return ok(call(read))
 
 
 # Tracing a record.
 
 
 @router.get("/datasets/{dataset:path}/records/{key:path}/trace")
-def record_trace(dataset: str, key: str, request: Request, _: CurrentActor) -> JSONResponse:
+def record_trace(
+    dataset: str, key: str, request: Request, who: CurrentActor, unmask: Unmask = False
+) -> JSONResponse:
     """What happened to one record, by its dataset key: each version that held it, oldest first, with what each route
-    did with it. Only versions sealed since the key index came in are traced."""
-    return ok(call(lambda: as_json(Tracer(request.app.state.feather).trace(dataset, key))))
+    did with it. Only versions sealed since the key index came in are traced. PII fields are masked unless `unmask`."""
+
+    def read() -> dict[str, Any]:
+        state = request.app.state.feather
+        found = Tracer(state).trace(dataset, key)
+        shown = pii.masking(state, who, dataset, unmask=unmask, target=f"record:{dataset}/{key}")
+        return {**as_json(pii.mask_trace(found, shown.hidden)), **pii.as_json(shown)}
+
+    return ok(call(read))
 
 
 # Deliveries.
@@ -718,6 +900,10 @@ class RoleBody(Reason):
     role: str
 
 
+class GrantsBody(Reason):
+    grants: list[str]
+
+
 class NewToken(BaseModel):
     name: str
     role: str | None = None  # the caller's own when left out
@@ -750,6 +936,21 @@ def set_role(
 ) -> JSONResponse:
     return _once(
         request, actor, key, lambda: accounts.set_role(actor, username, body.role, reason=body.reason)
+    )
+
+
+@router.put("/users/{username}/grants")
+def set_grants(
+    username: str,
+    request: Request,
+    accounts: Manage,
+    actor: CurrentActor,
+    body: GrantsBody,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    """Give the user these add-on grants, `approver` and `pii-reader`, and no others."""
+    return _once(
+        request, actor, key, lambda: accounts.set_grants(actor, username, body.grants, reason=body.reason)
     )
 
 
@@ -1175,9 +1376,109 @@ def deactivate_flow(
 # Budgets, connections and the summary.
 
 
+class SnoozeBody(Reason):
+    minutes: int
+
+
+class AlertRuleBody(Reason):
+    enabled: bool = True
+    params: dict[str, Any] = {}
+    channels: list[str] = []
+
+
+def _alerting(request: Request) -> alerts.AlertActions:
+    return alerts.AlertActions(request.app.state.feather)
+
+
+@router.get("/alerts")
+def list_alerts(
+    request: Request,
+    _: CurrentActor,
+    state: Annotated[str | None, Query(description="firing or cleared")] = None,
+    limit: Limit = 100,
+) -> JSONResponse:
+    """The newest alerts, firing and cleared."""
+    if state not in (None, "firing", "cleared"):
+        raise ApiProblem(422, "Unprocessable Content", "state is firing or cleared")
+    found = request.app.state.feather.store.alerts.list_alerts(state, check_limit(limit))  # pyright: ignore[reportArgumentType]
+    return ok({"items": found})
+
+
+@router.post("/alerts/{alert_id}:ack")
+def ack_alert(
+    alert_id: str, request: Request, actor: CurrentActor, body: Reason, key: IdempotencyKey = None
+) -> JSONResponse:
+    return _once(request, actor, key, lambda: _alerting(request).ack(actor, alert_id, reason=body.reason))
+
+
+@router.post("/alerts/{alert_id}:snooze")
+def snooze_alert(
+    alert_id: str, request: Request, actor: CurrentActor, body: SnoozeBody, key: IdempotencyKey = None
+) -> JSONResponse:
+    """Quiet the alert for `minutes`, or no longer with 0."""
+    return _once(
+        request,
+        actor,
+        key,
+        lambda: _alerting(request).snooze(actor, alert_id, body.minutes, reason=body.reason),
+    )
+
+
+@router.get("/alert-rules")
+def alert_rules(request: Request, _: CurrentActor) -> JSONResponse:
+    """Each rule as it applies here, the default or what the environment set, and the channels there are."""
+    state = request.app.state.feather
+    return ok({"items": alerts.rules(state), "channels": sorted(alerts.channels_of(state))})
+
+
+@router.put("/alert-rules/{name}")
+def set_alert_rule(
+    name: str, request: Request, actor: CurrentActor, body: AlertRuleBody, key: IdempotencyKey = None
+) -> JSONResponse:
+    return _once(
+        request,
+        actor,
+        key,
+        lambda: _alerting(request).set_rule(
+            actor, name, enabled=body.enabled, params=body.params, channels=body.channels, reason=body.reason
+        ),
+    )
+
+
+@router.delete("/alert-rules/{name}")
+def reset_alert_rule(
+    name: str, request: Request, actor: CurrentActor, key: IdempotencyKey = None
+) -> JSONResponse:
+    """Back to the rule's default."""
+    return _once(request, actor, key, lambda: _alerting(request).reset_rule(actor, name))
+
+
+@router.get("/audit")
+def audit(
+    reads: See,
+    who: CurrentActor,
+    actor: str | None = None,
+    action: str | None = None,
+    target: str | None = None,
+    cursor: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> JSONResponse:
+    """The audit log, newest first: `actor` and `action` as named, `target` by its start, such as `route:`."""
+    rows, next_cursor = call(
+        lambda: reads.audit(who, actor=actor, action=action, target=target, cursor=cursor, limit=limit)
+    )
+    return ok({"items": rows, "next_cursor": next_cursor})
+
+
 @router.get("/budgets")
 def budgets(reads: See, _: CurrentActor) -> JSONResponse:
     return ok({"items": reads.budgets(), "next_cursor": None})
+
+
+@router.get("/budgets/{name}")
+def budget_detail(name: str, reads: See, _: CurrentActor) -> JSONResponse:
+    """The budget's windows with their use and the share `high` work keeps, and the tasks waiting for it."""
+    return ok(call(lambda: reads.budget_detail(name)))
 
 
 @router.get("/budgets/{name}/usage")

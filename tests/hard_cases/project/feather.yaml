@@ -11,5 +11,14 @@ connections:
     auth: {dsn: "${secret:env:FEATHER_STACK_DATABASE_URL}"}
   erp:
     connector: http.call
-    base_url: http://127.0.0.1:9  # the test points it at its stand-in, in env/dev.yaml
+    base_url: http://127.0.0.1:9  # the test points each erp connection at its stand-in, in env/dev.yaml
     retry_attempts: 1
+  erp7high: {connector: http.call, base_url: http://127.0.0.1:9, budget: h7}
+  erp7low: {connector: http.call, base_url: http://127.0.0.1:9, budget: h7}
+  erp8: {connector: http.call, base_url: http://127.0.0.1:9, budget: h8}
+  erp10: {connector: http.call, base_url: http://127.0.0.1:9}
+  erp15: {connector: http.call, base_url: http://127.0.0.1:9, budget: h15}
+budgets:
+  h7: {limits: ["6/hour"], reserve: {high: 0.5}}  # the high flow keeps half of it
+  h8: {limits: ["2/hour"]}  # a wait past a minute is the engine's, and listed on the Budgets page
+  h15: {limits: ["10/minute"]}

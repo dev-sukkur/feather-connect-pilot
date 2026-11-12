@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{{ m.page_head("Alerts", tiles, "What needs a look: a failed run or delivery, a budget nearly spent, a hold waiting, ticks skipped, a dataset gone stale. An alert fires once, its channels hear of it once, and it clears by itself when the rule no longer finds it. Acknowledge it to quiet it for good, or snooze it for a while.") }}
+{{ m.notice_of(notice) }}
+<nav class="tabs" aria-label="Which alerts">
+  <a href="/alerts?state=firing"{% if shown == "firing" %} aria-current="page"{% endif %}>Firing</a>
+  <a href="/alerts?state=cleared"{% if shown == "cleared" %} aria-current="page"{% endif %}>Cleared</a>
+  <a href="/alerts?state=all"{% if shown not in ("firing", "cleared") %} aria-current="page"{% endif %}>All</a>
+</nav>
+<div id="live">
+{% if rows %}
+<div class="table-wrap scroll"><table class="data" data-table="alerts">
+  <caption class="sr-only">Alerts</caption>
+  <thead><tr><th scope="col">Rule</th><th scope="col">Subject</th><th scope="col">Severity</th><th scope="col">What</th><th scope="col">Fired</th><th scope="col">State</th><th scope="col">Action</th></tr></thead>
+  <tbody>
+  {% for a in rows %}
+    <tr>
+      <th scope="row">{{ a.rule }}</th>
+      <td><code>{{ a.subject }}</code></td>
+      <td><span class="state tone-{{ 'bad' if a.severity == 'critical' else 'warn' }}"><span class="dot" aria-hidden="true"></span>{{ a.severity }}</span></td>
+      <td>{{ a.message }}</td>
+      <td><time datetime="{{ a.fired_at.isoformat() }}">{{ a.fired_at | stamp }}</time></td>
+      <td>{% if a.state == "cleared" %}cleared {{ a.cleared_at | stamp }}{% elif a.acked_by %}acknowledged by {{ a.acked_by }}{% elif a.snoozed_until and a.snoozed_until > now %}snoozed until {{ a.snoozed_until | stamp }}{% else %}firing{% endif %}</td>
+      <td>{% if a.state == "firing" and actor and can(actor, "alerts.ack") %}
+        {% if not a.acked_by %}<form method="post" action="/alerts/{{ a.alert_id }}/ack" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit">Acknowledge<span class="sr-only"> {{ a.rule }} {{ a.subject }}</span></button>
+        </form>{% endif %}
+        <form method="post" action="/alerts/{{ a.alert_id }}/snooze" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label class="sr-only" for="snooze-{{ loop.index }}">Snooze {{ a.rule }} {{ a.subject }} for</label>
+          <select id="snooze-{{ loop.index }}" name="minutes"><option value="60">1 hour</option><option value="240">4 hours</option><option value="1440">1 day</option><option value="0">Not snoozed</option></select>
+          <button type="submit">Snooze</button>
+        </form>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% else %}
+<p class="empty">{% if shown == "firing" %}Nothing is firing.{% else %}No alerts.{% endif %}</p>
+{% endif %}
+</div>
+<section aria-labelledby="h-rules">
+  <h2 id="h-rules">Rules</h2>
+  <p class="muted">A rule with no channels of its own tells every channel in <code>settings.alert_channels</code>{% if channels %}: {{ channels | join(", ") }}{% else %}, and there are none yet{% endif %}.</p>
+  <div class="table-wrap scroll"><table class="data" data-table="alert-rules">
+    <caption class="sr-only">Alert rules</caption>
+    <thead><tr><th scope="col">Rule</th><th scope="col">On</th><th scope="col">Parameters</th><th scope="col">Channels</th><th scope="col">Set here</th></tr></thead>
+    <tbody>
+    {% for r in rules %}
+      <tr>
+        <th scope="row">{{ r.name }}</th>
+        {% if actor and can(actor, "alerts.manage") %}
+        <td colspan="4">
+          <form method="post" action="/alerts/rules/{{ r.name }}" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label><input type="checkbox" name="enabled"{% if r.enabled %} checked{% endif %}> on<span class="sr-only"> {{ r.name }}</span></label>
+            {% for k, v in r.params.items() %}<label for="rule-{{ r.name }}-{{ k }}">{{ k }}</label> <input id="rule-{{ r.name }}-{{ k }}" name="{{ k }}" type="text" size="6" value="{{ v }}"> {% endfor %}
+            {% for c in channels %}<label><input type="checkbox" name="channel" value="{{ c }}"{% if c in r.channels %} checked{% endif %}> {{ c }}<span class="sr-only"> for {{ r.name }}</span></label> {% endfor %}
+            <button type="submit">Save<span class="sr-only"> {{ r.name }}</span></button>
+            {% if r.custom %}<button type="submit" name="reset" value="1">Reset<span class="sr-only"> {{ r.name }}</span></button>{% endif %}
+          </form>
+        </td>
+        {% else %}
+        <td>{{ "yes" if r.enabled else "no" }}</td>
+        <td>{% for k, v in r.params.items() %}{{ k }}={{ v }} {% endfor %}</td>
+        <td>{{ r.channels | join(", ") or "all" }}</td>
+        <td>{{ "yes" if r.custom else "default" }}</td>
+        {% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endblock %}

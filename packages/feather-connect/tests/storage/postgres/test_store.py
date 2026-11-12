@@ -480,7 +480,8 @@ def test_a_deactivated_flow_stops_firing_within_seconds_over_listen_notify(store
 
     from feather_connect.runtime.catalogue import Catalogue
 
-    spec = {"name": "acme/invoices", "datasets": [], "triggers": [{"kind": "every", "seconds": 1.0}]}
+    # Every 5 min: a poller's quicker ticks are its host's, not the catalogue's (M2 plan 1 §3).
+    spec = {"name": "acme/invoices", "datasets": [], "triggers": [{"kind": "every", "seconds": 300.0}]}
     store.packages.install(_package_version({"specs": {"acme/invoices": spec}}), b"wheel", ["acme/invoices"])
     store.packages.activate("acme/invoices", "acme", "1.0.0", "ops", T0)
     store.packages.promote("acme", "1.0.0", T0)  # its host is up
@@ -488,14 +489,14 @@ def test_a_deactivated_flow_stops_firing_within_seconds_over_listen_notify(store
     catalogue.listen()
     try:
         catalogue.tick(clock.now())
-        clock.advance(timedelta(seconds=1))
+        clock.advance(timedelta(seconds=300))
         assert len(catalogue.tick(clock.now())) == 1
         started = time.monotonic()
         store.packages.deactivate("acme/invoices", "ops", clock.now())
         while catalogue.flows() and time.monotonic() - started < 5:
             time.sleep(0.05)
         assert catalogue.flows() == [] and time.monotonic() - started <= 5
-        clock.advance(timedelta(seconds=5))
+        clock.advance(timedelta(seconds=300))
         assert catalogue.tick(clock.now()) == []
     finally:
         catalogue.close()

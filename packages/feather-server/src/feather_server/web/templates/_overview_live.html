@@ -123,7 +123,7 @@
       <tbody>
       {% for budget in overview.budgets %}{% for window in budget.windows %}
         <tr>
-          <th scope="row">{% if loop.first %}{{ budget.name }}{% endif %}</th>
+          <th scope="row">{% if loop.first %}<a href="/budgets/{{ budget.name | urlencode }}">{{ budget.name }}</a>{% endif %}</th>
           <td>per {{ window.seconds | span }}</td>
           <td>{{ meter(window.used, window.units) }}</td>
         </tr>

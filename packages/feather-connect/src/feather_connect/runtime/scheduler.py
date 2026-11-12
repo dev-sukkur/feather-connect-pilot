@@ -9,16 +9,18 @@ a skipped one included, which keeps the runs list readable (design 6.3).
 """
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from cronsim import CronSim
 
 from feather_connect.core.flow import Flow
-from feather_connect.core.triggers import Cron, Every, Trigger, is_stream
+from feather_connect.core.triggers import Cron, Every, Reconcile, Trigger, is_stream
 from feather_connect.logs import redact
+from feather_connect.runtime.extract import RECONCILE
 from feather_connect.runtime.runtime import RunNotStarted, Runtime
 
 log = logging.getLogger(__name__)
@@ -43,6 +45,17 @@ class TickResult:
     reason: str | None
 
 
+def _seconds(step: timedelta) -> str:
+    seconds = step.total_seconds()
+    return str(int(seconds)) if seconds.is_integer() else f"{seconds:g}"
+
+
+def first_reconciles(triggers: Sequence[Trigger]) -> list[Trigger]:
+    """The triggers in the order a tick fires them: a reconcile first, whose read covers what another due at the same
+    time would read, which then skips as an overlap rather than the reconcile."""
+    return sorted(triggers, key=lambda t: not isinstance(t, Reconcile))
+
+
 def trigger_id(trigger: Trigger) -> str | None:
     """Return the stable id of a scheduled trigger, such as `cron:*/15 * * * *:Asia/Kolkata`. Others have none."""
     match trigger:
@@ -50,6 +63,8 @@ def trigger_id(trigger: Trigger) -> str | None:
             return f"cron:{expr}:{tz}"
         case Every(interval):
             return f"every:{interval.total_seconds():g}s"
+        case Reconcile(interval, lookback):
+            return f"reconcile:{_seconds(interval)}s:{_seconds(lookback)}s"
         case _:
             return None
 
@@ -66,7 +81,7 @@ def _due(trigger: Trigger, last: datetime, now: datetime) -> tuple[list[datetime
                     break
                 found.append(at.astimezone(UTC))
             return found, 0
-        case Every(interval):
+        case Every(interval) | Reconcile(interval, _):
             count = int((now - last) / interval)
             first = max(1, count - MAX_CATCH_UP)
             return [last + interval * n for n in range(first, count + 1)], first - 1
@@ -74,17 +89,24 @@ def _due(trigger: Trigger, last: datetime, now: datetime) -> tuple[list[datetime
             return [], 0
 
 
-def tick(runtime: Runtime, *, now: datetime) -> list[TickResult]:
+def tick(
+    runtime: Runtime, *, now: datetime, streams_of: "set[str] | frozenset[str] | None" = None
+) -> list[TickResult]:
     """Start the runs that are due as of `now`, and return what became of each tick.
 
     A trigger seen for the first time only notes `now`: nothing before the start is made up. The last tick is
     stored before any run is started, so a crash in between loses a tick, which shows in the log, and never repeats
     one. A flow that can't be ticked is logged and left, so the others carry on.
+
+    `streams_of` ticks only the high-frequency pollers of those flows: a package host does so for its active flows,
+    adding their ticks to the day's stream run, while the server's catalogue ticks the others as runs.
     """
     results: list[TickResult] = []
     for flow in runtime.flows():
-        for trigger in flow.triggers:
-            if (tid := trigger_id(trigger)) is None:
+        if streams_of is not None and flow.name not in streams_of:
+            continue
+        for trigger in first_reconciles(flow.triggers):
+            if (tid := trigger_id(trigger)) is None or (streams_of is not None and not is_stream(trigger)):
                 continue
             try:
                 results += _tick_trigger(runtime, flow, trigger, tid, now)
@@ -119,8 +141,10 @@ def _tick_trigger(
     elif collapsed:
         params = {"collapsed": collapsed, "from": due[0].isoformat(), "to": wanted[0].isoformat()}
         results.append(_skip(runtime, flow, tid, due[0], "catch_up_collapsed", params))
+    if isinstance(trigger, Reconcile):
+        wanted = wanted[-1:]  # one read of the window again finds all that the missed ones would have
     fire = _fire_stream if stream else _fire
-    results += [fire(runtime, flow, tid, at) for at in wanted]
+    results += [fire(runtime, flow, tid, at, run_params(trigger)) for at in wanted]
     return results
 
 
@@ -143,7 +167,14 @@ def _skip(
     return TickResult(flow.name, tid, due_at, run_id, "skipped", reason)
 
 
-def _fire_stream(runtime: Runtime, flow: Flow, tid: str, due_at: datetime) -> TickResult:
+def run_params(trigger: Trigger) -> dict[str, Any]:
+    """What a run of the trigger is told beyond its tick: a reconcile's lookback, in seconds."""
+    return {RECONCILE: trigger.lookback.total_seconds()} if isinstance(trigger, Reconcile) else {}
+
+
+def _fire_stream(
+    runtime: Runtime, flow: Flow, tid: str, due_at: datetime, params: dict[str, Any] | None = None
+) -> TickResult:
     """Add one due tick to the flow's stream run, or record why it doesn't go ahead. Overlap is always `skip`, whatever
     the flow asks, because the next tick reads from the same watermark anyway."""
 
@@ -166,7 +197,9 @@ def _fire_stream(runtime: Runtime, flow: Flow, tid: str, due_at: datetime) -> Ti
     return TickResult(flow.name, tid, due_at, run_id, run.status, None)
 
 
-def _fire(runtime: Runtime, flow: Flow, tid: str, due_at: datetime) -> TickResult:
+def _fire(
+    runtime: Runtime, flow: Flow, tid: str, due_at: datetime, params: dict[str, Any] | None = None
+) -> TickResult:
     """Start the run for one due tick, or record why it is not started."""
     if not flow.enabled:
         return _skip(runtime, flow, tid, due_at, "disabled")
@@ -179,7 +212,7 @@ def _fire(runtime: Runtime, flow: Flow, tid: str, due_at: datetime) -> TickResul
         for run in active:
             runtime.cancel_run(run.run_id, actor=_ACTOR, reason="cancel_previous: the next tick is due")
     try:
-        run_id = runtime.start_run(flow.name, trigger=tid, actor=_ACTOR)
+        run_id = runtime.start_run(flow.name, trigger=tid, actor=_ACTOR, params=params)
     except RunNotStarted as error:  # the run is written, and already says so
         log.exception("could not start flow %s for tick %s", flow.name, tid)
         return TickResult(flow.name, tid, due_at, error.run_id, "failed", error.reason)

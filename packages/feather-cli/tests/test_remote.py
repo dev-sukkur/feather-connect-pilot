@@ -85,6 +85,23 @@ def test_logs_print_a_run_task_logs(cli: Callable[..., Result], server: Served) 
     assert doc["run_id"] == run_id and doc["tasks"] and all("lines" in t for t in doc["tasks"])
 
 
+def test_trace_and_diff_print_a_records_story_and_a_versions_changes(
+    cli: Callable[..., Result], server: Served
+) -> None:  # M2 plan 2 O4 and O5
+    object.__setattr__(server.world.state.runtime.dataset("orders"), "pii", ("date",))
+    server.world.run([day(18)])
+    version = server.world.store.versions.latest_sealed("orders", day(18))
+    assert version is not None
+    r = cli("trace", "orders", "181", *_at(server))
+    assert r.exit_code == 0, r.output
+    assert "PII masked: date" in r.stdout and version.version_id in r.stdout
+    r = cli("diff", version.version_id, *_at(server))
+    assert r.exit_code == 0, r.output
+    assert "2 added" in r.stdout and "+ 181" in r.stdout and "+ 182" in r.stdout
+    refused = cli("diff", version.version_id, "--unmask", *_at(server))
+    assert refused.exit_code != 0 and "pii-reader" in refused.output
+
+
 def test_backfill_dry_run_prints_the_impact_and_changes_nothing(
     cli: Callable[..., Result], server: Served
 ) -> None:
@@ -179,3 +196,90 @@ def test_the_env_files_token_goes_only_to_the_env_files_server(
         assert own._http.headers["authorization"] == "Bearer fc_qa_token"  # pyright: ignore[reportPrivateUsage]
     with client(tmp_path, "qa", "https://feather.qa.example/", None, json_mode=True) as same:
         assert same._http.headers["authorization"] == "Bearer fc_qa_token"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_ready_close_fire_and_status(cli: Callable[..., Result], server: Served) -> None:
+    import feather_connect as fc
+    from feather_connect.connectors import memory
+    from feather_connect.project import prefixed
+    from feather_connect.runtime.catalogue import ActiveFlow
+
+    by_day = fc.partition.by_day("date", tz="UTC")
+    invoices = fc.Dataset(
+        "invoices", source=memory.Source(), key="id", strategy=fc.strategy.replace(), partition=by_day
+    )
+    ingest = fc.Flow("ingest", reads=invoices, deliver=[fc.to(memory.Sink(connection="staging"))])
+    posting = fc.Flow(
+        "posting",
+        reads=fc.Dataset(
+            "totals", source=memory.Source(connection="t"), key="id", strategy=fc.strategy.replace()
+        ),
+        deliver=[fc.to(memory.Sink(connection="erp"))],
+        triggers=[fc.on_ready(fc.ready(invoices), each="day", tz="UTC")],
+    )
+    flows = [
+        ActiveFlow(f.name, "acme", "1.0.0", (), f.overlap, f.catch_up, True, frozenset(), f.spec_dict())
+        for f in prefixed([ingest, posting], "acme")
+    ]
+
+    class Catalogue:
+        def flows(self) -> list[ActiveFlow]:
+            return flows
+
+    server.world.state.catalogue = Catalogue()  # type: ignore[assignment]
+    closed = cli(
+        "ready",
+        "close",
+        "acme/invoices",
+        "--partition",
+        "date=2026-10-17",
+        "--reason",
+        "day done",
+        *_at(server),
+    )
+    assert closed.exit_code == 0, closed.output
+    assert "closed by cli" in closed.stdout
+    fired = cli(
+        "ready",
+        "fire",
+        "acme/posting",
+        "--period",
+        "2026-10-17",
+        "--reason",
+        "by hand",
+        *_at(server),
+        "--json",
+    )
+    assert fired.exit_code == 0, fired.output
+    run_id = json.loads(fired.stdout)["run_id"]
+    assert server.world.store.runs.get_run(run_id).trigger == "ready"
+    shown = cli("ready", "status", "acme/posting", *_at(server))
+    assert shown.exit_code == 0, shown.output
+    assert "acme/posting: acme/invoices, each day" in shown.stdout and "2026-10-17" in shown.stdout
+    refused = cli("ready", "fire", "acme/posting", "--period", "2026-10-17", *_at(server))
+    assert refused.exit_code != 0  # no reason
+
+
+def test_holds_list_and_reject(cli: Callable[..., Result], server: Served) -> None:
+    from feather_connect.storage.port import VersionDraft
+
+    store = server.world.store
+    run = store.runs.create_run("acme/orders", "every", "t", {})
+    store.versions.stage(VersionDraft("v9", "acme/orders", "_", run, True, 1, 0, "h", None, None, "s"))
+    store.versions.seal(["v9"], ["acme/sap"])
+    store.ledger.transition("acme/sap", "v9", "running", actor="system")
+    store.ledger.transition("acme/sap", "v9", "held", actor="system", reason="approval: 1 record to approve")
+    listed = cli("holds", "list", *_at(server))
+    assert listed.exit_code == 0 and "acme/sap v9 [_]: approval: 1 record to approve" in listed.stdout
+    refused = cli("holds", "reject", "acme/sap", "v9", "--reason", "wrong", *_at(server))
+    assert refused.exit_code != 0  # the token's user isn't an approver (M2 plan 2 O2)
+    store.users.create_user("ann", "h", "operator")
+    store.users.set_grants("ann", ["approver"])
+    token = issue_token(
+        store, "ann-cli", timedelta(days=1), role="operator", created_by="ann", clock=server.world.clock
+    )
+    at = ["--server", server.url, "--token", token]
+    assert cli("holds", "reject", "acme/sap", "v9", *at).exit_code != 0  # no reason
+    done = cli("holds", "reject", "acme/sap", "v9", "--reason", "wrong", *at)
+    assert done.exit_code == 0, done.output
+    assert "rejected" in done.stdout and store.ledger.get("acme/sap", "v9").status == "skipped"

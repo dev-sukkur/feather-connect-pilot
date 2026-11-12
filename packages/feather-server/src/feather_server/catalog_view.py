@@ -25,6 +25,7 @@ class CatalogDataset:
     strategy: str
     priority: str
     routes: tuple[str, ...]
+    pii: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ def dataset_of(state: "AppState", name: str) -> CatalogDataset:
                     str(d.get("strategy", "")),
                     str(d.get("priority", "normal")),
                     tuple(str(r["name"]) for r in spec.get("routes") or []),
+                    tuple(str(f) for f in d.get("pii") or ()),
                 )
     raise KeyError(f"no dataset is named {name!r}")
 

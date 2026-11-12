@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -23,6 +23,7 @@ from feather_connect.project import load_project, validate_project
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.spool import MemorySpool
+from feather_connect.templates.retail import zakya_invoices_to_erp  # pyright: ignore[reportMissingImports]
 
 REPO = Path(__file__).resolve().parents[2]
 DEMO = REPO / "examples" / "zakya-demo"
@@ -89,13 +90,42 @@ def _received(db: Path) -> list[dict[str, Any]]:
 
 def test_the_zakya_demo_project_is_sound():
     project = load_project(DEMO, "dev")
-    assert [f.name for f in project.flows] == ["zakya-invoices"]
-    assert [r.name for r in project.flows[0].routes] == ["erp"]
+    assert [f.name for f in project.flows] == ["zakya-invoices", "invoices-to-sap"]
+    assert [r.name for r in project.flows[0].routes] == ["erp", "staging"]
+    assert [r.name for r in project.flows[1].routes] == ["sap"] and project.flows[1].routes[0].approval
     assert validate_project(project) == []
     (budget,) = (
         project.budgets.values()
     )  # M13: a dev day of the simulator takes far more than Zoho's 1400 calls
     assert [(w.units, w.seconds) for w in budget.windows] == [(90, 60), (20000, 86400)]
+
+
+def test_the_sap_flow_starts_once_after_each_ingest_runs_invoices_are_in_staging():
+    """The chain on the evaluator `feather dev`'s server runs (readiness design §11): `invoices-to-sap` waits for the
+    ingest run's deliveries to staging, never for a run still delivering, and fires once for it."""
+    from feather_connect.project import prefixed
+    from feather_connect.runtime.catalogue import ActiveFlow
+    from feather_connect.runtime.ready_eval import evaluate
+    from feather_connect.storage.port import VersionDraft
+
+    flows = [
+        ActiveFlow(f.name, "zakya-demo", "1.0.0", (), f.overlap, f.catch_up, True, frozenset(), f.spec_dict())
+        for f in prefixed(load_project(DEMO, "dev").flows, "zakya-demo")
+    ]
+    clock = FrozenClock(datetime(2026, 11, 12, 9, tzinfo=UTC))
+    store = MemoryStore(clock)
+    run = store.runs.create_run("zakya-demo/zakya-invoices", "every", "scheduler", {})
+    store.versions.stage(
+        VersionDraft("v1", "zakya-demo/invoices", "", run, True, 3, 0, "h", None, None, "sha")
+    )
+    store.versions.seal(["v1"], ["zakya-demo/erp", "zakya-demo/staging"])
+    store.runs.set_run_status(run, "succeeded")
+    assert evaluate(store, flows, clock.now()) == []  # its invoices are still going to staging
+    store.ledger.transition("zakya-demo/staging", "v1", "running", actor="t")
+    store.ledger.transition("zakya-demo/staging", "v1", "applied", actor="t")
+    [check] = evaluate(store, flows, clock.now())
+    assert store.runs.get_run(check).flow == "zakya-demo/invoices-to-sap"
+    assert evaluate(store, flows, clock.now()) == []  # once
 
 
 def test_a_budget_naming_another_organisation_is_a_problem(tmp_path: Path):  # Stage Z review 8
@@ -125,8 +155,10 @@ def test_each_invoice_reaches_the_receiver_once_and_a_changed_one_again(sims, mo
         base = urls[connection]
         return {**config, "base_url": base, **({"accounts_url": base} if "accounts_url" in config else {})}
 
+    # The ERP leg alone: the template as the demo calls it, without the staging route the chain test covers.
+    flow = zakya_invoices_to_erp(source="zakya", destination="erp", name="zakya-invoices", page_size=25)
     runtime = Runtime(
-        project.flows,
+        [flow],
         store,
         spool,
         engine,
@@ -180,3 +212,90 @@ def test_the_zakya_simulator_keeps_its_invoices_across_a_restart(tmp_path):
     again = zakya_sim.ZakyaSim(start=3, state=state)
     assert again.invoices == first.invoices
     assert again.add() == ["4600000000004"]
+
+
+@pytest.mark.postgres
+def test_the_chain_stages_each_invoice_then_posts_it_to_sap_once_held_over_the_limit(sims, monkeypatch):
+    """The M2 reference chain: Zakya → Postgres staging → SAP through CPI. An invoice over 500,000 holds the SAP
+    delivery until it is approved; once applied, a compensation reverses each posting."""
+    from real_stack import scratch_database, server_url
+
+    from feather_connect.connectors.sap_cpi.testing import CpiSim, serve  # pyright: ignore[reportMissingImports]
+    from feather_connect.runtime.http import forget_tokens
+
+    zakya, _db, urls = sims
+    monkeypatch.chdir(DEMO.parent)
+    forget_tokens()
+    cpi = CpiSim(key="invoice_id", csrf=True)
+    port = _free_port()
+    cpi_server = serve(cpi, port)
+    big = next(iter(zakya.invoices))
+    zakya.invoices[big]["total"] = 750_000.0
+    with scratch_database(server_url()) as staging_url:
+        monkeypatch.setenv("FEATHER_DATABASE_URL", staging_url)
+        import psycopg
+
+        with psycopg.connect(staging_url, autocommit=True) as conn:
+            conn.execute(_module("staging").DDL)
+        project = load_project(DEMO, "dev")
+        clock = FrozenClock(datetime(2026, 11, 12, 10, tzinfo=UTC))
+        store, spool, engine = MemoryStore(clock), MemorySpool(clock), LocalEngine(clock)
+
+        def config_of(connection: str) -> dict[str, Any]:
+            config = project.connections[connection].resolve()
+            if connection == "sap":
+                base = f"http://127.0.0.1:{port}"
+                return {**config, "base_url": base, "token_url": f"{base}/oauth/token"}
+            if connection in ("staging", "staging_read"):
+                return config
+            base = urls[connection]
+            return {
+                **config,
+                "base_url": base,
+                **({"accounts_url": base} if "accounts_url" in config else {}),
+            }
+
+        runtime = Runtime(
+            project.flows, store, spool, engine, code_sha="demo", clock=clock, config_of=config_of
+        )
+        engine.register(runtime.tasks())
+        try:
+            ingest = runtime.start_run("zakya-invoices")
+            engine.run_until_idle()
+            assert store.runs.get_run(ingest).status == "succeeded"
+            with psycopg.connect(staging_url) as conn:
+                staged = conn.execute("select invoice_id from zakya_demo.invoices").fetchall()
+            assert sorted(r[0] for r in staged) == sorted(zakya.invoices)
+
+            clock.advance(timedelta(minutes=5))  # on_ready's at_most_every
+            runtime.start_run("invoices-to-sap")
+            engine.run_until_idle()
+            print(
+                "DEBUG",
+                [(v.version_id, v) for v in store.versions.list_versions("staged-invoices")]
+                if hasattr(store.versions, "list_versions")
+                else dir(store.versions),
+            )
+            (delivery,) = store.ledger.list_deliveries(route="sap")
+            assert delivery.status == "held" and cpi.posts == 0  # nothing of it reaches SAP before approval
+            runtime.approve("sap", delivery.version_id, actor="ann", reason="checked with finance")
+            engine.run_until_idle()
+            assert store.ledger.get("sap", delivery.version_id).status == "applied"
+            assert sorted(cpi.documents["invoices"]) == sorted(zakya.invoices) and cpi.posts == 5
+            answers = store.responses.of_delivery("sap", delivery.version_id)
+            assert len(answers) == 5 and all(str(a.fields["sap_document"]).startswith("9") for a in answers)
+
+            clock.advance(timedelta(minutes=5))
+            again = runtime.start_run("invoices-to-sap")  # nothing changed in staging: nothing posted
+            engine.run_until_idle()
+            assert store.runs.get_run(again).status == "succeeded" and cpi.posts == 5
+
+            runtime.compensate("sap", delivery.version_id, actor="ann", reason="posted to the wrong company")
+            engine.run_until_idle()
+            assert store.ledger.get("sap", delivery.version_id).status == "compensated"
+            assert (
+                sorted(cpi.reversed["invoices"]) == sorted(zakya.invoices) and not cpi.documents["invoices"]
+            )
+        finally:
+            cpi_server.shutdown()
+            forget_tokens()

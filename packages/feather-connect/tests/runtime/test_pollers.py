@@ -110,6 +110,17 @@ def test_poller_uses_one_run_per_day():
     assert len(w.ticks(run.run_id)) == 4
 
 
+def test_a_host_ticks_only_the_pollers_of_its_active_flows():
+    w = World(fc.every("30s"), fc.every("15m"))
+    tick(w.rt, now=w.clock.now(), streams_of={"other"})
+    w.clock.advance(timedelta(minutes=16))
+    assert tick(w.rt, now=w.clock.now(), streams_of={"other"}) == []  # not its flow
+    tick(w.rt, now=w.clock.now(), streams_of={"f"})  # first seen: noted
+    w.clock.advance(timedelta(minutes=16))
+    results = tick(w.rt, now=w.clock.now(), streams_of={"f"})
+    assert [r.trigger_id for r in results] == ["every:30s"] * len(results) and results  # not the 15 min one
+
+
 def test_a_new_day_opens_a_new_stream_run():
     # 18:29 UTC is 23:59 in Kolkata, so the day ends at 18:30 UTC and not at midnight UTC.
     w = World(timezone="Asia/Kolkata", start=datetime(2026, 10, 18, 18, 29, tzinfo=UTC))

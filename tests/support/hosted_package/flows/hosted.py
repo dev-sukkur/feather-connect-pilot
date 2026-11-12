@@ -121,7 +121,11 @@ class HostedSink(memory.Sink):
 
 
 dataset = fc.Dataset("rows", source=HostedSource("src"), key="id", strategy=fc.strategy.replace())
-flow = fc.Flow(
-    "feed", reads=dataset, deliver=[fc.to(HostedSink("out"), name="out")], triggers=[fc.every("2s")]
+# Runs as tests queue them, one at a time.
+flow = fc.Flow("feed", reads=dataset, deliver=[fc.to(HostedSink("out"), name="out")], triggers=[fc.manual()])
+# A poller: its host ticks it every 2 s, each tick a task of the day's stream run.
+ticks = fc.Dataset("ticks", source=HostedSource("src"), key="id", strategy=fc.strategy.replace())
+poll = fc.Flow(
+    "poll", reads=ticks, deliver=[fc.to(HostedSink("out"), name="poll-out")], triggers=[fc.every("2s")]
 )
 _fail_load_if_told()

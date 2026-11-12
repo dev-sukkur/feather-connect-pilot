@@ -854,7 +854,17 @@ class Call(_HttpConnector, connector.Sink):
         self.client(ctx)  # checks the settings: a call would change the destination
 
     def apply(self, ctx: Context, batch: ApplyBatch) -> ApplyResult:
+        return self._send(ctx, batch, self.url, batch.idempotency_key)
+
+    def _chunk_headers(self, ctx: Context, client: FeatherHttp, url: Template) -> dict[str, str]:
+        """Headers that go with each request of one chunk, worked out once for it, such as a CSRF token. A connector
+        built on this overrides it; none by default."""
+        return {}
+
+    def _send(self, ctx: Context, batch: ApplyBatch, target: Template, key_of: str) -> ApplyResult:
+        """Send each record of the batch to `target`, keyed by `key_of` and the record's key."""
         client = self.client(ctx)
+        extra = self._chunk_headers(ctx, client, target)
         applied = 0
         rejected: list[Rejection] = []
         responses: list[RecordResponse] = []
@@ -868,11 +878,11 @@ class Call(_HttpConnector, connector.Sink):
                     )
                 continue
             try:
-                url, body = self._render(record)
+                url, body = self._render(record, target)
             except PermanentError as error:  # this record lacks a field the templates need
                 rejected.append(Rejection(record.key, "TemplateError", str(error)))
                 continue
-            key = hashlib.sha256(f"{batch.idempotency_key}:{_key_text(record.key)}".encode()).hexdigest()
+            key = hashlib.sha256(f"{key_of}:{_key_text(record.key)}".encode()).hexdigest()
             try:
                 response = client.request(
                     self.method,
@@ -880,6 +890,7 @@ class Call(_HttpConnector, connector.Sink):
                     content=canonical_json(body),
                     headers={
                         **self.headers,
+                        **extra,
                         "Content-Type": "application/json",
                         self.key_header: key,
                         VERSION_HEADER: batch.version_id,
@@ -904,10 +915,11 @@ class Call(_HttpConnector, connector.Sink):
             responses.append(answer)
         return ApplyResult(applied, rejected, responses=responses)
 
-    def _render(self, record: ApplyRecord) -> tuple[str, dict[str, Any]]:
+    def _render(self, record: ApplyRecord, target: Template | None = None) -> tuple[str, dict[str, Any]]:
         payload = cast(Mapping[str, Any], record.payload)
+        url_of = self.url if target is None else target
         try:
-            url = self.url(payload) if callable(self.url) else _filled(self.url, payload)
+            url = url_of(payload) if callable(url_of) else _filled(url_of, payload)
             if self.body is None:
                 body: Mapping[str, Any] = payload
             elif callable(self.body):

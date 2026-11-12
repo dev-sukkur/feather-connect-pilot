@@ -871,6 +871,120 @@ class StoreContract(
         rest = store.ledger.list_deliveries(cursor=delivery_cursor(first[-1]))
         assert first + rest == everything and len(rest) == 1
 
+    def test_latest_before_is_the_newest_before_a_seal(self, store: Store):  # M2 plan 2 D1
+        for vid in ("v1", "v2", "v3"):
+            seal(store, vid, ["a"], part="p")
+        seal(store, "w1", ["a"], part="q")
+        for vid in ("v1", "v2", "w1"):
+            store.ledger.transition("a", vid, "running", actor="t")
+            store.ledger.transition("a", vid, "applied", actor="t")
+        v3 = store.ledger.get("a", "v3")
+        found = store.ledger.latest_before("a", "p", "d", v3.seal_seq)
+        assert found is not None and found.version_id == "v2"
+        v1 = store.ledger.get("a", "v1")
+        assert store.ledger.latest_before("a", "p", "d", v1.seal_seq) is None
+        assert store.ledger.latest_before("a", "p", "other", v3.seal_seq) is None
+        seal(store, "v4", ["a"], part="p")
+        v4 = store.ledger.get("a", "v4")
+        assert store.ledger.latest_before("a", "p", "d", v4.seal_seq).version_id == "v2"  # pyright: ignore[reportOptionalMemberAccess]
+        assert store.ledger.latest_before("a", "p", "d", v4.seal_seq, None).version_id == "v3"  # pyright: ignore[reportOptionalMemberAccess]
+
+    def test_delivered_routes_are_those_with_a_delivery_of_the_dataset(self, store: Store):  # M2 plan 2 D2
+        seal(store, "v1", ["a", "b"])
+        assert store.ledger.delivered_routes("d", ["a", "c"]) == {"a"}
+        assert store.ledger.delivered_routes("other", ["a"]) == set()
+        assert store.ledger.delivered_routes("d", []) == set()
+        assert store.ledger.has_deliveries("d") and not store.ledger.has_deliveries("other")
+
+    def test_a_task_waiting_for_a_budget_is_listed_until_its_wait_ends(
+        self, store: Store, clock: FrozenClock
+    ):
+        store.budgets.note_wait("api", "t1", "r1", clock.now() + timedelta(minutes=5))
+        store.budgets.note_wait("api", "t2", None, clock.now() + timedelta(minutes=2))
+        store.budgets.note_wait("api", "t1", None, clock.now() + timedelta(minutes=10))
+        store.budgets.note_wait("other", "t3", None, clock.now() + timedelta(minutes=10))
+        found = store.budgets.waits("api")
+        assert [(w.task_ref, w.run_id, w.waits) for w in found] == [("t2", None, 1), ("t1", "r1", 2)]
+        assert found[1].until == clock.now() + timedelta(minutes=10) and found[1].first_at == clock.now()
+        clock.advance(timedelta(minutes=3))
+        assert [w.task_ref for w in store.budgets.waits("api")] == ["t1"]
+
+    def test_roles_and_grants_of_a_user(self, store: Store):  # M2 plan 2 O2
+        store.users.create_user("v", "h", "viewer")
+        store.users.create_user("d", "h", "developer")
+        assert [(u.username, u.role, u.grants) for u in store.users.list_users()] == [
+            ("d", "developer", ()),
+            ("v", "viewer", ()),
+        ]
+        store.users.set_grants("v", ["pii-reader", "approver", "approver"])
+        found = store.users.get_user("v")
+        assert found is not None and found.grants == ("approver", "pii-reader")
+        store.users.set_grants("v", [])
+        assert store.users.get_user("v").grants == ()  # pyright: ignore[reportOptionalMemberAccess]
+        with pytest.raises(KeyError):
+            store.users.set_grants("nobody", ["approver"])
+
+    def test_the_audit_log_filters_by_actor_action_and_target(self, store: Store):  # M2 plan 2 O3
+        store.audit.record("human", "ann", "retry", "route:erp", {}, "ok")
+        store.audit.record("human", "bob", "retry", "route:erp_2", {}, "ok")
+        store.audit.record("human", "ann", "set_role", "user:bob", {}, "ok")
+        store.audit.record("token", "ci", "retry", "route%x", {}, "ok")
+        assert [r.target for r in store.audit.list_audit(actor="ann")] == ["user:bob", "route:erp"]
+        assert [r.actor for r in store.audit.list_audit(action="retry")] == ["ci", "bob", "ann"]
+        assert [r.actor for r in store.audit.list_audit(target="route:erp")] == ["bob", "ann"]
+        assert [r.actor for r in store.audit.list_audit(target="route%")] == [
+            "ci"
+        ]  # a wildcard is a character
+        assert [r.actor for r in store.audit.list_audit(target="route:erp_")] == ["bob"]
+        [first] = store.audit.list_audit(1, action="retry")
+        assert [r.actor for r in store.audit.list_audit(cursor=first.audit_id, action="retry")] == [
+            "bob",
+            "ann",
+        ]
+
+    def test_an_alert_fires_once_escalates_and_clears(self, store: Store):  # M2 plan 2 O6
+        first, new = store.alerts.fire("budget_high", "api", "warning", "api at 81%")
+        assert new and first.state == "firing" and store.alerts.unnotified() == [first]
+        store.alerts.mark_notified(first.alert_id)
+        again, new = store.alerts.fire("budget_high", "api", "warning", "api at 85%")
+        assert not new and again.alert_id == first.alert_id and again.message == "api at 85%"
+        assert store.alerts.unnotified() == []
+        worse, new = store.alerts.fire("budget_high", "api", "critical", "api at 96%")
+        assert new and worse.notified_at is None and worse.alert_id == first.alert_id
+        other, _ = store.alerts.fire("budget_high", "erp", "warning", "erp at 80%")
+        [cleared] = store.alerts.clear("budget_high", ["erp"])
+        assert (
+            cleared.alert_id == first.alert_id
+            and cleared.state == "cleared"
+            and cleared.cleared_at is not None
+        )
+        assert [a.alert_id for a in store.alerts.list_alerts("firing")] == [other.alert_id]
+        fresh, new = store.alerts.fire("budget_high", "api", "warning", "api at 82%")
+        assert new and fresh.alert_id != first.alert_id  # a new alert once the old cleared
+        acked = store.alerts.ack(other.alert_id, "ann")
+        assert acked.acked_by == "ann" and acked.acked_at is not None
+        assert store.alerts.snooze(other.alert_id, None).snoozed_until is None
+        with pytest.raises(KeyError):
+            store.alerts.get_alert("nope")
+
+    def test_alert_rules_are_set_and_reset(self, store: Store):
+        rule = store.alerts.set_rule("delivery_failed", True, {"after": "30m"}, ["ops-slack"])
+        assert (rule.enabled, dict(rule.params), rule.channels) == (True, {"after": "30m"}, ("ops-slack",))
+        store.alerts.set_rule("delivery_failed", False, {}, [])
+        assert [(r.name, r.enabled) for r in store.alerts.rules()] == [("delivery_failed", False)]
+        store.alerts.delete_rule("delivery_failed")
+        assert store.alerts.rules() == []
+        with pytest.raises(KeyError):
+            store.alerts.delete_rule("delivery_failed")
+
+    def test_the_budgets_defined_are_listed(self, store: Store):  # M2 plan 2 O1
+        store.budgets.define(BudgetSpec("z", parse_limits(["10/minute"]), reserve={"high": 0.6}))
+        store.budgets.define(BudgetSpec("a", parse_limits(["5/hour", "9/day"])))
+        assert [(s.name, s.windows, dict(s.reserve)) for s in store.budgets.specs()] == [
+            ("a", parse_limits(["5/hour", "9/day"]), {}),
+            ("z", parse_limits(["10/minute"]), {"high": 0.6}),
+        ]
+
     def test_all_applied(self, store: Store):
         assert store.ledger.all_applied()
         seal(store, "v1", ["a"])
@@ -1917,6 +2031,93 @@ class StoreContract(
             "o-2": T0,
         }
         assert store.webhooks.keep_many([]) == []
+
+    def test_a_partition_is_closed_once_with_who_and_why(self, store: Store):
+        first = store.readiness.close("acme/invoices", "store_id=1509", "ops", "store-day closed", T0)
+        again = store.readiness.close(
+            "acme/invoices", "store_id=1509", "other", "again", T0 + timedelta(hours=1)
+        )
+        assert again == first and (first.closed_by, first.reason, first.closed_at) == (
+            "ops",
+            "store-day closed",
+            T0,
+        )
+        assert set(store.readiness.closes("acme/invoices", ["store_id=1509", "store_id=1"])) == {
+            "store_id=1509"
+        }
+        assert store.readiness.closes("acme/other", ["store_id=1509"]) == {}
+
+    def test_a_firing_happens_once_and_queues_its_run_with_it(self, store: Store):
+        from feather_connect.storage.port import Firing
+
+        firing = Firing(
+            "acme/post",
+            "store_day",
+            "2026-11-08",
+            "store_id=1509",
+            0,
+            "ready",
+            {"a": {"p": "v"}},
+            T0,
+            "ready",
+        )
+        params = {"package": "acme", "version": "1.0.0", "ready": {"period": "2026-11-08"}}
+        run_id = store.readiness.fire(firing, params)
+        assert run_id is not None and store.readiness.fire(firing, params) is None
+        run = store.runs.get_run(run_id)
+        assert (run.flow, run.trigger, run.status, run.params["ready"]) == (
+            "acme/post",
+            "ready",
+            "queued",
+            params["ready"],
+        )
+        rerun = store.readiness.fire(
+            replace(firing, seq=1, reason="late data", fired_at=T0 + timedelta(hours=1)), params
+        )
+        assert rerun is not None and rerun != run_id
+        listed = store.readiness.firings("acme/post")
+        assert [(f.seq, f.run_id, f.versions) for f in listed] == [
+            (1, rerun, {"a": {"p": "v"}}),
+            (0, run_id, {"a": {"p": "v"}}),
+        ]
+        assert (
+            store.readiness.firings("acme/post", "other") == [] and store.readiness.firings("acme/else") == []
+        )
+
+    def test_readiness_reads_the_newest_sealed_version_of_each_partition_and_what_is_open(self, store: Store):
+        first = store.runs.create_run("f", "manual", "t", {})
+        second = store.runs.create_run("f", "manual", "t", {})
+        store.runs.set_run_status(first, "succeeded")
+        seal(store, "v1", ["staging"], ds="inv", part="day=1", run=first)
+        seal(store, "v2", ["staging"], ds="inv", part="day=2", run=first)
+        seal(store, "v3", ["staging"], ds="inv", part="day=1", run=second)
+        seal(store, "o1", ["staging"], ds="other", part="day=1", run=first)
+        latest = store.readiness.latest_sealed("inv", T0 - timedelta(days=1))
+        assert {p: (s.version_id, s.run_id, s.run_status) for p, s in latest.items()} == {
+            "day=1": ("v3", second, "queued"),
+            "day=2": ("v2", first, "succeeded"),
+        }
+        assert [s.version_id for s in store.readiness.sealed_since("inv", T0 - timedelta(days=1))] == [
+            "v1",
+            "v2",
+            "v3",
+        ]
+        assert store.readiness.latest_sealed("inv", datetime.now(UTC) + timedelta(days=3650)) == {}
+        store.ledger.transition("staging", "v1", "running", actor="t")
+        store.ledger.transition("staging", "v1", "applied", actor="t")
+        store.ledger.transition("staging", "v2", "running", actor="t")
+        store.ledger.transition("staging", "v2", "failed", actor="t", error="no")
+        store.ledger.transition("staging", "v2", "skipped", actor="t", reason="ops")
+        opened = store.readiness.open_deliveries("staging", "inv")
+        assert opened == {"day=1": latest["day=1"].seal_seq}  # v3; v1 is applied and v2 skipped
+        assert store.readiness.open_deliveries("staging", "nothing") == {}
+
+    def test_readiness_finds_the_oldest_push_event_not_sealed(self, store: Store):
+        assert store.readiness.oldest_unsealed("hooks") is None
+        store.inbox.put("hooks", inbound(b'{"n": 1}', at=T0), "e1")
+        store.inbox.put("hooks", inbound(b'{"n": 2}', at=T0 + timedelta(minutes=1)), "e2")
+        store.inbox.put("other", inbound(b"{}", at=T0 - timedelta(hours=1)), "e0")
+        assert store.readiness.oldest_unsealed("hooks") == T0
 
     def test_registries_are_added_listed_and_removed(self, store: Store):
         store.registry.add_registry("zeta", "https://z.example.com/simple/", None, "root")

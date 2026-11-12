@@ -121,6 +121,46 @@ class NotReady(Exception):
         self.state = state
 
 
+class UpstreamInactive(NotReady):
+    """A flow whose `on_ready` set names another package's dataset can't be activated while no active flow reads
+    that dataset: it would wait for data that never comes (M2 plan 1 §1.2)."""
+
+    def __init__(self, flow: str, datasets: list[str]) -> None:
+        super().__init__(
+            f"{flow} waits for {', '.join(datasets)}, which no active flow reads: activate the flow that writes "
+            f"{'them' if len(datasets) > 1 else 'it'} first",
+            "upstream_inactive",
+        )
+        self.datasets = datasets
+
+
+def inactive_upstreams(store: Store, flow: str, spec: Mapping[str, Any]) -> list[str]:
+    """The datasets of other packages that `flow`'s `on_ready` sets wait for and that no active flow reads."""
+    own = flow.split("/", 1)[0] + "/"
+    wanted = sorted(
+        {
+            str(name)
+            for t in cast("list[Mapping[str, Any]]", spec.get("triggers") or [])
+            if t.get("kind") == "on_ready"
+            for name in cast(
+                "list[str]", cast("Mapping[str, Any]", t.get("ready") or {}).get("datasets") or []
+            )
+            if not str(name).startswith(own)
+        }
+    )
+    if not wanted:
+        return []
+    read: set[str] = set()
+    for activation in store.packages.active():
+        if activation.flow == flow:
+            continue
+        version = store.packages.version(activation.package, activation.version)
+        specs = cast("dict[str, Any]", (version.load_check if version else {}).get("specs") or {})
+        found = cast("Mapping[str, Any]", specs.get(activation.flow) or {})
+        read |= {str(d.get("name")) for d in cast("list[Mapping[str, Any]]", found.get("datasets") or [])}
+    return [name for name in wanted if name not in read]
+
+
 class Busy(Exception):
     """As many installs and wheel fetches as may run at once are running: try again in `retry_after` seconds."""
 
@@ -632,12 +672,15 @@ class Packages:
             )
             raise NotReady(f"{package} {installed.version} can't be activated yet: {why}", installed.state)
         self._signed_still(installed)
+        spec = cast(dict[str, Any], installed.load_check.get("specs") or {}).get(flow)
+        missing = inactive_upstreams(self._store, flow, spec or {})
+        if missing:
+            raise UpstreamInactive(flow, missing)
         now = self._clock.now()
         try:
             done = self._store.packages.activate(flow, package, installed.version, actor.name, now, reason)
         except VersionNotReady as error:  # uninstalled meanwhile: the store checks in its transaction
             raise NotReady(str(error), error.state) from None
-        spec = cast(dict[str, Any], installed.load_check.get("specs") or {}).get(flow)
         if spec is not None and done.state == "activating":
             restart_ticks(self._store, flow, spec, now)  # no catch-up of the time it was inactive
         self._sync(package, installed)

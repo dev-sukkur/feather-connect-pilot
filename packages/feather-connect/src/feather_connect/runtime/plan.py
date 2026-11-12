@@ -1,13 +1,15 @@
 """Planning: which partitions of each dataset a run reads."""
 
-from collections.abc import Mapping, Sequence
+import inspect
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import PermanentError
 from feather_connect.core.flow import Flow
+from feather_connect.core.readiness import ReadyInfo
 from feather_connect.core.strategies import ByStamp
 from feather_connect.runtime.deps import RuntimeDeps
 
@@ -73,7 +75,20 @@ def _backfill_of(flow: Flow, days: Mapping[str, Any]) -> list[str]:
         raise PermanentError(f"the backfill can't be planned: {error}") from error
 
 
-def _partitions_of(dataset: Dataset, explicit: Sequence[str] | None, deps: RuntimeDeps) -> list[str]:
+def _planned(dataset: Dataset, now: datetime, ready: ReadyInfo | None) -> list[str]:
+    """The planner's partitions. A planner that takes `ready=` is told what a readiness firing is for (`ctx.ready`
+    in the readiness design §5), and None on a run that no firing started."""
+    planner = cast("Callable[..., list[str]]", dataset.planner)
+    try:
+        takes_ready = "ready" in inspect.signature(planner).parameters
+    except (TypeError, ValueError):  # a builtin has no signature to read
+        takes_ready = False
+    return planner(now, ready=ready) if takes_ready else planner(now)
+
+
+def _partitions_of(
+    dataset: Dataset, explicit: Sequence[str] | None, deps: RuntimeDeps, ready: ReadyInfo | None = None
+) -> list[str]:
     """Return what to read: the run's own list, or else the planner's, or else the scheme's recent window."""
     if isinstance(dataset.strategy, ByStamp):  # it reads once per run, across partitions, from its watermark
         return [_ALL_PARTITIONS]
@@ -81,7 +96,7 @@ def _partitions_of(dataset: Dataset, explicit: Sequence[str] | None, deps: Runti
     if explicit is not None:
         chosen = explicit
     elif dataset.planner is not None:
-        chosen = dataset.planner(now)
+        chosen = _planned(dataset, now, ready)
     else:
         recent = dataset.partition.recent(now)
         if recent is None:
@@ -110,7 +125,7 @@ def run_plan(flow: Flow, run_id: str, deps: RuntimeDeps, tick: str | None = None
             dataset.strategy.name == _PUSH
         ):  # nothing to read: its events come in, and the sealer makes its versions
             continue
-        partitions = _partitions_of(dataset, explicit, deps)
+        partitions = _partitions_of(dataset, explicit, deps, ReadyInfo.from_params(params))
         if tick is not None and dataset.strategy.complete and len(partitions) > 1:
             raise PermanentError(
                 f"dataset {dataset.name!r} reads {len(partitions)} slices as a whole, which a high-frequency poller "

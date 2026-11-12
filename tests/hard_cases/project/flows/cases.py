@@ -20,6 +20,10 @@ def table(name: str, key: str = "id") -> postgres.Table:
     return postgres.Table("warehouse", table=name, key_columns=[key])
 
 
+def erp(connection: str) -> http.Call:
+    return http.Call(connection, method="PUT", url="/orders/{id}")
+
+
 h1 = fc.Flow(  # a record moves from one day to another
     "h1",
     reads=fc.Dataset(
@@ -62,5 +66,69 @@ h6 = fc.Flow(  # one destination is down while the others take the read
         fc.to(table("h6"), name="h6-warehouse"),
         fc.to(http.Call("erp", method="PUT", url="/orders/{id}"), name="h6-erp"),
     ],
+    triggers=[fc.every("1d")],
+)
+
+
+# M2 plan 2's hard cases.
+
+h5 = fc.Flow(  # a row stamped before the watermark is found by the scheduled reconcile
+    "h5",
+    reads=fc.Dataset(
+        "h5.items", source=source("h5"), key="id", strategy=fc.strategy.by_stamp("u", lookback="1h")
+    ),
+    deliver=[fc.to(table("h5"), name="h5-upsert")],
+    triggers=[fc.every("1d"), fc.reconcile(every="20s", lookback="400d")],
+)
+h7_reader = fc.Flow(  # H7: a high-priority flow and a low-priority one share the budget h7
+    "h7-high",
+    reads=fc.Dataset("h7.high", source=source("h7high"), key="id", strategy=fc.strategy.snapshot_diff()),
+    deliver=[fc.to(erp("erp7high"), name="h7-high", priority="high")],
+    triggers=[fc.every("1d")],
+)
+h7_writer = fc.Flow(
+    "h7-low",
+    reads=fc.Dataset("h7.low", source=source("h7low"), key="id", strategy=fc.strategy.snapshot_diff()),
+    deliver=[fc.to(erp("erp7low"), name="h7-low", priority="low")],
+    triggers=[fc.every("1d")],
+)
+h8 = fc.Flow(  # the budget runs out: the delivery waits for the next window, and does not fail
+    "h8",
+    reads=fc.Dataset("h8.items", source=source("h8"), key="id", strategy=fc.strategy.snapshot_diff()),
+    deliver=[fc.to(erp("erp8"), name="h8-erp")],
+    triggers=[fc.every("1d")],
+)
+h10 = fc.Flow(  # a record the ERP turned down is superseded by a newer version of its key
+    "h10",
+    reads=fc.Dataset(
+        "h10.items", source=source("h10"), key="id", strategy=fc.strategy.snapshot_diff(), keep_state=True
+    ),
+    deliver=[fc.to(erp("erp10"), name="h10-erp")],
+    triggers=[fc.every("1d")],
+)
+# H11: the test rewrites this line in its copy of the project and installs it again, deploying a route more.
+H11_ROUTES = ["a"]
+h11 = fc.Flow(
+    "h11",
+    reads=fc.Dataset("h11.items", source=source("h11"), key="id", strategy=fc.strategy.by_stamp("u")),
+    deliver=[fc.to(table(f"h11_{r}"), name=f"h11-{r}") for r in H11_ROUTES],
+    triggers=[fc.every("1d")],
+)
+h12 = fc.Flow(  # an added column applies, a dropped one holds the delivery
+    "h12",
+    reads=fc.Dataset("h12.items", source=source("h12"), key="id", strategy=fc.strategy.snapshot_diff()),
+    deliver=[fc.to(table("h12"), name="h12-upsert")],
+    triggers=[fc.every("1d")],
+)
+h15 = fc.Flow(  # new code is deployed while the deliveries drain, slowed by the budget h15
+    "h15",
+    reads=fc.Dataset(
+        "h15.items",
+        source=source("h15"),
+        key="id",
+        strategy=fc.strategy.snapshot_diff(),
+        partition=fc.partition.by_bucket("id", 5),
+    ),
+    deliver=[fc.to(erp("erp15"), name="h15-erp")],
     triggers=[fc.every("1d")],
 )

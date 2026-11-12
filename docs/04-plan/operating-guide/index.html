@@ -51,7 +51,7 @@ nav { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 15px; }
   <h1>Feather Connect Operating Guide</h1>
   <p class="lead prose">How to run Feather Connect on your machine, then how a customer creates a flow, tests it, runs it, watches it and fixes it when something goes wrong, and how to deploy it.</p>
   <nav>
-    <a href="#run">Run it</a><a href="#create">Create a flow</a><a href="#test">Test it</a><a href="#start">Start the flow</a><a href="#monitor">Monitor</a><a href="#operate">Operate</a><a href="#webhooks">Webhooks</a><a href="#api">API and remote commands</a><a href="#environment">Environment and secrets</a><a href="#deploy">Deploy</a><a href="#limits">Not in M1</a>
+    <a href="#run">Run it</a><a href="#create">Create a flow</a><a href="#test">Test it</a><a href="#start">Start the flow</a><a href="#monitor">Monitor</a><a href="#operate">Operate</a><a href="#webhooks">Webhooks</a><a href="#api">API and remote commands</a><a href="#environment">Environment and secrets</a><a href="#m2-operations">Approvals and SAP</a><a href="#deploy">Deploy</a><a href="#limits">Not in M1</a>
   </nav>
 </header>
 
@@ -339,7 +339,7 @@ def test_orders_reach_the_warehouse():
   <p class="prose">The worker registers the flow and its triggers start it. There's no deploy step. While <code>feather dev</code> runs, saving a file under <code>flows/</code> or <code>env/</code>, or <code>feather.yaml</code>, reloads it. A file that doesn't load leaves the running version alone and says why. To run the flow now, press <b>Run now</b> on its page, or use <code>feather run &lt;flow&gt;</code> against a server (see <a href="#api">API and remote commands</a>).</p>
   <div class="scroll"><table>
     <tr><th>Trigger</th><th>Runs</th></tr>
-    <tr><td><code>fc.every("15m")</code></td><td>On an interval. An interval under 5 minutes is a <b>poller</b>: each tick is a task inside one run per day, called a stream run. So <code>every("30s")</code> shows as one run that gathers about 2,880 ticks a day, and its page counts them.</td></tr>
+    <tr><td><code>fc.every("15m")</code></td><td>On an interval. An interval under 5 minutes is a <b>poller</b>: each tick is a task inside one run per day, called a stream run. So <code>every("30s")</code> shows as one run that gathers about 2,880 ticks a day, and its page counts them. In a package, its host ticks it, while the version is active.</td></tr>
     <tr><td><code>fc.cron("0 6 * * *", tz="Asia/Kolkata")</code></td><td>On a cron schedule in a time zone. Each firing is a run.</td></tr>
     <tr><td><code>fc.manual()</code></td><td>Only when someone starts it.</td></tr>
     <tr><td><code>fc.on_event(dataset)</code></td><td>When webhooks arrive for a push dataset (see <a href="#webhooks">Receive webhooks</a>).</td></tr>
@@ -397,17 +397,18 @@ uv run feather replay warehouse --version &lt;version_id&gt; --reason "table res
   <h3 id="trace">Trace a record</h3>
   <p class="prose">To answer “what happened to invoice INV-00005?”, open <b>Trace a record</b> in the sidebar, pick the dataset and type the record's key. A <b>Trace</b> link on each row of a version's records, of a delivery's answers and of Quarantine does the same. The page is one timeline, oldest first. Each version that held the key shows whether it inserted, updated or deleted the record, its partition, the run that read it with a link to that read's log, the record as it was read, and the fields that changed since the version before. Under each version, every route shows its delivery: the status, each attempt with its error, what the destination answered for the record (the HTTP status, fields such as <code>erp_id</code>, and the body that was sent when it was rejected), its quarantine entries, and each retry, skip or replay with who did it, the reason and its audit row. The same comes as JSON from <code>GET /api/v1/datasets/{dataset}/records/{key}/trace</code>.</p>
   <p class="prose">Versions are found through a key index that each seal writes in its own transaction, for scheduled reads and webhooks alike, so a trace reads no spool chunk to find them. Versions sealed before this release are not in the index and don't show. <code>http.Call</code> and <code>graphql.Mutation</code> send <code>X-Feather-Version: &lt;version_id&gt;</code> beside the <code>Idempotency-Key</code>, so a line in the destination's logs leads back to a version and from there to its trace.</p>
-  <h3 id="roles">Roles: admin and operator</h3>
-  <p class="prose">Each user and each API token has one of two roles. An <b>operator</b> does everything this section describes: run, re-run, backfill, retry, skip, replay, cancel, pause and resume, check connections and settle the quarantine. An <b>admin</b> can do all that, and also manage users, their roles and API tokens. With flow packages, installing, promoting and uninstalling a package and adding a registry will be an admin's too, while activating a flow stays an operator's. The rest of RBAC (viewer, developer, approvals) comes in M2.</p>
+  <h3 id="roles">Roles and grants (M2)</h3>
+  <p class="prose">Each user and each API token has one of four roles, each able to do what the one below it does. A <b>viewer</b> sees every page and API read but the audit log and PII, and changes nothing. An <b>operator</b> runs, re-runs, backfills, retries, skips, replays, compensates, cancels, pauses and resumes, checks connections, settles the quarantine, acknowledges and snoozes alerts and reads the audit log. A <b>developer</b> also manages the environment's connections, secrets and alert rules, and installs, promotes, uninstalls and yanks packages and adds registries. An <b>admin</b> also manages users, their roles and grants and API tokens, and publishes packages. In a <b>protected</b> environment (<code>settings: {protected: true}</code>), what a developer does is an admin's. Two <b>grants</b> go beside a role: <code>approver</code> decides holds, and <code>pii-reader</code> sees PII fields as they are; an admin has both.</p>
   <div class="scroll"><table>
     <tr><th>To</th><th>Do</th></tr>
     <tr><td>Add a user</td><td><code>feather server create-user ann</code>. The first user is an admin and the next ones operators; <code>--role admin</code> or <code>--role operator</code> says which.</td></tr>
-    <tr><td>Change a role</td><td><code>feather server set-role ann admin --reason "on call"</code>, the <b>Users</b> page of the dashboard (admins only), or <code>PUT /api/v1/users/ann/role</code>. The only admin can't be made an operator: make another admin first.</td></tr>
+    <tr><td>Change a role</td><td><code>feather server set-role ann admin --reason "on call"</code>, the <b>Users</b> page of the dashboard (admins only), or <code>PUT /api/v1/users/ann/role</code>. The roles are <code>viewer</code>, <code>operator</code>, <code>developer</code> and <code>admin</code>. The only admin can't be made anything else: make another admin first.</td></tr>
+    <tr><td>Give grants</td><td><code>feather server set-grants ann approver pii-reader</code> (none to take them all away), the checkboxes on the <b>Users</b> page, or <code>PUT /api/v1/users/ann/grants</code> with <code>{"grants": ["approver"]}</code>. Audited as <code>set_grants</code>.</td></tr>
     <tr><td>Make a token</td><td><code>feather server create-token ci-bot --role operator</code> for automation, an operator unless <code>--role</code> says otherwise; <code>--user ann</code> makes it ann's. An admin can also call <code>POST /api/v1/tokens</code>, which makes a token of their own.</td></tr>
   </table></div>
   <p class="prose">A token never acts above its user: it acts with the lower of its own role and its user's current one, so demoting a user demotes their tokens at once. Users and tokens from before this release are admins, so nothing changes for them. The signed-in line in the sidebar shows your role. An operator who tries an admin action gets <code>403</code> with <code>needs the admin role</code> from the API, or a page saying so in the dashboard; the server's check is what counts, and the dashboard only hides what an operator can't use. Roles are held per tenant.</p>
   <h3>Audit</h3>
-  <p class="prose">Each action from the dashboard, the API or the CLI writes a row with who did it, what it touched, and the reason, in the <code>feather.audit</code> table. So does every role change, and every admin action refused to an operator, with the result <code>refused: needs the admin role</code>. M1 has no audit page, so read it with SQL.</p>
+  <p class="prose">Each action from the dashboard, the API or the CLI writes a row with who did it, what it touched, and the reason, in the <code>feather.audit</code> table. So does every role and grant change, every unmasking of PII, and every action refused, with the result, such as <code>refused: needs the developer role</code> or <code>refused: needs the approver grant</code>. The <b>Audit</b> page (operators and up) lists it newest first, filtered by actor, action and the start of a target (<code>route:</code> for every route), a page at a time; each actor, action and target links to its own filter. The API is <code>GET /api/v1/audit?actor=&amp;action=&amp;target=&amp;cursor=&amp;limit=</code>.</p>
   <h3>Workers, scaling and draining</h3>
   <p class="prose">A worker runs the tasks of the project's flows: <code>uv run feather worker --project my-shop --database-url postgresql://...</code>, with <code>--slots</code> (8 tasks at once by default) and <code>--labels site=hq</code>. Start more workers to scale out. With Compose, set <code>FEATHER_WORKERS</code>. On SIGTERM a worker marks itself <code>draining</code>, stops taking work, waits up to 30 seconds for its running tasks, and exits. If a worker is killed instead, the sweeper sees its heartbeats stop and hands its tasks on. The Overview lists each worker with its state, slots and code version, and <code>feather status</code> lists each worker's state.</p>
   <h3>Budgets</h3>
@@ -418,7 +419,30 @@ connections:
   zakya:
     connector: zakya
     budget: zoho-api</code></pre>
-  <p class="prose">A budget is its tenant's own, unless it names an <code>account</code>: the vendor account the limits belong to. Every budget naming the same account takes from one set of windows, whatever tenant or name it has, because the vendor counts those calls together (ADR-0013 rule 8). The Overview shows each budget's use, and <code>GET /api/v1/budgets</code> returns it. A connection check spends from the high-priority reserve.</p>
+  <p class="prose">A budget is its tenant's own, unless it names an <code>account</code>: the vendor account the limits belong to. Every budget naming the same account takes from one set of windows, whatever tenant or name it has, because the vendor counts those calls together (ADR-0013 rule 8). The <b>Budgets</b> page shows each budget, the project's and those its packages define, with each window's use, the part kept for high-priority work, and the tasks waiting for it: a task that finds a budget spent waits for the next window, and is listed there rather than failed. <code>GET /api/v1/budgets</code> and <code>GET /api/v1/budgets/{name}</code> return the same. A connection check spends from the high-priority reserve.</p>
+  <h3 id="pii">PII</h3>
+  <p class="prose">Name a dataset's personal fields with <code>fc.Dataset(..., pii=["email", "phone"])</code>. They show as <code>•••</code> wherever its records are shown: a version's records, a task's, a trace and a diff, on the dashboard, in the API (whose answers say <code>"masked": true</code> and <code>"pii": [...]</code>) and in <code>feather trace</code> and <code>feather diff</code>. A <code>pii-reader</code> (or an admin) sees them as they are with <b>Show them</b> on the page, <code>?unmask=true</code> in the API or <code>--unmask</code> in the CLI; each time is audited as <code>pii.unmask</code>, and a refusal too. A null stays null. Keys are never masked, as they identify the record in every page and link: don't key a dataset by a personal field.</p>
+  <h3 id="diff">What a version changed</h3>
+  <p class="prose"><b>What it changed</b> on a version's page compares it with the partition's version before it: the keys it added, removed and changed, and for each changed key the fields, before and after, PII masked. <code>?against=&lt;version&gt;</code> compares with an older version of the same partition, netting every version between. <code>feather diff VERSION [--against OLDER]</code> and <code>GET /api/v1/versions/{id}/diff</code> give the same; <code>feather trace DATASET KEY</code> prints a record's trace.</p>
+  <h3 id="alerts">Alerts</h3>
+  <p class="prose">A server loop checks these rules every 30 seconds. An alert fires once for its subject, is refreshed while the rule still finds it, and clears by itself when it doesn't. Its channels hear of it once, and again only if it turns critical; a notice a channel turned down is tried again on the next pass.</p>
+  <div class="scroll"><table>
+    <tr><th>Rule</th><th>Fires for</th><th>Default</th></tr>
+    <tr><td><code>run_failed</code></td><td>A flow whose newest run failed</td><td>On in a protected environment only</td></tr>
+    <tr><td><code>delivery_failed</code></td><td>A delivery failed for longer than <code>after</code></td><td><code>after: 15m</code></td></tr>
+    <tr><td><code>budget_high</code></td><td>A budget window at <code>warning</code> (a warning) or <code>critical</code> (critical) of its units</td><td>0.8 and 0.95</td></tr>
+    <tr><td><code>hold_waiting</code></td><td>A delivery held for longer than <code>after</code></td><td><code>after: 2h</code></td></tr>
+    <tr><td><code>schedule_skipped</code></td><td>A flow whose newest <code>ticks</code> scheduled runs were all skipped</td><td><code>ticks: 3</code></td></tr>
+    <tr><td><code>dataset_stale</code></td><td>A dataset whose newest version is older than its <code>max_lag</code></td><td>Where a dataset has <code>max_lag="2h"</code></td></tr>
+  </table></div>
+  <p class="prose">Channels go in the project's settings; a secret reference works in a URL or an SMTP password:</p>
+  <pre><code>settings:
+  alert_channels:
+    ops-hook: {kind: webhook, url: "${secret:env:OPS_HOOK_URL}"}   # the alert as JSON
+    ops-slack: {kind: slack, url: "${secret:env:SLACK_WEBHOOK}"}     # its text
+    ops-mail: {kind: smtp, host: smtp.example.com, port: 587, starttls: true, from: feather@example.com,
+               to: [ops@example.com], username: feather, password: "${secret:env:SMTP_PASSWORD}"}</code></pre>
+  <p class="prose">The <b>Alerts</b> page lists what is firing (and what cleared), with <b>Acknowledge</b>, which quiets an alert for good, and <b>Snooze</b>, which quiets it for an hour, four hours or a day; both are an operator's and audited. Under it, a developer turns each rule on or off, sets its parameters and picks its channels (none picks them all), or resets it to its default. The API is <code>GET /api/v1/alerts?state=firing</code>, <code>POST /api/v1/alerts/{id}:ack</code>, <code>POST /api/v1/alerts/{id}:snooze</code> with <code>{"minutes": 60}</code>, <code>GET /api/v1/alert-rules</code>, <code>PUT /api/v1/alert-rules/{name}</code> with <code>{"enabled", "params", "channels"}</code> and <code>DELETE /api/v1/alert-rules/{name}</code>. Alerts and rules are kept in the <code>feather.alert</code> and <code>feather.alert_rule</code> tables.</p>
   <h3>Secrets</h3>
   <p class="prose">Write secrets as references, <code>${secret:env:NAME}</code> or <code>${secret:file:path}</code>, under a connection's <code>auth</code>. Other providers arrive in M3. They are resolved when used. An error names the reference, never the value, and the dashboard never shows them. <code>feather validate</code> reports one that isn't set.</p>
   <h3>When things go wrong</h3>
@@ -491,7 +515,7 @@ curl -H "Authorization: Bearer fc_..." http://127.0.0.1:8080/api/v1/runs</code><
     <tr><th>Calls</th><th>Do</th></tr>
     <tr><td><code>GET /flows</code>, <code>/runs</code>, <code>/runs/{id}/tasks</code>, <code>/tasks/{id}/logs</code>, <code>/summary</code>, <code>/connections</code>, <code>/budgets</code></td><td>Read</td></tr>
     <tr><td><code>POST /flows/{flow}:run</code>, <code>/runs/{id}:cancel</code>, <code>/flows/{flow}:pause</code>, <code>:resume</code>, <code>/routes/{route}:pause</code>, <code>:resume</code></td><td>Act</td></tr>
-    <tr><td><code>GET /users</code>, <code>POST /users</code>, <code>PUT /users/{name}/role</code>, <code>POST /tokens</code></td><td>Manage users, roles and tokens: admin only (see <a href="#roles">Roles</a>)</td></tr>
+    <tr><td><code>GET /users</code>, <code>POST /users</code>, <code>PUT /users/{name}/role</code>, <code>PUT /users/{name}/grants</code>, <code>POST /tokens</code></td><td>Manage users, roles, grants and tokens: admin only (see <a href="#roles">Roles</a>)</td></tr>
     <tr><td><code>POST /flows/{flow}:backfill:preview</code>, then <code>/flows/{flow}:backfill</code>; likewise <code>/deliveries:retry</code>, <code>:skip</code>, <code>:replay</code> and <code>/datasets/{d}/partitions:rerun</code></td><td>Mass actions: the preview returns the impact and a <code>confirmation_token</code>, which the action takes</td></tr>
   </table></div>
   <p class="prose">A call that changes something takes a <code>reason</code> in its body and an <code>Idempotency-Key</code> header. If the same caller repeats a key within 24 hours, it gets the first answer again and nothing more happens.</p>
@@ -584,6 +608,31 @@ feather secret set zakya/client_secret --env prod &lt; client-secret.txt        
   <p class="prose">Every comparison takes constant time. The <code>webhook_connector</code> install check still refuses a package that brings its own webhook source as code, and now also a declared webhook that isn't valid or feeds a dataset the package doesn't define.</p>
 </section>
 
+<section id="readiness">
+  <h2><span class="n">8c</span>Run a flow when its data is ready (M2)</h2>
+  <p class="prose">A flow can wait for data instead of a clock: it starts once the datasets it needs are complete, and optionally delivered to a route. The server works this out from the store as soon as a version is sealed or a delivery applied (Postgres <code>NOTIFY feather_ready</code>), and every 10 seconds for the clock, and fires each period once, on the version of the package that is active. A set may wait for another package's dataset, named <code>&lt;package&gt;/&lt;dataset&gt;</code>; activating such a flow is refused, naming the dataset, until a flow that reads it is active.</p>
+  <div class="file">flows/posting.py</div>
+  <pre><code># After each ingest run is applied to staging, at most every 4 hours.
+to_sap = fc.Flow("to-sap", reads=staged, deliver=[to_sap_route],
+                 triggers=[fc.on_ready(fc.ready(invoices, delivered_to="staging"), each="run", at_most_every="4h")])
+
+# Once a store-day of invoices, returns and payments is complete, store by store.
+posting = fc.Flow("store-day-posting", reads=totals, deliver=[to_erp],
+                  triggers=[fc.on_ready(fc.ready([invoices, returns, payments], by="store_id"),
+                                        each="day", tz="Asia/Kolkata", on_late="rerun")])</code></pre>
+  <div class="scroll"><table>
+    <tr><th>A dataset read by</th><th>Is complete through the end of a period when</th></tr>
+    <tr><td><code>replace</code>, <code>snapshot_diff</code></td><td>The period's partition (for its scope) has a version from a run that started after the period ended, or the partition was closed and has a version</td></tr>
+    <tr><td><code>by_stamp</code></td><td>A run that succeeded started at least <code>settle</code> (default: the dataset's <code>lookback</code>) after the period ended</td></tr>
+    <tr><td><code>push</code></td><td>No event received before the end waits to be sealed, and <code>settle</code> (default 5 minutes) has passed or the partition was closed</td></tr>
+  </table></div>
+  <p class="prose"><code>delivered_to</code> also needs the route to have applied (or skipped) every one of those versions. With <code>quarantine="blocks"</code> a version with records turned down doesn't count. A period that fired and later gets a new version is <b>late</b>: <code>on_late="rerun"</code> (the default) fires it once more, with the reason <i>late data</i>; <code>warn</code> shows it as late; <code>ignore</code> does nothing. A new flow fires from when it was first seen, or from <code>start=</code>; periods older than 7 days are not looked at. A planner that takes <code>ready=</code> is told the period, scope and versions of the run.</p>
+  <pre><code>feather ready status [flow]                                       # each period: fired, ready, waiting (and for what), late
+feather ready close acme/invoices --partition "store_id=1509/date=2026-11-08" --reason "till closed"
+feather ready fire acme/posting --period 2026-11-08 --scope store_id=1509 --reason "posted by hand"</code></pre>
+  <p class="prose">The <b>Readiness</b> page shows the same, with <b>Fire now</b> and <b>Close partition</b>; the API is <code>GET /api/v1/readiness</code>, <code>GET /api/v1/flows/{flow}/readiness</code>, <code>POST /api/v1/flows/{flow}/readiness:fire</code> and <code>POST /api/v1/datasets/{d}/partitions/{p}:close</code>. Both actions need an operator and a reason, and are audited. A period fired by hand stays fired: late data doesn't rerun it. <code>feather validate</code> refuses a set naming a dataset no flow reads, a <code>delivered_to</code> route that doesn't take it, <code>by</code> a field it isn't partitioned on, <code>each="run"</code> with several datasets, <code>hour</code> or <code>day</code> without <code>tz</code>, and flows waiting on each other.</p>
+</section>
+
 <section id="deploy">
   <h2><span class="n">9</span>Deploy</h2>
   <p class="prose"><code>feather dev</code> is for development. To run Feather Connect for real on one machine, use Docker Compose:</p>
@@ -611,14 +660,29 @@ docker compose -f deploy/compose.yaml exec feather-server feather server create-
   <p class="prose">Locally, <code>feather dev</code> does all of this on start: it installs the project as the next <code>&lt;version&gt;.devN</code>, renames any M1 history, and installs again on each save. It keeps the last three dev versions.</p>
 </section>
 
+<section id="m2-operations">
+  <h2><span class="n">8d</span>Approvals, SAP and changes over time (M2)</h2>
+  <h3 id="approvals">Approvals</h3>
+  <p class="prose">A route can hold its deliveries for a person: <code>fc.to(sink, approval=fc.approval.when(lambda r: r["total"] &gt; 500000, reason="large invoice"))</code>, or <code>fc.approval.always()</code>. A delivery with a record that needs approval waits as a whole, <code>held</code>, with the reason and the count, and the versions behind it in its partition wait too. An approver approves it, and it applies as it is, or rejects it with a reason, and it is skipped: on the <b>Holds</b> page, with <code>feather holds list</code>, <code>feather holds approve ROUTE VERSION --reason ...</code> and <code>feather holds reject ...</code>, or <code>POST /api/v1/routes/{route}/deliveries/{version}:approve</code> (or <code>:reject</code>). Each decision is audited.</p>
+  <h3 id="side-effects">Side-effect routes and compensation</h3>
+  <p class="prose">A sink that can take a posting back (one with <code>compensate</code>, such as <code>sap_cpi.Post</code>) makes a side-effect route. An operator reverses an applied delivery with <code>feather deliveries compensate ROUTE VERSION --reason ...</code> or <code>POST /api/v1/routes/{route}/deliveries/{version}:compensate</code>; the sink reverses each chunk, the delivery becomes <code>compensated</code>, and it is audited. A resend after a crash posts nothing twice, because each chunk carries the same <code>Idempotency-Key</code>.</p>
+  <h3 id="sap">SAP through CPI</h3>
+  <p class="prose"><code>feather-sap-cpi</code> reads and posts through iFlows on SAP's Cloud Platform Integration: <code>sap_cpi.Source</code> GETs an endpoint that returns JSON pages (by_stamp with a <code>since</code> parameter, or replace), and <code>sap_cpi.Post(connection, path=..., reversal_path=..., response_map=...)</code> posts each record with an idempotency header and keeps fields of the answer, such as the billing document. It signs in with OAuth2 client credentials against the BTP token URL and fetches a CSRF token when the connection says <code>csrf: true</code>. <code>examples/zakya-demo</code> runs the reference chain: Zakya invoices to Postgres staging, then staging to SAP once each run is in staging, holding invoices above 5 lakh for approval, against the simulator <code>sims/cpi.py</code>.</p>
+  <h3 id="schema-policy">When a dataset's fields change</h3>
+  <p class="prose">Before a version is applied, its fields and their types are compared with the version the route last applied in that partition. With the default <code>schema_policy="default"</code>, an added field applies, while a dropped field or a changed type holds the delivery with a reason that starts <code>schema_change</code>, for an approver to approve (the change is meant) or reject. <code>"strict"</code> holds on any change, <code>"permissive"</code> on none, and a function <code>(before, after) -&gt; reason or None</code> decides for itself. Set it on the dataset; <code>fc.to(..., schema_policy=...)</code> overrides it for one route.</p>
+  <h3 id="new-route">Adding a route to a live flow</h3>
+  <p class="prose">Deploy the flow with the new route and it catches up by itself: its first delivery in each partition is the whole slice as now read (for a <code>by_stamp</code> dataset, read from the beginning), while the routes it joins get only what changed. Then it follows live.</p>
+  <h3 id="reconcile">Reconcile</h3>
+  <p class="prose">A <code>by_stamp</code> read misses a row whose stamp put it before the watermark, such as one back-dated into a closed period. <code>triggers=[fc.every("15m"), fc.reconcile(every="1d", lookback="30d")]</code> reads the last 30 days again once a day; what it finds unchanged goes nowhere, and what it finds new or changed is delivered as any read's.</p>
+</section>
+
 <section id="limits">
   <h2><span class="n">10</span>Not in M1</h2>
   <div class="scroll"><table>
     <tr><th>Missing</th><th>Arrives in</th></tr>
-    <tr><td><code>fc.reconcile</code>, and hard case H5</td><td>M2</td></tr>
-    <tr><td>Readiness, side-effect routes and approvals, overrides beyond pause and resume, the rest of RBAC (M1.1 brings the admin and operator roles), MCP and alerts</td><td>M2</td></tr>
-    <tr><td>A budget page on the dashboard. The Overview shows use, and the reserve logic ships in M1</td><td>M2</td></tr>
-    <tr><td><code>sink.confirm</code>, with Magento</td><td>M2</td></tr>
+    <tr><td>Overrides beyond pause and resume, availability windows, SLA and anomaly views, derived datasets and SQL transforms</td><td>M4</td></tr>
+    <tr><td>Connectors other than Zakya, Postgres, HTTP and SAP through CPI</td><td>M6</td></tr>
+    <tr><td><code>sink.confirm</code>, with Magento</td><td>M6</td></tr>
     <tr><td>OAuth2 tokens shared across processes. M1 shares one per grant within a process</td><td>M2</td></tr>
     <tr><td>Secret providers other than <code>env</code> and <code>file</code></td><td>M3</td></tr>
     <tr><td>Row-level security policies (every table already carries <code>tenant_id</code>) and other tenants than <code>default</code></td><td>M3</td></tr>

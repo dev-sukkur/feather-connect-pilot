@@ -38,22 +38,22 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[HostWorld
             found.close()
 
 
-def _first_taken(world: HostWorld, version: str, timeout: float) -> str:
-    """The first run the scheduler queued for the version, once its host has taken it."""
-
-    def taken() -> str | None:
-        runs = [r for r in world.runs("acme") if r.params.get("version") == version]
-        return next((r.run_id for r in runs if r.status != "queued"), None)
-
-    return wait_for(taken, timeout, f"a run of {version} from the scheduler, taken by its host")
+POLL = "poll"
 
 
-def test_a_flow_activated_runs_through_the_scheduler_and_one_deactivated_queues_nothing_after_5_s(
+def _first_tick(world: HostWorld, version: str, timeout: float) -> str:
+    """The first tick of the poller that the version's host ran, by the delivery it wrote."""
+    return wait_for(
+        lambda: next(iter(world.ticks("acme", version)), None), timeout, f"a tick of the poller on {version}"
+    )
+
+
+def test_a_poller_activated_ticks_on_its_host_into_one_stream_run_and_deactivated_stops_after_5_s(
     world: HostWorld, record_property: Callable[[str, object], None]
 ):
     world.install(world.build("acme", "1.0.0", lib="1.0"))
     world.start()
-    world.start_scheduler()
+    world.start_scheduler()  # it ticks the other triggers: a poller's are its host's (M2 plan 1 §3)
     wait_for(lambda: world.state("acme", "1.0.0") == "ready", 120, "the supervisor to prepare acme 1.0.0")
     row = world.store.packages.version("acme", "1.0.0")
     assert row is not None
@@ -61,38 +61,37 @@ def test_a_flow_activated_runs_through_the_scheduler_and_one_deactivated_queues_
     assert world.host_of("acme", "1.0.0") is None  # nothing is active: no host
 
     activated = time.monotonic()
-    world.activate("acme", "1.0.0")
-    assert world.active("acme") is None  # it fires once its host is up
-    run = _first_taken(world, "1.0.0", 120)
+    world.activate("acme", "1.0.0", POLL)
+    assert world.active("acme", POLL) is None  # it ticks once its host is up
+    _first_tick(world, "1.0.0", 120)
     record_property("activate_uncached_s", round(time.monotonic() - activated, 1))
     host = world.host_of("acme", "1.0.0")
-    assert host is not None and world.wait_for_runs([run])[run] == "succeeded", world.log_of(str(host))
+    assert host is not None
+    wait_for(lambda: len(world.ticks("acme")) >= 3, 60, "three ticks")
+    runs = world.store.runs.list_runs(flow=f"acme/{POLL}", limit=50)
+    assert [r.trigger for r in runs] == ["stream"] * len(runs) and len(runs) <= 2  # a run a day, not a tick
     assert {(code, lib) for _, _, code, lib in world.rows()} == {("1.0.0", "1.0")}
 
-    # Deactivated: the scheduler queues nothing once 5 s have passed.
+    # Deactivated: its host ticks nothing once 5 s have passed.
     stopped = time.monotonic()
-    world.deactivate("acme")
+    world.deactivate("acme", POLL)
     time.sleep(max(0.0, stopped + 5 - time.monotonic()))
-    after = {r.run_id for r in world.runs("acme")}
+    after = world.ticks("acme")
     time.sleep(6)  # three ticks of its trigger
-    assert {r.run_id for r in world.runs("acme")} == after, (
-        "the scheduler queued a run 5 s after deactivating"
-    )
+    assert world.ticks("acme") == after, "the host ticked 5 s after deactivating"
     wait_for(lambda: world.host_of("acme", "1.0.0") is None, 120, "the host to drain and stop")
     worker = next(w for w in world.store.workers.list_workers() if w.worker_id == host)
     assert worker.state == "draining"  # it drained, as a worker does on SIGTERM
 
-    # Activated again, on the environment it built: a run within 30 s.
-    world.wait_for_runs([r.run_id for r in world.runs("acme")])
-    seen = {r.run_id for r in world.runs("acme")}
+    # Activated again, on the environment it built: a tick within 30 s.
+    seen = set(world.ticks("acme"))
     activated = time.monotonic()
-    world.activate("acme", "1.0.0")
-
-    def new_taken() -> str | None:
-        found = [r for r in world.runs("acme") if r.run_id not in seen and r.status != "queued"]
-        return found[0].run_id if found else None
-
-    wait_for(new_taken, 30, "a new run taken within 30 s of activating, its environment built")
+    world.activate("acme", "1.0.0", POLL)
+    wait_for(
+        lambda: set(world.ticks("acme")) - seen,
+        30,
+        "a new tick within 30 s of activating, its environment built",
+    )
     record_property("activate_cached_s", round(time.monotonic() - activated, 1))
 
 
@@ -192,24 +191,21 @@ def test_activating_a_version_whose_host_cant_load_keeps_the_old_one_firing(worl
     for version in ("1.0.0", "1.1.0"):
         world.install(world.build("acme", version))
     world.start()
-    world.start_scheduler()
     for version in ("1.0.0", "1.1.0"):
         wait_for(lambda v=version: world.state("acme", v) == "ready", 120, f"acme {version} to be ready")
-    world.activate("acme", "1.0.0")
-    _first_taken(world, "1.0.0", 60)
+    world.activate("acme", "1.0.0", POLL)
+    _first_tick(world, "1.0.0", 60)
     world.fail_load("1.1.0")  # loads in the load check, but not in a host
-    world.activate("acme", "1.1.0")
-    wait_for(lambda: world.activation("acme", "1.1.0") == "failed", 120, "the activation of 1.1.0 to fail")
-    [failed] = [a for a in world.store.packages.activations("acme", "1.1.0") if a.flow == f"acme/{FLOW}"]
-    assert "was told not to load" in (failed.error or "")
-    assert world.active("acme") == "1.0.0"
-    seen = {r.run_id for r in world.runs("acme")}
+    world.activate("acme", "1.1.0", POLL)
     wait_for(
-        lambda: [r for r in world.runs("acme") if r.run_id not in seen and r.params["version"] == "1.0.0"],
-        30,
-        "the old version to fire again",
+        lambda: world.activation("acme", "1.1.0", POLL) == "failed", 120, "the activation of 1.1.0 to fail"
     )
-    assert all(r.params["version"] == "1.0.0" for r in world.runs("acme"))
+    [failed] = [a for a in world.store.packages.activations("acme", "1.1.0") if a.flow == f"acme/{POLL}"]
+    assert "was told not to load" in (failed.error or "")
+    assert world.active("acme", POLL) == "1.0.0"
+    seen = set(world.ticks("acme"))
+    wait_for(lambda: set(world.ticks("acme", "1.0.0")) - seen, 30, "the old version to tick again")
+    assert world.ticks("acme", "1.1.0") == []
 
 
 def test_two_packages_pinning_two_versions_of_one_library_run_side_by_side(world: HostWorld):

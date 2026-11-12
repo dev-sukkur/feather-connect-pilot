@@ -51,6 +51,15 @@ def test_a_loop_runs_each_interval_until_stopped() -> None:
     assert runner.count == stopped_at and runner.last_error is None
 
 
+def test_a_woken_loop_runs_its_next_pass_at_once() -> None:
+    runner = LoopRunner("x", lambda: None, 60.0, AlwaysLeader())
+    runner.start()
+    wait_until(lambda: runner.count >= 1)
+    runner.wake()
+    wait_until(lambda: runner.count >= 2)  # not 60 s later
+    runner.stop()
+
+
 def test_a_raising_loop_keeps_running_and_records_the_error() -> None:
     calls: list[int] = []
 
@@ -102,6 +111,8 @@ def test_default_loops_are_the_scheduler_sweeper_and_retention(state: AppState) 
         ("sweeper", 5.0),
         ("retention", 3600.0),
         ("sealer", 0.25),
+        ("readiness", 2.0),
+        ("alerts", 30.0),  # M2 plan 2 O6
     }
 
 

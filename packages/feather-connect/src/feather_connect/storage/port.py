@@ -6,7 +6,7 @@ dataclasses so that they pickle, which the engine needs for step results.
 
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -21,8 +21,10 @@ VersionStatus = Literal["staged", "sealed"]
 DeliveryStatus = Literal["pending", "running", "applied", "failed", "held", "skipped", "compensated"]
 QuarantineStatus = Literal["open", "superseded"]
 WorkerState = Literal["alive", "draining", "dead"]
-Role = Literal["admin", "operator"]
-ROLES: tuple[Role, ...] = ("admin", "operator")  # highest first
+Role = Literal["admin", "developer", "operator", "viewer"]
+ROLES: tuple[Role, ...] = ("admin", "developer", "operator", "viewer")  # highest first (design §13.2)
+AccessGrant = Literal["approver", "pii-reader"]  # add-on grants beside a role: deciding holds, unmasking PII
+GRANTS: tuple[AccessGrant, ...] = ("approver", "pii-reader")
 TokenScope = Literal[
     "all", "publish"
 ]  # `publish`: it may upload to the built-in registry and do nothing else
@@ -550,6 +552,27 @@ class Ledger(Protocol):
         """In seal order. Pass `delivery_cursor(last)` as `cursor` to continue after `last`."""
         ...
 
+    def latest_before(
+        self,
+        route: str,
+        partition: str,
+        dataset: str,
+        before_seq: int,
+        status: DeliveryStatus | None = "applied",
+    ) -> Delivery | None:
+        """The latest delivery of `dataset` on the route's partition sealed before `before_seq`, of `status` unless
+        that is None, or None. The schema policy compares with the last applied one (M2 plan 2 D1), and a route's
+        first delivery in a partition is its bootstrap (D2)."""
+        ...
+
+    def delivered_routes(self, dataset: str, routes: Sequence[str]) -> set[str]:
+        """Those of `routes` that have a delivery of `dataset`, of any status (M2 plan 2 D2)."""
+        ...
+
+    def has_deliveries(self, dataset: str) -> bool:
+        """Whether any route has a delivery of `dataset`: whether it has a sealed history to bootstrap from."""
+        ...
+
     def count_by_status(
         self, routes: Sequence[str], statuses: Sequence[DeliveryStatus]
     ) -> dict[tuple[str, DeliveryStatus], int]:
@@ -882,6 +905,21 @@ def parse_limits(limits: Sequence[str]) -> tuple[Window, ...]:
     return tuple(windows)
 
 
+@dataclass(frozen=True)
+class BudgetWait:
+    """A task that waits for a budget: since `first_at`, `waits` times, now until `until`."""
+
+    budget: str
+    task_ref: str
+    run_id: str | None
+    first_at: datetime
+    until: datetime
+    waits: int
+
+
+WAITS_KEPT = timedelta(days=1)  # how long a wait's row stays after its `until`
+
+
 class BudgetStore(Protocol):
     """Shared rate budgets. Each window refills continuously, as a token bucket, by the store's clock."""
 
@@ -902,6 +940,19 @@ class BudgetStore(Protocol):
         ...
 
     def usage(self, name: str) -> list[WindowUsage]: ...
+
+    def specs(self) -> list[BudgetSpec]:
+        """The budgets defined here, by name: the project's and those a package host defined (M2 plan 2 O1)."""
+        ...
+
+    def note_wait(self, name: str, task_ref: str, run_id: str | None, until: datetime) -> None:
+        """Note that the task waits for the budget until `until` (M2 plan 2 O1): the first wait of a task makes its
+        row, and each later one moves `until` and counts. Rows a day past their `until` go."""
+        ...
+
+    def waits(self, name: str) -> list[BudgetWait]:
+        """The tasks still waiting for the budget by the store's clock, the soonest to go on first."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -1153,6 +1204,7 @@ class UserRow:
     password_hash: str
     created_at: datetime
     role: Role
+    grants: tuple[AccessGrant, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1188,6 +1240,11 @@ class UserStore(Protocol):
 
     def set_role(self, username: str, role: Role) -> None:
         """Give the user another role. Raises `KeyError` when there is no such user."""
+        ...
+
+    def set_grants(self, username: str, grants: Sequence[AccessGrant]) -> None:
+        """Give the user these grants, and no others, in the order of `GRANTS`. Raises `KeyError` when there is no
+        such user."""
         ...
 
     def set_password_hash(self, username: str, password_hash: str) -> None:
@@ -1556,8 +1613,18 @@ class AuditStore(Protocol):
         """Add a row, stamped now, and return its id."""
         ...
 
-    def list_audit(self, limit: int = 100, cursor: str | None = None) -> list[AuditRow]:
-        """Newest first. `cursor` is the `audit_id` of the last row of the previous page."""
+    def list_audit(
+        self,
+        limit: int = 100,
+        cursor: str | None = None,
+        *,
+        actor: str | None = None,
+        action: str | None = None,
+        target: str | None = None,
+    ) -> list[AuditRow]:
+        """Newest first. `cursor` is the `audit_id` of the last row of the previous page. `actor` and `action` keep
+        the rows that name them; `target` the rows whose target starts with it, as `route:` does every route's
+        (M2 plan 2 O3)."""
         ...
 
     def for_target(self, target: str, since: datetime | None = None, limit: int = 500) -> list[AuditRow]:
@@ -1704,6 +1771,181 @@ class WebhookEventStore(Protocol):
         ...
 
 
+READY_CHANNEL = (
+    "feather_ready"  # NOTIFY payload: the tenant whose versions sealed or deliveries closed (readiness)
+)
+
+
+@dataclass(frozen=True)
+class PartitionClose:
+    """Someone said a partition is complete (readiness design §4.1): it is ready once its last version is sealed."""
+
+    dataset: str
+    partition: str
+    closed_at: datetime
+    closed_by: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class Firing:
+    """One run of a waiting flow for one (readiness set, period, scope), and `seq` 0 for the first, 1 and on for the
+    reruns late data starts (readiness design §6). `ready_set` names the set within the flow; `period` is an ISO
+    start (`2026-11-08`, `2026-11-08T13:00`) or `run:<id>` of an upstream run; `scope` is `field=value` or empty."""
+
+    flow: str
+    ready_set: str
+    period: str
+    scope: str
+    seq: int
+    reason: str  # ready, late data or manual
+    versions: Mapping[str, Any]  # what the firing saw: dataset -> partition -> version id
+    fired_at: datetime
+    actor: str
+    run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class SealedPartition:
+    """A partition's sealed version as readiness reads it: with its run's status and when the run was made, which is
+    no later than when it started to read (design §4)."""
+
+    partition: str
+    version_id: str
+    seal_seq: int
+    run_id: str
+    run_status: str
+    run_created_at: datetime
+    sealed_at: datetime
+
+
+class ReadinessStore(Protocol):
+    """Closed partitions and firings (readiness design §7.2). What is sealed and applied is read from the versions and
+    the ledger, which already hold it."""
+
+    def listen(self, callback: "Callable[[], None]") -> "Callable[[], None]":
+        """Call `callback` when a version is sealed or a delivery is applied or skipped (`READY_CHANNEL`), from this
+        process or another, so that the evaluator looks again at once. A store may never call it, and its evaluator
+        then polls. Returns what stops listening."""
+        ...
+
+    def close(self, dataset: str, partition: str, actor: str, reason: str, at: datetime) -> PartitionClose:
+        """Close the partition. A partition closed already stays as it was, and that close is returned."""
+        ...
+
+    def closes(self, dataset: str, partitions: Sequence[str]) -> dict[str, PartitionClose]:
+        """The closes of those of `partitions` that are closed."""
+        ...
+
+    def fire(self, firing: Firing, params: Mapping[str, Any]) -> str | None:
+        """Record the firing and queue its run, with `params` and the trigger `ready`, in one transaction, and return
+        the run's id. None, recording and queueing nothing, when the firing's (flow, set, period, scope, seq) is there
+        already: so a firing happens once however many evaluators race to it."""
+        ...
+
+    def firings(self, flow: str, ready_set: str | None = None, limit: int = 200) -> list[Firing]:
+        """The flow's firings, newest first."""
+        ...
+
+    def latest_sealed(self, dataset: str, since: datetime) -> dict[str, SealedPartition]:
+        """By partition, the newest sealed version of each partition of `dataset` that had a version sealed at `since`
+        or later."""
+        ...
+
+    def sealed_since(self, dataset: str, since: datetime) -> list[SealedPartition]:
+        """Every version of `dataset` sealed at `since` or later, in seal order: what `each="run"` groups by run."""
+        ...
+
+    def open_deliveries(self, route: str, dataset: str) -> dict[str, int]:
+        """By partition, the lowest `seal_seq` of the route's deliveries of `dataset` that aren't closed (`CLOSED`)."""
+        ...
+
+    def oldest_unsealed(self, dataset: str) -> datetime | None:
+        """When the oldest event of a push dataset that is neither sealed nor held arrived, or None."""
+        ...
+
+
+AlertState = Literal["firing", "cleared"]
+SEVERITIES = ("warning", "critical")  # least first
+
+
+@dataclass(frozen=True)
+class AlertRow:
+    """One alert (M2 plan 2 O6): a rule firing for a subject, such as a route's delivery or a budget's window. While it
+    fires, it is the one row of its (rule, subject); it clears when the rule no longer finds it. `notified_at` is None
+    until its channels were told, so a notice that failed is retried."""
+
+    alert_id: str
+    rule: str
+    subject: str
+    severity: str
+    message: str
+    state: AlertState
+    fired_at: datetime
+    last_seen_at: datetime
+    cleared_at: datetime | None = None
+    acked_by: str | None = None
+    acked_at: datetime | None = None
+    snoozed_until: datetime | None = None
+    notified_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class AlertRuleRow:
+    """A rule as the environment set it: on or off, its parameters, and the channels it tells."""
+
+    name: str
+    enabled: bool
+    params: Mapping[str, Any]
+    channels: tuple[str, ...]
+    updated_at: datetime
+
+
+class AlertStore(Protocol):
+    def fire(self, rule: str, subject: str, severity: str, message: str) -> tuple[AlertRow, bool]:
+        """Raise the alert of (rule, subject), or refresh the one firing. True when it is new, or critical now where it
+        was a warning: then its channels are to be told (again)."""
+        ...
+
+    def clear(self, rule: str, firing: Collection[str]) -> list[AlertRow]:
+        """Clear the rule's firing alerts whose subject is not in `firing`; return them, cleared."""
+        ...
+
+    def list_alerts(self, state: AlertState | None = None, limit: int = 100) -> list[AlertRow]:
+        """Newest first."""
+        ...
+
+    def get_alert(self, alert_id: str) -> AlertRow:
+        """Raises `KeyError` when there is no such alert."""
+        ...
+
+    def ack(self, alert_id: str, actor: str) -> AlertRow:
+        """Acknowledge it: it stays until it clears, but its channels hear no more of it. Raises `KeyError`."""
+        ...
+
+    def snooze(self, alert_id: str, until: datetime | None) -> AlertRow:
+        """Keep it quiet until then, or no longer with None. Raises `KeyError`."""
+        ...
+
+    def mark_notified(self, alert_id: str) -> None: ...
+
+    def unnotified(self) -> list[AlertRow]:
+        """The firing alerts whose channels haven't been told, oldest first."""
+        ...
+
+    def rules(self) -> list[AlertRuleRow]:
+        """By name."""
+        ...
+
+    def set_rule(
+        self, name: str, enabled: bool, params: Mapping[str, Any], channels: Sequence[str]
+    ) -> AlertRuleRow: ...
+
+    def delete_rule(self, name: str) -> None:
+        """Back to the rule's default. Raises `KeyError` when the environment hasn't set it."""
+        ...
+
+
 @dataclass(frozen=True)
 class Store:
     """The ports together. A backend provides one of these."""
@@ -1728,6 +1970,8 @@ class Store:
     env_config: EnvConfigStore
     secrets: SecretStore
     webhooks: WebhookEventStore
+    readiness: ReadinessStore
+    alerts: AlertStore
 
     def is_unavailable(self, error: BaseException) -> bool:
         """Whether `error` says that the store can't be reached, or can't keep up, just now, so that the same call may

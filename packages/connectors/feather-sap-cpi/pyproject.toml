@@ -1,0 +1,28 @@
+[project]
+name = "feather-sap-cpi"
+version = "0.1.0"
+description = "SAP through SAP Integration Suite (Cloud Integration, CPI) for Feather Connect: read an iFlow's JSON, post records to an iFlow with a reversal."
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "feather-connect",
+    "feather-http",
+    "httpx",
+]
+
+[project.entry-points."feather_connect.connectors"]
+"sap_cpi.source" = "feather_connect.connectors.sap_cpi:Source"
+"sap_cpi.post" = "feather_connect.connectors.sap_cpi:Post"
+
+[tool.uv.sources]
+feather-connect = { workspace = true }
+feather-http = { workspace = true }
+
+# The package adds the subpackage `sap_cpi` to the namespace `feather_connect.connectors`, which has no
+# `__init__.py`, nor has `feather_connect`, which belongs to the feather-connect distribution.
+[tool.hatch.build.targets.wheel]
+packages = ["src/feather_connect"]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"

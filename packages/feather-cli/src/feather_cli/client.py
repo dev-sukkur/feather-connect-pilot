@@ -6,6 +6,7 @@ token, or answered with a problem (RFC 9457), whose detail it carries.
 
 import hashlib
 import re
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Self
@@ -134,6 +135,16 @@ class ApiClient:
     def task_logs(self, task_id: str) -> list[str]:
         return self._call("GET", f"/tasks/{task_id}/logs")["lines"]
 
+    def trace(self, dataset: str, key: str, *, unmask: bool = False) -> dict[str, Any]:
+        path = f"/datasets/{quote(dataset, safe='/')}/records/{quote(key, safe='')}/trace"
+        return self._call("GET", path, params={"unmask": unmask or None})
+
+    def version_diff(
+        self, version_id: str, against: str | None = None, *, unmask: bool = False
+    ) -> dict[str, Any]:
+        params = {"against": against, "unmask": unmask or None}
+        return self._call("GET", f"/versions/{quote(version_id, safe='')}/diff", params=params)
+
     # Actions.
 
     def start_run(
@@ -258,6 +269,46 @@ class ApiClient:
     def activate_flow(self, flow: str, version: str, reason: str | None) -> dict[str, Any]:
         return self._call(
             "POST", f"/flows/{quote(flow, safe='/')}:activate", body={"version": version, "reason": reason}
+        )
+
+    def readiness(self, flow: str | None = None) -> dict[str, Any]:
+        path = "/readiness" if flow is None else f"/flows/{quote(flow, safe='/')}/readiness"
+        return self._call("GET", path)
+
+    def fire_ready(self, flow: str, period: str, scope: str, reason: str | None) -> dict[str, Any]:
+        return self._call(
+            "POST",
+            f"/flows/{quote(flow, safe='/')}/readiness:fire",
+            body={"period": period, "scope": scope, "reason": reason},
+            idempotency_key=str(uuid.uuid4()),
+        )
+
+    def close_partition(self, dataset: str, partition: str, reason: str | None) -> dict[str, Any]:
+        return self._call(
+            "POST",
+            f"/datasets/{quote(dataset, safe='/')}/partitions/{quote(partition, safe='/=')}:close",
+            body={"reason": reason},
+            idempotency_key=str(uuid.uuid4()),
+        )
+
+    def compensate(self, route: str, version_id: str, reason: str | None) -> dict[str, Any]:
+        return self._call(
+            "POST",
+            f"/routes/{quote(route, safe='/')}/deliveries/{quote(version_id, safe='')}:compensate",
+            body={"reason": reason},
+            idempotency_key=str(uuid.uuid4()),
+        )
+
+    def holds(self, route: str | None = None) -> dict[str, Any]:
+        return self._call("GET", "/holds" + (f"?route={quote(route, safe='')}" if route else ""))
+
+    def decide_hold(self, route: str, version_id: str, approve: bool, reason: str | None) -> dict[str, Any]:
+        verb = "approve" if approve else "reject"
+        return self._call(
+            "POST",
+            f"/routes/{quote(route, safe='/')}/deliveries/{quote(version_id, safe='')}:{verb}",
+            body={"reason": reason},
+            idempotency_key=str(uuid.uuid4()),
         )
 
     def deactivate_flow(self, flow: str, reason: str | None) -> dict[str, Any]:

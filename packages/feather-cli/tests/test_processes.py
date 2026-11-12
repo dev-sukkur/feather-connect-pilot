@@ -218,7 +218,7 @@ def test_the_first_user_is_an_admin_the_next_an_operator_and_a_role_can_change(
     assert second.exit_code == 0 and "ann, operator" in second.stdout
     chosen = cli("server", "create-user", "bob", "--role", "admin", "--json", input="pw-3\n")
     assert json.loads(chosen.stdout)["role"] == "admin"
-    bad = cli("server", "create-user", "cy", "--role", "viewer", input="pw-4\n")
+    bad = cli("server", "create-user", "cy", "--role", "owner", input="pw-4\n")
     assert bad.exit_code == 1 and "not a role" in bad.stderr
 
     assert cli("server", "set-role", "ann", "admin", "--reason", "on call").exit_code == 0

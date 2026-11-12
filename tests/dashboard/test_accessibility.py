@@ -32,6 +32,11 @@ PATHS = [
     "/packages/acme-invoices",
     "/packages/acme-invoices/flows/invoices",
     "/registries",
+    "/readiness",
+    "/holds",  # M2 plan 2 A1
+    "/budgets",  # M2 plan 2 O1
+    "/audit",  # M2 plan 2 O3
+    "/alerts",  # M2 plan 2 O6
 ]
 WCAG_AA = {"runOnly": {"type": "tag", "values": ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]}}
 

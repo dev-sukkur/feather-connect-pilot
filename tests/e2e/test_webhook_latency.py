@@ -321,18 +321,26 @@ class Schedules:
     stack: Any
 
     def tick_runs(self) -> list[Any]:
-        """The poller's ticks. A packaged flow's tick is a run of its own, queued for its version's host, not a task
-        of a day's stream run as in M1 (an M2 item: flow packages §12)."""
-        return [r for r in self.stack.store.runs.list_runs(flow=POLLER, limit=200) if r.trigger == TRIGGER]
+        """The poller's runs: its host adds its ticks to one stream run a day (M2 plan 1 §3)."""
+        return [r for r in self.stack.store.runs.list_runs(flow=POLLER, limit=200) if r.trigger == "stream"]
+
+    def _ticks(self, kind: str) -> list[Any]:
+        return [
+            t
+            for r in self.tick_runs()
+            for t in self.stack.store.runs.list_tasks(r.run_id, kinds=(kind,), limit=5000)
+            if f":{TRIGGER}@" in t.ref
+        ]
 
     def tick_times(self) -> list[datetime]:
         """The due time of every tick that went ahead, oldest first, with repeats if a tick fired twice."""
         return sorted(
-            datetime.fromisoformat(r.params["due_at"]) for r in self.tick_runs() if r.status != "skipped"
+            datetime.fromisoformat(t.ref.split(f":{TRIGGER}@", 1)[1].removesuffix(":plan"))
+            for t in self._ticks("plan")
         )
 
     def skipped_ticks(self) -> list[str | None]:
-        return [r.reason for r in self.tick_runs() if r.status == "skipped"]
+        return [t.error for t in self._ticks("skip")]
 
     def cron_runs(self) -> list[Any]:
         return self.stack.store.runs.list_runs(flow=BY_CRON, limit=50)

@@ -147,7 +147,7 @@ These appear in the design, but not in its M1 scope:
 - readiness, side-effect routes and approvals, overrides beyond pause and resume, RBAC, MCP, alerts, in M2;
 - budget UI, in M2 (the reserve logic ships in M1, because the SQL is the same);
 - row-level security policies, in M3 (every table carries `tenant_id` from M1);
-- `sink.confirm`, in M2 with Magento;
+- `sink.confirm`, in M6 with Magento;
 - handling after a backup restore (design §7.5), such as marking versions with missing chunks `lost`, in M3 with the restore drill.
 
 ## Questions for the sponsor before or during M1
@@ -157,5 +157,5 @@ These appear in the design, but not in its M1 scope:
 | Discovery Q9: GitHub organisation and PyPI name | Plan 6 image names and the first release |
 | Discovery Q10: maintainers and governance | `CONTRIBUTING.md` and `CODEOWNERS` |
 | Discovery Q11: is 14-day spool retention right? | Default value only; 14 days is used until told otherwise |
-| Discovery Q2: GoFrugal docs and sandbox | M2 scope |
+| Discovery Q2: GoFrugal docs and sandbox | M6 scope |
 | ADR-0004 and the design review | The data model is built as designed. Changing it after the build costs more. |

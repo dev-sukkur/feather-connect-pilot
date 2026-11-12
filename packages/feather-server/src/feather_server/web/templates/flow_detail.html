@@ -16,7 +16,8 @@
 <dl class="facts">
   <dt>Owner</dt><dd>{% if flow.owner %}{{ flow.owner }}{% else %}<span class="muted">none</span>{% endif %}</dd>
   <dt>Tags</dt><dd><span class="tags">{% for tag in flow.tags %}<span class="tag">{{ tag }}</span>{% else %}<span class="muted">none</span>{% endfor %}</span></dd>
-  <dt>Starts</dt><dd>{{ flow.triggers | join(", ") }}</dd>
+  <dt>Starts</dt><dd>{{ flow.triggers | join(", ") }}</dd>{% if "on_ready" in flow.triggers or "are ready, each" in (flow.triggers | join(" ")) %}
+  <dt>Readiness</dt><dd><a href="/readiness?q={{ flow.name | urlencode }}">See which periods it waits for</a></dd>{% endif %}
   <dt>Code</dt><dd><code>{{ sha }}</code></dd>
   <dt>Data fresh</dt><dd>{{ m.time_ago(flow.last_sealed_at) }}</dd>
 </dl>

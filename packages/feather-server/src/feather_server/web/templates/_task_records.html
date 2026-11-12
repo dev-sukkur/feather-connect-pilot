@@ -3,6 +3,7 @@
 {% set base = "/runs/" ~ (run_id | urlencode) ~ "/tasks/" ~ (t.task_id | urlencode) ~ "/records" %}
 <section class="records-panel" aria-labelledby="h-task-records">
   <h2 id="h-task-records">Records {% if t.kind == "apply" %}sent to {{ found.route }}{% else %}read{% endif %}{% if t.partition and t.partition != "*" %} &middot; {{ m.partition_label(found.dataset, t.partition) }}{% else %} &middot; {{ found.dataset }}{% endif %}</h2>
+{% include "_pii.html" %}
   <p class="muted">
     {% for v in found.versions %}<a href="/versions/{{ v.version_id | urlencode }}">version {{ v.seal_seq }}</a>{% if not loop.last %}, {% endif %}{% else %}No version was sealed.{% endfor %}
     {% if found.delivery %} &middot; delivery {{ m.status_badge(found.delivery.status) }} <a href="/routes/{{ found.route | urlencode }}/deliveries/{{ found.delivery.version_id | urlencode }}?run={{ run_id | urlencode }}">details</a>{% endif %}

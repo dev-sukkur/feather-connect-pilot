@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{{ m.page_head(title, tiles, "The rate budgets the connections share: each window's use now, the part kept for high-priority work, and the tasks waiting for a window to refill. A task that waits sleeps durably and uses up no attempt.") }}
+<div id="live">
+{% for b in budgets %}
+<section aria-labelledby="h-budget-{{ loop.index }}">
+  <h2 id="h-budget-{{ loop.index }}">{% if one %}{{ b.name }}{% else %}<a href="/budgets/{{ b.name | urlencode }}">{{ b.name }}</a>{% endif %}{% if b.account %} <span class="muted">account {{ b.account }}</span>{% endif %}</h2>
+  {% if b.windows %}
+  <div class="table-wrap"><table class="data">
+    <caption class="sr-only">Windows of {{ b.name }}</caption>
+    <thead><tr><th scope="col">Window</th><th scope="col">Used</th><th scope="col">Of</th><th scope="col">Use</th><th scope="col">Kept for high</th></tr></thead>
+    <tbody>
+    {% for w in b.windows %}
+      {% set share = (w.used / w.units) if w.units else 0 %}
+      <tr>
+        <th scope="row">{{ w.units }} per {{ w.seconds | span }}</th>
+        <td>{{ "%.0f" | format(w.used) }}</td>
+        <td>{{ w.units }}</td>
+        <td><meter min="0" max="1" high="0.8" value="{{ share }}" aria-label="{{ '%.0f' | format(share * 100) }}% used">{{ "%.0f" | format(share * 100) }}%</meter> {{ "%.0f" | format(share * 100) }}%</td>
+        <td>{% if w.kept_for_high %}{{ "%.0f" | format(w.kept_for_high) }}{% else %}none{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}
+  <p class="empty">Nothing has used this budget yet.</p>
+  {% endif %}
+  {% if b.waiting %}
+  <div class="table-wrap"><table class="data">
+    <caption>Tasks waiting for {{ b.name }}</caption>
+    <thead><tr><th scope="col">Task</th><th scope="col">Run</th><th scope="col">Flow</th><th scope="col">Waiting since</th><th scope="col">Until</th><th scope="col">Waits</th></tr></thead>
+    <tbody>
+    {% for w in b.waiting %}
+      <tr>
+        <th scope="row"><code>{{ w.task_ref }}</code></th>
+        <td>{% if w.run_id %}<a href="/runs/{{ w.run_id }}">{{ w.run_id[:12] }}</a>{% endif %}</td>
+        <td>{% if w.flow %}<a href="/flows/{{ w.flow | urlencode }}">{{ w.flow }}</a>{% endif %}</td>
+        <td>{{ w.first_at.isoformat() }}</td>
+        <td>{{ w.until.isoformat() }}</td>
+        <td>{{ w.waits }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% elif b.windows %}
+  <p class="muted">No task is waiting for it.</p>
+  {% endif %}
+</section>
+{% else %}
+<p class="empty">No budgets are defined. A project defines them under <code>budgets:</code> in <code>feather.yaml</code>, and a connection names one with <code>budget:</code>.</p>
+{% endfor %}
+</div>
+{% endblock %}

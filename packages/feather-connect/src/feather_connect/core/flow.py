@@ -7,12 +7,15 @@ from typing import Any, Literal, cast
 
 import pyarrow as pa
 
+from feather_connect.core.approval import Approval
 from feather_connect.core.connector import RouteMode, Sink
 from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.partitions import none
+from feather_connect.core.readiness import OnReady, dataset_spec
 from feather_connect.core.records import Record
-from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Trigger, is_stream
+from feather_connect.core.schema_policy import SchemaPolicy
+from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Reconcile, Trigger, is_stream
 from feather_connect.storage.port import Priority
 
 Overlap = Literal["queue", "skip", "cancel_previous"]
@@ -42,6 +45,12 @@ class RouteSpec:
     map: RecordMap | BatchMap | None
     mode: RouteMode
     priority: Priority
+    approval: Approval | None = None  # holds a delivery for an approver (design §5.3)
+    schema_policy: SchemaPolicy | None = None  # the dataset's when None (design §4.7)
+
+
+def _policy_name(policy: SchemaPolicy) -> str:
+    return policy if isinstance(policy, str) else "custom"
 
 
 def to(
@@ -51,13 +60,18 @@ def to(
     mode: RouteMode = "upsert",
     priority: Priority = "normal",
     name: str | None = None,
+    approval: Approval | None = None,
+    schema_policy: SchemaPolicy | None = None,
 ) -> RouteSpec:
     """Return a route that delivers to `sink`.
 
     The route is named after the sink's connection unless `name` says otherwise, so two routes to one
-    connection need a name each.
+    connection need a name each. `approval` (`fc.approval.when(...)`) holds a delivery with a record that needs one
+    until an approver decides. `schema_policy` overrides the datasets' for this route.
     """
-    return RouteSpec(sink.connection if name is None else name, sink, map, mode, priority)
+    return RouteSpec(
+        sink.connection if name is None else name, sink, map, mode, priority, approval, schema_policy
+    )
 
 
 @dataclass(frozen=True)
@@ -161,10 +175,18 @@ def _trigger_dict(trigger: Trigger) -> dict[str, Any]:
             return {"kind": "cron", "expr": expr, "tz": tz}
         case Every(interval):
             return {"kind": "every", "seconds": interval.total_seconds()}
+        case Reconcile(interval, lookback):
+            return {
+                "kind": "reconcile",
+                "seconds": interval.total_seconds(),
+                "lookback": lookback.total_seconds(),
+            }
         case Manual():
             return {"kind": "manual"}
         case OnEvent(dataset):
             return {"kind": "on_event", "dataset": dataset.name}
+        case OnReady():
+            return trigger.spec()
 
 
 class Flow:
@@ -218,9 +240,17 @@ class Flow:
                     "connector": d.source.spec.name,
                     "key": [d.key] if isinstance(d.key, str) else list(d.key),
                     "strategy": d.strategy.name,
+                    **(
+                        {"schema_policy": _policy_name(d.schema_policy)}
+                        if d.schema_policy != "default"
+                        else {}
+                    ),
+                    **({"pii": list(d.pii)} if d.pii else {}),
+                    **({"max_lag": d.max_lag} if d.max_lag else {}),
                     "complete": d.strategy.complete,
                     "priority": d.priority,
                     "keep_state": d.keep_state,
+                    **dataset_spec(d),
                     **({"push": push} if (push := push_spec(d)) is not None else {}),
                 }
                 for d in self.datasets
@@ -232,6 +262,12 @@ class Flow:
                     "connector": r.sink.spec.name,
                     "mode": r.mode,
                     "priority": r.priority,
+                    **({"approval": r.approval.spec()} if r.approval is not None else {}),
+                    **(
+                        {"schema_policy": _policy_name(r.schema_policy)}
+                        if r.schema_policy is not None
+                        else {}
+                    ),
                 }
                 for r in self.routes
             ],
@@ -289,6 +325,18 @@ class Flow:
             names.add(route.name)
         problems += self._poller_problems()
         for i, trigger in enumerate(self.triggers):
+            if isinstance(trigger, Reconcile) and not any(
+                d.strategy.name == "by_stamp" for d in self.datasets
+            ):
+                problems.append(
+                    Problem(
+                        "error",
+                        "reconcile_needs_by_stamp",
+                        "reconcile reads a lookback window again, but no dataset of the flow uses by_stamp",
+                        f"triggers[{i}]",
+                        "a complete strategy (snapshot_diff, replace) reads it all each run already: drop reconcile",
+                    )
+                )
             if isinstance(trigger, OnEvent) and trigger.dataset.strategy.name != "push":
                 problems.append(
                     Problem(

@@ -59,6 +59,7 @@ class ConnectorSpec:
     maturity: Maturity = "experimental"
     resumable: bool = False
     secrets: AbstractSet[str] | None = None
+    side_effect: bool = False  # its sink posts business documents and implements `compensate` (design §8.4)
 
 
 @dataclass(frozen=True)

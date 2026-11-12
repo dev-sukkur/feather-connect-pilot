@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{% set v = diff.after %}
+{{ m.page_head("Diff of " ~ v.dataset, tiles, "What this version added, changed and removed against the version of its partition before it. A key that was there and is now deleted is removed; one that was not and now is, added.") }}
+<p>{{ m.partition_label(v.dataset, v.partition) }}:
+  {% if diff.before %}<a href="/versions/{{ diff.before.version_id | urlencode }}"><code>{{ diff.before.version_id }}</code></a>{% else %}nothing before it{% endif %}
+  &rarr; <a href="/versions/{{ v.version_id | urlencode }}"><code>{{ v.version_id }}</code></a></p>
+{% include "_pii.html" %}
+{% if diff.truncated %}<p class="notice" role="note">A version holds more keys than a diff reads, so this diff is of the first of them only.</p>{% endif %}
+<section aria-labelledby="h-changed">
+  <h2 id="h-changed">Changed</h2>
+  {% if diff.changed %}
+  <div class="table-wrap scroll"><table class="data" data-table="changed">
+    <caption class="sr-only">Changed keys and their fields</caption>
+    <thead><tr><th scope="col">Key</th><th scope="col">Field</th><th scope="col">Before</th><th scope="col">After</th></tr></thead>
+    <tbody>
+    {% for c in diff.changed %}{% for f in c.fields %}
+      <tr>{% if loop.first %}<th scope="row" rowspan="{{ c.fields | length }}"><a href="/trace?dataset={{ v.dataset | urlencode }}&amp;key={{ c.key | urlencode }}">{{ c.key }}</a></th>{% endif %}
+        <td>{{ f.field }}</td><td><code>{{ f.before if f.before is string else (f.before | tojson) }}</code></td><td><code>{{ f.after if f.after is string else (f.after | tojson) }}</code></td></tr>
+    {% endfor %}{% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}<p class="empty">No key changed.</p>{% endif %}
+</section>
+{% for title, keys, n in (("Added", diff.added, diff.counts.added), ("Removed", diff.removed, diff.counts.removed)) %}
+<section aria-labelledby="h-{{ title | lower }}">
+  <h2 id="h-{{ title | lower }}">{{ title }}</h2>
+  {% if keys %}
+  <ul class="keys">{% for k in keys %}<li><a href="/trace?dataset={{ v.dataset | urlencode }}&amp;key={{ k | urlencode }}">{{ k }}</a></li>{% endfor %}</ul>
+  {% if n > keys | length %}<p class="muted">And {{ n - keys | length }} more.</p>{% endif %}
+  {% else %}<p class="empty">None.</p>{% endif %}
+</section>
+{% endfor %}
+{% endblock %}

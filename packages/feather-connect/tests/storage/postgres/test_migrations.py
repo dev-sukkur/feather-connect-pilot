@@ -113,7 +113,7 @@ def test_users_and_tokens_of_an_m1_database_become_admins(pg_url: str):  # flow 
             tokens = conn.execute("select name, role, created_by from feather.api_token").fetchall()
             assert users == [("ann", "admin"), ("bob", "admin")] and tokens == [("ci", "admin", None)]
             with pytest.raises(psycopg.errors.CheckViolation):
-                conn.execute("update feather.app_user set role = 'viewer' where username = 'ann'")
+                conn.execute("update feather.app_user set role = 'owner' where username = 'ann'")
             with pytest.raises(psycopg.errors.NotNullViolation):  # a new row must say its role
                 conn.execute(
                     """insert into feather.app_user (tenant_id, user_id, username, password_hash, created_at)

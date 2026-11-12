@@ -5,6 +5,7 @@ numbers, never records. Each chunk reaches the sink under a key that names the c
 after a crash or a retry can't apply it twice. A replay of a delivery has a new key, and reaches the sink again.
 """
 
+import json
 import logging
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -16,12 +17,14 @@ from typing import Any, cast
 
 import pyarrow as pa
 
+from feather_connect.core.approval import APPROVED
 from feather_connect.core.connector import ApplyBatch, ApplyRecord, ApplyResult, Key, RecordResponse
 from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import BudgetDeferred, PermanentError, TransientError
 from feather_connect.core.flow import BatchMap, RouteSpec
 from feather_connect.core.records import Op, Record, canonical_json, decode_key
+from feather_connect.core.schema_policy import NULL, SCHEMA_CHANGE, judge
 from feather_connect.core.transforms import apply_map, is_batch_map
 from feather_connect.engine.port import RetryPolicy, TaskContext
 from feather_connect.logs import redact
@@ -36,7 +39,7 @@ from feather_connect.storage.port import (
     delivery_cursor,
     is_paused,
 )
-from feather_connect.storage.spool import ChunkKind, table_to_records
+from feather_connect.storage.spool import JSON_COLUMNS_KEY, ChunkKind, table_to_records
 
 log = logging.getLogger(__name__)
 
@@ -101,8 +104,19 @@ def _chunk_keys(version_id: str, chunk_no: int, kind: ChunkKind, deps: RuntimeDe
     return cast("list[str]", deps.spool.get_chunk(version_id, chunk_no, kind).column(_KEY).to_pylist())
 
 
+def _bootstraps(route: RouteSpec, version: Version, deps: RuntimeDeps) -> bool:
+    """Whether the version is the route's first in its partition, which then gets the whole slice read (H11)."""
+    if version.seal_seq is None:
+        return False
+    earlier = deps.store.ledger.latest_before(
+        route.name, version.partition, version.dataset, version.seal_seq, None
+    )
+    return earlier is None
+
+
 def _plan_of(route: RouteSpec, version: Version, deps: RuntimeDeps) -> _Plan:
-    """Work out what the delivery sends. A `replace_partition` route gets the whole slice, and the others the changes.
+    """Work out what the delivery sends. A `replace_partition` route gets the whole slice, and the others the changes,
+    except in a route's first delivery in a partition, which gets the whole slice read when it was kept (D2, H11).
 
     A complete version with no `full` chunks, whose snapshot holds nothing that reached the destination, says that the
     slice is now empty there, because of deletes or moves, which the sink has to hear. Raises `PermanentError` if the
@@ -111,6 +125,9 @@ def _plan_of(route: RouteSpec, version: Version, deps: RuntimeDeps) -> _Plan:
     """
     version_id = version.version_id
     if route.mode != "replace_partition":
+        full = tuple(chunk.chunk_no for chunk in deps.spool.list_chunks(version_id, "full"))
+        if full and _bootstraps(route, version, deps):
+            return _Plan("full", full)
         return _Plan("data", tuple(chunk.chunk_no for chunk in deps.spool.list_chunks(version_id)))
     chunks = tuple(chunk.chunk_no for chunk in deps.spool.list_chunks(version_id, "full"))
     snapshots = deps.spool.list_chunks(version_id, "snapshot")
@@ -262,6 +279,29 @@ class _ChunkSender:
         context = self._deps.make_context(self._route.sink.connection)
         for chunk_no in self._plan.chunks:
             self._records(version, chunk_no, context)
+
+    def reverse(self, chunk_no: int) -> int:
+        """Compensate one chunk: the sink reverses what it applied of it (design §6.5). Returns how many it reversed."""
+        version = self._deps.store.versions.get(self._delivery.version_id)
+        context = self._deps.make_context(self._route.sink.connection)
+        records, _ = self._records(version, chunk_no, context)
+        if not records:
+            return 0
+        route, delivery = self._route, self._delivery
+        batch = ApplyBatch(
+            route=route.name,
+            version_id=delivery.version_id,
+            chunk_no=chunk_no,
+            partition=delivery.partition,
+            mode=route.mode,
+            records=records,
+            idempotency_key=f"compensate:{route.name}:{delivery.version_id}:{chunk_no}",
+            is_first=chunk_no == self._plan.chunks[0],
+            is_last=chunk_no == self._plan.chunks[-1],
+        )
+        result = route.sink.compensate(context, batch)
+        self._keep_responses(chunk_no, result.responses, complete=False)
+        return result.applied
 
     def _send(self, chunk_no: int) -> _Counts:
         route, delivery, plan = self._route, self._delivery, self._plan
@@ -534,7 +574,23 @@ def _finish(
         _supersede(delivery, plan, deps)
 
 
-def _step_durably[T](ctx: TaskContext, name: str, fn: Callable[[], T], retry: RetryPolicy) -> T:
+def note_wait(deps: RuntimeDeps, task_ref: str, run_id: str | None, deferred: BudgetDeferred) -> None:
+    """Note on the budget that the task waits for it (O1), for the Budgets page. A note that can't be written is
+    logged: it is no reason to stop the work."""
+    try:
+        until = deps.clock.now() + deferred.wait
+        deps.store.budgets.note_wait(deferred.budget, task_ref, run_id, until)
+    except Exception:
+        log.exception("could not note that task %s waits for budget %s", task_ref, deferred.budget)
+
+
+def _step_durably[T](
+    ctx: TaskContext,
+    name: str,
+    fn: Callable[[], T],
+    retry: RetryPolicy,
+    note: Callable[[BudgetDeferred], None] | None = None,
+) -> T:
     """Run a step, and sleep off a budget deferral before running it again.
 
     An error for the engine to retry goes to the engine. On the task's last attempt the engine won't, while a delivery
@@ -551,6 +607,8 @@ def _step_durably[T](ctx: TaskContext, name: str, fn: Callable[[], T], retry: Re
         except PermanentError:
             raise
         except BudgetDeferred as deferred:
+            if note is not None:
+                note(deferred)
             if deferred.wait < _SLEEP_FROM and not last_attempt:
                 raise
             ctx.sleep(deferred.wait)
@@ -567,13 +625,148 @@ def _step_durably[T](ctx: TaskContext, name: str, fn: Callable[[], T], retry: Re
             ctx.sleep(max(wait, timedelta(seconds=asked)) if asked is not None else wait)
 
 
+def _hold_kind(reason: str | None) -> str:
+    return SCHEMA_CHANGE if (reason or "").startswith(SCHEMA_CHANGE) else "approval"
+
+
+def approved(route: str, version_id: str, deps: RuntimeDeps, kind: str = "approval") -> bool:
+    """Whether an approver let the delivery go from a hold of `kind` ("approval" or "schema_change"): a move from
+    held to pending that says so, after a hold of that kind. Each hold needs its own decision."""
+    held: str | None = None
+    for a in deps.store.ledger.attempts(route, version_id):
+        if a.to_status == "held":
+            held = _hold_kind(a.reason)
+        elif (
+            a.from_status == "held"
+            and a.to_status == "pending"
+            and (a.reason or "").startswith(APPROVED)
+            and held == kind
+        ):
+            return True
+    return False
+
+
+_FIELDS: dict[str, dict[str, str] | None] = {}  # by version id: a sealed version's chunks never change
+_FIELDS_KEPT = 512
+
+
+def version_fields(version_id: str, deps: RuntimeDeps) -> dict[str, str] | None:
+    """The fields of the version's upserted records and their Arrow types (`null` for one null in all of them), or
+    None when it upserts nothing or its chunks are gone, which tells nothing of its schema."""
+    if version_id in _FIELDS:
+        return _FIELDS[version_id]
+    found: dict[str, str] = {}
+    try:
+        for ref in deps.spool.list_chunks(version_id):
+            table = deps.spool.get_chunk(version_id, ref.chunk_no)
+            ops = cast("list[str]", table.column("_fc_op").to_pylist())
+            rows = [i for i, op in enumerate(ops) if op != "delete"]
+            if not rows:
+                continue
+            metadata = table.schema.metadata or {}
+            json_columns = set(json.loads(metadata.get(JSON_COLUMNS_KEY.encode(), b"[]")))
+            schema: Any = table.schema  # pyarrow's stubs leave a field's type unknown
+            for name in table.column_names:
+                if name.startswith("_fc_"):
+                    continue
+                values = table.column(name).to_pylist()
+                if all(values[i] is None for i in rows):
+                    typed = NULL
+                else:
+                    typed = "json" if name in json_columns else str(schema.field(name).type)
+                if found.get(name, NULL) == NULL:
+                    found[name] = typed
+    except KeyError:
+        return None
+    fields = found or None
+    if len(_FIELDS) >= _FIELDS_KEPT:
+        _FIELDS.pop(next(iter(_FIELDS)))
+    _FIELDS[version_id] = fields
+    return fields
+
+
+def _hold_for_schema(dataset: Dataset, route: RouteSpec, delivery: Delivery, deps: RuntimeDeps) -> bool:
+    """Hold the delivery when its fields changed from the last version the route applied in a way the policy holds
+    on (design §4.7, H12), unless an approver let it go; say whether it is held."""
+    policy = route.schema_policy if route.schema_policy is not None else dataset.schema_policy
+    ledger, version_id = deps.store.ledger, delivery.version_id
+    if policy == "permissive":
+        return False
+    if ledger.get(route.name, version_id).status == "held":
+        return True  # a step run again
+    if approved(route.name, version_id, deps, SCHEMA_CHANGE):
+        return False
+    last = ledger.latest_before(route.name, delivery.partition, delivery.dataset, delivery.seal_seq)
+    if last is None:
+        return False
+    before, after = version_fields(last.version_id, deps), version_fields(version_id, deps)
+    if before is None or after is None:
+        return False
+    why = judge(policy, before, after)
+    if why is None:
+        return False
+    _resume(delivery, "apply started", deps)
+    ledger.transition(
+        route.name,
+        version_id,
+        "held",
+        actor=_ACTOR,
+        reason=f"{why} (against version {last.version_id})",
+        code_sha=deps.code_sha,
+    )
+    log.info("route %s, version %s: held for a schema change", route.name, version_id)
+    return True
+
+
+def _hold_for_approval(route: RouteSpec, delivery: Delivery, deps: RuntimeDeps) -> bool:
+    """Hold the delivery for an approver when a record of it needs one and none has approved it; say whether it is
+    held (design §5.3). It reads the records the sink would get, before the map, as the route's approval judges them."""
+    approval, version_id = route.approval, delivery.version_id
+    ledger = deps.store.ledger
+    if approval is None:
+        return False
+    if ledger.get(route.name, version_id).status == "held":
+        return True  # a step run again
+    if approved(route.name, version_id, deps):
+        return False
+    plan = _plan_of(route, deps.store.versions.get(version_id), deps)
+    wanted = sum(
+        approval.wanted(record)
+        for chunk_no in plan.chunks
+        for record in table_to_records(deps.spool.get_chunk(version_id, chunk_no, plan.kind))
+    )
+    if not wanted:
+        return False
+    _resume(delivery, "apply started", deps)
+    why = f" ({approval.reason})" if approval.reason else ""
+    ledger.transition(
+        route.name,
+        version_id,
+        "held",
+        actor=_ACTOR,
+        reason=f"approval: {wanted} record{'s' if wanted != 1 else ''} to approve{why}",
+        code_sha=deps.code_sha,
+    )
+    log.info("route %s, version %s: held for approval", route.name, version_id)
+    return True
+
+
 def _deliver(
     ctx: TaskContext, dataset: Dataset, route: RouteSpec, delivery: Delivery, deps: RuntimeDeps
 ) -> bool:
-    """Apply one delivery and return True, or return False if it failed, which blocks its partition."""
+    """Apply one delivery and return True, or return False if it failed or is held, which blocks its partition."""
     version_id = delivery.version_id
     totals: list[_Counts] = []
+    run_id = deps.store.versions.get(version_id).run_id
+    waits = partial(note_wait, deps, ctx.task_ref, run_id)
     try:
+        schema = partial(_hold_for_schema, dataset, route, delivery, deps)
+        if _step_durably(ctx, f"schema:{version_id}", schema, deps.retry):
+            return False
+        if route.approval is not None:
+            hold = partial(_hold_for_approval, route, delivery, deps)
+            if _step_durably(ctx, f"approval:{version_id}", hold, deps.retry):
+                return False
         start = partial(_start, route, delivery, deps)
         plan = _step_durably(ctx, f"start:{version_id}", start, deps.retry)
         sender = _ChunkSender(dataset, route, delivery, plan, deps)
@@ -581,13 +774,53 @@ def _deliver(
             _step_durably(ctx, f"maps:{version_id}", sender.check_maps, deps.retry)
         for chunk_no in plan.chunks:
             send = partial(sender.send, chunk_no)
-            totals.append(_step_durably(ctx, f"chunk:{version_id}:{chunk_no}", send, deps.retry))
+            totals.append(_step_durably(ctx, f"chunk:{version_id}:{chunk_no}", send, deps.retry, waits))
     except PermanentError as error:
         message = str(error)
         ctx.step(f"fail:{version_id}", lambda: _fail(delivery, message, deps))
         return False
     ctx.step(f"end:{version_id}", lambda: _finish(dataset, delivery, plan, totals, deps))
     return True
+
+
+def run_compensate(
+    ctx: TaskContext,
+    dataset: Dataset,
+    route: RouteSpec,
+    version_id: str,
+    deps: RuntimeDeps,
+    *,
+    actor: str,
+    reason: str | None,
+) -> None:
+    """Reverse an applied delivery of a side-effect route, chunk by chunk, then mark it `compensated` (design §6.5,
+    H9). Each chunk's reversal carries its own idempotency key, so a task run again reverses nothing twice."""
+    delivery = ctx.step("delivery", lambda: deps.store.ledger.get(route.name, version_id))
+    if delivery.status == "compensated":
+        return
+    if delivery.status != "applied":
+        raise PermanentError(
+            f"only an applied delivery can be compensated, and this one is {delivery.status}"
+        )
+    plan = _step_durably(
+        ctx,
+        f"plan:{version_id}",
+        lambda: _plan_of(route, deps.store.versions.get(version_id), deps),
+        deps.retry,
+    )
+    sender = _ChunkSender(dataset, route, delivery, plan, deps)
+    reversed_ = 0
+    for chunk_no in plan.chunks:
+        reversed_ += _step_durably(
+            ctx, f"reverse:{version_id}:{chunk_no}", partial(sender.reverse, chunk_no), deps.retry
+        )
+    why = f"compensated {reversed_} records" + (f": {reason}" if reason else "")
+    ctx.step(
+        "compensated",
+        lambda: deps.store.ledger.transition(
+            route.name, version_id, "compensated", actor=actor, reason=why, code_sha=deps.code_sha
+        ),
+    )
 
 
 def run_apply(

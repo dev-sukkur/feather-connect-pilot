@@ -22,9 +22,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, cast
 
-from feather_connect.core.triggers import Cron, Every, Trigger
+from feather_connect.core.triggers import Cron, Every, Reconcile, Trigger, is_stream
 from feather_connect.packages.webhooks import Webhook, parse_webhooks
-from feather_connect.runtime.scheduler import MAX_CATCH_UP, _due, trigger_id  # pyright: ignore[reportPrivateUsage]
+from feather_connect.runtime.scheduler import MAX_CATCH_UP, _due, first_reconciles, run_params, trigger_id  # pyright: ignore[reportPrivateUsage]
 from feather_connect.storage.port import PackageVersion, Store
 
 __all__ = [
@@ -55,6 +55,7 @@ class ActiveFlow:
     catch_up: str
     enabled: bool
     datasets: frozenset[str] = field(default_factory=frozenset[str])
+    spec: Mapping[str, Any] = field(default_factory=dict[str, Any])  # as the load check recorded it
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,10 @@ def triggers_of(spec: Mapping[str, Any]) -> tuple[Trigger, ...]:
             found.append(Cron(str(raw["expr"]), str(raw.get("tz") or "UTC")))
         elif raw.get("kind") == "every":
             found.append(Every(timedelta(seconds=float(raw["seconds"]))))
+        elif raw.get("kind") == "reconcile":
+            found.append(
+                Reconcile(timedelta(seconds=float(raw["seconds"])), timedelta(seconds=float(raw["lookback"])))
+            )
     return tuple(found)
 
 
@@ -202,6 +207,7 @@ class Catalogue:
                     str(spec.get("catch_up", "latest")),
                     bool(spec.get("enabled", True)),
                     datasets,
+                    spec,
                 )
             )
             try:
@@ -222,9 +228,9 @@ class Catalogue:
         for flow in self.flows():
             if not flow.enabled:  # a disabled flow writes nothing; its ticks wait for it
                 continue
-            for trigger in flow.triggers:
+            for trigger in first_reconciles(flow.triggers):
                 tid = trigger_id(trigger)
-                if tid is None:
+                if tid is None or is_stream(trigger):  # a poller's ticks join its stream run, on the host
                     continue
                 try:
                     runs += self._tick(flow, trigger, tid, now)
@@ -245,10 +251,17 @@ class Catalogue:
         due, _ = _due(trigger, last, now)
         if not due or not schedules.advance_tick(flow.name, tid, last, due[-1]):
             return []
-        wanted = due[-1:] if flow.catch_up == "latest" else due[-MAX_CATCH_UP:]
+        wanted = (
+            due[-1:] if flow.catch_up == "latest" or isinstance(trigger, Reconcile) else due[-MAX_CATCH_UP:]
+        )
         runs: list[str] = []
         for at in wanted:
-            params = {"due_at": at.isoformat(), "package": flow.package, "version": flow.version}
+            params = {
+                "due_at": at.isoformat(),
+                "package": flow.package,
+                "version": flow.version,
+                **run_params(trigger),
+            }
             if flow.overlap == "skip" and self._busy(flow.name):
                 runs.append(self._store.runs.create_run(flow.name, tid, _ACTOR, params, "skipped", "overlap"))
             else:
