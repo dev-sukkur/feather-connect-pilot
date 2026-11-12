@@ -18,6 +18,7 @@ from feather_connect.runtime.scheduler import tick
 from feather_connect.runtime.sealer import seal_once
 from feather_connect.runtime.sweeper import SweepReport, sweep_once
 from feather_connect.storage.postgres.leader import PostgresLeaderLock
+from feather_server.services.alerts import evaluate_once as evaluate_alerts
 
 if TYPE_CHECKING:
     from feather_server.app import AppState
@@ -29,6 +30,7 @@ _NAMED = 5  # items of a list that a log line spells out
 
 
 READY_POLL_S = 10.0  # the readiness loop's poll when NOTIFY wakes it
+ALERTS_POLL_S = 30.0
 
 
 class LoopRunner:
@@ -183,6 +185,17 @@ def default_loops(state: "AppState") -> list[LoopRunner]:
     def seal() -> None:
         seal_once(state.runtime, now=state.clock.now())
 
+    def alert() -> None:  # alerts (M2 plan 2 O6): fire, clear and tell the channels
+        report = evaluate_alerts(state)
+        if report.fired or report.cleared or report.failed:
+            log.info(
+                "alerts: %d fired, %d cleared, %d told, %d to retry",
+                len(report.fired),
+                len(report.cleared),
+                len(report.notified),
+                len(report.failed),
+            )
+
     def ready() -> None:  # readiness (M2 plan 1): fires what is ready, from the catalogue and the store
         evaluate_readiness(state.store, catalogue.flows(), state.clock.now())
 
@@ -200,4 +213,5 @@ def default_loops(state: "AppState") -> list[LoopRunner]:
         # Often enough that a batch waits about `max_age` (1 s), and no more than a quarter of that again.
         LoopRunner("sealer", seal, 0.25, lock("sealer")),
         readiness,
+        LoopRunner("alerts", alert, ALERTS_POLL_S, lock("alerts")),
     ]

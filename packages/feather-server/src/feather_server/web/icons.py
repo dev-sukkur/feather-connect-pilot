@@ -24,6 +24,9 @@ ICONS: dict[str, str] = {
         '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14.5a6.5 6.5 0 0 1 3.5 5.5"/>'
     ),
     "readiness": ('<path d="M4 12.5 9 17.5 20 6.5"/><path d="M4 6.5h7M4 20h16"/>'),
+    "alerts": (
+        '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>'
+    ),
     "audit": ('<path d="M6 3h9l3 3v15H6z"/><path d="M9 9h6M9 13h6M9 17h4"/>'),
     "budgets": ('<path d="M4 19a8 8 0 1 1 16 0"/><path d="m12 19 4-6"/><path d="M4 19h16"/>'),
     "holds": (

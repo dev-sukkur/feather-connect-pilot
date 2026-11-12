@@ -27,7 +27,7 @@ from feather_server.api.errors import ApiProblem, translate
 from feather_server.api.paging import check_limit, decode, page
 from feather_server.auth import Actor, CurrentActor, require_csrf
 from feather_server.catalog_view import dataset_of, route_of
-from feather_server.services import diff, pii
+from feather_server.services import alerts, diff, pii
 from feather_server.services import task_records as records
 from feather_server.services.access import require
 from feather_server.services.accounts import Accounts
@@ -1374,6 +1374,83 @@ def deactivate_flow(
 
 
 # Budgets, connections and the summary.
+
+
+class SnoozeBody(Reason):
+    minutes: int
+
+
+class AlertRuleBody(Reason):
+    enabled: bool = True
+    params: dict[str, Any] = {}
+    channels: list[str] = []
+
+
+def _alerting(request: Request) -> alerts.AlertActions:
+    return alerts.AlertActions(request.app.state.feather)
+
+
+@router.get("/alerts")
+def list_alerts(
+    request: Request,
+    _: CurrentActor,
+    state: Annotated[str | None, Query(description="firing or cleared")] = None,
+    limit: Limit = 100,
+) -> JSONResponse:
+    """The newest alerts, firing and cleared."""
+    if state not in (None, "firing", "cleared"):
+        raise ApiProblem(422, "Unprocessable Content", "state is firing or cleared")
+    found = request.app.state.feather.store.alerts.list_alerts(state, check_limit(limit))  # pyright: ignore[reportArgumentType]
+    return ok({"items": found})
+
+
+@router.post("/alerts/{alert_id}:ack")
+def ack_alert(
+    alert_id: str, request: Request, actor: CurrentActor, body: Reason, key: IdempotencyKey = None
+) -> JSONResponse:
+    return _once(request, actor, key, lambda: _alerting(request).ack(actor, alert_id, reason=body.reason))
+
+
+@router.post("/alerts/{alert_id}:snooze")
+def snooze_alert(
+    alert_id: str, request: Request, actor: CurrentActor, body: SnoozeBody, key: IdempotencyKey = None
+) -> JSONResponse:
+    """Quiet the alert for `minutes`, or no longer with 0."""
+    return _once(
+        request,
+        actor,
+        key,
+        lambda: _alerting(request).snooze(actor, alert_id, body.minutes, reason=body.reason),
+    )
+
+
+@router.get("/alert-rules")
+def alert_rules(request: Request, _: CurrentActor) -> JSONResponse:
+    """Each rule as it applies here, the default or what the environment set, and the channels there are."""
+    state = request.app.state.feather
+    return ok({"items": alerts.rules(state), "channels": sorted(alerts.channels_of(state))})
+
+
+@router.put("/alert-rules/{name}")
+def set_alert_rule(
+    name: str, request: Request, actor: CurrentActor, body: AlertRuleBody, key: IdempotencyKey = None
+) -> JSONResponse:
+    return _once(
+        request,
+        actor,
+        key,
+        lambda: _alerting(request).set_rule(
+            actor, name, enabled=body.enabled, params=body.params, channels=body.channels, reason=body.reason
+        ),
+    )
+
+
+@router.delete("/alert-rules/{name}")
+def reset_alert_rule(
+    name: str, request: Request, actor: CurrentActor, key: IdempotencyKey = None
+) -> JSONResponse:
+    """Back to the rule's default."""
+    return _once(request, actor, key, lambda: _alerting(request).reset_rule(actor, name))
 
 
 @router.get("/audit")

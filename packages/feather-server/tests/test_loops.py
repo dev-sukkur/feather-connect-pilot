@@ -112,6 +112,7 @@ def test_default_loops_are_the_scheduler_sweeper_and_retention(state: AppState) 
         ("retention", 3600.0),
         ("sealer", 0.25),
         ("readiness", 2.0),
+        ("alerts", 30.0),  # M2 plan 2 O6
     }
 
 

@@ -35,7 +35,7 @@ from feather_server.api.paging import decode, encode
 from feather_server.auth import Actor, CurrentActor, csrf_token, current_actor, require_csrf
 from feather_server.catalog_view import dataset_of, route_of
 from feather_server.services import actions as action_limits
-from feather_server.services import diff, pii
+from feather_server.services import alerts, diff, pii
 from feather_server.services.access import Capability, Forbidden, can
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
@@ -84,6 +84,7 @@ NAV: list[NavItem] = [
     NavItem("Secrets", "/secrets", "secrets"),
     NavItem("Users", "/users", "users", needs="users.manage"),
     NavItem("Audit", "/audit", "audit", needs="audit.read"),
+    NavItem("Alerts", "/alerts", "alerts"),
     NavItem("Packages", "/packages", "packages"),
     NavItem("Registries", "/registries", "registries"),
     NavItem("Trace a record", "/trace", "trace"),
@@ -1908,6 +1909,101 @@ def _holds_page(
         q=q,
         notice=notice,
     )
+
+
+def _alerts_page(
+    request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
+) -> HTMLResponse:
+    state = request.app.state.feather
+    shown = request.query_params.get("state", "firing")
+    wanted = shown if shown in ("firing", "cleared") else None
+    rows = state.store.alerts.list_alerts(wanted, 200)  # pyright: ignore[reportArgumentType]
+    now = state.clock.now()
+    firing = state.store.alerts.list_alerts("firing", 1000)
+    tiles = [
+        Tile(
+            "Firing",
+            len(firing),
+            "bad" if any(a.severity == "critical" for a in firing) else "warn" if firing else "",
+        ),
+        Tile("Unacknowledged", sum(1 for a in firing if a.acked_by is None)),
+        Tile("Snoozed", sum(1 for a in firing if a.snoozed_until is not None and a.snoozed_until > now)),
+    ]
+    return render(
+        request,
+        "alerts.html",
+        status=status,
+        title="Alerts",
+        actor=actor,
+        rows=rows,
+        tiles=tiles,
+        shown=shown,
+        now=now,
+        rules=alerts.rules(state),
+        channels=sorted(alerts.channels_of(state)),
+        notice=notice,
+    )
+
+
+@router.get("/alerts", response_class=HTMLResponse)
+def alerts_page(request: Request, actor: CurrentActor) -> HTMLResponse:
+    return _alerts_page(request, actor)
+
+
+@router.post("/alerts/{alert_id}/ack", dependencies=[Depends(require_csrf)])
+def alerts_ack(request: Request, actor: CurrentActor, alert_id: str) -> Response:
+    try:
+        alerts.AlertActions(request.app.state.feather).ack(actor, alert_id)
+    except KeyError:
+        return _not_found(request, f"No alert {alert_id!r}.")
+    except Forbidden as error:
+        return _alerts_page(request, actor, status=403, notice=("bad", str(error)))
+    return _alerts_page(request, actor, notice=("ok", "Acknowledged: its channels hear no more of it."))
+
+
+@router.post("/alerts/{alert_id}/snooze", dependencies=[Depends(require_csrf)])
+def alerts_snooze(
+    request: Request, actor: CurrentActor, alert_id: str, minutes: Annotated[int, Form(ge=0, le=10080)]
+) -> Response:
+    try:
+        alerts.AlertActions(request.app.state.feather).snooze(actor, alert_id, minutes)
+    except KeyError:
+        return _not_found(request, f"No alert {alert_id!r}.")
+    except Forbidden as error:
+        return _alerts_page(request, actor, status=403, notice=("bad", str(error)))
+    except ValueError as error:
+        return _alerts_page(request, actor, status=422, notice=("bad", str(error)))
+    said = f"Snoozed for {minutes} minutes." if minutes else "No longer snoozed."
+    return _alerts_page(request, actor, notice=("ok", said))
+
+
+@router.post("/alerts/rules/{name}", dependencies=[Depends(require_csrf)])
+async def alerts_rule(request: Request, actor: CurrentActor, name: str) -> Response:
+    form = await request.form()
+    channels = [str(c) for c in form.getlist("channel")]
+    defaults = alerts.RULES.get(name, {})
+    params: dict[str, Any] = {}
+    for key, default in defaults.items():
+        raw = str(form.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            params[key] = type(default)(raw) if not isinstance(default, str) else raw
+        except ValueError:
+            return _alerts_page(request, actor, status=422, notice=("bad", f"{key} {raw!r} is not a number."))
+    doing = alerts.AlertActions(request.app.state.feather)
+    try:
+        if form.get("reset"):
+            doing.reset_rule(actor, name)
+        else:
+            doing.set_rule(actor, name, enabled=form.get("enabled") == "on", params=params, channels=channels)
+    except KeyError:
+        return _alerts_page(request, actor, notice=("ok", f"{name} has its default already."))
+    except Forbidden as error:
+        return _alerts_page(request, actor, status=403, notice=("bad", str(error)))
+    except ValueError as error:
+        return _alerts_page(request, actor, status=422, notice=("bad", str(error)))
+    return _alerts_page(request, actor, notice=("ok", f"Rule {name} is saved."))
 
 
 @router.get("/audit", response_class=HTMLResponse)

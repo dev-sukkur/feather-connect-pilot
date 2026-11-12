@@ -246,6 +246,7 @@ class Flow:
                         else {}
                     ),
                     **({"pii": list(d.pii)} if d.pii else {}),
+                    **({"max_lag": d.max_lag} if d.max_lag else {}),
                     "complete": d.strategy.complete,
                     "priority": d.priority,
                     "keep_state": d.keep_state,
