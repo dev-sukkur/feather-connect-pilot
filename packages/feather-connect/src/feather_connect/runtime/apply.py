@@ -16,7 +16,6 @@ from itertools import count
 from typing import Any, cast
 
 import pyarrow as pa
-import pyarrow.compute as pc
 
 from feather_connect.core.approval import APPROVED
 from feather_connect.core.connector import ApplyBatch, ApplyRecord, ApplyResult, Key, RecordResponse
@@ -628,20 +627,23 @@ def version_fields(version_id: str, deps: RuntimeDeps) -> dict[str, str] | None:
     try:
         for ref in deps.spool.list_chunks(version_id):
             table = deps.spool.get_chunk(version_id, ref.chunk_no)
-            upserts = table.filter(pc.not_equal(table.column("_fc_op"), "delete"))  # pyright: ignore[reportAttributeAccessIssue]
-            if not upserts.num_rows:
+            ops = cast("list[str]", table.column("_fc_op").to_pylist())
+            rows = [i for i, op in enumerate(ops) if op != "delete"]
+            if not rows:
                 continue
             metadata = table.schema.metadata or {}
             json_columns = set(json.loads(metadata.get(JSON_COLUMNS_KEY.encode(), b"[]")))
-            for column in upserts.schema:
-                if column.name.startswith("_fc_"):
+            schema: Any = table.schema  # pyarrow's stubs leave a field's type unknown
+            for name in table.column_names:
+                if name.startswith("_fc_"):
                     continue
-                if upserts.column(column.name).null_count == upserts.num_rows:
+                values = table.column(name).to_pylist()
+                if all(values[i] is None for i in rows):
                     typed = NULL
                 else:
-                    typed = "json" if column.name in json_columns else str(column.type)
-                if found.get(column.name, NULL) == NULL:
-                    found[column.name] = typed
+                    typed = "json" if name in json_columns else str(schema.field(name).type)
+                if found.get(name, NULL) == NULL:
+                    found[name] = typed
     except KeyError:
         return None
     fields = found or None
