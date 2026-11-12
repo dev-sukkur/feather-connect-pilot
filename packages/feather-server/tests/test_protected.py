@@ -8,7 +8,7 @@ from datetime import timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from feather_connect.storage.port import VersionDraft
+from feather_connect.storage.port import Role, VersionDraft
 from feather_server.app import AppState, create_app
 from feather_server.auth import Actor, issue_token, token_digest
 from feather_server.services.access import ReasonRequired, require_reason
@@ -143,13 +143,13 @@ def _applied(state: AppState, version: str = "v2") -> None:
     state.store.ledger.transition("acme/sap", version, "applied", actor="system", rows_applied=1)
 
 
-def _api(state: AppState, name: str, role: str, grants: tuple[str, ...] = ()) -> TestClient:
-    state.store.users.create_user(name, "h", role)  # type: ignore[arg-type]
+def _api(state: AppState, name: str, role: Role, grants: tuple[str, ...] = ()) -> TestClient:
+    state.store.users.create_user(name, "h", role)
     if grants:
         state.store.users.set_grants(name, grants)  # type: ignore[arg-type]
     token = issue_token(
         state.store, f"{name}-t", timedelta(days=1), role=role, created_by=name, clock=state.clock
-    )  # type: ignore[arg-type]
+    )
     return TestClient(
         create_app(state=state, loops=lambda s: []), headers={"Authorization": f"Bearer {token}"}
     )
