@@ -547,11 +547,19 @@ class Reads:
 
     def budget_details(self) -> list[BudgetDetail]:
         """Every budget of the project with its windows, reserve and the tasks waiting for it."""
-        return [self.budget_detail(name) for name in sorted(self._state.project.budgets)]
+        return [self.budget_detail(name) for name in sorted(self._budget_specs())]
+
+    def _budget_specs(self) -> dict[str, Any]:
+        """The project's budgets, and those a package host defined in the store."""
+        try:
+            found: dict[str, Any] = {s.name: s for s in self._store.budgets.specs()}
+        except Exception:  # noqa: BLE001 - a store that can't list them leaves the project's
+            found = {}
+        return {**found, **self._state.project.budgets}
 
     def budget_detail(self, name: str) -> BudgetDetail:
         """One budget's windows, reserve and waiting tasks. Raises `KeyError` for one the project doesn't define."""
-        spec = self._state.project.budgets.get(name)
+        spec = self._budget_specs().get(name)
         if spec is None:
             raise KeyError(f"no budget named {name!r}")
         high = float(spec.reserve.get("high", 0.0))

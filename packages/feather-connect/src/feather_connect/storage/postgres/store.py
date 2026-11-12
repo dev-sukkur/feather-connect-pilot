@@ -1826,6 +1826,29 @@ class PostgresBudgets(BudgetStore):
             raise KeyError(name)
         return [WindowUsage(Window(r["units"], r["seconds"]), float(r["units"] - r["tokens"])) for r in rows]
 
+    def specs(self) -> list[BudgetSpec]:
+        with self._db.tx() as conn:
+            budgets = conn.execute(
+                "select name, reserve, account from feather.budget where tenant_id = %s order by name",
+                (self._db.tenant,),
+            ).fetchall()
+            found: list[BudgetSpec] = []
+            for b in budgets:
+                tenant, key = self._owner(b["account"], b["name"])
+                windows = conn.execute(
+                    "select units, seconds from feather.budget_window where tenant_id = %s and name = %s order by idx",
+                    (tenant, key),
+                ).fetchall()
+                found.append(
+                    BudgetSpec(
+                        b["name"],
+                        tuple(Window(w["units"], w["seconds"]) for w in windows),
+                        reserve=dict(_unjson(b["reserve"]) or {}),
+                        account=b["account"],
+                    )
+                )
+        return found
+
     def note_wait(self, name: str, task_ref: str, run_id: str | None, until: datetime) -> None:
         now = self._db.clock.now()
         with self._db.tx() as conn:

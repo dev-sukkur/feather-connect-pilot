@@ -1132,6 +1132,10 @@ class _Budgets(BudgetStore):
             if not shared or spec.key not in self._buckets:
                 self._buckets[spec.key] = [_Bucket(Fraction(w.units), now) for w in spec.windows]
 
+    def specs(self) -> list[BudgetSpec]:
+        with self._d.lock:
+            return sorted(self._specs.values(), key=lambda s: s.name)
+
     def _refilled(self, name: str) -> tuple[BudgetSpec, list[_Bucket]]:
         """Bring the buckets of the budget up to now, and return them."""
         spec = self._specs[name]

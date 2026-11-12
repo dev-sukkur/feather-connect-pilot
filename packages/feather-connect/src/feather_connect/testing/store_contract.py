@@ -977,6 +977,14 @@ class StoreContract(
         with pytest.raises(KeyError):
             store.alerts.delete_rule("delivery_failed")
 
+    def test_the_budgets_defined_are_listed(self, store: Store):  # M2 plan 2 O1
+        store.budgets.define(BudgetSpec("z", parse_limits(["10/minute"]), reserve={"high": 0.6}))
+        store.budgets.define(BudgetSpec("a", parse_limits(["5/hour", "9/day"])))
+        assert [(s.name, s.windows, dict(s.reserve)) for s in store.budgets.specs()] == [
+            ("a", parse_limits(["5/hour", "9/day"]), {}),
+            ("z", parse_limits(["10/minute"]), {"high": 0.6}),
+        ]
+
     def test_all_applied(self, store: Store):
         assert store.ledger.all_applied()
         seal(store, "v1", ["a"])

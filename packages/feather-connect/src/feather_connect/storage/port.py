@@ -941,6 +941,10 @@ class BudgetStore(Protocol):
 
     def usage(self, name: str) -> list[WindowUsage]: ...
 
+    def specs(self) -> list[BudgetSpec]:
+        """The budgets defined here, by name: the project's and those a package host defined (M2 plan 2 O1)."""
+        ...
+
     def note_wait(self, name: str, task_ref: str, run_id: str | None, until: datetime) -> None:
         """Note that the task waits for the budget until `until` (M2 plan 2 O1): the first wait of a task makes its
         row, and each later one moves `until` and counts. Rows a day past their `until` go."""

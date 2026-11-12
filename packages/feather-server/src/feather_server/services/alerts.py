@@ -158,7 +158,7 @@ def _hold_waiting(state: "AppState", rule: Rule, now: datetime) -> list[Finding]
 def _budget_high(state: "AppState", rule: Rule, now: datetime) -> list[Finding]:
     warning, critical = float(rule.params["warning"]), float(rule.params["critical"])
     found: list[Finding] = []
-    for name in sorted(state.project.budgets):
+    for name in sorted({s.name for s in state.store.budgets.specs()} | set(state.project.budgets)):
         try:
             usage = state.store.budgets.usage(name)
         except KeyError:
