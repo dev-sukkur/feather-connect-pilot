@@ -22,9 +22,10 @@ It exits 1 if a run is missing, the mistake is still there, or the RTO is over a
 
 ## On a real deployment
 
-1. **Before**: Postgres runs with `wal_level=replica`, `archive_mode=on` and an `archive_command` that copies WAL
-   somewhere the database's disk can't take with it. Base backups are taken daily. The master key is backed up apart
-   from the database.
+1. **Before**: Postgres runs with `wal_level=replica`, `archive_mode=on`, an `archive_command` that copies WAL
+   somewhere the database's disk can't take with it, and `archive_timeout = 300` or less, so that at most five
+   minutes of changes can be lost (RPO, NFR-05). Base backups are taken daily. The master key is backed up apart from
+   the database.
 2. **Stop Feather**: `docker compose stop feather-server feather-worker`, so nothing writes while you restore.
 3. **Restore** the newest base backup from before the moment into a new data directory. Add to its
    `postgresql.auto.conf`:
