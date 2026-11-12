@@ -62,6 +62,7 @@ class _Slice:
     partition: str
     version_id: str
     chunks: int = 0  # how many `full` chunks are written
+    latest_rows: bool = False  # whether a row read last of its key is in it
     watermark: Any = None
     buffer: dict[str, Record] = field(default_factory=dict[str, Record])  # last row wins per key
 
@@ -70,7 +71,9 @@ class _Read:
     """Takes the rows of a read and files them under their slices, as `full` chunks.
 
     `latest` holds the partition and hash of the last row read for each key, wherever it landed. `rejected` holds
-    the keys of records that were read but turned down.
+    the keys of records that were read but turned down. A read that bootstraps a route from the beginning is given
+    the `cutoff` its read would have started at otherwise, and `older` holds the keys last read with a stamp before
+    it, which only the new route gets.
     """
 
     def __init__(
@@ -83,9 +86,12 @@ class _Read:
         *,
         writer: str | None = None,
         tick: str | None = None,
+        cutoff: Any = None,
     ) -> None:
         self.writer = writer  # None for a dry run, which claims nothing and turns no record down in the store
         self.tick = tick
+        self._cutoff = cutoff
+        self.older: set[str] = set()
         self._dataset = dataset
         self._run_id = run_id
         self._partition = partition  # None when each row's partition comes from the row
@@ -133,6 +139,11 @@ class _Read:
             return
         target = self._slice(partition)
         self.latest[key] = (partition, record.row_hash)
+        if self._cutoff is not None:
+            if stamp is not None and stamp < self._cutoff:
+                self.older.add(key)
+            else:
+                self.older.discard(key)
         if stamp is not None and (target.watermark is None or stamp > target.watermark):
             target.watermark = stamp
         self._buffered += key not in target.buffer
@@ -429,13 +440,17 @@ def _stage_slice(
     keep_full: bool,
     writer: str,
     deps: RuntimeDeps,
+    bootstrap: bool = False,
 ) -> Version | None:
-    """Compare a slice with what was known, write its chunks and stage its version, if there is anything to say."""
+    """Compare a slice with what was known, write its chunks and stage its version, if there is anything to say.
+
+    A read that bootstraps a route (`bootstrap`) stages a slice that changed nothing too, when rows are latest in it,
+    since its `full` chunks are what the new route gets."""
     strategy = dataset.strategy
     found = _compare(dataset, read, target, new, since, deps)
     changes, deletes, held, old_hashes = found.changes, found.deletes, found.held, found.old_hashes
     # A newly held key must reach the snapshot even with no records, or nothing would remember it.
-    if not changes and not deletes and held <= old_hashes.keys():
+    if not changes and not deletes and held <= old_hashes.keys() and not (bootstrap and target.latest_rows):
         _discard(target.version_id, writer, deps)
         return None
     if strategy.complete:
@@ -516,6 +531,20 @@ def _verify(dataset: Dataset, partition: str, deps: RuntimeDeps) -> VerifyResult
     return VerifyResult(upserts, deletes)
 
 
+def _fresh_routes(dataset: Dataset, routes: Sequence[RouteSpec], deps: RuntimeDeps) -> list[str]:
+    """The routes that have had no delivery of the dataset yet while it has a sealed history, which its read
+    bootstraps (M2 plan 2 D2). A dataset's first read has nothing to bootstrap from: what it reads is all new."""
+    names = [route.name for route in routes]
+    if not names:
+        return []
+    ledger = deps.store.ledger
+    delivered = ledger.delivered_routes(dataset.name, names)
+    fresh = [name for name in names if name not in delivered]
+    if fresh and not delivered and not ledger.has_deliveries(dataset.name):
+        return []
+    return fresh
+
+
 def _read_and_stage(
     dataset: Dataset,
     run_id: str,
@@ -526,14 +555,30 @@ def _read_and_stage(
     deps: RuntimeDeps,
     tick: str | None,
 ) -> tuple[list[str], list[Version]]:
-    """Read the source and stage a version per slice. Return the partitions read and the versions staged."""
+    """Read the source and stage a version per slice. Return the partitions read and the versions staged.
+
+    While a route of the flow has had no delivery of the dataset, which is so of one added to a live flow (H11), the
+    read bootstraps it: a `by_stamp` read starts from the beginning, and the `full` chunks are kept, which that
+    route's first delivery in each partition sends (see `apply`), so that it gets the whole slice and not only what
+    changed. The other routes get the changes as ever."""
     strategy = dataset.strategy
     by_stamp = strategy if isinstance(strategy, ByStamp) else None
+    fresh = _fresh_routes(dataset, routes, deps)
     watermark = None if by_stamp is None else deps.store.versions.latest_watermark(dataset.name)
     since = None if by_stamp is None else _read_since(dataset, by_stamp, watermark)
+    cutoff = since if fresh else None
     stamp_kind = None if watermark is None else _stamp_kind(watermark)
-    read = _Read(dataset, run_id, None if by_stamp else partition, stamp_kind, deps, writer=writer, tick=tick)
-    _read_source(dataset, read, since, deps, _ALL_PARTITIONS if by_stamp else partition)
+    read = _Read(
+        dataset,
+        run_id,
+        None if by_stamp else partition,
+        stamp_kind,
+        deps,
+        writer=writer,
+        tick=tick,
+        cutoff=cutoff,
+    )
+    _read_source(dataset, read, None if fresh else since, deps, _ALL_PARTITIONS if by_stamp else partition)
     if by_stamp:  # an earlier attempt may have staged a partition that this read no longer touches
         for stale in deps.store.versions.staged_for_run(run_id, dataset.name, tick):
             if stale.partition not in read.slices:
@@ -542,11 +587,13 @@ def _read_and_stage(
     versions: list[Version] = []
     new_by_slice: dict[str, dict[str, int]] = {name: {} for name in read.slices}
     for key, (slice_name, hash_) in read.latest.items():
-        new_by_slice[slice_name][key] = hash_
-    keep_full = any(route.mode == "replace_partition" for route in routes)
+        read.slices[slice_name].latest_rows = True
+        if key not in read.older:  # what the read would not have seen but for a bootstrap is no change
+            new_by_slice[slice_name][key] = hash_
+    keep_full = bool(fresh) or any(route.mode == "replace_partition" for route in routes)
     for name, target in read.slices.items():
         version = _stage_slice(
-            dataset, run_id, read, target, new_by_slice[name], since, keep_full, writer, deps
+            dataset, run_id, read, target, new_by_slice[name], since, keep_full, writer, deps, bool(fresh)
         )
         if version is not None:
             versions.append(version)

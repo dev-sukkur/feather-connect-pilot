@@ -871,7 +871,7 @@ class StoreContract(
         rest = store.ledger.list_deliveries(cursor=delivery_cursor(first[-1]))
         assert first + rest == everything and len(rest) == 1
 
-    def test_last_applied_is_the_newest_applied_before_a_seal(self, store: Store):  # M2 plan 2 D1
+    def test_latest_before_is_the_newest_before_a_seal(self, store: Store):  # M2 plan 2 D1
         for vid in ("v1", "v2", "v3"):
             seal(store, vid, ["a"], part="p")
         seal(store, "w1", ["a"], part="q")
@@ -879,11 +879,22 @@ class StoreContract(
             store.ledger.transition("a", vid, "running", actor="t")
             store.ledger.transition("a", vid, "applied", actor="t")
         v3 = store.ledger.get("a", "v3")
-        found = store.ledger.last_applied("a", "p", "d", v3.seal_seq)
+        found = store.ledger.latest_before("a", "p", "d", v3.seal_seq)
         assert found is not None and found.version_id == "v2"
         v1 = store.ledger.get("a", "v1")
-        assert store.ledger.last_applied("a", "p", "d", v1.seal_seq) is None
-        assert store.ledger.last_applied("a", "p", "other", v3.seal_seq) is None
+        assert store.ledger.latest_before("a", "p", "d", v1.seal_seq) is None
+        assert store.ledger.latest_before("a", "p", "other", v3.seal_seq) is None
+        seal(store, "v4", ["a"], part="p")
+        v4 = store.ledger.get("a", "v4")
+        assert store.ledger.latest_before("a", "p", "d", v4.seal_seq).version_id == "v2"  # pyright: ignore[reportOptionalMemberAccess]
+        assert store.ledger.latest_before("a", "p", "d", v4.seal_seq, None).version_id == "v3"  # pyright: ignore[reportOptionalMemberAccess]
+
+    def test_delivered_routes_are_those_with_a_delivery_of_the_dataset(self, store: Store):  # M2 plan 2 D2
+        seal(store, "v1", ["a", "b"])
+        assert store.ledger.delivered_routes("d", ["a", "c"]) == {"a"}
+        assert store.ledger.delivered_routes("other", ["a"]) == set()
+        assert store.ledger.delivered_routes("d", []) == set()
+        assert store.ledger.has_deliveries("d") and not store.ledger.has_deliveries("other")
 
     def test_all_applied(self, store: Store):
         assert store.ledger.all_applied()

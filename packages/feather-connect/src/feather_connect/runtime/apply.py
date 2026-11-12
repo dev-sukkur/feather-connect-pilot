@@ -104,8 +104,19 @@ def _chunk_keys(version_id: str, chunk_no: int, kind: ChunkKind, deps: RuntimeDe
     return cast("list[str]", deps.spool.get_chunk(version_id, chunk_no, kind).column(_KEY).to_pylist())
 
 
+def _bootstraps(route: RouteSpec, version: Version, deps: RuntimeDeps) -> bool:
+    """Whether the version is the route's first in its partition, which then gets the whole slice read (H11)."""
+    if version.seal_seq is None:
+        return False
+    earlier = deps.store.ledger.latest_before(
+        route.name, version.partition, version.dataset, version.seal_seq, None
+    )
+    return earlier is None
+
+
 def _plan_of(route: RouteSpec, version: Version, deps: RuntimeDeps) -> _Plan:
-    """Work out what the delivery sends. A `replace_partition` route gets the whole slice, and the others the changes.
+    """Work out what the delivery sends. A `replace_partition` route gets the whole slice, and the others the changes,
+    except in a route's first delivery in a partition, which gets the whole slice read when it was kept (D2, H11).
 
     A complete version with no `full` chunks, whose snapshot holds nothing that reached the destination, says that the
     slice is now empty there, because of deletes or moves, which the sink has to hear. Raises `PermanentError` if the
@@ -114,6 +125,9 @@ def _plan_of(route: RouteSpec, version: Version, deps: RuntimeDeps) -> _Plan:
     """
     version_id = version.version_id
     if route.mode != "replace_partition":
+        full = tuple(chunk.chunk_no for chunk in deps.spool.list_chunks(version_id, "full"))
+        if full and _bootstraps(route, version, deps):
+            return _Plan("full", full)
         return _Plan("data", tuple(chunk.chunk_no for chunk in deps.spool.list_chunks(version_id)))
     chunks = tuple(chunk.chunk_no for chunk in deps.spool.list_chunks(version_id, "full"))
     snapshots = deps.spool.list_chunks(version_id, "snapshot")
@@ -664,7 +678,7 @@ def _hold_for_schema(dataset: Dataset, route: RouteSpec, delivery: Delivery, dep
         return True  # a step run again
     if approved(route.name, version_id, deps, SCHEMA_CHANGE):
         return False
-    last = ledger.last_applied(route.name, delivery.partition, delivery.dataset, delivery.seal_seq)
+    last = ledger.latest_before(route.name, delivery.partition, delivery.dataset, delivery.seal_seq)
     if last is None:
         return False
     before, after = version_fields(last.version_id, deps), version_fields(version_id, deps)

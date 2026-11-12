@@ -1256,12 +1256,20 @@ class _Ledger(Ledger):
             ).fetchall()
         return [_delivery(r) for r in rows]
 
-    def last_applied(self, route: str, partition: str, dataset: str, before_seq: int) -> Delivery | None:
+    def latest_before(
+        self,
+        route: str,
+        partition: str,
+        dataset: str,
+        before_seq: int,
+        status: DeliveryStatus | None = "applied",
+    ) -> Delivery | None:
         with self._db.tx() as conn:
             row = conn.execute(
                 """select * from feather.delivery
                    where tenant_id = %(tenant)s and route = %(route)s and partition = %(partition)s
-                     and dataset = %(dataset)s and status = 'applied' and seal_seq < %(before)s
+                     and dataset = %(dataset)s and seal_seq < %(before)s
+                     and (%(status)s::text is null or status = %(status)s)
                    order by seal_seq desc limit 1""",
                 {
                     "tenant": self._db.tenant,
@@ -1269,9 +1277,31 @@ class _Ledger(Ledger):
                     "partition": partition,
                     "dataset": dataset,
                     "before": before_seq,
+                    "status": status,
                 },
             ).fetchone()
         return None if row is None else _delivery(row)
+
+    def delivered_routes(self, dataset: str, routes: Sequence[str]) -> set[str]:
+        if not routes:
+            return set()
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select r.route from unnest(%(routes)s::text[]) as r(route)
+                   where exists (select 1 from feather.delivery d
+                                 where d.tenant_id = %(tenant)s and d.route = r.route and d.dataset = %(dataset)s)""",
+                {"tenant": self._db.tenant, "routes": list(routes), "dataset": dataset},
+            ).fetchall()
+        return {r["route"] for r in rows}
+
+    def has_deliveries(self, dataset: str) -> bool:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select exists (select 1 from feather.delivery where tenant_id = %(tenant)s and dataset = %(dataset)s)
+                   as found""",
+                {"tenant": self._db.tenant, "dataset": dataset},
+            ).fetchone()
+        return bool(row and row["found"])
 
     def count_by_status(
         self, routes: Sequence[str], statuses: Sequence[DeliveryStatus]

@@ -550,9 +550,25 @@ class Ledger(Protocol):
         """In seal order. Pass `delivery_cursor(last)` as `cursor` to continue after `last`."""
         ...
 
-    def last_applied(self, route: str, partition: str, dataset: str, before_seq: int) -> Delivery | None:
-        """The latest delivery of `dataset` on the route's partition sealed before `before_seq` that is applied, or
-        None. The schema policy compares with it (M2 plan 2 D1)."""
+    def latest_before(
+        self,
+        route: str,
+        partition: str,
+        dataset: str,
+        before_seq: int,
+        status: DeliveryStatus | None = "applied",
+    ) -> Delivery | None:
+        """The latest delivery of `dataset` on the route's partition sealed before `before_seq`, of `status` unless
+        that is None, or None. The schema policy compares with the last applied one (M2 plan 2 D1), and a route's
+        first delivery in a partition is its bootstrap (D2)."""
+        ...
+
+    def delivered_routes(self, dataset: str, routes: Sequence[str]) -> set[str]:
+        """Those of `routes` that have a delivery of `dataset`, of any status (M2 plan 2 D2)."""
+        ...
+
+    def has_deliveries(self, dataset: str) -> bool:
+        """Whether any route has a delivery of `dataset`: whether it has a sealed history to bootstrap from."""
         ...
 
     def count_by_status(

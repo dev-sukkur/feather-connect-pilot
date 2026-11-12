@@ -846,7 +846,14 @@ class _Ledger(Ledger):
         ]
         return found[:limit]
 
-    def last_applied(self, route: str, partition: str, dataset: str, before_seq: int) -> Delivery | None:
+    def latest_before(
+        self,
+        route: str,
+        partition: str,
+        dataset: str,
+        before_seq: int,
+        status: DeliveryStatus | None = "applied",
+    ) -> Delivery | None:
         with self._d.lock:
             found = [
                 d
@@ -854,10 +861,21 @@ class _Ledger(Ledger):
                 if d.route == route
                 and d.partition == partition
                 and d.dataset == dataset
-                and d.status == "applied"
+                and (status is None or d.status == status)
                 and d.seal_seq < before_seq
             ]
         return max(found, key=lambda d: d.seal_seq, default=None)
+
+    def delivered_routes(self, dataset: str, routes: Sequence[str]) -> set[str]:
+        wanted = set(routes)
+        with self._d.lock:
+            return {
+                d.route for d in self._d.deliveries.values() if d.dataset == dataset and d.route in wanted
+            }
+
+    def has_deliveries(self, dataset: str) -> bool:
+        with self._d.lock:
+            return any(d.dataset == dataset for d in self._d.deliveries.values())
 
     def count_by_status(
         self, routes: Sequence[str], statuses: Sequence[DeliveryStatus]
