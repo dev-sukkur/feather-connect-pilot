@@ -192,7 +192,7 @@ def _stop_postgres_container() -> None:
 
 def _code_sha(project: Path) -> str:
     """A name for the code as it is on disk now, so that an edit to a flow is a new version of it."""
-    digest = hashlib.sha1()
+    digest = hashlib.sha1(usedforsecurity=False)  # a name for the files, not a check of them
     files = [
         project / "feather.yaml",
         *sorted((project / "flows").rglob("*")),

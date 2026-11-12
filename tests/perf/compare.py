@@ -56,7 +56,7 @@ def compare(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("results", type=Path)
     parser.add_argument("--baseline", type=Path, default=Path("docs/06-release/perf-baseline.json"))
     parser.add_argument("--summary", type=Path, help="append the table, as Markdown, to this file")

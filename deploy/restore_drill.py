@@ -232,7 +232,7 @@ def drill(keep: bool = False) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--keep", action="store_true", help="leave the drill's containers and volumes")
     args = parser.parse_args(argv)
     report = drill(keep=args.keep)
