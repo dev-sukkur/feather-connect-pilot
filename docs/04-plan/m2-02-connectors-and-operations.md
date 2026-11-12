@@ -69,4 +69,4 @@ All stages are built on `feat/m2-readiness` (PR 30), 12 Nov 2026.
 | O6 | Done: six rules, webhook, Slack and SMTP channels, ack and snooze, rules per environment (`alert_rule`, `alert`, migration 0032) |
 | H | H5, H7, H8, H10–H12, H15 added to `tests/hard_cases` and pass on the full stack. H9: `tests/chaos/test_kill_mid_apply.py` (no duplicate) and the demo chain's compensate. H7 and H8 use hour windows and check the wait, the reserve and the cap without waiting the hour out |
 
-Open: whether a Railway deployment belongs to M2 (sponsor to say).
+A deployment (Railway) comes after M3, as the sponsor said on 12 Nov 2026; M2's exit criterion runs in the reference organisation's qa/uat.
