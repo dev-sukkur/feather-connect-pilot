@@ -7,8 +7,13 @@ name: Release
 #   cosign verify ghcr.io/<org>/feather-server:<tag> #     --certificate-identity-regexp 'https://github.com/.+/.github/workflows/release.yml@refs/tags/v.+' #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*"]  # a tag pushed by hand
+  workflow_call:  # from release-please, whose tag starts no workflow by itself
+    inputs:
+      tag: {type: string, required: true}
   workflow_dispatch:
+    inputs:
+      tag: {description: "The release tag, such as v1.0.0", type: string, required: true}
 
 permissions:
   contents: write  # the SBOMs on the release
@@ -23,8 +28,11 @@ jobs:
         image: [server, worker]
     env:
       ORG: ${{ vars.FEATHER_IMAGE_ORG || 'feather-connect' }}
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
@@ -41,7 +49,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ env.ORG }}/feather-${{ matrix.image }}:${{ github.ref_name }}
+            ghcr.io/${{ env.ORG }}/feather-${{ matrix.image }}:${{ env.TAG }}
             ghcr.io/${{ env.ORG }}/feather-${{ matrix.image }}:latest
       - name: The SBOM (CycloneDX)
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -49,10 +57,19 @@ jobs:
           image: ghcr.io/${{ env.ORG }}/feather-${{ matrix.image }}@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
           output-file: feather-${{ matrix.image }}.cdx.json
-          upload-release-assets: ${{ startsWith(github.ref, 'refs/tags/') }}
+          upload-artifact: false
+          upload-release-assets: false
       - name: Sign the image and attest its SBOM, keyless
         env:
           IMAGE: ghcr.io/${{ env.ORG }}/feather-${{ matrix.image }}@${{ steps.build.outputs.digest }}
         run: |
           cosign sign --yes "$IMAGE"
           cosign attest --yes --type cyclonedx --predicate feather-${{ matrix.image }}.cdx.json "$IMAGE"
+      - name: The SBOM on the GitHub release
+        if: startsWith(env.TAG, 'v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A tag pushed by hand has no release yet: the first image job makes it.
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --verify-tag --generate-notes || true
+          gh release upload "$TAG" feather-${{ matrix.image }}.cdx.json --clobber

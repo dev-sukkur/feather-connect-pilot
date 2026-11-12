@@ -1,0 +1,48 @@
+name: Release Please
+
+# On main, release-please keeps a release pull request open with the next version and its changelog, from the
+# conventional commit messages (M3 plan 1 L2). Every package of the workspace has one version, bumped together in
+# their pyproject.toml. Merging that pull request tags vX.Y.Z and makes the GitHub release; this workflow then builds,
+# signs and pushes the images and publishes to PyPI. They are called from here, since a tag pushed with GITHUB_TOKEN
+# starts no other workflow.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      created: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  images:
+    needs: release-please
+    if: needs.release-please.outputs.created == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag }}
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+
+  pypi:
+    needs: release-please
+    if: needs.release-please.outputs.created == 'true'
+    uses: ./.github/workflows/publish.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag }}
+    permissions:
+      contents: read
+      id-token: write
