@@ -6,6 +6,7 @@ token, or answered with a problem (RFC 9457), whose detail it carries.
 
 import hashlib
 import re
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Self
@@ -258,6 +259,26 @@ class ApiClient:
     def activate_flow(self, flow: str, version: str, reason: str | None) -> dict[str, Any]:
         return self._call(
             "POST", f"/flows/{quote(flow, safe='/')}:activate", body={"version": version, "reason": reason}
+        )
+
+    def readiness(self, flow: str | None = None) -> dict[str, Any]:
+        path = "/readiness" if flow is None else f"/flows/{quote(flow, safe='/')}/readiness"
+        return self._call("GET", path)
+
+    def fire_ready(self, flow: str, period: str, scope: str, reason: str | None) -> dict[str, Any]:
+        return self._call(
+            "POST",
+            f"/flows/{quote(flow, safe='/')}/readiness:fire",
+            body={"period": period, "scope": scope, "reason": reason},
+            idempotency_key=str(uuid.uuid4()),
+        )
+
+    def close_partition(self, dataset: str, partition: str, reason: str | None) -> dict[str, Any]:
+        return self._call(
+            "POST",
+            f"/datasets/{quote(dataset, safe='/')}/partitions/{quote(partition, safe='/=')}:close",
+            body={"reason": reason},
+            idempotency_key=str(uuid.uuid4()),
         )
 
     def deactivate_flow(self, flow: str, reason: str | None) -> dict[str, Any]:

@@ -12,6 +12,7 @@ from feather_cli.commands import (
     new,
     package,
     processes,
+    ready,
     registry,
     remote,
     run,
@@ -44,6 +45,7 @@ app.add_typer(environment.connection_app, name="connection")
 app.add_typer(environment.config_app, name="config")
 app.add_typer(environment.secret_app, name="secret")
 app.add_typer(environment.flow_app, name="flow")
+app.add_typer(ready.ready_app, name="ready")
 app.command()(run.run)
 app.command("test")(test_command.test)
 for command in (remote.status, remote.runs, remote.logs, remote.backfill, remote.replay):

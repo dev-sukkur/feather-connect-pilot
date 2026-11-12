@@ -179,3 +179,65 @@ def test_the_env_files_token_goes_only_to_the_env_files_server(
         assert own._http.headers["authorization"] == "Bearer fc_qa_token"  # pyright: ignore[reportPrivateUsage]
     with client(tmp_path, "qa", "https://feather.qa.example/", None, json_mode=True) as same:
         assert same._http.headers["authorization"] == "Bearer fc_qa_token"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_ready_close_fire_and_status(cli: Callable[..., Result], server: Served) -> None:
+    import feather_connect as fc
+    from feather_connect.connectors import memory
+    from feather_connect.project import prefixed
+    from feather_connect.runtime.catalogue import ActiveFlow
+
+    by_day = fc.partition.by_day("date", tz="UTC")
+    invoices = fc.Dataset(
+        "invoices", source=memory.Source(), key="id", strategy=fc.strategy.replace(), partition=by_day
+    )
+    ingest = fc.Flow("ingest", reads=invoices, deliver=[fc.to(memory.Sink(connection="staging"))])
+    posting = fc.Flow(
+        "posting",
+        reads=fc.Dataset(
+            "totals", source=memory.Source(connection="t"), key="id", strategy=fc.strategy.replace()
+        ),
+        deliver=[fc.to(memory.Sink(connection="erp"))],
+        triggers=[fc.on_ready(fc.ready(invoices), each="day", tz="UTC")],
+    )
+    flows = [
+        ActiveFlow(f.name, "acme", "1.0.0", (), f.overlap, f.catch_up, True, frozenset(), f.spec_dict())
+        for f in prefixed([ingest, posting], "acme")
+    ]
+
+    class Catalogue:
+        def flows(self) -> list[ActiveFlow]:
+            return flows
+
+    server.world.state.catalogue = Catalogue()  # type: ignore[assignment]
+    closed = cli(
+        "ready",
+        "close",
+        "acme/invoices",
+        "--partition",
+        "date=2026-10-17",
+        "--reason",
+        "day done",
+        *_at(server),
+    )
+    assert closed.exit_code == 0, closed.output
+    assert "closed by cli" in closed.stdout
+    fired = cli(
+        "ready",
+        "fire",
+        "acme/posting",
+        "--period",
+        "2026-10-17",
+        "--reason",
+        "by hand",
+        *_at(server),
+        "--json",
+    )
+    assert fired.exit_code == 0, fired.output
+    run_id = json.loads(fired.stdout)["run_id"]
+    assert server.world.store.runs.get_run(run_id).trigger == "ready"
+    shown = cli("ready", "status", "acme/posting", *_at(server))
+    assert shown.exit_code == 0, shown.output
+    assert "acme/posting: acme/invoices, each day" in shown.stdout and "2026-10-17" in shown.stdout
+    refused = cli("ready", "fire", "acme/posting", "--period", "2026-10-17", *_at(server))
+    assert refused.exit_code != 0  # no reason
