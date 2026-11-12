@@ -1946,6 +1946,9 @@ class _Readiness(ReadinessStore):
         self._closes: dict[tuple[str, str], PartitionClose] = {}
         self._firings: dict[tuple[str, str, str, str, int], Firing] = {}
 
+    def listen(self, callback: Callable[[], None]) -> Callable[[], None]:
+        return lambda: None  # nothing to wake: in one process the evaluator's poll is as quick
+
     def close(self, dataset: str, partition: str, actor: str, reason: str, at: datetime) -> PartitionClose:
         with self._d.lock:
             return self._closes.setdefault(

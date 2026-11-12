@@ -2637,27 +2637,7 @@ class _Packages(PackageStore):
         return [self._activation(r) for r in rows]
 
     def listen(self, callback: Callable[[], None]) -> Callable[[], None]:
-        stop = threading.Event()
-        given = self._db.pool.conninfo
-        conninfo = given() if callable(given) else given
-        tenant = self._db.tenant
-
-        def run() -> None:
-            while not stop.is_set():
-                try:
-                    with psycopg.connect(conninfo, autocommit=True) as conn:
-                        conn.execute(sql.SQL("listen {}").format(sql.Identifier(CATALOG_CHANNEL)))
-                        callback()  # anything missed while not listening
-                        while not stop.is_set():
-                            for note in conn.notifies(timeout=1.0, stop_after=1):
-                                if note.payload == tenant:
-                                    callback()
-                except psycopg.Error:
-                    log.warning("listening for catalogue changes failed; trying again", exc_info=True)
-                    stop.wait(5)
-
-        threading.Thread(target=run, name="catalog-listen", daemon=True).start()
-        return stop.set
+        return _listen(self._db, CATALOG_CHANNEL, callback, "catalog-listen")
 
     def prepared(
         self,
@@ -3454,9 +3434,38 @@ class _Webhooks(WebhookEventStore):
         return done.rowcount
 
 
+def _listen(db: "_Db", channel: str, callback: Callable[[], None], name: str) -> Callable[[], None]:
+    """Call `callback` on each NOTIFY on `channel` for this tenant, and once each time it starts listening, for what it
+    missed meanwhile; on a dedicated connection, on a daemon thread. Returns what stops it."""
+    stop = threading.Event()
+    given = db.pool.conninfo
+    conninfo = given() if callable(given) else given
+    tenant = db.tenant
+
+    def run() -> None:
+        while not stop.is_set():
+            try:
+                with psycopg.connect(conninfo, autocommit=True) as conn:
+                    conn.execute(sql.SQL("listen {}").format(sql.Identifier(channel)))
+                    callback()  # anything missed while not listening
+                    while not stop.is_set():
+                        for note in conn.notifies(timeout=1.0, stop_after=1):
+                            if note.payload == tenant:
+                                callback()
+            except psycopg.Error:
+                log.warning("listening on %s failed; trying again", channel, exc_info=True)
+                stop.wait(5)
+
+    threading.Thread(target=run, name=name, daemon=True).start()
+    return stop.set
+
+
 class _Readiness(ReadinessStore):
     def __init__(self, db: _Db) -> None:
         self._db = db
+
+    def listen(self, callback: Callable[[], None]) -> Callable[[], None]:
+        return _listen(self._db, READY_CHANNEL, callback, "ready-listen")
 
     def close(self, dataset: str, partition: str, actor: str, reason: str, at: datetime) -> PartitionClose:
         with self._db.tx() as conn:

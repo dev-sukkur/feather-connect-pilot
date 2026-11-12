@@ -1756,6 +1756,12 @@ class ReadinessStore(Protocol):
     """Closed partitions and firings (readiness design §7.2). What is sealed and applied is read from the versions and
     the ledger, which already hold it."""
 
+    def listen(self, callback: "Callable[[], None]") -> "Callable[[], None]":
+        """Call `callback` when a version is sealed or a delivery is applied or skipped (`READY_CHANNEL`), from this
+        process or another, so that the evaluator looks again at once. A store may never call it, and its evaluator
+        then polls. Returns what stops listening."""
+        ...
+
     def close(self, dataset: str, partition: str, actor: str, reason: str, at: datetime) -> PartitionClose:
         """Close the partition. A partition closed already stays as it was, and that close is returned."""
         ...

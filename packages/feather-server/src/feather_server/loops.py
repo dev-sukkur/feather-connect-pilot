@@ -28,6 +28,9 @@ _JOIN_S = 30.0
 _NAMED = 5  # items of a list that a log line spells out
 
 
+READY_POLL_S = 10.0  # the readiness loop's poll when NOTIFY wakes it
+
+
 class LoopRunner:
     """Calls `fn` every `interval_s` seconds on a daemon thread, while it leads.
 
@@ -44,14 +47,20 @@ class LoopRunner:
         self._fn = fn
         self._lock = lock
         self._stopping = threading.Event()
+        self._woken = threading.Event()
         self._thread = threading.Thread(target=self._run, name=f"loop-{name}", daemon=True)
 
     def start(self) -> None:
         self._thread.start()
 
+    def wake(self) -> None:
+        """Run the next pass now rather than at the end of the interval."""
+        self._woken.set()
+
     def stop(self) -> None:
         """Stop after the pass that is running, give up the lock and wait for the thread."""
         self._stopping.set()
+        self._woken.set()
         if self._thread.is_alive():
             self._thread.join(_JOIN_S)
         self._lock.release()  # the thread does so too; if it never started, this is the only release
@@ -63,7 +72,8 @@ class LoopRunner:
                 self.leading = self._lock.try_acquire()
                 if self.leading:
                     self._once()
-                self._stopping.wait(self.interval_s)
+                self._woken.wait(self.interval_s)
+                self._woken.clear()
         finally:
             self._lock.release()
 
@@ -176,11 +186,18 @@ def default_loops(state: "AppState") -> list[LoopRunner]:
     def ready() -> None:  # readiness (M2 plan 1): fires what is ready, from the catalogue and the store
         evaluate_readiness(state.store, catalogue.flows(), state.clock.now())
 
+    # Woken by a seal or an applied delivery (NOTIFY feather_ready); the poll is for the clock: a period ending, a
+    # settle passing. Without a database nothing notifies, so it polls as often as it waits for a seal elsewhere.
+    readiness = LoopRunner(
+        "readiness", ready, READY_POLL_S if state.settings.database_url else 2.0, lock("readiness")
+    )
+    state.closers.append(state.store.readiness.listen(readiness.wake))
+
     return [
         LoopRunner("scheduler", schedule, 1.0, lock("scheduler")),
         LoopRunner("sweeper", sweep, 5.0, lock("sweeper")),
         LoopRunner("retention", retain, 3600.0, lock("retention")),
         # Often enough that a batch waits about `max_age` (1 s), and no more than a quarter of that again.
         LoopRunner("sealer", seal, 0.25, lock("sealer")),
-        LoopRunner("readiness", ready, 2.0, lock("readiness")),
+        readiness,
     ]

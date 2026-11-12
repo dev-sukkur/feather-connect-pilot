@@ -165,3 +165,23 @@ def test_h17_a_late_version_for_a_fired_period_reruns_it_exactly_once_and_holds_
     assert ready["reason"] == "late data"
     assert ready["versions"]["acme/lines"]["store_id=1509/date=2026-11-08"] == f"lines-1509-{late}"
     assert db.fired("posting") == [("store_id=1509", 0, "ready"), ("store_id=1509", 1, "late data")]
+
+
+def test_a_seal_wakes_the_evaluator_through_notify(db: Db):
+    woken = threading.Event()
+    calls: list[int] = []
+
+    def wake() -> None:
+        calls.append(1)
+        if len(calls) > 1:  # the first is the call on starting to listen
+            woken.set()
+
+    stop = db.store.readiness.listen(wake)
+    try:
+        deadline = datetime.now(UTC) + timedelta(seconds=10)
+        while not calls and datetime.now(UTC) < deadline:
+            woken.wait(0.05)
+        db.seal("lines", 1509)
+        assert woken.wait(10)
+    finally:
+        stop()
