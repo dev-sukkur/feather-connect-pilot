@@ -89,13 +89,41 @@ def _received(db: Path) -> list[dict[str, Any]]:
 
 def test_the_zakya_demo_project_is_sound():
     project = load_project(DEMO, "dev")
-    assert [f.name for f in project.flows] == ["zakya-invoices"]
+    assert [f.name for f in project.flows] == ["zakya-invoices", "erp-check"]
     assert [r.name for r in project.flows[0].routes] == ["erp"]
     assert validate_project(project) == []
     (budget,) = (
         project.budgets.values()
     )  # M13: a dev day of the simulator takes far more than Zoho's 1400 calls
     assert [(w.units, w.seconds) for w in budget.windows] == [(90, 60), (20000, 86400)]
+
+
+def test_the_check_starts_once_after_each_ingest_runs_invoices_are_in_the_erp():
+    """The chain on the evaluator `feather dev`'s server runs (readiness design §11): `erp-check` waits for the
+    ingest run's deliveries to the ERP, never for a run still delivering, and fires once for it."""
+    from feather_connect.project import prefixed
+    from feather_connect.runtime.catalogue import ActiveFlow
+    from feather_connect.runtime.ready_eval import evaluate
+    from feather_connect.storage.port import VersionDraft
+
+    flows = [
+        ActiveFlow(f.name, "zakya-demo", "1.0.0", (), f.overlap, f.catch_up, True, frozenset(), f.spec_dict())
+        for f in prefixed(load_project(DEMO, "dev").flows, "zakya-demo")
+    ]
+    clock = FrozenClock(datetime(2026, 11, 12, 9, tzinfo=UTC))
+    store = MemoryStore(clock)
+    run = store.runs.create_run("zakya-demo/zakya-invoices", "every", "scheduler", {})
+    store.versions.stage(
+        VersionDraft("v1", "zakya-demo/invoices", "", run, True, 3, 0, "h", None, None, "sha")
+    )
+    store.versions.seal(["v1"], ["zakya-demo/erp"])
+    store.runs.set_run_status(run, "succeeded")
+    assert evaluate(store, flows, clock.now()) == []  # its invoices are still going to the ERP
+    store.ledger.transition("zakya-demo/erp", "v1", "running", actor="t")
+    store.ledger.transition("zakya-demo/erp", "v1", "applied", actor="t")
+    [check] = evaluate(store, flows, clock.now())
+    assert store.runs.get_run(check).flow == "zakya-demo/erp-check"
+    assert evaluate(store, flows, clock.now()) == []  # once
 
 
 def test_a_budget_naming_another_organisation_is_a_problem(tmp_path: Path):  # Stage Z review 8

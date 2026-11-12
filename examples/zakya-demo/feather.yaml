@@ -1,8 +1,9 @@
-# The Zakya demo: invoices from a Zakya-like API go to an ERP, one POST each, every minute.
+# The Zakya demo: invoices from a Zakya-like API go to an ERP, one POST each, every minute; after each run's invoices
+# are in the ERP, `erp-check` starts (fc.on_ready), at most every 5 minutes.
 # Both ends are small simulators in sims/; env/dev.yaml points the connections at them.
 # `feather validate --project examples/zakya-demo` checks it.
 name: zakya-demo
-modules: [flows.invoices]
+modules: [flows.invoices, flows.chain]
 settings: {timezone: UTC}
 # The budget is the organisation's: every tenant, flow and connection that names the account shares its windows.
 budgets:
@@ -16,6 +17,9 @@ connections:
   erp:
     connector: http.call
     auth_scheme: bearer
+  # The chain's second link (flows/chain.py): simulated, so it needs nothing more on `feather dev`.
+  receipts: {connector: simulation.source}
+  checked: {connector: simulation.sink}
 # `feather dev` starts these first, in this directory, and stops them with the rest.
 dev:
   processes:
