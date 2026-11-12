@@ -605,9 +605,13 @@ def approved(route: str, version_id: str, deps: RuntimeDeps, kind: str = "approv
     for a in deps.store.ledger.attempts(route, version_id):
         if a.to_status == "held":
             held = _hold_kind(a.reason)
-        elif a.from_status == "held" and a.to_status == "pending" and (a.reason or "").startswith(APPROVED):
-            if held == kind:
-                return True
+        elif (
+            a.from_status == "held"
+            and a.to_status == "pending"
+            and (a.reason or "").startswith(APPROVED)
+            and held == kind
+        ):
+            return True
     return False
 
 
