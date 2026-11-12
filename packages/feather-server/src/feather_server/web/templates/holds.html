@@ -5,6 +5,33 @@
 {{ m.notice_of(notice) }}
 {% call m.toolbar("/holds", q, "holds", columns=[("dataset", "Dataset"), ("held", "Held")], table="holds") %}{% endcall %}
 <div id="live">
+{% if requests %}
+<h2 id="requests">Asked for, waiting for a second person</h2>
+<p class="muted">In a protected environment, compensating a delivery and skipping deliveries wait here until an approver other than the one who asked decides.</p>
+<div class="table-wrap scroll"><table class="data" data-table="requests">
+  <caption class="sr-only">Actions asked for</caption>
+  <thead><tr><th scope="col">Action</th><th scope="col">Of</th><th scope="col">Asked by</th><th scope="col">Why</th><th scope="col">When</th><th scope="col">Decision</th></tr></thead>
+  <tbody>
+  {% for r in requests %}
+    <tr>
+      <th scope="row">{{ r.action | replace("_", " ") }}</th>
+      <td>{{ r.target }}{% if r.params.version_id %} {{ r.params.version_id[:12] }}{% endif %}{% if r.params.deliveries %} ({{ r.params.deliveries | length }} deliveries){% endif %}</td>
+      <td>{{ r.requested_by }}</td>
+      <td>{{ r.reason or "" }}</td>
+      <td>{{ r.created_at }}</td>
+      <td>{% if actor and can(actor, "holds.decide") and actor.name != r.requested_by %}
+        <form method="post" action="/holds/requests/{{ r.request_id }}/decide" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label class="sr-only" for="request-reason-{{ loop.index }}">Reason for request {{ r.request_id[:12] }}</label>
+          <input id="request-reason-{{ loop.index }}" name="reason" type="text" maxlength="500" placeholder="Reason" required>
+          <button type="submit" name="decision" value="approve">Approve</button>
+          <button type="submit" name="decision" value="reject">Reject</button>
+        </form>{% elif actor and actor.name == r.requested_by %}<span class="muted">Yours: another approver decides</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endif %}
 {% if rows %}
 <div class="table-wrap scroll"><table class="data" data-table="holds">
   <caption class="sr-only">Held deliveries</caption>

@@ -38,7 +38,7 @@ from feather_server.services import actions as action_limits
 from feather_server.services import alerts, diff, pii
 from feather_server.services.access import Capability, Forbidden, ReasonRequired, can
 from feather_server.services.accounts import Accounts
-from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
+from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection, Requested, SamePerson
 from feather_server.services.environment import Environment, coerce_setting
 from feather_server.services.previews import Preview, PreviewError, PreviewExpired, PreviewInvalid
 from feather_server.services.reads import FlowSummary, Reads
@@ -1894,8 +1894,16 @@ def _holds_page(
         if _matches(q, h["route"], h["version_id"], h["dataset"], h["partition"], h["reason"] or "")
     ]
     approvals = sum(1 for h in rows if h["kind"] == "approval")
+    waiting = actions(request).requests()
     tiles = [Tile("Held", len(rows), "warn" if rows else ""), Tile("For approval", approvals)]
+    if waiting or actions(request).protected:
+        tiles.append(Tile("Asked for", len(waiting), "warn" if waiting else ""))
     done = request.query_params.get("done")
+    if notice is None and done in ("request-approved", "request-rejected"):
+        notice = (
+            "ok",
+            "Approved: it is done as asked." if done == "request-approved" else "Rejected: nothing is done.",
+        )
     if notice is None and done in ("approved", "rejected"):
         word = (
             "it applies now" if done == "approved" else "it is skipped, and the versions behind it go ahead"
@@ -1908,6 +1916,7 @@ def _holds_page(
         title="Holds",
         actor=actor,
         rows=rows,
+        requests=waiting,
         tiles=tiles,
         q=q,
         notice=notice,
@@ -2072,6 +2081,43 @@ def budget_page(name: str, request: Request, actor: CurrentActor) -> HTMLRespons
 @router.get("/holds", response_class=HTMLResponse)
 def holds(request: Request, actor: CurrentActor) -> HTMLResponse:
     return _holds_page(request, actor)
+
+
+@router.post("/holds/requests/{request_id}/decide", dependencies=[Depends(require_csrf)])
+def holds_decide_request(
+    request: Request,
+    actor: CurrentActor,
+    request_id: str,
+    decision: Annotated[str, Form(max_length=10)],
+    reason: Reason = "",
+) -> Response:
+    try:
+        actions(request).decide_request(
+            actor, request_id, approve=decision == "approve", reason=_reason(reason)
+        )
+    except KeyError:
+        return _not_found(request, f"No request {request_id!r}.")
+    except SamePerson as error:
+        return _holds_page(request, actor, status=403, notice=("bad", str(error)))
+    except (ValueError, InvalidTransition) as error:
+        return _holds_page(request, actor, status=422, notice=("bad", str(error)))
+    word = "request-approved" if decision == "approve" else "request-rejected"
+    return RedirectResponse(f"/holds?done={word}", status_code=303)
+
+
+def asked_for(request: Request, asked: Requested) -> HTMLResponse:
+    """A destructive action in a protected environment was asked for: say it waits for a second person."""
+    return render(
+        request,
+        "error.html",
+        status=202,
+        title="Asked for",
+        actor=current_actor(request),
+        message=(
+            "This is a protected environment, so this waits for a second person: an approver other than you decides "
+            f"it on the Holds page (request {asked.request.request_id[:12]})."
+        ),
+    )
 
 
 @router.post("/holds/decide", dependencies=[Depends(require_csrf)])

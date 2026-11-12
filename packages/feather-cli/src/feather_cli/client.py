@@ -303,6 +303,18 @@ class ApiClient:
             idempotency_key=str(uuid.uuid4()),
         )
 
+    def action_requests(self, status: str = "waiting") -> dict[str, Any]:
+        return self._call("GET", "/action-requests", params={"status": status})
+
+    def decide_request(self, request_id: str, approve: bool, reason: str | None) -> dict[str, Any]:
+        verb = "approve" if approve else "reject"
+        return self._call(
+            "POST",
+            f"/action-requests/{quote(request_id, safe='')}:{verb}",
+            body={"reason": reason},
+            idempotency_key=str(uuid.uuid4()),
+        )
+
     def holds(self, route: str | None = None) -> dict[str, Any]:
         return self._call("GET", "/holds" + (f"?route={quote(route, safe='')}" if route else ""))
 

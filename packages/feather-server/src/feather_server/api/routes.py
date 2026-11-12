@@ -31,7 +31,7 @@ from feather_server.services import alerts, diff, pii
 from feather_server.services import task_records as records
 from feather_server.services.access import require
 from feather_server.services.accounts import Accounts
-from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
+from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection, Requested, request_doc
 from feather_server.services.environment import Environment
 from feather_server.services.packages import Packages
 from feather_server.services.previews import Preview
@@ -181,6 +181,8 @@ def _answer(fn: Callable[[], Any], status: int) -> JSONResponse:
 
     try:
         return ok(call(fn), status)
+    except Requested as asked:  # a protected environment: it waits for a second person (M3 plan 1 E3)
+        return ok({**request_doc(asked.request), "detail": str(asked)}, 202)
     except ApiProblem as problem:
         return problem_response(problem)
 
@@ -504,6 +506,47 @@ def _decide(
         return {"route": route, "version_id": version_id, "status": "pending" if approve else "skipped"}
 
     return _once(request, actor, key, decide)
+
+
+@router.get("/action-requests")
+def action_requests(actions: Do, _: CurrentActor, status: str | None = "waiting") -> JSONResponse:
+    """Destructive actions asked for in a protected environment: those waiting, or `status=approved`, `rejected`
+    or `all`."""
+    return ok(call(lambda: {"items": actions.requests(status), "next_cursor": None}))
+
+
+def _decide_request(
+    request: Request, actions: Do, actor: Actor, key: str | None, request_id: str, *, approve: bool,
+    reason: str | None,
+) -> JSONResponse:  # fmt: skip
+    return _once(
+        request, actor, key, lambda: actions.decide_request(actor, request_id, approve=approve, reason=reason)
+    )
+
+
+@router.post("/action-requests/{request_id}:approve")
+def approve_request(
+    request_id: str,
+    request: Request,
+    actions: Do,
+    actor: CurrentActor,
+    body: Reason,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    """Do the action as it was asked for. An approver other than the one who asked."""
+    return _decide_request(request, actions, actor, key, request_id, approve=True, reason=body.reason)
+
+
+@router.post("/action-requests/{request_id}:reject")
+def reject_request(
+    request_id: str,
+    request: Request,
+    actions: Do,
+    actor: CurrentActor,
+    body: Reason,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    return _decide_request(request, actions, actor, key, request_id, approve=False, reason=body.reason)
 
 
 @router.post("/routes/{route:path}/deliveries/{version_id}:approve")

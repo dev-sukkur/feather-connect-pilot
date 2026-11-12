@@ -7,8 +7,9 @@ from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
 
 from feather_server.services.access import Forbidden, ReasonRequired
+from feather_server.services.actions import Requested
 from feather_server.web import package_pages
-from feather_server.web.routes import ask_reason, refused, router
+from feather_server.web.routes import ask_reason, asked_for, refused, router
 
 if TYPE_CHECKING:
     from feather_server.app import AppState
@@ -37,4 +38,10 @@ def install(app: FastAPI, state: "AppState") -> None:
         return await ask_reason(request, error)
 
     app.add_exception_handler(Forbidden, on_forbidden)
+
+    async def on_requested(request: Request, error: Exception) -> Response:
+        assert isinstance(error, Requested)
+        return asked_for(request, error)
+
     app.add_exception_handler(ReasonRequired, on_reason_required)
+    app.add_exception_handler(Requested, on_requested)

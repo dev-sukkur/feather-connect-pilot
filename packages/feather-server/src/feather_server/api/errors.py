@@ -14,6 +14,7 @@ from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.storage.port import DuplicateUser, InUse, InvalidTransition
 from feather_connect.vault import KeyConflict, NoMasterKey, VaultError
 from feather_server.services.access import Forbidden, ReasonRequired
+from feather_server.services.actions import SamePerson
 from feather_server.services.packages import Busy, InstallFailed, NotReady
 from feather_server.services.previews import PreviewError, PreviewInvalid
 from feather_server.services.registries import VersionExists
@@ -57,6 +58,8 @@ def translate(error: Exception) -> ApiProblem | None:
         return error
     if isinstance(error, Forbidden):
         return ApiProblem(403, "Forbidden", str(error), capability=error.capability, role=error.needed)
+    if isinstance(error, SamePerson):  # the one who asked can't approve their own request
+        return ApiProblem(403, "Forbidden", str(error), check="second_person")
     if isinstance(error, ReasonRequired):  # a protected environment: send it again with a reason
         return ApiProblem(422, "Unprocessable Content", str(error), check="reason_required")
     if isinstance(error, Busy):

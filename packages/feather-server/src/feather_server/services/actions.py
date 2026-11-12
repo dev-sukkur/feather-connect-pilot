@@ -29,6 +29,7 @@ from feather_connect.runtime.ready_eval import fire_now
 from feather_connect.runtime.ready_eval import status as ready_status
 from feather_connect.runtime.runtime import VERIFY, FlowPaused
 from feather_connect.storage.port import (
+    ActionRequestRow,
     Delivery,
     DeliveryStatus,
     InvalidTransition,
@@ -64,6 +65,22 @@ _STATUSES: dict[str, tuple[DeliveryStatus, ...]] = {
 CHECK_TIMEOUT_S = 15  # how long a connection check may take before it is given up on
 _SIMULATED = ("simulation.", "memory.")  # connectors of tests and demos, which connect to nothing
 LOOKS = frozenset({"verify_partition", "check_connection"})  # actions that change nothing, so need no reason
+
+
+class Requested(Exception):
+    """A destructive action in a protected environment was asked for, not done: it waits for a second person, an
+    approver other than the one who asked (M3 plan 1 E3, design §11). The API answers 202 with the request; a page
+    says where it waits."""
+
+    def __init__(self, request: ActionRequestRow) -> None:
+        super().__init__(f"waiting for a second person: request {request.request_id}")
+        self.request = request
+
+
+class SamePerson(ValueError):
+    """Whoever asked for a destructive action can't also approve it."""
+
+
 CAPABILITIES: dict[str, Capability] = {  # each action, as its audit rows name it, and the capability it needs
     "run_flow": "runs.start",
     "rerun": "runs.rerun",
@@ -84,6 +101,8 @@ CAPABILITIES: dict[str, Capability] = {  # each action, as its audit rows name i
     "fire_ready": "readiness.fire",
     "close_partition": "partitions.close",
     "approve_delivery": "holds.decide",
+    "approve_request": "holds.decide",
+    "reject_request": "holds.decide",
     "compensate_delivery": "deliveries.compensate",
     "reject_delivery": "holds.decide",
 }
@@ -129,6 +148,24 @@ class DeliverySelection:
             None if versions is None else tuple(versions),
             bool(found.get("follow_latest")),
         )
+
+
+def request_doc(row: ActionRequestRow) -> dict[str, Any]:
+    """A request as the API and the pages show it."""
+    return {
+        "request_id": row.request_id,
+        "action": row.action,
+        "target": row.target,
+        "params": dict(row.params),
+        "requested_by": row.requested_by,
+        "reason": row.reason,
+        "status": row.status,
+        "created_at": row.created_at.isoformat(),
+        "decided_by": row.decided_by,
+        "decided_at": None if row.decided_at is None else row.decided_at.isoformat(),
+        "decision_reason": row.decision_reason,
+        "result": row.result,
+    }
 
 
 def _label(dataset: Dataset | None, partition: str) -> str:
@@ -721,6 +758,14 @@ class Actions:
         found = self._chosen(action, wanted)
         if wanted.follow_latest:
             found = self._latest_of_each_stream([self._newest_now(d) for d in found])
+        if action == "skip" and self.protected:  # destructive: a second person approves it
+            self._ask(
+                actor,
+                confirmed,
+                f"route:{wanted.route}" if wanted.route else "deliveries",
+                {"deliveries": [[d.route, d.version_id] for d in found]},
+                reason,
+            )
         runtime_call = {"retry": self._rt.retry, "skip": self._rt.skip, "replay": self._rt.replay}[action]
         refused: list[str] = []
 
@@ -953,7 +998,16 @@ class Actions:
         self._do(actor, action, f"route:{route}", {"version_id": version_id, "reason": reason}, decide)
 
     def compensate(self, actor: Actor, route: str, version_id: str, *, reason: str | None) -> None:
-        """Reverse an applied delivery of a side-effect route, as a task (design §6.5). Audited, with a reason."""
+        """Reverse an applied delivery of a side-effect route, as a task (design §6.5). Audited, with a reason. In a
+        protected environment it is asked for, and `Requested` is raised: a second person approves it."""
+        if self.protected:
+            self._ask(
+                actor,
+                "compensate_delivery",
+                f"route:{route}",
+                {"route": route, "version_id": version_id},
+                reason,
+            )
 
         def do() -> None:
             if not (reason and reason.strip()):
@@ -963,6 +1017,74 @@ class Actions:
         self._do(
             actor, "compensate_delivery", f"route:{route}", {"version_id": version_id, "reason": reason}, do
         )
+
+    # Destructive actions in a protected environment, asked for and decided by a second person (M3 plan 1 E3).
+
+    def _ask(
+        self, actor: Actor, action: str, target: str, params: Mapping[str, Any], reason: str | None
+    ) -> None:
+        """Keep the action as a request that waits for an approver other than `actor`, audit it, and raise
+        `Requested`."""
+        self._require(actor, action, target)
+        self._require_reason(actor, action, reason)
+        row = self._store.requests.add(action, target, params, actor.name, reason)
+        self._record(
+            actor, action, target, {"reason": reason, "request_id": row.request_id, **params}, "requested"
+        )
+        raise Requested(row)
+
+    def requests(self, status: str | None = "waiting") -> list[dict[str, Any]]:
+        """The destructive actions asked for, newest first: those waiting, unless `status` says otherwise."""
+        chosen = status if status in ("waiting", "approved", "rejected") else None
+        return [request_doc(r) for r in self._store.requests.list_requests(chosen)]  # type: ignore[arg-type]
+
+    def decide_request(
+        self, actor: Actor, request_id: str, *, approve: bool, reason: str | None
+    ) -> dict[str, Any]:
+        """Approve a request, which does the action as it was asked for, or reject it. The approver can't be the one
+        who asked. Raises `KeyError` for an unknown request, `InvalidTransition` for one decided already and
+        `SamePerson` for the one who asked."""
+        found = self._store.requests.get(request_id)
+        action = "approve_request" if approve else "reject_request"
+
+        def decide() -> dict[str, Any]:
+            if found.requested_by == actor.name:
+                raise SamePerson("a second person decides: you asked for this one")
+            if found.status != "waiting":
+                raise InvalidTransition(f"request {request_id} was {found.status} already")
+            if not approve and not (reason and reason.strip()):
+                raise ValueError("a reason is required to reject a request")
+            result = self._carry_out(found) if approve else None
+            row = self._store.requests.decide(
+                request_id, "approved" if approve else "rejected", actor.name, reason, result
+            )
+            return request_doc(row)
+
+        return self._do(
+            actor,
+            action,
+            found.target,
+            {"request_id": request_id, "action": found.action, "reason": reason},
+            decide,
+            lambda doc: f"ok: {doc['result']}" if approve else "ok",
+        )
+
+    def _carry_out(self, request: ActionRequestRow) -> str:
+        """Do what was asked for, as the one who asked, with their reason."""
+        params, who, why = request.params, request.requested_by, request.reason
+        if request.action == "compensate_delivery":
+            self._rt.compensate(params["route"], params["version_id"], actor=who, reason=why)
+            return "compensating"
+        if request.action == "skip_deliveries":
+            moved, refused = 0, 0
+            for route, version_id in params["deliveries"]:
+                try:
+                    self._rt.skip(route, version_id, actor=who, reason=why)
+                    moved += 1
+                except (InvalidTransition, PermanentError):
+                    refused += 1  # moved on meanwhile, as a retry would have it
+            return f"{moved} skipped" + (f", {refused} had moved on" if refused else "")
+        raise ValueError(f"no such action as {request.action!r}")
 
     # Connections.
 
