@@ -28,10 +28,11 @@ This page is the one source for milestones: scope, status, and which requirement
 | **M1.1: brought forward** | **Done**, 11 Nov 2026 (PRs 10, 15, 20–23, 25, 26 and the docs PR). The live Zakya run is deferred; readiness moved to M2 | Record trace, flow packages with the admin and operator roles, the Zakya connector, the dashboard redesign | §4 |
 | **M2: business connectors and operations** | Built: readiness ([plan 1](m2-01-readiness.md)), connectors and operations ([plan 2](m2-02-connectors-and-operations.md)), PR 30. The run in the reference organisation's qa/uat moved to the end of M3 | Readiness first (from M1.1); the Postgres connector and SAP through CPI; side effects and approvals; data rules; RBAC; alerts | §5 |
 | **M3: enterprise and v1.0** | Planned: [plan 1](m3-01-enterprise-and-v1.md) | Test environments, production protections, hardening, the v1.0.0 release. Multi-tenancy stays light (ADR-0013) | §6 |
-| **M4: AI and integrations** | After v1.0 | MCP server and agent skills, Postgres CDC, metrics export, the `objects` spool, `feather diff`, SQL transforms, overrides and windows, SLA views, vaults | §7 |
+| **M4: integrations** | After v1.0 | Postgres CDC, metrics export, the `objects` spool, `feather diff`, SQL transforms, overrides and windows, SLA views, vaults | §7 |
 | **M5** | Empty. Full multi-tenancy moved to M9 on 12 Nov 2026 | — | §8 |
 | **M6: more business connectors** | Not scheduled. Moved out of M2 on 12 Nov 2026 | SAP direct (OData, HANA), Magento, GoFrugal, the retail templates, the on-prem agent and its gateway | §9 |
-| **M9: later, and maybe never** | Not planned. Set up on 12 Nov 2026; it may never be built | Full multi-tenancy, SSO, the fleet view, sandbox refresh, Helm, Kafka, more connectors, marketplace, lineage, in-dashboard AI, and what discovery ruled out | §10 |
+| **M8: AI** | Not scheduled. Moved out of M4 on 12 Nov 2026 | MCP server and agent skills, agent actions held for approval in prod, an in-dashboard AI assistant | §9b |
+| **M9: later, and maybe never** | Not planned. Set up on 12 Nov 2026; it may never be built | Full multi-tenancy, SSO, the fleet view, sandbox refresh, Helm, Kafka, more connectors, marketplace, lineage, and what discovery ruled out | §10 |
 
 ## 3. M1: MVP, the core loop
 
@@ -193,12 +194,11 @@ Moved by the sponsor on 10 Nov 2026. The scope below is unchanged, and is the fi
 
 **Exit criteria:** NFR targets met; the release checklist complete; the reference chain (Zakya → Postgres staging → SAP through CPI, with approvals) runs in the reference organisation's qa/uat (moved from M2 on 12 Nov 2026); the reference organisation's in-scope flows cut over to prod. The Railway deployment follows M3.
 
-## 7. M4: AI and integrations (after v1.0)
+## 7. M4: integrations (after v1.0)
 
-Moved out of v1 by the sponsor on 9 Nov 2026.
+Moved out of v1 by the sponsor on 9 Nov 2026. The AI part moved to [M8](#9b-m8-ai-not-scheduled) on 12 Nov 2026.
 
 **Scope:**
-- **AI:** the MCP server and agent skills (FR-L1); agent actions that change state in production create a hold for approval (FR-L3). `AGENTS.md` (FR-L2) shipped in M1.
 - **Postgres CDC** as a source and an event trigger (FR-B2, FR-D2).
 - **Prometheus and OpenTelemetry export** (FR-M2). The dashboard keeps working without them.
 - **The `objects` spool backend** (S3-compatible, Azure Blob, GCS) for bulk extracts and long archives.
@@ -206,7 +206,7 @@ Moved out of v1 by the sponsor on 9 Nov 2026.
 - **Data rules:** derived datasets, SQL transforms on DuckDB and cached reference lookups (FR-C2, FR-C4, FR-C5).
 - **Operations:** runtime overrides and connection availability windows (FR-G4, FR-D5); freshness/SLA and volume-anomaly views (FR-F7); vault and cloud secret providers (FR-K3).
 
-**Exit criteria:** agent-driven recovery is shown in qa; a CDC dataset passes the hard cases that apply to push datasets; a 100-million-row extract runs on the `objects` spool.
+**Exit criteria:** a CDC dataset passes the hard cases that apply to push datasets; a 100-million-row extract runs on the `objects` spool.
 
 ## 8. M5: empty
 
@@ -225,6 +225,21 @@ Moved out of M2 on 12 Nov 2026, so that M2 is Zakya, Postgres and SAP through CP
 - **On-prem:** the agent and its gateway (design §6.9), for systems reachable only inside a customer's network.
 
 **Exit criteria:** SAP prices → Zakya/GoFrugal/Magento and Magento orders → SAP with approvals run in the reference organisation's qa/uat; a flow with a `site:` connection runs on an agent.
+
+## 9b. M8: AI (not scheduled)
+
+Moved out of M4 by the sponsor on 12 Nov 2026, so that M4 is integrations only. M7 is not used.
+
+**Scope:**
+- **The MCP server and agent skills** (FR-L1, [ADR-0008](../02-design/adr/0008-ai-operability-via-mcp.md), design §14):
+  an agent reads and operates Feather through the same services and RBAC as a person.
+- **Request, don't act, in prod** (FR-L3): in a protected environment an agent token may only request; what it asks for
+  becomes a hold an approver decides (design §11, §14.3).
+- **An in-dashboard AI assistant**, from discovery's later list.
+- `AGENTS.md` (FR-L2) shipped in M1.
+
+**Exit criteria:** agent-driven recovery is shown in qa: an agent finds a failed delivery, explains it and asks for the
+retry, which a person approves.
 
 ## 10. M9: later, and maybe never
 
@@ -248,7 +263,7 @@ stays cheap to add.
 
 | Later (after 1.0) | Not planned |
 |---|---|
-| Helm chart and Kubernetes; Kafka or Redpanda as an optional transport; a visual data-mapping assistant; an in-dashboard AI assistant; more connectors (Salesforce, Dynamics, NetSuite, Snowflake, BigQuery, Kafka, SFTP, Excel); a community connector marketplace; column-level lineage | A visual flow designer; a single-page JavaScript front end; hosted SaaS; an API gateway or developer portal; full BPM |
+| Helm chart and Kubernetes; Kafka or Redpanda as an optional transport; a visual data-mapping assistant; more connectors (Salesforce, Dynamics, NetSuite, Snowflake, BigQuery, Kafka, SFTP, Excel); a community connector marketplace; column-level lineage | A visual flow designer; a single-page JavaScript front end; hosted SaaS; an API gateway or developer portal; full BPM |
 
 ## 11. What the IDs mean
 
@@ -259,7 +274,7 @@ stays cheap to add.
 
 | ID | Meaning | Defined in |
 |---|---|---|
-| M1–M6, M1.1, M9 | Milestones; M1.1 is what was brought forward from later ones; M4 and M6 come after v1.0; M5 is empty; M9 holds what is not planned | §2 of this page |
+| M1–M6, M1.1, M8, M9 | Milestones; M1.1 is what was brought forward from later ones; M4, M6 and M8 come after v1.0; M5 and M7 are empty; M8 is AI; M9 holds what is not planned | §2 of this page |
 | FR-A1 … FR-M3 | Functional requirements, by area: A authoring, B data movement, C transformation, D triggers, E reliability, F–G dashboard and operations, H environments, I tenancy, J connectors, K security, L AI, M observability | Discovery §7 |
 | NFR-01 … NFR-15 | Non-functional requirements (performance, durability, footprint, security, accessibility and others) | Discovery §8 |
 | Q1–Q11 | Open questions for the sponsor | Discovery §15 |
@@ -366,8 +381,9 @@ Where each use case (discovery §6) and functional requirement (discovery §7) l
 | **M1.1** | FR-H2 (promotion by package checksum, ADR-0011), and the M1.1 parts of FR-F6, FR-J2 and FR-K2 below |
 | **M2** | UC-02, UC-03, UC-06, UC-07, UC-12, UC-14; FR-B7 and FR-D3 (readiness, moved back from M1.1), FR-B9, FR-E5, FR-F9, FR-G3, FR-K4, FR-K5, FR-M3 |
 | **M3** | FR-H3 |
-| **M4** | FR-C2, FR-C4, FR-C5, FR-F7, FR-G4, FR-L1, FR-L3, FR-M2 |
+| **M4** | FR-C2, FR-C4, FR-C5, FR-F7, FR-G4, FR-M2 |
 | **M6** | The connector parts of UC-04, FR-A7 and FR-J2 below; the on-prem agent |
+| **M8** | FR-L1, FR-L3 |
 | **M9** | UC-13; FR-I2–I4 (ADR-0013); FR-F8, FR-H4; FR-K1's SSO half |
 
 **Split across milestones:**
