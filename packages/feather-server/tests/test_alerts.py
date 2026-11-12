@@ -159,6 +159,6 @@ def test_the_api_and_the_alerts_page(world: World, told: Told):
     )  # a developer's
     viewer = sign_in(app, "vi", "viewer")
     page = viewer.get("/alerts")
-    assert page.status_code == 200 and "budget_high" in page.text and "/ack\"" not in page.text
+    assert page.status_code == 200 and "budget_high" in page.text and '/ack"' not in page.text
     assert 'href="/alerts"' in page.text
     assert "budget api has used" in sign_in(app).get("/alerts").text
