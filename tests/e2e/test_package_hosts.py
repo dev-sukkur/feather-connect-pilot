@@ -88,7 +88,9 @@ def test_a_poller_activated_ticks_on_its_host_into_one_stream_run_and_deactivate
     activated = time.monotonic()
     world.activate("acme", "1.0.0", POLL)
     wait_for(
-        lambda: set(world.ticks("acme")) - seen, 30, "a new tick within 30 s of activating, its environment built"
+        lambda: set(world.ticks("acme")) - seen,
+        30,
+        "a new tick within 30 s of activating, its environment built",
     )
     record_property("activate_cached_s", round(time.monotonic() - activated, 1))
 

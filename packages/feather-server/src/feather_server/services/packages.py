@@ -142,7 +142,9 @@ def inactive_upstreams(store: Store, flow: str, spec: Mapping[str, Any]) -> list
             str(name)
             for t in cast("list[Mapping[str, Any]]", spec.get("triggers") or [])
             if t.get("kind") == "on_ready"
-            for name in cast("list[str]", cast("Mapping[str, Any]", t.get("ready") or {}).get("datasets") or [])
+            for name in cast(
+                "list[str]", cast("Mapping[str, Any]", t.get("ready") or {}).get("datasets") or []
+            )
             if not str(name).startswith(own)
         }
     )

@@ -9,7 +9,6 @@ the chain runs on `feather dev` with nothing more to set up.
 import feather_connect as fc
 from feather_connect.connectors import simulation
 
-
 receipts = fc.Dataset(
     "erp-receipts",
     source=simulation.Source("receipts", generator={"id": simulation.seq()}, rows_per_partition=3),
@@ -20,7 +19,5 @@ erp_check = fc.Flow(
     "erp-check",
     reads=receipts,
     deliver=[fc.to(simulation.Sink("checked"), name="checked")],
-    triggers=[
-        fc.on_ready(fc.ready("invoices", delivered_to="erp"), each="run", at_most_every="5m")
-    ],
+    triggers=[fc.on_ready(fc.ready("invoices", delivered_to="erp"), each="run", at_most_every="5m")],
 )

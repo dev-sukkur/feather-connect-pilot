@@ -13,7 +13,7 @@ changed from the design now that every flow is packaged, and the order of the wo
 | §7.2: `route_progress` per (route, dataset, partition), written by apply | **Not a table.** "Delivered through version v" is `Ledger.oldest_open(route, partition)` being none or later than v: the ledger already applies versions in order per partition (§4.2) | As above. The ledger is the truth for delivery |
 | §7.2: `closed_at`, `closed_by` on the mark | `readiness_close` per (dataset, partition): who, when, why | Closing is the one fact that exists nowhere else |
 | §7.2: `readiness_firing` | As designed, keyed by (tenant, flow, set, period, scope), with the run, reason, versions and late versions | Firing exactly once is the point |
-| §7.1: `NOTIFY feather_ready` on seal and apply | As designed. The evaluator also wakes every 30 s for clock conditions | — |
+| §7.1: `NOTIFY feather_ready` on seal and apply | As designed: the server's readiness loop listens and wakes at once; it also polls every 10 s for clock conditions (every 2 s on the memory store, which doesn't notify) | — |
 
 So the cost of a pass is per waiting period, not per version: the evaluator looks at the periods from `start` (or the
 last fired one) to now, for each scope it has seen, and reads one newest version and one oldest open delivery per
@@ -67,15 +67,18 @@ Tasks 1–3 are stage R1, 4–7 R2, 8–10 R3. All three go in one PR.
 | 9 | Done | `feather ready`, `/api/v1/readiness…`; Operating Guide §8c |
 | 10 | Done on Postgres | `tests/hard_cases/test_readiness_cases.py`: H13, H16 (8 evaluators racing), H17. They stop at the queued run, which a host takes as it takes a clock tick's |
 
-Still open, and why:
+Also done (the items left open on 12 Nov):
 
-- **Activation of a cross-package set** doesn't yet refuse an upstream that isn't installed: the flow shows *upstream inactive* and doesn't fire, which is safe.
-- **The evaluator polls every 2 s** rather than waking on `NOTIFY feather_ready`; the notification is sent, for a listener later.
-- **The Zakya chain on `feather dev`** (design §11, first exit criterion) needs the reference project's flows given `on_ready`; the mechanism it needs is the one H13 tests.
-- **§3 below** is not done.
+- **Activation of a cross-package set** is refused, naming the dataset, until a flow that reads it is active
+  (`services/packages.py`, `inactive_upstreams`). One deactivated later shows *upstream inactive* and doesn't fire.
+- **NOTIFY wake**: `ReadinessStore.listen` on Postgres; `LoopRunner.wake`.
+- **The Zakya chain**: `examples/zakya-demo/flows/chain.py`, `erp-check`, starts after each ingest run's invoices are
+  applied to the ERP, at most every 5 minutes; `tests/demo/test_zakya_demo.py`.
+- **A packaged poller's tick is a task of the day's stream run** (§3 below).
 
 ## 3. Next
 
-- **A packaged poller's tick is a run** (carried from M1.1; not in this PR): a host takes a stream run's ticks again, so a poller every
-  5 s writes a run a day, not 17,280. Readiness counts a stream run's ticks by their versions, not by runs, so it
+- **A packaged poller's tick is a run** (carried from M1.1): done. Its host ticks its active flows' pollers into the
+  day's stream run (`scheduler.tick(..., streams_of=...)`), and the server's catalogue ticks only the others, so a
+  poller every 5 s writes a run a day, not 17,280. Readiness counts a stream run's ticks by their versions, not by runs, so it
   doesn't depend on this, but `each="run"` on a poller would fire 17,280 times a day without it.

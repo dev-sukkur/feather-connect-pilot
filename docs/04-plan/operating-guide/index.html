@@ -339,7 +339,7 @@ def test_orders_reach_the_warehouse():
   <p class="prose">The worker registers the flow and its triggers start it. There's no deploy step. While <code>feather dev</code> runs, saving a file under <code>flows/</code> or <code>env/</code>, or <code>feather.yaml</code>, reloads it. A file that doesn't load leaves the running version alone and says why. To run the flow now, press <b>Run now</b> on its page, or use <code>feather run &lt;flow&gt;</code> against a server (see <a href="#api">API and remote commands</a>).</p>
   <div class="scroll"><table>
     <tr><th>Trigger</th><th>Runs</th></tr>
-    <tr><td><code>fc.every("15m")</code></td><td>On an interval. An interval under 5 minutes is a <b>poller</b>: each tick is a task inside one run per day, called a stream run. So <code>every("30s")</code> shows as one run that gathers about 2,880 ticks a day, and its page counts them.</td></tr>
+    <tr><td><code>fc.every("15m")</code></td><td>On an interval. An interval under 5 minutes is a <b>poller</b>: each tick is a task inside one run per day, called a stream run. So <code>every("30s")</code> shows as one run that gathers about 2,880 ticks a day, and its page counts them. In a package, its host ticks it, while the version is active.</td></tr>
     <tr><td><code>fc.cron("0 6 * * *", tz="Asia/Kolkata")</code></td><td>On a cron schedule in a time zone. Each firing is a run.</td></tr>
     <tr><td><code>fc.manual()</code></td><td>Only when someone starts it.</td></tr>
     <tr><td><code>fc.on_event(dataset)</code></td><td>When webhooks arrive for a push dataset (see <a href="#webhooks">Receive webhooks</a>).</td></tr>
@@ -586,7 +586,7 @@ feather secret set zakya/client_secret --env prod &lt; client-secret.txt        
 
 <section id="readiness">
   <h2><span class="n">8c</span>Run a flow when its data is ready (M2)</h2>
-  <p class="prose">A flow can wait for data instead of a clock: it starts once the datasets it needs are complete, and optionally delivered to a route. The server works this out from the store every 2 seconds and fires each period once, on the version of the package that is active.</p>
+  <p class="prose">A flow can wait for data instead of a clock: it starts once the datasets it needs are complete, and optionally delivered to a route. The server works this out from the store as soon as a version is sealed or a delivery applied (Postgres <code>NOTIFY feather_ready</code>), and every 10 seconds for the clock, and fires each period once, on the version of the package that is active. A set may wait for another package's dataset, named <code>&lt;package&gt;/&lt;dataset&gt;</code>; activating such a flow is refused, naming the dataset, until a flow that reads it is active.</p>
   <div class="file">flows/posting.py</div>
   <pre><code># After each ingest run is applied to staging, at most every 4 hours.
 to_sap = fc.Flow("to-sap", reads=staged, deliver=[to_sap_route],
