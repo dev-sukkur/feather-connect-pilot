@@ -150,11 +150,11 @@ def test_a_change_needs_a_reason_field_filled_when_protected(
     again = client.post(
         "/deliveries/confirm", data={"csrf_token": csrf(), "token": token, "reason": "bad data"}
     )
-    assert again.status_code == 303
-    assert {d.status for d in world.store.ledger.list_deliveries(route="warehouse")} == {
-        "skipped",
-        "applied",
-    } - {"applied"} | {"skipped"}
+    # Protected, a skip is asked for, and waits for a second person (M3 plan 1 E3).
+    assert again.status_code == 202 and "waits for a second person" in again.text
+    assert {d.status for d in world.store.ledger.list_deliveries(route="warehouse")} >= {"failed"}
+    [asked] = world.store.requests.list_requests("waiting")
+    assert asked.action == "skip_deliveries" and asked.reason == "bad data"
     # Retrying needs one too, when protected: every change does (M3 plan 1 E3).
     fail_warehouse(world, "again", day(15))
     page = client.get("/failures").text

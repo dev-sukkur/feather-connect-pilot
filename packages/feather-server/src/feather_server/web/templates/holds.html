@@ -19,14 +19,14 @@
       <td>{{ r.requested_by }}</td>
       <td>{{ r.reason or "" }}</td>
       <td>{{ r.created_at }}</td>
-      <td>{% if actor and can(actor, "holds.decide") and actor.name != r.requested_by %}
+      <td>{% if actor and can(actor, "holds.decide") and (actor.user or actor.name) != r.requested_by %}
         <form method="post" action="/holds/requests/{{ r.request_id }}/decide" class="inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <label class="sr-only" for="request-reason-{{ loop.index }}">Reason for request {{ r.request_id[:12] }}</label>
           <input id="request-reason-{{ loop.index }}" name="reason" type="text" maxlength="500" placeholder="Reason" required>
           <button type="submit" name="decision" value="approve">Approve</button>
           <button type="submit" name="decision" value="reject">Reject</button>
-        </form>{% elif actor and actor.name == r.requested_by %}<span class="muted">Yours: another approver decides</span>{% endif %}</td>
+        </form>{% elif actor and (actor.user or actor.name) == r.requested_by %}<span class="muted">Yours: another approver decides</span>{% endif %}</td>
     </tr>
   {% endfor %}
   </tbody>

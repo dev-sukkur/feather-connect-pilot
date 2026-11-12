@@ -150,6 +150,12 @@ class DeliverySelection:
         )
 
 
+def person(actor: Actor) -> str:
+    """The person acting: a token's user, or the actor's own name. Whoever asks for a destructive action, by the
+    dashboard or by a token, is the same person, who can't then approve it."""
+    return actor.user or actor.name
+
+
 def request_doc(row: ActionRequestRow) -> dict[str, Any]:
     """A request as the API and the pages show it."""
     return {
@@ -1027,7 +1033,7 @@ class Actions:
         `Requested`."""
         self._require(actor, action, target)
         self._require_reason(actor, action, reason)
-        row = self._store.requests.add(action, target, params, actor.name, reason)
+        row = self._store.requests.add(action, target, params, person(actor), reason)
         self._record(
             actor, action, target, {"reason": reason, "request_id": row.request_id, **params}, "requested"
         )
@@ -1048,7 +1054,7 @@ class Actions:
         action = "approve_request" if approve else "reject_request"
 
         def decide() -> dict[str, Any]:
-            if found.requested_by == actor.name:
+            if found.requested_by == person(actor):
                 raise SamePerson("a second person decides: you asked for this one")
             if found.status != "waiting":
                 raise InvalidTransition(f"request {request_id} was {found.status} already")
@@ -1056,7 +1062,7 @@ class Actions:
                 raise ValueError("a reason is required to reject a request")
             result = self._carry_out(found) if approve else None
             row = self._store.requests.decide(
-                request_id, "approved" if approve else "rejected", actor.name, reason, result
+                request_id, "approved" if approve else "rejected", person(actor), reason, result
             )
             return request_doc(row)
 

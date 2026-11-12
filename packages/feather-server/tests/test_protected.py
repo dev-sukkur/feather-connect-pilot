@@ -8,11 +8,12 @@ from datetime import timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from feather_server.app import create_app
+from feather_connect.storage.port import VersionDraft
+from feather_server.app import AppState, create_app
 from feather_server.auth import Actor, issue_token, token_digest
 from feather_server.services.access import ReasonRequired, require_reason
 from feather_server.services.accounts import Accounts
-from feather_server.testing import World
+from feather_server.testing import World, sign_in
 
 API = "/api/v1"
 
@@ -127,3 +128,103 @@ def test_the_reason_page_keeps_the_forms_fields(
     asked = client.post(f"/alerts/{alert.alert_id}/snooze", data={"csrf_token": csrf(), "minutes": "30"})
     assert asked.status_code == 422 and 'name="minutes" value="30"' in asked.text
     assert protected.store.alerts.get_alert(alert.alert_id).snoozed_until is None  # nothing done yet
+
+
+# Destructive actions wait for a second person (M3 plan 1 E3).
+
+
+def _applied(state: AppState, version: str = "v2") -> None:
+    run = state.store.runs.create_run("acme/orders", "every", "t", {})
+    state.store.versions.stage(
+        VersionDraft(version, "acme/orders", "_", run, True, 1, 0, "h", None, None, "s")
+    )
+    state.store.versions.seal([version], ["acme/sap"])
+    state.store.ledger.transition("acme/sap", version, "running", actor="system")
+    state.store.ledger.transition("acme/sap", version, "applied", actor="system", rows_applied=1)
+
+
+def _api(state: AppState, name: str, role: str, grants: tuple[str, ...] = ()) -> TestClient:
+    state.store.users.create_user(name, "h", role)  # type: ignore[arg-type]
+    if grants:
+        state.store.users.set_grants(name, grants)  # type: ignore[arg-type]
+    token = issue_token(
+        state.store, f"{name}-t", timedelta(days=1), role=role, created_by=name, clock=state.clock
+    )  # type: ignore[arg-type]
+    return TestClient(
+        create_app(state=state, loops=lambda s: []), headers={"Authorization": f"Bearer {token}"}
+    )
+
+
+def test_a_compensation_waits_for_a_second_person_who_carries_it_out(
+    state: AppState, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setitem(state.project.settings, "protected", True)
+    _applied(state)
+    ann = _api(state, "ann", "operator", ("approver",))
+    bob = _api(state, "bob", "operator", ("approver",))
+    asked = ann.post(f"{API}/routes/acme/sap/deliveries/v2:compensate", json={"reason": "posted twice"})
+    assert asked.status_code == 202 and asked.json()["status"] == "waiting", asked.text
+    request_id = asked.json()["request_id"]
+    assert state.store.ledger.get("acme/sap", "v2").status == "applied"  # nothing done yet
+    [listed] = bob.get(f"{API}/action-requests").json()["items"]
+    assert (listed["action"], listed["requested_by"], listed["reason"]) == (
+        "compensate_delivery",
+        "ann",
+        "posted twice",
+    )
+    own = ann.post(f"{API}/action-requests/{request_id}:approve", json={"reason": "sure"})
+    assert own.status_code == 403 and own.json()["check"] == "second_person", own.text
+    done = bob.post(f"{API}/action-requests/{request_id}:approve", json={"reason": "checked with finance"})
+    assert done.status_code == 200 and done.json()["status"] == "approved", done.text
+    assert done.json()["decided_by"] == "bob" and done.json()["result"] == "compensating"
+    again = bob.post(f"{API}/action-requests/{request_id}:approve", json={"reason": "again"})
+    assert again.status_code == 409  # done at most once
+    actions = [r.action for r in state.store.audit.list_audit(50)]
+    assert "approve_request" in actions and "compensate_delivery" in actions
+    assert bob.get(f"{API}/action-requests").json()["items"] == []
+
+
+def test_a_rejected_request_does_nothing_and_needs_a_reason(state: AppState, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setitem(state.project.settings, "protected", True)
+    _applied(state)
+    ann = _api(state, "ann", "operator")
+    bob = _api(state, "bob", "operator", ("approver",))
+    request_id = ann.post(f"{API}/routes/acme/sap/deliveries/v2:compensate", json={"reason": "x"}).json()[
+        "request_id"
+    ]
+    assert bob.post(f"{API}/action-requests/{request_id}:reject", json={}).status_code == 422
+    no = bob.post(f"{API}/action-requests/{request_id}:reject", json={"reason": "not ours"})
+    assert no.status_code == 200 and no.json()["status"] == "rejected"
+    assert state.store.ledger.get("acme/sap", "v2").status == "applied"
+
+
+def test_without_protection_a_compensation_is_done_at_once(state: AppState):
+    _applied(state)
+    ann = _api(state, "ann", "operator")
+    done = ann.post(f"{API}/routes/acme/sap/deliveries/v2:compensate", json={"reason": "posted twice"})
+    assert (
+        done.status_code == 202
+        and done.json()["status"] == "compensating"
+        and "request_id" not in done.json()
+    )
+
+
+def test_the_holds_page_lists_requests_and_a_second_person_decides(
+    state: AppState, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setitem(state.project.settings, "protected", True)
+    _applied(state)
+    ann = _api(state, "ann", "operator")
+    request_id = ann.post(f"{API}/routes/acme/sap/deliveries/v2:compensate", json={"reason": "x"}).json()[
+        "request_id"
+    ]
+    browser = sign_in(create_app(state=state, loops=lambda s: []), "carol", "operator", ("approver",))
+    page = browser.get("/holds").text
+    assert "Asked for, waiting for a second person" in page and f"/holds/requests/{request_id}/decide" in page
+    csrf = re.search(r'<meta name="csrf-token" content="([^"]+)"', page)
+    assert csrf
+    sent = browser.post(
+        f"/holds/requests/{request_id}/decide",
+        data={"csrf_token": csrf.group(1), "decision": "approve", "reason": "checked"},
+    )
+    assert sent.status_code == 303 and state.store.requests.get(request_id).status == "approved"
