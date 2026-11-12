@@ -82,6 +82,7 @@ NAV: list[NavItem] = [
     NavItem("Budgets", "/budgets", "budgets"),
     NavItem("Secrets", "/secrets", "secrets"),
     NavItem("Users", "/users", "users", needs="users.manage"),
+    NavItem("Audit", "/audit", "audit", needs="audit.read"),
     NavItem("Packages", "/packages", "packages"),
     NavItem("Registries", "/registries", "registries"),
     NavItem("Trace a record", "/trace", "trace"),
@@ -1831,6 +1832,32 @@ def _holds_page(
         tiles=tiles,
         q=q,
         notice=notice,
+    )
+
+
+@router.get("/audit", response_class=HTMLResponse)
+def audit_page(request: Request, actor: CurrentActor) -> HTMLResponse:
+    query = request.query_params
+    wanted = {name: query.get(name, "")[:200].strip() for name in ("actor", "action", "target")}
+    cursor = query.get("cursor") or None
+    try:
+        rows, next_cursor = reads(request).audit(
+            actor, actor=wanted["actor"], action=wanted["action"], target=wanted["target"], cursor=cursor
+        )
+    except Forbidden as error:
+        return render(request, "error.html", status=403, title="Not allowed", message=str(error))
+    refused = sum(1 for r in rows if r.result.startswith("refused"))
+    tiles = [Tile("Shown", len(rows)), Tile("Refused", refused, "warn" if refused else "")]
+    later = {k: v for k, v in wanted.items() if v}
+    return render(
+        request,
+        "audit.html",
+        title="Audit",
+        actor=actor,
+        rows=rows,
+        tiles=tiles,
+        wanted=wanted,
+        next_href=f"/audit?{urlencode({**later, 'cursor': next_cursor})}" if next_cursor else None,
     )
 
 

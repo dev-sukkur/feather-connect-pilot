@@ -924,6 +924,24 @@ class StoreContract(
         with pytest.raises(KeyError):
             store.users.set_grants("nobody", ["approver"])
 
+    def test_the_audit_log_filters_by_actor_action_and_target(self, store: Store):  # M2 plan 2 O3
+        store.audit.record("human", "ann", "retry", "route:erp", {}, "ok")
+        store.audit.record("human", "bob", "retry", "route:erp_2", {}, "ok")
+        store.audit.record("human", "ann", "set_role", "user:bob", {}, "ok")
+        store.audit.record("token", "ci", "retry", "route%x", {}, "ok")
+        assert [r.target for r in store.audit.list_audit(actor="ann")] == ["user:bob", "route:erp"]
+        assert [r.actor for r in store.audit.list_audit(action="retry")] == ["ci", "bob", "ann"]
+        assert [r.actor for r in store.audit.list_audit(target="route:erp")] == ["bob", "ann"]
+        assert [r.actor for r in store.audit.list_audit(target="route%")] == [
+            "ci"
+        ]  # a wildcard is a character
+        assert [r.actor for r in store.audit.list_audit(target="route:erp_")] == ["bob"]
+        [first] = store.audit.list_audit(1, action="retry")
+        assert [r.actor for r in store.audit.list_audit(cursor=first.audit_id, action="retry")] == [
+            "bob",
+            "ann",
+        ]
+
     def test_all_applied(self, store: Store):
         assert store.ledger.all_applied()
         seal(store, "v1", ["a"])

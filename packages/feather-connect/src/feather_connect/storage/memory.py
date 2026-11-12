@@ -1899,11 +1899,25 @@ class _Audit(AuditStore):
             )
             return audit_id
 
-    def list_audit(self, limit: int = 100, cursor: str | None = None) -> list[AuditRow]:
+    def list_audit(
+        self,
+        limit: int = 100,
+        cursor: str | None = None,
+        *,
+        actor: str | None = None,
+        action: str | None = None,
+        target: str | None = None,
+    ) -> list[AuditRow]:
         with self._d.lock:
             rows = sorted(self._d.audit, key=lambda r: r.audit_id, reverse=True)
-        if cursor is not None:
-            rows = [r for r in rows if r.audit_id < cursor]
+        rows = [
+            r
+            for r in rows
+            if (cursor is None or r.audit_id < cursor)
+            and (actor is None or r.actor == actor)
+            and (action is None or r.action == action)
+            and (target is None or (r.target or "").startswith(target))
+        ]
         return rows[:limit]
 
     def for_target(self, target: str, since: datetime | None = None, limit: int = 500) -> list[AuditRow]:

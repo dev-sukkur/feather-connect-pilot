@@ -1314,6 +1314,23 @@ def deactivate_flow(
 # Budgets, connections and the summary.
 
 
+@router.get("/audit")
+def audit(
+    reads: See,
+    who: CurrentActor,
+    actor: str | None = None,
+    action: str | None = None,
+    target: str | None = None,
+    cursor: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> JSONResponse:
+    """The audit log, newest first: `actor` and `action` as named, `target` by its start, such as `route:`."""
+    rows, next_cursor = call(
+        lambda: reads.audit(who, actor=actor, action=action, target=target, cursor=cursor, limit=limit)
+    )
+    return ok({"items": rows, "next_cursor": next_cursor})
+
+
 @router.get("/budgets")
 def budgets(reads: See, _: CurrentActor) -> JSONResponse:
     return ok({"items": reads.budgets(), "next_cursor": None})

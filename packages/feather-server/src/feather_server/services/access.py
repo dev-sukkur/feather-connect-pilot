@@ -42,6 +42,7 @@ Capability = Literal[
     "holds.decide",  # approve or reject a delivery held for approval (M2 plan 2 A1); the approver grant
     "pii.unmask",  # see a dataset's PII fields as they are (M2 plan 2 O4); the pii-reader grant
     "alerts.ack",  # acknowledge or snooze an alert (M2 plan 2 O6)
+    "audit.read",  # the audit log (M2 plan 2 O3)
     # developer, in an environment that isn't protected
     "alerts.manage",  # alert rules and channels (M2 plan 2 O6)
     # admin
@@ -80,6 +81,7 @@ NEEDS: Mapping[Capability, Role] = {
     "pii.unmask": "viewer",  # and the pii-reader grant
     "deliveries.compensate": "operator",
     "alerts.ack": "operator",
+    "audit.read": "operator",
     "alerts.manage": "developer",
     "users.manage": "admin",
     "tokens.manage": "admin",

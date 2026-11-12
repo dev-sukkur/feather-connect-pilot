@@ -20,6 +20,7 @@ from feather_connect.runtime.retention import kept_days, kept_inbox_days
 from feather_connect.storage.port import (
     STREAM_TRIGGER,
     Attempt,
+    AuditRow,
     Delivery,
     DeliveryStatus,
     FailureGroup,
@@ -31,7 +32,9 @@ from feather_connect.storage.port import (
     Version,
     WorkerRow,
 )
+from feather_server.auth import Actor
 from feather_server.catalog_view import dataset_of
+from feather_server.services.access import require
 from feather_server.services.text import span
 
 if TYPE_CHECKING:
@@ -523,6 +526,24 @@ class Reads:
             raise KeyError(f"no budget named {name!r}")
         found = next((b for b in self._budgets() if b.name == name), None)
         return found or BudgetUse(name, ())
+
+    def audit(
+        self,
+        who: Actor,
+        *,
+        actor: str | None = None,
+        action: str | None = None,
+        target: str | None = None,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> tuple[list[AuditRow], str | None]:
+        """A page of the audit log, newest first, with the cursor of the next (M2 plan 2 O3). It needs `audit.read`:
+        what operators and admins did, and why, is not a viewer's to see."""
+        require(who, "audit.read", self._store.audit, "audit")
+        rows = self._store.audit.list_audit(
+            limit + 1, cursor, actor=actor or None, action=action or None, target=target or None
+        )
+        return rows[:limit], rows[limit - 1].audit_id if len(rows) > limit else None
 
     def budget_details(self) -> list[BudgetDetail]:
         """Every budget of the project with its windows, reserve and the tasks waiting for it."""

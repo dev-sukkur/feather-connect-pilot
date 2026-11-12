@@ -2861,12 +2861,36 @@ class _Audit(AuditStore):
             )
         return audit_id
 
-    def list_audit(self, limit: int = 100, cursor: str | None = None) -> list[AuditRow]:
+    def list_audit(
+        self,
+        limit: int = 100,
+        cursor: str | None = None,
+        *,
+        actor: str | None = None,
+        action: str | None = None,
+        target: str | None = None,
+    ) -> list[AuditRow]:
+        prefix = (
+            None
+            if target is None
+            else target.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        )
         with self._db.tx() as conn:
             rows = conn.execute(
-                """select * from feather.audit where tenant_id = %s and (%s::text is null or audit_id < %s)
-                   order by audit_id desc limit %s""",
-                (self._db.tenant, cursor, cursor, limit),
+                """select * from feather.audit where tenant_id = %(tenant)s
+                     and (%(cursor)s::text is null or audit_id < %(cursor)s)
+                     and (%(actor)s::text is null or actor = %(actor)s)
+                     and (%(action)s::text is null or action = %(action)s)
+                     and (%(target)s::text is null or target like %(target)s)
+                   order by audit_id desc limit %(limit)s""",
+                {
+                    "tenant": self._db.tenant,
+                    "cursor": cursor,
+                    "actor": actor,
+                    "action": action,
+                    "target": prefix,
+                    "limit": limit,
+                },
             ).fetchall()
         return [_audit_row(r) for r in rows]
 

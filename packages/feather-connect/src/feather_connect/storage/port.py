@@ -1609,8 +1609,18 @@ class AuditStore(Protocol):
         """Add a row, stamped now, and return its id."""
         ...
 
-    def list_audit(self, limit: int = 100, cursor: str | None = None) -> list[AuditRow]:
-        """Newest first. `cursor` is the `audit_id` of the last row of the previous page."""
+    def list_audit(
+        self,
+        limit: int = 100,
+        cursor: str | None = None,
+        *,
+        actor: str | None = None,
+        action: str | None = None,
+        target: str | None = None,
+    ) -> list[AuditRow]:
+        """Newest first. `cursor` is the `audit_id` of the last row of the previous page. `actor` and `action` keep
+        the rows that name them; `target` the rows whose target starts with it, as `route:` does every route's
+        (M2 plan 2 O3)."""
         ...
 
     def for_target(self, target: str, since: datetime | None = None, limit: int = 500) -> list[AuditRow]:
