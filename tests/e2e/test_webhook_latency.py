@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Self
 
 import pytest
+from perf_results import record
 from real_stack import wait_until
 
 pytestmark = [pytest.mark.postgres, pytest.mark.perf]
@@ -251,6 +252,7 @@ def test_webhook_to_sink_p95_within_5s(push_stack: Any, tmp_path: Path, record_p
     }
     print_numbers("webhook latency", numbers)
     record_property("numbers", json.dumps(numbers))
+    record("NFR-01", "webhook_to_sink_p95", numbers["p95"], "s", P95_TARGET_S, higher_is_better=False)
     assert set(report["statuses"]) == {"202"}, report["refused"]
     check_rates(report)
     assert lost == 0, numbers
@@ -306,6 +308,8 @@ def test_burst_at_10x_loses_nothing_and_recovers(
     }
     print_numbers("burst", numbers)
     record_property("numbers", json.dumps(numbers))
+    if recovered is not None:
+        record("NFR-01", "burst_recovery", recovered, "s", RECOVERY_TARGET_S, higher_is_better=False)
     assert set(report["statuses"]) == {"202"}, numbers
     check_rates(report)
     assert lost == 0, numbers
