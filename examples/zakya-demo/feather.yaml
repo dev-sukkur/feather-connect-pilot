@@ -1,5 +1,6 @@
-# The Zakya demo: invoices from a Zakya-like API go to an ERP, one POST each, every minute; after each run's invoices
-# are in the ERP, `erp-check` starts (fc.on_ready), at most every 5 minutes.
+# The Zakya demo: invoices from a Zakya-like API go to an ERP, one PUT each, every minute, and to a Postgres staging
+# table; after each run's invoices are in staging, `invoices-to-sap` posts them to SAP through CPI (fc.on_ready), at
+# most every 5 minutes, holding one over 500,000 for an approver.
 # Both ends are small simulators in sims/; env/dev.yaml points the connections at them.
 # `feather validate --project examples/zakya-demo` checks it.
 name: zakya-demo
@@ -17,11 +18,14 @@ connections:
   erp:
     connector: http.call
     auth_scheme: bearer
-  # The chain's second link (flows/chain.py): simulated, so it needs nothing more on `feather dev`.
-  receipts: {connector: simulation.source}
-  checked: {connector: simulation.sink}
+  # The chain (flows/chain.py): the staging table in the Postgres of `feather dev`, and SAP through CPI.
+  staging: {connector: postgres.table, schema: zakya_demo}
+  staging_read: {connector: postgres.query, schema: zakya_demo}
+  sap: {connector: sap_cpi.post, csrf: true}
 # `feather dev` starts these first, in this directory, and stops them with the rest.
 dev:
   processes:
     - {name: zakya-sim, command: [python, sims/zakya.py, --port, "29100", --state, .data/zakya.json], port: 29100}
     - {name: erp-sim, command: [python, sims/receiver.py, --port, "29101", --db, .data/receiver.sqlite], port: 29101}
+    - {name: cpi-sim, command: [python, sims/cpi.py, --port, "29102"], port: 29102}
+    - {name: staging, command: [python, sims/staging.py]}

@@ -91,3 +91,26 @@ def test_a_held_delivery_blocks_the_next_and_a_rejected_one_lets_it_go():
 def test_the_spec_names_the_approval():
     flow = fc.Flow("f", reads=World(BIG).ds, deliver=[World(BIG).route])
     assert flow.spec_dict()["routes"][0]["approval"] == {"kind": "when", "reason": "over 500"}
+
+
+def test_an_approved_delivery_applies_on_a_task_of_its_own():
+    """Through the runtime, as the API and the Holds page approve: the apply task that held the delivery has run its
+    key, so the one after the approval needs another (found by the Zakya chain, M2 plan 2 C2)."""
+    from feather_connect.runtime.runtime import Runtime
+
+    clock = FrozenClock(T0)
+    store, engine, sink = MemoryStore(clock), LocalEngine(clock), Sink("sap")
+    ds = fc.Dataset(
+        "orders", source=Source(rows=[{"id": 1, "total": 900}]), key="id", strategy=fc.strategy.replace()
+    )
+    flow = fc.Flow("f", reads=ds, deliver=[fc.to(sink, name="sap", approval=BIG)])
+    rt = Runtime([flow], store, MemorySpool(clock), engine, code_sha="sha", clock=clock)
+    engine.register(rt.tasks())
+    run = rt.start_run("f")
+    engine.run_until_idle()
+    [version] = store.versions.sealed_for_run(run, "orders")
+    assert store.ledger.get("sap", version.version_id).status == "held"
+    rt.approve("sap", version.version_id, actor="ann", reason="checked")
+    engine.run_until_idle()
+    assert store.ledger.get("sap", version.version_id).status == "applied" and len(sink.rows) == 1
+    assert store.runs.get_run(run).status == "succeeded"

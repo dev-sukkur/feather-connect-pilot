@@ -16,6 +16,24 @@ reads the invoices changed since the last one through the `zakya` connector, pag
 an invoice changed during a read is not skipped, and upserts each through `http.Call`; the ERP's id for each invoice shows on the
 run's delivery page on the dashboard.
 
+## The chain to SAP
+
+The same run upserts each invoice into a staging table too, `zakya_demo.invoices` in the Postgres that `feather dev`
+runs (`sims/staging.py` makes it at startup). That is the first link of the reference chain, Zakya → Postgres → SAP
+through CPI, in `flows/chain.py`:
+
+- once a run's invoices are applied to staging, `invoices-to-sap` starts (`fc.on_ready(..., delivered_to="staging")`),
+  at most every 5 minutes. It reads the staging rows changed since its last run and posts each, as a billing
+  document, through `sap_cpi.Post`: an OAuth2 client-credentials token, a CSRF token per chunk, and an
+  `Idempotency-Key` on each post, so that a resend after a lost answer posts nothing twice.
+- a delivery with an invoice over 500,000 is held for an approver. It waits on the dashboard's **Holds** page (or
+  `feather holds list`); approved, it posts as it was, and rejected, it is skipped.
+- an applied delivery can be reversed: **Compensate** on its delivery page (or `feather deliveries compensate`) posts
+  each document to the iFlow's reversal path, once.
+
+`sims/cpi.py` (port 29102) plays the CPI tenant with the `feather-sap-cpi` package's simulator. It keeps what it is
+sent in memory, so a restart forgets it.
+
 `env/dev.yaml` raises the `zoho-api` budget to 20000 calls a day: the simulator makes about 8 calls a minute, which
 would spend Zoho's 1400 a day in about three hours and leave the demo looking stalled.
 
@@ -27,13 +45,13 @@ From the repository root:
 uv run feather dev --project examples/zakya-demo
 ```
 
-That starts both simulators (declared under `dev.processes` in `feather.yaml`), Postgres, the server and a
-worker; Ctrl+C stops them all. Their output shows in the same console, prefixed `[zakya-sim]` and `[erp-sim]`. Sign
-in to the dashboard with the password it prints, and watch the runs of `zakya-invoices`. Each delivery's page lists
+That starts the simulators (declared under `dev.processes` in `feather.yaml`), Postgres, the server and a
+worker; Ctrl+C stops them all. Their output shows in the same console, prefixed `[zakya-sim]`, `[erp-sim]` and `[cpi-sim]`. Sign
+in to the dashboard with the password it prints, and watch the runs of `zakya-invoices` and `invoices-to-sap`. Each delivery's page lists
 the ERP id each invoice got.
 
 The credentials in `secrets/` are fake, and only the simulators take them. Their paths in `env/dev.yaml` are read
 against the project directory, so the demo runs from any directory.
 
 To run the simulators alone, from this directory: `python sims/zakya.py --port 29100 --state .data/zakya.json` and
-`python sims/receiver.py --port 29101`.
+`python sims/receiver.py --port 29101` and `python sims/cpi.py --port 29102`.

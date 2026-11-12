@@ -1028,15 +1028,22 @@ class Runtime:
 
     def _apply_ref(self, delivery: Delivery, run_id: str) -> str:
         """Return the key of the delivery's next apply task: `_apply_key`, and `#n` after it once `n` tasks of it ended
-        because the route was paused, since an engine runs a key only once."""
+        because the route was paused or held it (for an approver, M2 plan 2 A1) and it was let go again, since an
+        engine runs a key only once."""
         base = _apply_key(delivery)
         rows = self._deps.store.runs.tasks_by_ref(run_id, base)
-        held = sum(
+        paused = sum(
             1
             for r in rows
             if r.status == "cancelled" and r.error == _PAUSED and r.ref.partition("#")[0] == base
         )
-        return f"{base}#{held}" if held else base
+        released = sum(
+            1
+            for a in self._deps.store.ledger.attempts(delivery.route, delivery.version_id)
+            if a.from_status == "held" and a.to_status == "pending"
+        )
+        ended = paused + released
+        return f"{base}#{ended}" if ended else base
 
     def _submit_next(self, delivery: Delivery) -> None:
         """Submit what comes next in the delivery's stream, unless that is blocked."""

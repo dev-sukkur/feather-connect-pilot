@@ -17,3 +17,14 @@ connections:
     retry_attempts: 4
     auth:
       token: ${secret:file:secrets/erp-token.txt}
+  staging:
+    auth: {dsn: "${secret:env:FEATHER_DATABASE_URL}"}
+  staging_read:
+    auth: {dsn: "${secret:env:FEATHER_DATABASE_URL}"}
+  sap:
+    base_url: http://127.0.0.1:29102
+    token_url: http://127.0.0.1:29102/oauth/token
+    retry_attempts: 4
+    auth:
+      client_id: ${secret:file:secrets/cpi-client-id.txt}
+      client_secret: ${secret:file:secrets/cpi-client-secret.txt}
