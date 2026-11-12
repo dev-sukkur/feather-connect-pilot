@@ -20,7 +20,18 @@ from feather_connect.core.readiness import PUSH_SETTLE
 from feather_connect.runtime.catalogue import ActiveFlow
 from feather_connect.storage.port import Firing, SealedPartition, Store
 
-__all__ = ["ACTOR", "WINDOW", "Period", "evaluate", "periods_of", "set_state"]
+__all__ = [
+    "ACTOR",
+    "WINDOW",
+    "Period",
+    "evaluate",
+    "fire_now",
+    "period_of",
+    "periods_of",
+    "ready_triggers",
+    "set_state",
+    "status",
+]
 
 log = logging.getLogger(__name__)
 ACTOR = "readiness"
@@ -320,8 +331,8 @@ def _trigger(
     for scope in scopes:
         for period in periods:
             before = done.get((period.id, scope or ""))
-            if before is not None and trigger.get("on_late", "rerun") != "rerun":
-                continue
+            if before is not None and (trigger.get("on_late", "rerun") != "rerun" or before.reason == "manual"):
+                continue  # a period fired by hand stays fired: what it read is what someone chose
             ready, _, versions = set_state(reads, sets, datasets, scope, period)
             if not ready:
                 continue
@@ -403,3 +414,168 @@ def _each_run(
             log.info("readiness: %s fired after run(s) %s", flow.name, ", ".join(runs))
             queued.append(run)
     return queued
+
+
+SHOWN = {"day": 7, "hour": 24}  # how many of the latest periods a status shows, per scope
+
+
+def period_of(each: str, tz: str, period: str) -> Period:
+    """The period named `period` (`2026-11-08`, `2026-11-08T13:00`) of a trigger counting `each` in `tz`. Raises
+    `ValueError` for a name that is not one of its periods."""
+    zone = ZoneInfo(tz)
+    if each == "day":
+        day = date.fromisoformat(period)
+        nxt = day + timedelta(days=1)
+        return Period(
+            period,
+            datetime(day.year, day.month, day.day, tzinfo=zone),
+            datetime(nxt.year, nxt.month, nxt.day, tzinfo=zone),
+        )
+    if each == "hour":
+        start = datetime.fromisoformat(period).replace(tzinfo=zone)
+        if start.minute or start.second:
+            raise ValueError(f"{period!r} is not the start of an hour")
+        return Period(start.strftime("%Y-%m-%dT%H:%M"), start, (start + timedelta(hours=1)).astimezone(zone))
+    raise ValueError(f"a flow that waits for each run has no periods to name, such as {period!r}")
+
+
+def ready_triggers(flow: ActiveFlow) -> list[Mapping[str, Any]]:
+    """The flow's `on_ready` triggers, as its spec gives them."""
+    return [
+        t
+        for t in cast("list[Mapping[str, Any]]", flow.spec.get("triggers") or [])
+        if t.get("kind") == "on_ready"
+    ]
+
+
+def status(
+    store: Store, flows: Sequence[ActiveFlow], now: datetime, flow: str | None = None
+) -> list[dict[str, Any]]:
+    """How each readiness set of the active flows stands (design §8), for the API, the CLI and the dashboard: per set,
+    its latest periods and scopes, each `fired` (with its run), `late`, or `waiting` (with what for)."""
+    datasets = {
+        str(d["name"]): d
+        for f in flows
+        for d in cast("list[Mapping[str, Any]]", f.spec.get("datasets") or [])
+    }
+    reads = _Reads(store, now)
+    found: list[dict[str, Any]] = []
+    for active_flow in flows:
+        if flow is not None and active_flow.name != flow:
+            continue
+        for trigger in ready_triggers(active_flow):
+            sets = cast("Mapping[str, Any]", trigger["ready"])
+            name = str(sets["name"])
+            firings = store.readiness.firings(active_flow.name, name, limit=1000)
+            rows: list[dict[str, Any]] = []
+            if trigger.get("each") == "run":
+                rows = [
+                    {
+                        "period": f.period,
+                        "scope": f.scope,
+                        "state": "fired",
+                        "run_id": f.run_id,
+                        "reason": f.reason,
+                        "fired_at": f.fired_at.isoformat(),
+                        "runs": list(cast("list[str]", f.versions.get("runs") or [])),
+                    }
+                    for f in firings[:20]
+                ]
+            else:
+                each, tz = str(trigger["each"]), str(trigger.get("tz") or "UTC")
+                latest = periods_of(
+                    each,
+                    tz,
+                    now - (timedelta(days=SHOWN["day"]) if each == "day" else timedelta(hours=SHOWN["hour"])),
+                    now,
+                )
+                by = cast("str | None", sets.get("by"))
+                scopes: list[str | None] = [None]
+                if by is not None:
+                    keys: set[str] = set()
+                    for dataset in cast("list[str]", sets.get("datasets") or []):
+                        spec = datasets.get(dataset)
+                        if spec is not None:
+                            partition = cast("Mapping[str, Any]", spec.get("partition") or {})
+                            keys |= {
+                                s
+                                for k in reads.latest(dataset)
+                                if (s := _scopes_of(k, partition, by)) is not None
+                            }
+                    scopes = list[str | None](sorted(keys))
+                done: dict[tuple[str, str], Firing] = {}
+                for firing in reversed(firings):
+                    done[(firing.period, firing.scope)] = firing
+                for scope in scopes:
+                    for period in reversed(latest):
+                        ready, waiting, versions = set_state(reads, sets, datasets, scope, period)
+                        before = done.get((period.id, scope or ""))
+                        row: dict[str, Any] = {"period": period.id, "scope": scope or ""}
+                        if before is None:
+                            row |= {"state": "ready" if ready else "waiting", "waiting_for": waiting}
+                        elif ready and dict(before.versions) != versions and before.reason != "manual":
+                            row |= {"state": "late", "run_id": before.run_id, "reason": before.reason}
+                        else:
+                            row |= {
+                                "state": "fired",
+                                "run_id": before.run_id,
+                                "reason": before.reason,
+                                "fired_at": before.fired_at.isoformat(),
+                            }
+                        rows.append(row)
+            found.append(
+                {
+                    "flow": active_flow.name,
+                    "set": name,
+                    "datasets": list(cast("list[str]", sets.get("datasets") or [])),
+                    "delivered_to": dict(cast("Mapping[str, str]", sets.get("delivered_to") or {})),
+                    "by": sets.get("by"),
+                    "each": trigger.get("each"),
+                    "tz": trigger.get("tz"),
+                    "on_late": trigger.get("on_late"),
+                    "periods": rows,
+                }
+            )
+    return found
+
+
+def fire_now(
+    store: Store, flow: ActiveFlow, period: str, scope: str, actor: str, reason: str, now: datetime
+) -> str:
+    """Fire a period of the flow's first readiness set by hand (design §8, *Fire now*), whether or not it is ready: a
+    new firing after any it had, with the reason `manual`. Raises `ValueError` for a flow with no readiness trigger or
+    a period it doesn't have."""
+    triggers = ready_triggers(flow)
+    if not triggers:
+        raise ValueError(f"flow {flow.name!r} has no on_ready trigger")
+    trigger = triggers[0]
+    sets = cast("Mapping[str, Any]", trigger["ready"])
+    name = str(sets["name"])
+    by = cast("str | None", sets.get("by"))
+    if trigger.get("each") == "run":
+        found = Period(f"manual:{now.isoformat()}", None, None)
+    else:
+        found = period_of(str(trigger["each"]), str(trigger.get("tz") or "UTC"), period)
+    if scope and (by is None or not scope.startswith(f"{by}=")):
+        raise ValueError(f"scope {scope!r} is not a value of the set's by field ({by})")
+    before = [
+        f
+        for f in store.readiness.firings(flow.name, name, limit=1000)
+        if (f.period, f.scope) == (found.id, scope)
+    ]
+    seq = max((f.seq for f in before), default=-1) + 1
+    info = {
+        "set": name,
+        "period": found.id,
+        "start": found.start.isoformat() if found.start else None,
+        "end": found.end.isoformat() if found.end else None,
+        "scope": {by: scope.split("=", 1)[1]} if scope and by else {},
+        "versions": {},
+        "reason": "manual",
+        "note": reason,
+    }
+    firing = Firing(flow.name, name, found.id, scope, seq, "manual", {}, now, actor)
+    run = store.readiness.fire(firing, _params(flow, info))
+    if run is None:  # another firing took this seq meanwhile
+        raise ValueError(f"period {found.id} of {flow.name!r} fired meanwhile; look again")
+    return run

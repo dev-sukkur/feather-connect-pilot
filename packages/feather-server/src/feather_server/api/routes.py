@@ -246,6 +246,16 @@ def flows(reads: See, _: CurrentActor) -> JSONResponse:
     return ok({"items": reads.flows(), "next_cursor": None})
 
 
+@router.get("/readiness")
+def readiness(actions: Do, _: CurrentActor) -> JSONResponse:
+    return ok(call(lambda: {"sets": actions.readiness()}))
+
+
+@router.get("/flows/{flow:path}/readiness")
+def flow_readiness(flow: str, actions: Do, _: CurrentActor) -> JSONResponse:
+    return ok(call(lambda: {"sets": actions.readiness(flow)}))
+
+
 @router.get("/flows/{flow:path}")
 def flow(flow: str, reads: See, _: CurrentActor) -> JSONResponse:
     return ok(call(lambda: reads.flow_detail(flow)))
@@ -416,6 +426,56 @@ def run_flow(
         lambda: {"run_id": actions.run_flow(actor, flow, reason=wanted.reason, partitions=wanted.partitions)},
         202,
     )
+
+
+class FireBody(Reason):
+    period: str = ""
+    scope: str = ""
+
+
+@router.post("/flows/{flow:path}/readiness:fire", status_code=202)
+def fire_ready(
+    flow: str,
+    request: Request,
+    actions: Do,
+    actor: CurrentActor,
+    body: FireBody,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    return _once(
+        request,
+        actor,
+        key,
+        lambda: {
+            "run_id": actions.fire_ready(
+                actor, flow, period=body.period, scope=body.scope, reason=body.reason
+            )
+        },
+        202,
+    )
+
+
+@router.post("/datasets/{dataset:path}/partitions/{partition:path}:close")
+def close_partition(
+    dataset: str,
+    partition: str,
+    request: Request,
+    actions: Do,
+    actor: CurrentActor,
+    body: Reason,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    def close() -> dict[str, Any]:
+        found = actions.close_partition(actor, dataset, partition, reason=body.reason)
+        return {
+            "dataset": found.dataset,
+            "partition": found.partition,
+            "closed_at": found.closed_at.isoformat(),
+            "closed_by": found.closed_by,
+            "reason": found.reason,
+        }
+
+    return _once(request, actor, key, close)
 
 
 @router.post("/runs/{run_id}:cancel")

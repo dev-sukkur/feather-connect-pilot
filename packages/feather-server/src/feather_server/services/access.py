@@ -32,6 +32,8 @@ Capability = Literal[
     "routes.pause",
     "connections.check",
     "flows.activate",  # activating and deactivating a package's flow
+    "readiness.fire",  # Fire now, for a period a flow waits for (readiness §8)
+    "partitions.close",  # Close partition (readiness §4.1)
     # admin
     "users.manage",
     "tokens.manage",
@@ -62,6 +64,8 @@ NEEDS: Mapping[Capability, Role] = {
     "routes.pause": "operator",
     "connections.check": "operator",
     "flows.activate": "operator",
+    "readiness.fire": "operator",
+    "partitions.close": "operator",
     "users.manage": "admin",
     "tokens.manage": "admin",
     "roles.manage": "admin",

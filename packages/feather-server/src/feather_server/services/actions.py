@@ -25,8 +25,16 @@ from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.catalogue import ActiveFlow
 from feather_connect.runtime.extract import VerifyResult
 from feather_connect.runtime.plan import BACKFILL, MAX_BACKFILL_DAYS, backfill_partitions
+from feather_connect.runtime.ready_eval import fire_now
+from feather_connect.runtime.ready_eval import status as ready_status
 from feather_connect.runtime.runtime import VERIFY, FlowPaused
-from feather_connect.storage.port import Delivery, DeliveryStatus, InvalidTransition, split_error
+from feather_connect.storage.port import (
+    Delivery,
+    DeliveryStatus,
+    InvalidTransition,
+    PartitionClose,
+    split_error,
+)
 from feather_server.auth import Actor
 from feather_server.catalog_view import CatalogDataset, dataset_of
 from feather_server.services.access import Capability, require
@@ -72,6 +80,8 @@ CAPABILITIES: dict[str, Capability] = {  # each action, as its audit rows name i
     "pause_route": "routes.pause",
     "resume_route": "routes.pause",
     "check_connection": "connections.check",
+    "fire_ready": "readiness.fire",
+    "close_partition": "partitions.close",
 }
 
 
@@ -840,6 +850,59 @@ class Actions:
             f"route:{route}",
             {"reason": reason},
             lambda: self._rt.resume_route(route, actor=actor.name, reason=reason),
+        )
+
+    # Readiness (M2 plan 1).
+
+    def readiness(self, flow: str | None = None) -> list[dict[str, Any]]:
+        """How each readiness set of the active flows stands, or of one flow's. Raises `KeyError` for a flow that isn't
+        active."""
+        catalogue = self._state.catalogue
+        flows = catalogue.flows() if catalogue is not None else []
+        if flow is not None and not any(f.name == flow for f in flows):
+            raise KeyError(flow)
+        return ready_status(self._store, flows, self._state.clock.now(), flow)
+
+    def fire_ready(self, actor: Actor, flow: str, *, period: str, scope: str = "", reason: str | None) -> str:
+        """Fire a period of a waiting flow now, ready or not (design §8): audited, with a reason. Raises `KeyError` for a
+        flow that isn't active, and `ValueError` for no reason or a period the flow doesn't have."""
+
+        def fire() -> str:
+            if not reason:
+                raise ValueError("a reason is required to fire a period by hand")
+            found = self._packaged(flow)
+            if found is None:
+                raise KeyError(flow)
+            if self._rt.is_flow_paused(flow):
+                raise FlowPaused(f"flow {flow!r} is paused")
+            return fire_now(self._store, found, period, scope, actor.name, reason, self._state.clock.now())
+
+        return self._do(
+            actor,
+            "fire_ready",
+            f"flow:{flow}",
+            {"period": period, "scope": scope, "reason": reason},
+            fire,
+            lambda r: f"ok: run {r}",
+        )
+
+    def close_partition(
+        self, actor: Actor, dataset: str, partition: str, *, reason: str | None
+    ) -> PartitionClose:
+        """Say that a partition is complete (design §4.1): it is ready once its last version is sealed. Audited, with a
+        reason. A partition closed already stays as it was."""
+
+        def close() -> PartitionClose:
+            if not reason:
+                raise ValueError("a reason is required to close a partition")
+            if not partition:
+                raise ValueError("name the partition to close")
+            return self._store.readiness.close(
+                dataset, partition, actor.name, reason, self._state.clock.now()
+            )
+
+        return self._do(
+            actor, "close_partition", f"dataset:{dataset}", {"partition": partition, "reason": reason}, close
         )
 
     # Connections.
