@@ -27,7 +27,7 @@ This page is the one source for milestones: scope, status, and which requirement
 | **M1: MVP, the core loop** | **Done**, 8 Nov 2026 (PR 8) | SDK, durable runtime on Postgres, JSON API and HTML dashboard, CLI and `feather dev`, generic connectors and templates, Compose | All met (§3.3) |
 | **M1.1: brought forward** | **Done**, 11 Nov 2026 (PRs 10, 15, 20–23, 25, 26 and the docs PR). The live Zakya run is deferred; readiness moved to M2 | Record trace, flow packages with the admin and operator roles, the Zakya connector, the dashboard redesign | §4 |
 | **M2: business connectors and operations** | Built: readiness ([plan 1](m2-01-readiness.md)), connectors and operations ([plan 2](m2-02-connectors-and-operations.md)), PR 30. The run in the reference organisation's qa/uat moved to the end of M3 | Readiness first (from M1.1); the Postgres connector and SAP through CPI; side effects and approvals; data rules; RBAC; alerts | §5 |
-| **M3: enterprise and v1.0** | Planned: [plan 1](m3-01-enterprise-and-v1.md) | Environment fleet view, SSO, hardening, the v1.0.0 release. Multi-tenancy stays light (ADR-0013) | §6 |
+| **M3: enterprise and v1.0** | Planned: [plan 1](m3-01-enterprise-and-v1.md) | Test environments, production protections, hardening, the v1.0.0 release. Multi-tenancy stays light (ADR-0013) | §6 |
 | **M4: AI and integrations** | After v1.0 | MCP server and agent skills, Postgres CDC, metrics export, the `objects` spool, `feather diff`, SQL transforms, overrides and windows, SLA views, vaults | §7 |
 | **M5: full multi-tenancy** | After M4 | Row-level security, per-tenant config and roles, quotas, worker pools; test environments as tenants | §8 |
 | **M6: more business connectors** | Not scheduled. Moved out of M2 on 12 Nov 2026 | SAP direct (OData, HANA), Magento, GoFrugal, the retail templates, the on-prem agent and its gateway | §9 |
@@ -186,8 +186,8 @@ Moved by the sponsor on 10 Nov 2026. The scope below is unchanged, and is the fi
 
 **Scope:**
 - **Tenancy:** light, by [ADR-0013](../02-design/adr/0013-light-tenancy-and-non-prod-layout.md): the `tenant_id` foundation from M1 and the single `default` tenant. Full multi-tenancy is M5. Its eight rules apply to every change.
-- **Environments:** environment peers and the fleet view; protections for protected environments. A Compose layout for the test environments on one machine, a database each (ADR-0013, layout B).
-- **Integrations:** OIDC SSO. Vault secret providers, Postgres CDC and Prometheus/OpenTelemetry export moved to M4; v1 reads secrets from environment variables and files.
+- **Environments:** protections for protected environments. A Compose layout for the test environments (qa and uat, no dev) on one machine, a database each (ADR-0013, layout B). Environment peers and the fleet view were cut on 12 Nov 2026: the test environments are not watched all the time.
+- **Integrations:** OIDC SSO was cut from v1 on 12 Nov 2026; local users and tokens stay. Vault secret providers, Postgres CDC and Prometheus/OpenTelemetry export moved to M4; v1 reads secrets from environment variables and files.
 - **Hardening:** chaos and performance suites with published results; a security review.
 - **Launch:** the docs site and the v1.0.0 release.
 
@@ -235,7 +235,7 @@ From [discovery §5](../01-discovery/2026-10-30-feather-connect-discovery.md#5-s
 
 | Later (after 1.0) | Not planned |
 |---|---|
-| Helm chart and Kubernetes; Kafka or Redpanda as an optional transport; a visual data-mapping assistant; an in-dashboard AI assistant; more connectors (Salesforce, Dynamics, NetSuite, Snowflake, BigQuery, Kafka, SFTP, Excel); a community connector marketplace; column-level lineage | A visual flow designer; a single-page JavaScript front end; hosted SaaS; an API gateway or developer portal; full BPM |
+| OIDC SSO (FR-K1); environment peers and the fleet view (FR-F8, FR-H4); Helm chart and Kubernetes; Kafka or Redpanda as an optional transport; a visual data-mapping assistant; an in-dashboard AI assistant; more connectors (Salesforce, Dynamics, NetSuite, Snowflake, BigQuery, Kafka, SFTP, Excel); a community connector marketplace; column-level lineage | A visual flow designer; a single-page JavaScript front end; hosted SaaS; an API gateway or developer portal; full BPM |
 
 ## 11. What the IDs mean
 
@@ -352,7 +352,7 @@ Where each use case (discovery §6) and functional requirement (discovery §7) l
 | **M1** | UC-01, UC-05, UC-08, UC-09, UC-11, UC-15; FR-A1–A6, FR-B1, FR-B3–B6, FR-B10, FR-C1, FR-C3, FR-D1, FR-D4, FR-E1–E4, FR-E7, FR-F1–F5, FR-G1, FR-G2, FR-G5, FR-H1, FR-I1, FR-J1, FR-J3, FR-J4, FR-K6, FR-L2, FR-M1 |
 | **M1.1** | FR-H2 (promotion by package checksum, ADR-0011), and the M1.1 parts of FR-F6, FR-J2 and FR-K2 below |
 | **M2** | UC-02, UC-03, UC-06, UC-07, UC-12, UC-14; FR-B7 and FR-D3 (readiness, moved back from M1.1), FR-B9, FR-E5, FR-F9, FR-G3, FR-K4, FR-K5, FR-M3 |
-| **M3** | FR-F8, FR-H3, FR-H4 |
+| **M3** | FR-H3 |
 | **M4** | FR-C2, FR-C4, FR-C5, FR-F7, FR-G4, FR-L1, FR-L3, FR-M2 |
 | **M5** | UC-13; FR-I2–I4 (ADR-0013) |
 | **M6** | The connector parts of UC-04, FR-A7 and FR-J2 below; the on-prem agent |
@@ -371,6 +371,6 @@ Where each use case (discovery §6) and functional requirement (discovery §7) l
 | FR-E6 | M1 budget windows; M2 priorities and the budgets page |
 | FR-F6 | M1.1 record trace; M2 version diffs and masked samples |
 | FR-J2 | By connector: Zakya in M1.1; Postgres and SAP through CPI in M2; SAP direct, Magento and GoFrugal in M6 |
-| FR-K1 | M1 local users and tokens; M3 SSO |
+| FR-K1 | M1 local users and tokens; SSO after v1, not scheduled |
 | FR-K2 | M1.1 admin and operator; M2 the rest |
 | FR-K3 | M1 env and file secrets, and encrypted database secrets in M1.1; M4 vaults |
