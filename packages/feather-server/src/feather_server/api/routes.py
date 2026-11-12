@@ -27,6 +27,7 @@ from feather_server.api.errors import ApiProblem, translate
 from feather_server.api.paging import check_limit, decode, page
 from feather_server.auth import Actor, CurrentActor, require_csrf
 from feather_server.catalog_view import dataset_of, route_of
+from feather_server.services import pii
 from feather_server.services import task_records as records
 from feather_server.services.access import require
 from feather_server.services.accounts import Accounts
@@ -46,6 +47,12 @@ _MAX_KEY = 200
 router = APIRouter(prefix=PREFIX, tags=["api"], dependencies=[Depends(require_csrf)])
 
 Limit = Annotated[int, Query(description="Items on a page, from 1 to 500.")]
+Unmask = Annotated[
+    bool,
+    Query(
+        description="Show the dataset's PII fields as they are: needs the pii-reader grant, and is audited."
+    ),
+]
 Cursor = Annotated[str | None, Query(description="The `next_cursor` of the page before.")]
 IdempotencyKey = Annotated[str | None, Header(alias="Idempotency-Key")]
 
@@ -378,10 +385,11 @@ def task_records(
     run_id: str,
     task_id: str,
     request: Request,
-    _: CurrentActor,
+    who: CurrentActor,
     limit: Annotated[int, Query(description="Records on a page, from 1 to 500.")] = records.PAGE,
     cursor: Cursor = None,
     q: Annotated[str, Query(description="Only the keys that start with this.")] = "",
+    unmask: Unmask = False,
 ) -> JSONResponse:
     """The records of an extract task's versions, or of an apply task's version with what its route made of each, a
     page at a time by key. `not_indexed` says the version was sealed before records were indexed."""
@@ -396,8 +404,12 @@ def task_records(
             raise ApiProblem(
                 422, "Unprocessable Content", "this cursor is not one this server handed out"
             ) from None
+        state = request.app.state.feather
+        shown = pii.masking(state, who, found.dataset, unmask=unmask, target=f"task:{run_id}/{task_id}")
+        found = pii.mask_task_records(found, shown.hidden)
         return {
             **records.as_json(found),
+            **pii.as_json(shown),
             **page([records.item_json(r) for r in found.records], found.next_cursor),
         }
 
@@ -693,7 +705,9 @@ def backfill(
 # Versions.
 
 
-def _version_records(request: Request, version_id: str, limit: int, cursor: str | None) -> dict[str, Any]:
+def _version_records(
+    request: Request, who: Actor, version_id: str, limit: int, cursor: str | None, unmask: bool
+) -> dict[str, Any]:
     reads: Reads = request.app.state.reads
     try:
         version, records, next_raw = reads.version_records(version_id, limit, cursor)
@@ -701,7 +715,13 @@ def _version_records(request: Request, version_id: str, limit: int, cursor: str 
         raise ApiProblem(
             422, "Unprocessable Content", "this cursor is not one this server handed out"
         ) from None
-    return {"version_id": version.version_id, "masked": False, **page(records, next_raw)}
+    state = request.app.state.feather
+    shown = pii.masking(state, who, version.dataset, unmask=unmask, target=f"version:{version_id}")
+    return {
+        "version_id": version.version_id,
+        **pii.as_json(shown),
+        **page(pii.mask_rows(records, shown.hidden), next_raw),
+    }
 
 
 @router.get("/versions/{version_id}")
@@ -711,20 +731,36 @@ def version(version_id: str, request: Request, _: CurrentActor) -> JSONResponse:
 
 @router.get("/versions/{version_id}/records")
 def version_records(
-    version_id: str, request: Request, _: CurrentActor, limit: Limit = 100, cursor: Cursor = None
+    version_id: str,
+    request: Request,
+    who: CurrentActor,
+    limit: Limit = 100,
+    cursor: Cursor = None,
+    unmask: Unmask = False,
 ) -> JSONResponse:
-    """The version's records, a page at a time. Masking comes in M2: until then `masked` is false."""
-    return ok(call(lambda: _version_records(request, version_id, check_limit(limit), decode(cursor))))
+    """The version's records, a page at a time, the dataset's PII fields masked unless `unmask` is asked for."""
+    return ok(
+        call(lambda: _version_records(request, who, version_id, check_limit(limit), decode(cursor), unmask))
+    )
 
 
 # Tracing a record.
 
 
 @router.get("/datasets/{dataset:path}/records/{key:path}/trace")
-def record_trace(dataset: str, key: str, request: Request, _: CurrentActor) -> JSONResponse:
+def record_trace(
+    dataset: str, key: str, request: Request, who: CurrentActor, unmask: Unmask = False
+) -> JSONResponse:
     """What happened to one record, by its dataset key: each version that held it, oldest first, with what each route
-    did with it. Only versions sealed since the key index came in are traced."""
-    return ok(call(lambda: as_json(Tracer(request.app.state.feather).trace(dataset, key))))
+    did with it. Only versions sealed since the key index came in are traced. PII fields are masked unless `unmask`."""
+
+    def read() -> dict[str, Any]:
+        state = request.app.state.feather
+        found = Tracer(state).trace(dataset, key)
+        shown = pii.masking(state, who, dataset, unmask=unmask, target=f"record:{dataset}/{key}")
+        return {**as_json(pii.mask_trace(found, shown.hidden)), **pii.as_json(shown)}
+
+    return ok(call(read))
 
 
 # Deliveries.

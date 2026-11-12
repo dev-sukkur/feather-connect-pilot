@@ -35,6 +35,7 @@ from feather_server.api.paging import decode, encode
 from feather_server.auth import Actor, CurrentActor, csrf_token, current_actor, require_csrf
 from feather_server.catalog_view import dataset_of, route_of
 from feather_server.services import actions as action_limits
+from feather_server.services import pii
 from feather_server.services.access import Capability, Forbidden, can
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
@@ -1027,6 +1028,10 @@ def task_records(
         return _not_found(request, f"Run {run_id!r} has no task {task_id!r}.")
     except (ApiProblem, ValueError):
         return _bad_cursor(request)
+    shown = _masking(request, actor, found.dataset, f"task:{run_id}/{task_id}")
+    if not isinstance(shown, pii.Masking):
+        return shown
+    found = pii.mask_task_records(found, shown.hidden)
     return render(
         request,
         "task_records.html",
@@ -1037,7 +1042,28 @@ def task_records(
         run_id=run_id,
         next_cursor=encode(found.next_cursor),
         first_page=not cursor,
+        pii=shown,
+        unmask_href=_unmask_href(request),
     )
+
+
+def _masking(request: Request, actor: Actor, dataset: str, target: str) -> "pii.Masking | HTMLResponse":
+    """How a page shows the dataset's PII, `?unmask=1` asking to see it; a refusal is the page answered."""
+    try:
+        return pii.masking(
+            request.app.state.feather,
+            actor,
+            dataset,
+            unmask=request.query_params.get("unmask") == "1",
+            target=target,
+        )
+    except Forbidden as error:
+        return render(request, "error.html", status=403, title="Not allowed", message=str(error))
+
+
+def _unmask_href(request: Request) -> str:
+    query = {k: v for k, v in request.query_params.items() if k != "unmask"}
+    return f"{request.url.path}?{urlencode({**query, 'unmask': '1'})}"
 
 
 @router.get("/tasks/{task_id}/logs", response_class=HTMLResponse)
@@ -1378,6 +1404,10 @@ def version_detail(
         key = request.app.state.feather.runtime.dataset(version.dataset).key
     except KeyError:
         key = ()
+    shown = _masking(request, actor, version.dataset, f"version:{version_id}")
+    if not isinstance(shown, pii.Masking):
+        return shown
+    records = [dict(r) for r in pii.mask_rows(records, shown.hidden)]
     columns, rows = _record_rows(records, (key,) if isinstance(key, str) else tuple(key))
     return render(
         request,
@@ -1389,6 +1419,8 @@ def version_detail(
         rows=rows,
         next_cursor=encode(next_raw),
         first_page=not cursor,
+        pii=shown,
+        unmask_href=_unmask_href(request),
     )
 
 
@@ -1398,11 +1430,16 @@ def record_trace(request: Request, actor: CurrentActor, dataset: str = "", key: 
     tracer = Tracer(request.app.state.feather)
     datasets = tracer.datasets()
     found = None
+    shown = None
     if dataset and key:
         try:
             found = tracer.trace(dataset, key)
         except KeyError:
             return _not_found(request, f"No dataset {dataset!r}.")
+        shown = _masking(request, actor, dataset, f"record:{dataset}/{key}")
+        if not isinstance(shown, pii.Masking):
+            return shown
+        found = pii.mask_trace(found, shown.hidden)
     return render(
         request,
         "trace.html",
@@ -1412,6 +1449,8 @@ def record_trace(request: Request, actor: CurrentActor, dataset: str = "", key: 
         dataset=dataset or (datasets[0] if datasets else ""),
         key=key,
         trace=found,
+        pii=shown,
+        unmask_href=_unmask_href(request),
     )
 
 

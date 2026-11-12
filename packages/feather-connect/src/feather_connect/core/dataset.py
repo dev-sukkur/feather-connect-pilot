@@ -30,6 +30,7 @@ class Dataset:
     fails the whole version when `on_record_error` is `"fail"`. A complete read that returns no rows fails
     unless `allow_empty` is set. `priority` is the share of a shared budget its reads may use. `schema_policy` says
     which changes of its fields hold a delivery (`feather_connect.core.schema_policy`); a route's overrides it.
+    `pii` names the fields the dashboard, the API and the CLI show masked, unless a PII reader asks to see them.
     """
 
     name: str
@@ -45,3 +46,7 @@ class Dataset:
     allow_empty: bool = False
     planner: Callable[[datetime], list[str]] | None = None
     schema_policy: SchemaPolicy = "default"
+    pii: tuple[str, ...] = ()  # fields shown masked (M2 plan 2 O4)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "pii", tuple(self.pii))

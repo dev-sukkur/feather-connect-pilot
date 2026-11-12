@@ -245,6 +245,7 @@ class Flow:
                         if d.schema_policy != "default"
                         else {}
                     ),
+                    **({"pii": list(d.pii)} if d.pii else {}),
                     "complete": d.strategy.complete,
                     "priority": d.priority,
                     "keep_state": d.keep_state,
