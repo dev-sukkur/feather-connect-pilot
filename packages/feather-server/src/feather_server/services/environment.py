@@ -37,7 +37,7 @@ from feather_connect.project import (
 from feather_connect.storage.port import ENV_KINDS, EnvEntry, EnvKind, SealedSecret, Store
 from feather_connect.vault import Vault, VaultError, check_name
 from feather_server.auth import Actor
-from feather_server.services.access import require
+from feather_server.services.access import require, require_reason
 
 __all__ = [
     "ENDPOINT_KEYS",
@@ -283,6 +283,7 @@ class Environment:
         checked: list[tuple[EnvKind, str, Any]] = []
         for kind, name, value in found:
             require(actor, "environment.manage", self._store.audit, f"{kind}:{name}")
+            require_reason(actor, "environment.manage", reason)
             if kind not in ENV_KINDS:
                 raise ConfigProblem(f"{kind!r} is not one of {', '.join(ENV_KINDS)}")
             checked.append((cast(EnvKind, kind), name, check_entry(cast(EnvKind, kind), name, value)))
@@ -353,6 +354,7 @@ class Environment:
     def remove(self, actor: Actor, kind: EnvKind, name: str, *, reason: str | None = None) -> None:
         target = f"{kind}:{name}"
         require(actor, "environment.manage", self._store.audit, target)
+        require_reason(actor, "environment.manage", reason)
         if kind == "budget":
             users = sorted(
                 e.name
@@ -380,6 +382,7 @@ class Environment:
     ) -> list[EnvEntry]:
         """Set many entries: every one checked first, alone and together, so a bad one sets none."""
         require(actor, "environment.manage", self._store.audit, "environment")
+        require_reason(actor, "environment.manage", reason)
         rows = [(k, n, _as_db_refs(n, v) if k == "connection" else v) for k, n, v in found]
         return self._put_checked(actor, rows, reason or "imported")
 
@@ -424,6 +427,7 @@ class Environment:
     def set_secret(self, actor: Actor, name: str, value: str, *, reason: str | None = None) -> bool:
         target = f"secret:{name}"
         require(actor, "secrets.manage", self._store.audit, target)
+        require_reason(actor, "secrets.manage", reason)
         replaced = self.vault.set(name, value, actor.name, self._clock.now())
         request = {"env": self._env, "name": name, "replaced": replaced, "reason": reason}
         self._store.audit.record(actor.kind, actor.name, "set_secret", target, request, "ok")
@@ -450,6 +454,7 @@ class Environment:
     def delete_secret(self, actor: Actor, name: str, *, reason: str | None = None) -> None:
         target = f"secret:{name}"
         require(actor, "secrets.manage", self._store.audit, target)
+        require_reason(actor, "secrets.manage", reason)
         if not self.vault.delete(check_name(name)):
             raise KeyError(f"secret {name} is not set in environment {self._env}")
         self._store.audit.record(
@@ -464,6 +469,7 @@ class Environment:
     def rotate_key(self, actor: Actor, *, reason: str | None = None) -> dict[str, Any]:
         """Seal every secret again under this process's current master key, and make it the active one."""
         require(actor, "secrets.manage", self._store.audit, "secrets")
+        require_reason(actor, "secrets.manage", reason)
         ring = self.vault.keyring
         key_id = ring.current.key_id if ring is not None else None
         try:

@@ -99,6 +99,22 @@ GRANT_NEEDS: Mapping[Capability, AccessGrant] = {"holds.decide": "approver", "pi
 PUBLISH_SCOPE: frozenset[Capability] = frozenset({"packages.publish"})  # all a publish-scoped token may do
 
 
+class ReasonRequired(Exception):
+    """A change in a protected environment came without a reason (design §11, FR-H3). The API answers 422 with
+    `check: reason_required`; a page asks for the reason and sends the form again."""
+
+    def __init__(self, capability: Capability) -> None:
+        super().__init__(f"{capability}: a reason is required in a protected environment")
+        self.capability = capability
+
+
+def require_reason(actor: Actor, capability: Capability, reason: object) -> None:
+    """In a protected environment, every change needs a reason, kept in the audit log. Call it after `require`, in
+    each action that changes something; what only looks needs none."""
+    if actor.protected and not (isinstance(reason, str) and reason.strip()):
+        raise ReasonRequired(capability)
+
+
 class Forbidden(PermissionError):
     """The actor's role doesn't allow the action. The API answers 403; a page says what role it needs."""
 

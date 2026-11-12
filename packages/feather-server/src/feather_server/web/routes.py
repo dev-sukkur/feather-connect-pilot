@@ -11,7 +11,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -36,7 +36,7 @@ from feather_server.auth import Actor, CurrentActor, csrf_token, current_actor, 
 from feather_server.catalog_view import dataset_of, route_of
 from feather_server.services import actions as action_limits
 from feather_server.services import alerts, diff, pii
-from feather_server.services.access import Capability, Forbidden, can
+from feather_server.services.access import Capability, Forbidden, ReasonRequired, can
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
 from feather_server.services.environment import Environment, coerce_setting
@@ -236,6 +236,7 @@ def render(
             "url": url,
             "engine": state.settings.engine,
             "env": request.app.state.environment.env,
+            "protected": bool(state.project.settings.get("protected")),
             "version": VERSION,
             **context,
         },
@@ -1180,7 +1181,7 @@ def _handled(request: Request, notice: tuple[str, str] | None) -> tuple[str, str
 
 
 def _reason_required(request: Request, preview: Preview | None) -> bool:
-    return bool(preview and preview.action == "skip_deliveries" and actions(request).protected)
+    return bool(preview and actions(request).protected)  # every change, in a protected environment
 
 
 def _failures_page(
@@ -1781,10 +1782,12 @@ def users(request: Request, actor: CurrentActor) -> HTMLResponse:
 
 
 @router.post("/users/{username}/role", dependencies=[Depends(require_csrf)])
-def set_role(request: Request, actor: CurrentActor, username: str, role: Annotated[str, Form()]) -> Response:
+def set_role(
+    request: Request, actor: CurrentActor, username: str, role: Annotated[str, Form()], reason: Reason = ""
+) -> Response:
     accounts: Accounts = request.app.state.accounts
     try:
-        accounts.set_role(actor, username, role)
+        accounts.set_role(actor, username, role, reason=_reason(reason))
     except KeyError:
         return _not_found(request, f"No user named {username!r}.")
     except ValueError as error:
@@ -1798,7 +1801,7 @@ async def set_grants(request: Request, actor: CurrentActor, username: str) -> Re
     form = await request.form()
     chosen = [str(g) for g in form.getlist("grant")]
     try:
-        accounts.set_grants(actor, username, chosen)
+        accounts.set_grants(actor, username, chosen, reason=_reason(str(form.get("reason") or "")))
     except KeyError:
         return _not_found(request, f"No user named {username!r}.")
     except ValueError as error:
@@ -1951,9 +1954,9 @@ def alerts_page(request: Request, actor: CurrentActor) -> HTMLResponse:
 
 
 @router.post("/alerts/{alert_id}/ack", dependencies=[Depends(require_csrf)])
-def alerts_ack(request: Request, actor: CurrentActor, alert_id: str) -> Response:
+def alerts_ack(request: Request, actor: CurrentActor, alert_id: str, reason: Reason = "") -> Response:
     try:
-        alerts.AlertActions(request.app.state.feather).ack(actor, alert_id)
+        alerts.AlertActions(request.app.state.feather).ack(actor, alert_id, reason=_reason(reason))
     except KeyError:
         return _not_found(request, f"No alert {alert_id!r}.")
     except Forbidden as error:
@@ -1963,10 +1966,16 @@ def alerts_ack(request: Request, actor: CurrentActor, alert_id: str) -> Response
 
 @router.post("/alerts/{alert_id}/snooze", dependencies=[Depends(require_csrf)])
 def alerts_snooze(
-    request: Request, actor: CurrentActor, alert_id: str, minutes: Annotated[int, Form(ge=0, le=10080)]
+    request: Request,
+    actor: CurrentActor,
+    alert_id: str,
+    minutes: Annotated[int, Form(ge=0, le=10080)],
+    reason: Reason = "",
 ) -> Response:
     try:
-        alerts.AlertActions(request.app.state.feather).snooze(actor, alert_id, minutes)
+        alerts.AlertActions(request.app.state.feather).snooze(
+            actor, alert_id, minutes, reason=_reason(reason)
+        )
     except KeyError:
         return _not_found(request, f"No alert {alert_id!r}.")
     except Forbidden as error:
@@ -2244,6 +2253,30 @@ def search_json(request: Request, actor: CurrentActor, q: Search = "") -> Respon
 def search_page(request: Request, actor: CurrentActor, q: Search = "") -> HTMLResponse:
     """The same search as a page, for a browser without JavaScript."""
     return render(request, "search.html", title="Search", actor=actor, q=q, found=_search(request, actor, q))
+
+
+async def ask_reason(request: Request, error: ReasonRequired) -> HTMLResponse:
+    """A change in a protected environment came without a reason: ask for one, and send the same form again with
+    it. A form with a file in it can't be sent again from here, so that one is only told to add a reason."""
+    form = await request.form()
+    files = any(not isinstance(value, str) for _, value in form.multi_items())
+    fields = [
+        (k, v) for k, v in form.multi_items() if isinstance(v, str) and k not in ("csrf_token", "reason")
+    ]
+    came = urlsplit(request.headers.get("referer", ""))
+    back = (came.path or "/") if came.netloc == request.url.netloc else "/"  # only a page of ours
+    return render(
+        request,
+        "reason.html",
+        status=422,
+        title="A reason is needed",
+        actor=current_actor(request),
+        action=request.url.path,
+        fields=[] if files else fields,
+        files=files,
+        capability=error.capability,
+        back=back,
+    )
 
 
 def refused(request: Request, error: Forbidden) -> HTMLResponse:

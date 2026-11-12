@@ -37,7 +37,7 @@ from feather_connect.storage.port import (
 )
 from feather_server.auth import Actor
 from feather_server.catalog_view import CatalogDataset, dataset_of
-from feather_server.services.access import Capability, require
+from feather_server.services.access import Capability, require, require_reason
 from feather_server.services.previews import (
     Impact,
     Preview,
@@ -63,6 +63,7 @@ _STATUSES: dict[str, tuple[DeliveryStatus, ...]] = {
 }
 CHECK_TIMEOUT_S = 15  # how long a connection check may take before it is given up on
 _SIMULATED = ("simulation.", "memory.")  # connectors of tests and demos, which connect to nothing
+LOOKS = frozenset({"verify_partition", "check_connection"})  # actions that change nothing, so need no reason
 CAPABILITIES: dict[str, Capability] = {  # each action, as its audit rows name it, and the capability it needs
     "run_flow": "runs.start",
     "rerun": "runs.rerun",
@@ -159,7 +160,7 @@ class Actions:
 
     @property
     def protected(self) -> bool:
-        """Whether this is a protected environment (`settings.protected` in the project), where a skip needs a
+        """Whether this is a protected environment (`settings.protected` in the project), where every change needs a
         reason."""
         return bool(self._state.project.settings.get("protected"))
 
@@ -172,6 +173,11 @@ class Actions:
 
     def _require(self, actor: Actor, action: str, target: str | None = None) -> None:
         require(actor, CAPABILITIES[action], self._store.audit, target)
+
+    def _require_reason(self, actor: Actor, action: str, reason: object) -> None:
+        """A change in a protected environment needs a reason (design §11); what only looks needs none."""
+        if action not in LOOKS:
+            require_reason(actor, CAPABILITIES[action], reason)
 
     def _issue(self, actor: Actor, action: str, selection: Mapping[str, Any], print_: str) -> str:
         """A confirmation token for a preview, once the actor may do the action."""
@@ -189,6 +195,7 @@ class Actions:
     ) -> T:
         """Do the action and write its audit row: `ok` and what `note` says of the result, or `failed` and why."""
         self._require(actor, action, target)
+        self._require_reason(actor, action, request.get("reason"))
         try:
             result = fn()
         except Exception as error:
@@ -206,6 +213,7 @@ class Actions:
         fingerprint_of: Callable[[Mapping[str, Any]], str],
     ) -> Mapping[str, Any]:
         self._require(actor, action)  # before the token is spent
+        self._require_reason(actor, action, reason)
         try:
             return self._tokens.redeem(token, action, actor.name, fingerprint_of)
         except PreviewError as error:
@@ -700,8 +708,6 @@ class Actions:
         action = confirmed.removesuffix("_deliveries")
         if action not in _STATUSES or action == confirmed:
             raise PreviewInvalid(f"this token confirms {confirmed!r}, not a delivery action")
-        if action == "skip" and self.protected and not (reason and reason.strip()):
-            raise ValueError("a reason is required to skip deliveries in a protected environment")
         selection = self._redeem(
             actor,
             confirmed,

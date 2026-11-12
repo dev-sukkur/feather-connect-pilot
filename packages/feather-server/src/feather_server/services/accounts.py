@@ -14,7 +14,7 @@ from feather_connect.clock import Clock
 from feather_connect.logs import redact
 from feather_connect.storage.port import GRANTS, ROLES, AccessGrant, Role, Store, TokenScope, UserRow
 from feather_server.auth import MAX_PASSWORD, Actor, hash_password, issue_token
-from feather_server.services.access import Capability, at_least, require
+from feather_server.services.access import Capability, at_least, require, require_reason
 
 MAX_NAME = 200
 CLI = Actor("system", "cli", "admin")  # the server's CLI, which works on the database directly
@@ -79,6 +79,7 @@ class Accounts:
         fn: Callable[[], T],
     ) -> T:
         require(actor, capability, self._store.audit, target)
+        require_reason(actor, capability, request.get("reason"))
         try:
             result = fn()
         except Exception as error:
@@ -94,7 +95,15 @@ class Accounts:
         require(actor, "users.manage", self._store.audit, "users")
         return [User.of(row) for row in self._store.users.list_users()]
 
-    def create_user(self, actor: Actor, username: str, password: str, role: str | None = None) -> User:
+    def create_user(
+        self,
+        actor: Actor,
+        username: str,
+        password: str,
+        role: str | None = None,
+        *,
+        reason: str | None = None,
+    ) -> User:
         """Add a user. Without a `role`, the first user is an admin and any other an operator. Raises `ValueError` for
         a bad name, password or role and `DuplicateUser` for a name that is taken."""
         chosen: Role = _role(role) if role is not None else "admin" if self._first() else "operator"
@@ -108,7 +117,14 @@ class Accounts:
             assert found is not None
             return User.of(found)
 
-        return self._do(actor, "users.manage", "create_user", f"user:{username}", {"role": chosen}, create)
+        return self._do(
+            actor,
+            "users.manage",
+            "create_user",
+            f"user:{username}",
+            {"role": chosen, "reason": reason},
+            create,
+        )
 
     def _first(self) -> bool:
         return not self._store.users.list_users()
@@ -174,12 +190,14 @@ class Accounts:
         *,
         user: str | None = None,
         scope: str = "all",
+        reason: str | None = None,
     ) -> str:
         """Create a token and return it, shown this once. It belongs to `user`, or else to the person acting, and acts
         with no higher a role than theirs: without a `role`, it takes theirs. A token of the CLI's with no user is for
         automation, an operator unless told otherwise. Raises `KeyError` for an unknown user and `ValueError` for a
         role higher than the user's. A token of the `publish` scope may only upload packages to the built-in registry,
-        typically one per customer CI pipeline."""
+        typically one per customer CI pipeline. In a protected environment a token is a `viewer` unless a role is
+        asked for (least privilege, design §11)."""
         owner = user if user is not None else actor.user
 
         def create() -> str:
@@ -188,7 +206,15 @@ class Accounts:
             if owner is not None and found is None:
                 raise KeyError(f"no user named {owner!r}")
             ceiling: Role = actor.role if found is None else found.role
-            chosen = _role(role) if role is not None else "operator" if found is None else found.role
+            chosen = (
+                _role(role)
+                if role is not None
+                else "viewer"
+                if actor.protected
+                else "operator"
+                if found is None
+                else found.role
+            )
             if not at_least(ceiling, chosen):
                 whose = f"its user {owner}" if owner else "yours"
                 raise ValueError(f"a token can't have a higher role than {whose}, {ceiling}")
@@ -206,6 +232,7 @@ class Accounts:
                 "user": owner,
                 "scope": scope,
                 "ttl_s": None if ttl is None else int(ttl.total_seconds()),
+                "reason": reason,
             },
             create,
         )

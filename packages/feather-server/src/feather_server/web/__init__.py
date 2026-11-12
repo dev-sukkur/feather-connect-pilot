@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
 
-from feather_server.services.access import Forbidden
+from feather_server.services.access import Forbidden, ReasonRequired
 from feather_server.web import package_pages
-from feather_server.web.routes import refused, router
+from feather_server.web.routes import ask_reason, refused, router
 
 if TYPE_CHECKING:
     from feather_server.app import AppState
@@ -26,4 +26,15 @@ def install(app: FastAPI, state: "AppState") -> None:
         assert isinstance(error, Forbidden)
         return refused(request, error)
 
+    async def on_reason_required(request: Request, error: Exception) -> Response:
+        assert isinstance(error, ReasonRequired)
+        if request.url.path.startswith("/api/"):  # a route that let it through: answer as the API does
+            from feather_server.api.errors import problem_response, translate
+
+            problem = translate(error)
+            assert problem is not None
+            return problem_response(problem)
+        return await ask_reason(request, error)
+
     app.add_exception_handler(Forbidden, on_forbidden)
+    app.add_exception_handler(ReasonRequired, on_reason_required)

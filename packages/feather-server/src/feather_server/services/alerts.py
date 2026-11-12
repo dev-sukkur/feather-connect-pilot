@@ -32,7 +32,7 @@ import httpx
 from feather_connect.core.strategies import parse_duration
 from feather_connect.project import resolve_secret
 from feather_connect.storage.port import AlertRow, AlertRuleRow
-from feather_server.services.access import require
+from feather_server.services.access import require, require_reason
 
 if TYPE_CHECKING:
     from feather_server.app import AppState
@@ -332,6 +332,7 @@ class AlertActions:
     def ack(self, actor: "Actor", alert_id: str, *, reason: str | None = None) -> AlertRow:
         """Raises `KeyError` for an unknown alert."""
         require(actor, "alerts.ack", self._state.store.audit, f"alert:{alert_id}")
+        require_reason(actor, "alerts.ack", reason)
         row = self._state.store.alerts.ack(alert_id, actor.name)
         self._audit(
             actor,
@@ -344,6 +345,7 @@ class AlertActions:
     def snooze(self, actor: "Actor", alert_id: str, minutes: int, *, reason: str | None = None) -> AlertRow:
         """Quiet it for `minutes`, or no longer with 0. Raises `KeyError` and `ValueError`."""
         require(actor, "alerts.ack", self._state.store.audit, f"alert:{alert_id}")
+        require_reason(actor, "alerts.ack", reason)
         span = timedelta(minutes=minutes)
         if minutes < 0 or span > SNOOZE_MAX:
             raise ValueError(f"a snooze is from 0 minutes to {SNOOZE_MAX.days} days")
@@ -364,6 +366,7 @@ class AlertActions:
     ) -> Rule:
         """Raises `ValueError` for a rule, a parameter or a channel there isn't."""
         require(actor, "alerts.manage", self._state.store.audit, f"alert_rule:{name}")
+        require_reason(actor, "alerts.manage", reason)
         check_rule(name, params, channels, self._state)
         self._state.store.alerts.set_rule(name, enabled, params, channels)
         self._audit(
@@ -377,6 +380,7 @@ class AlertActions:
     def reset_rule(self, actor: "Actor", name: str, *, reason: str | None = None) -> Rule:
         """Back to the default. Raises `KeyError` for a rule the environment hasn't set."""
         require(actor, "alerts.manage", self._state.store.audit, f"alert_rule:{name}")
+        require_reason(actor, "alerts.manage", reason)
         self._state.store.alerts.delete_rule(name)
         self._audit(actor, "alerts.reset_rule", f"alert_rule:{name}", {"reason": reason})
         return next(r for r in rules(self._state) if r.name == name)
