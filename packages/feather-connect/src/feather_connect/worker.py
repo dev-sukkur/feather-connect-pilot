@@ -82,6 +82,7 @@ def work(
     code_sha: str,
     background: "Callable[[threading.Event], None] | None" = None,
     tasks: "Mapping[str, TaskFn] | None" = None,
+    tenant: str = "default",
 ) -> int:
     """Execute tasks and heartbeat until told to stop, and drain. `background`, if given, runs on a thread of its own
     from when the worker takes tasks, and is given the event that says to stop. `tasks` replaces the runtime's."""
@@ -101,7 +102,7 @@ def work(
     # A heartbeat keeps a draining worker draining, so that the drain shows to the end. This is a new process, though:
     # a restarted container keeps its hostname, the default id, and its last process left the row draining.
     store.workers.mark(worker_id, "alive")
-    handle = DbosWorkerRuntime(database_url, poll_s=poll_s, drain_s=DRAIN_S).run(
+    handle = DbosWorkerRuntime(database_url, poll_s=poll_s, drain_s=DRAIN_S, tenant=tenant).run(
         runtime.tasks() if tasks is None else tasks, worker_id, labels, slots
     )
     stop_beating = heartbeats(store, worker_id, labels, code_sha, slots)

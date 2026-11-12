@@ -155,7 +155,9 @@ def default_loops(state: "AppState") -> list[LoopRunner]:
 
     def lock(name: str) -> LeaderLock:
         url = state.settings.database_url
-        return PostgresLeaderLock(url, leader_key(name)) if url else AlwaysLeader()
+        return (
+            PostgresLeaderLock(url, leader_key(name, state.store.secrets.tenant)) if url else AlwaysLeader()
+        )
 
     if state.catalogue is None:
         state.catalogue = Catalogue(state.store)  # installed packages' active flows (flow packages §7.2)

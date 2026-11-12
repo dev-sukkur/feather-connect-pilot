@@ -19,7 +19,7 @@ from feather_connect.storage.postgres.leader import PostgresLeaderLock
 from feather_connect.storage.postgres.spool import PostgresSpool
 from feather_connect.storage.postgres.store import OLDEST_OPEN_SQL, PostgresStore
 from feather_connect.storage.spool import Spool, records_to_table
-from feather_connect.testing.store_contract import T0, StoreContract, draft, seal
+from feather_connect.testing.store_contract import T0, StoreContract, draft, inbound, seal
 
 pytestmark = pytest.mark.postgres
 
@@ -43,6 +43,39 @@ def spool(pg: Pg, pool: ConnectionPool[Pg], clock: FrozenClock) -> Spool:
 
 class TestPostgresStore(StoreContract):
     pass
+
+
+def fill_default_tenant(store: Store, clock: FrozenClock) -> None:
+    """Write into the default tenant what the contract's tests write, under the same names, so that a query that
+    forgets its tenant finds rows it shouldn't (ADR-0013 rule 6)."""
+    for vid in ("v1", "v2", "v3"):
+        seal(store, vid, ["a", "b"])
+    store.ledger.transition("a", "v1", "running", actor="t")
+    run_id = store.runs.create_run("f", "manual", "ann", {})
+    store.runs.start_task(run_id, "apply", "ref")
+    store.inbox.put("d", inbound())
+    # sealed: a day partition is shared, and a waiting event of any tenant keeps it (support.py says why)
+    store.inbox.seal_batch([e.event_seq for e in store.inbox.take("d", 1)], [], [])
+    store.quarantine.add("a", "v1", "k", "bad", payload={"x": 1})
+    store.audit.record("human", "ann", "retry_deliveries", "route:a", {"reason": "first"}, "ok")
+    store.overrides.set("t", "old", 1, actor="a", expires_at=clock.now() + timedelta(minutes=1))
+    store.users.create_user("ann", "h", "admin")
+    store.workers.heartbeat("w1", {"pool": "x"}, "sha", 4)
+    store.alerts.fire("budget_high", "api", "warning", "api at 81%")
+
+
+class TestPostgresStoreOfAnotherTenant(StoreContract):
+    """The whole contract again, as a second tenant, while the default tenant holds data of the same names: every
+    answer the contract expects is exact, so a row of the other tenant in it fails the test (ADR-0013 rule 6)."""
+
+    @pytest.fixture
+    def store(self, pg: Pg, pool: ConnectionPool[Pg], clock: FrozenClock) -> Store:
+        fill_default_tenant(PostgresStore(pool, clock), clock)
+        return PostgresStore(pool, clock, "acme")
+
+    @pytest.fixture
+    def spool(self, pg: Pg, pool: ConnectionPool[Pg], clock: FrozenClock) -> Spool:
+        return PostgresSpool(pool, clock, "acme")
 
 
 def in_threads(n: int, fn: Callable[[int], Any]) -> list[Any]:

@@ -36,6 +36,24 @@ class TestPostgresSpool(SpoolContract):
     pass
 
 
+class TestPostgresSpoolOfAnotherTenant(SpoolContract):
+    """The contract as a second tenant, while the default tenant has chunks and snapshots of the same versions
+    (ADR-0013 rule 6)."""
+
+    @pytest.fixture
+    def spool(
+        self,
+        pg: psycopg.Connection[DictRow],
+        pool: ConnectionPool[psycopg.Connection[DictRow]],
+        clock: FrozenClock,
+    ) -> PostgresSpool:
+        default = PostgresSpool(pool, clock)
+        for vid in ("v1", "v2", "v3"):
+            default.put_chunk(vid, 0, "data", TABLE2)
+            default.put_chunk(vid, 0, "snapshot", SNAP)
+        return PostgresSpool(pool, clock, "acme")
+
+
 def count_chunks(pg: psycopg.Connection[DictRow], version_id: str) -> int:
     row = pg.execute("select count(*) as n from feather.spool_chunk where version_id = %s", (version_id,))
     return row.fetchone()["n"]  # type: ignore[index]

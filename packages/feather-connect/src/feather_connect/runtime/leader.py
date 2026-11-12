@@ -12,9 +12,11 @@ from typing import Protocol
 _BASE = 7_262_411_000_000_000
 
 
-def leader_key(name: str) -> int:
-    """Return a stable lock key for the loop called `name`."""
-    return _BASE + zlib.crc32(name.encode())
+def leader_key(name: str, tenant: str = "default") -> int:
+    """Return a stable lock key for the loop called `name` in `tenant`. The default tenant's keys are those of M1, so
+    that a server of before and one of after never both lead; another tenant's loops lead on their own (ADR-0013 rule
+    7)."""
+    return _BASE + zlib.crc32((name if tenant == "default" else f"{tenant}/{name}").encode())
 
 
 class LeaderLock(Protocol):
