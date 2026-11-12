@@ -50,7 +50,7 @@ def compare(
         shown = "" if change is None else f"{change:+.0%}"
         verdict = "fail" if not meets or regressed else "ok"
         rows.append(
-            f"| {line['nfr']} | {name} | {value:,} {line['unit']} | {target:,} | {base or '—'} | {shown} | {verdict} |"
+            f"| {line['nfr']} | {name} | {value:,} {line['unit']} | {target:,} | {base or 'none'} | {shown} | {verdict} |"
         )
     return rows, failed
 

@@ -1,0 +1,7 @@
+{
+  "github-ubuntu-latest": {
+    "extract_to_spool": 24258,
+    "webhook_to_http_p95": 1.407,
+    "webhook_to_sink_p95": 1.176
+  }
+}
