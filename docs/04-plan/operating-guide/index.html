@@ -584,6 +584,31 @@ feather secret set zakya/client_secret --env prod &lt; client-secret.txt        
   <p class="prose">Every comparison takes constant time. The <code>webhook_connector</code> install check still refuses a package that brings its own webhook source as code, and now also a declared webhook that isn't valid or feeds a dataset the package doesn't define.</p>
 </section>
 
+<section id="readiness">
+  <h2><span class="n">8c</span>Run a flow when its data is ready (M2)</h2>
+  <p class="prose">A flow can wait for data instead of a clock: it starts once the datasets it needs are complete, and optionally delivered to a route. The server works this out from the store every 2 seconds and fires each period once, on the version of the package that is active.</p>
+  <div class="file">flows/posting.py</div>
+  <pre><code># After each ingest run is applied to staging, at most every 4 hours.
+to_sap = fc.Flow("to-sap", reads=staged, deliver=[to_sap_route],
+                 triggers=[fc.on_ready(fc.ready(invoices, delivered_to="staging"), each="run", at_most_every="4h")])
+
+# Once a store-day of invoices, returns and payments is complete, store by store.
+posting = fc.Flow("store-day-posting", reads=totals, deliver=[to_erp],
+                  triggers=[fc.on_ready(fc.ready([invoices, returns, payments], by="store_id"),
+                                        each="day", tz="Asia/Kolkata", on_late="rerun")])</code></pre>
+  <div class="scroll"><table>
+    <tr><th>A dataset read by</th><th>Is complete through the end of a period when</th></tr>
+    <tr><td><code>replace</code>, <code>snapshot_diff</code></td><td>The period's partition (for its scope) has a version from a run that started after the period ended, or the partition was closed and has a version</td></tr>
+    <tr><td><code>by_stamp</code></td><td>A run that succeeded started at least <code>settle</code> (default: the dataset's <code>lookback</code>) after the period ended</td></tr>
+    <tr><td><code>push</code></td><td>No event received before the end waits to be sealed, and <code>settle</code> (default 5 minutes) has passed or the partition was closed</td></tr>
+  </table></div>
+  <p class="prose"><code>delivered_to</code> also needs the route to have applied (or skipped) every one of those versions. With <code>quarantine="blocks"</code> a version with records turned down doesn't count. A period that fired and later gets a new version is <b>late</b>: <code>on_late="rerun"</code> (the default) fires it once more, with the reason <i>late data</i>; <code>warn</code> shows it as late; <code>ignore</code> does nothing. A new flow fires from when it was first seen, or from <code>start=</code>; periods older than 7 days are not looked at. A planner that takes <code>ready=</code> is told the period, scope and versions of the run.</p>
+  <pre><code>feather ready status [flow]                                       # each period: fired, ready, waiting (and for what), late
+feather ready close acme/invoices --partition "store_id=1509/date=2026-11-08" --reason "till closed"
+feather ready fire acme/posting --period 2026-11-08 --scope store_id=1509 --reason "posted by hand"</code></pre>
+  <p class="prose">The <b>Readiness</b> page shows the same, with <b>Fire now</b> and <b>Close partition</b>; the API is <code>GET /api/v1/readiness</code>, <code>GET /api/v1/flows/{flow}/readiness</code>, <code>POST /api/v1/flows/{flow}/readiness:fire</code> and <code>POST /api/v1/datasets/{d}/partitions/{p}:close</code>. Both actions need an operator and a reason, and are audited. A period fired by hand stays fired: late data doesn't rerun it. <code>feather validate</code> refuses a set naming a dataset no flow reads, a <code>delivered_to</code> route that doesn't take it, <code>by</code> a field it isn't partitioned on, <code>each="run"</code> with several datasets, <code>hour</code> or <code>day</code> without <code>tz</code>, and flows waiting on each other.</p>
+</section>
+
 <section id="deploy">
   <h2><span class="n">9</span>Deploy</h2>
   <p class="prose"><code>feather dev</code> is for development. To run Feather Connect for real on one machine, use Docker Compose:</p>

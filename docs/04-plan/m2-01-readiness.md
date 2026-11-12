@@ -55,8 +55,27 @@ active flow reads, and a set whose upstream is deactivated later shows *upstream
 
 Tasks 1–3 are stage R1, 4–7 R2, 8–10 R3. All three go in one PR.
 
-## 3. Also in this PR
+## 2.1 Where it stands (12 Nov 2026)
 
-- **A packaged poller's tick is a run** (carried from M1.1): a host takes a stream run's ticks again, so a poller every
+| # | State | Where |
+|---|---|---|
+| 1 | Done | Migration 0028; `ReadinessStore` on memory and Postgres; NOTIFY `feather_ready` from seal and from applied or skipped |
+| 2 | Done | `core/readiness.py`, `Flow.spec_dict()`, `project.prefixed`, `validate_project`; `tests/core/test_readiness.py` |
+| 3 | Done | `runtime/ready_eval.py`, the server's `readiness` loop (every 2 s). A firing and its run are one transaction, so no sweeper step is needed: a server killed mid-fire leaves both or neither |
+| 4–7 | Done | `tests/runtime/test_ready_eval.py` |
+| 8 | Done | `/readiness`, lines on the run and flow pages; axe clean in light and dark |
+| 9 | Done | `feather ready`, `/api/v1/readiness…`; Operating Guide §8c |
+| 10 | Done on Postgres | `tests/hard_cases/test_readiness_cases.py`: H13, H16 (8 evaluators racing), H17. They stop at the queued run, which a host takes as it takes a clock tick's |
+
+Still open, and why:
+
+- **Activation of a cross-package set** doesn't yet refuse an upstream that isn't installed: the flow shows *upstream inactive* and doesn't fire, which is safe.
+- **The evaluator polls every 2 s** rather than waking on `NOTIFY feather_ready`; the notification is sent, for a listener later.
+- **The Zakya chain on `feather dev`** (design §11, first exit criterion) needs the reference project's flows given `on_ready`; the mechanism it needs is the one H13 tests.
+- **§3 below** is not done.
+
+## 3. Next
+
+- **A packaged poller's tick is a run** (carried from M1.1; not in this PR): a host takes a stream run's ticks again, so a poller every
   5 s writes a run a day, not 17,280. Readiness counts a stream run's ticks by their versions, not by runs, so it
   doesn't depend on this, but `each="run"` on a poller would fire 17,280 times a day without it.
