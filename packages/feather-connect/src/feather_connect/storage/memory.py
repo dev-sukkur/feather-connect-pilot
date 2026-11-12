@@ -38,6 +38,7 @@ from feather_connect.storage.port import (
     EnvKind,
     EnvState,
     FailureGroup,
+    Firing,
     FlowActivation,
     FlowRow,
     Grant,
@@ -56,10 +57,12 @@ from feather_connect.storage.port import (
     PackageState,
     PackageStore,
     PackageVersion,
+    PartitionClose,
     PartitionRow,
     Priority,
     QuarantineRow,
     QuarantineStore,
+    ReadinessStore,
     ReadStore,
     RecordStateStore,
     RegistryFile,
@@ -1934,6 +1937,43 @@ class _Reads(ReadStore):
             return found
 
 
+class _Readiness(ReadinessStore):
+    def __init__(self, data: _Data, runs: RunJournal) -> None:
+        self._d = data
+        self._runs = runs
+        self._closes: dict[tuple[str, str], PartitionClose] = {}
+        self._firings: dict[tuple[str, str, str, str, int], Firing] = {}
+
+    def close(self, dataset: str, partition: str, actor: str, reason: str, at: datetime) -> PartitionClose:
+        with self._d.lock:
+            return self._closes.setdefault(
+                (dataset, partition), PartitionClose(dataset, partition, at, actor, reason)
+            )
+
+    def closes(self, dataset: str, partitions: Sequence[str]) -> dict[str, PartitionClose]:
+        with self._d.lock:
+            return {p: c for p in partitions if (c := self._closes.get((dataset, p))) is not None}
+
+    def fire(self, firing: Firing, params: Mapping[str, Any]) -> str | None:
+        key = (firing.flow, firing.ready_set, firing.period, firing.scope, firing.seq)
+        with self._d.lock:
+            if key in self._firings:
+                return None
+            run_id = self._runs.create_run(firing.flow, "ready", firing.actor, params)
+            self._firings[key] = replace(firing, run_id=run_id)
+            return run_id
+
+    def firings(self, flow: str, ready_set: str | None = None, limit: int = 200) -> list[Firing]:
+        with self._d.lock:
+            found = [
+                f
+                for f in self._firings.values()
+                if f.flow == flow and (ready_set is None or f.ready_set == ready_set)
+            ]
+        found.sort(key=lambda f: (f.fired_at, f.seq), reverse=True)
+        return found[: max(0, min(limit, 1000))]
+
+
 @dataclass
 class _InboxRow:
     event: InboxEvent
@@ -2081,8 +2121,9 @@ class MemoryStore(Store):
         data = _Data(clock or SystemClock())
         versions = _Versions(data)
         inbox = _Inbox(data, versions)
+        runs = _Runs(data)
         super().__init__(
-            runs=_Runs(data),
+            runs=runs,
             versions=versions,
             ledger=_Ledger(data),
             state=_State(data),
@@ -2102,4 +2143,5 @@ class MemoryStore(Store):
             env_config=_EnvConfig(data),
             secrets=_Secrets(data),
             webhooks=_Webhooks(data, inbox),
+            readiness=_Readiness(data, runs),
         )

@@ -160,6 +160,7 @@ class World:
             env_config=base.env_config,
             secrets=base.secrets,
             webhooks=base.webhooks,
+            readiness=base.readiness,
         )
         self.store.budgets.define(spec)
         self.engine = LocalEngine(self.clock)

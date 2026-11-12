@@ -1918,6 +1918,58 @@ class StoreContract(
         }
         assert store.webhooks.keep_many([]) == []
 
+    def test_a_partition_is_closed_once_with_who_and_why(self, store: Store):
+        first = store.readiness.close("acme/invoices", "store_id=1509", "ops", "store-day closed", T0)
+        again = store.readiness.close(
+            "acme/invoices", "store_id=1509", "other", "again", T0 + timedelta(hours=1)
+        )
+        assert again == first and (first.closed_by, first.reason, first.closed_at) == (
+            "ops",
+            "store-day closed",
+            T0,
+        )
+        assert set(store.readiness.closes("acme/invoices", ["store_id=1509", "store_id=1"])) == {
+            "store_id=1509"
+        }
+        assert store.readiness.closes("acme/other", ["store_id=1509"]) == {}
+
+    def test_a_firing_happens_once_and_queues_its_run_with_it(self, store: Store):
+        from feather_connect.storage.port import Firing
+
+        firing = Firing(
+            "acme/post",
+            "store_day",
+            "2026-11-08",
+            "store_id=1509",
+            0,
+            "ready",
+            {"a": {"p": "v"}},
+            T0,
+            "ready",
+        )
+        params = {"package": "acme", "version": "1.0.0", "ready": {"period": "2026-11-08"}}
+        run_id = store.readiness.fire(firing, params)
+        assert run_id is not None and store.readiness.fire(firing, params) is None
+        run = store.runs.get_run(run_id)
+        assert (run.flow, run.trigger, run.status, run.params["ready"]) == (
+            "acme/post",
+            "ready",
+            "queued",
+            params["ready"],
+        )
+        rerun = store.readiness.fire(
+            replace(firing, seq=1, reason="late data", fired_at=T0 + timedelta(hours=1)), params
+        )
+        assert rerun is not None and rerun != run_id
+        listed = store.readiness.firings("acme/post")
+        assert [(f.seq, f.run_id, f.versions) for f in listed] == [
+            (1, rerun, {"a": {"p": "v"}}),
+            (0, run_id, {"a": {"p": "v"}}),
+        ]
+        assert (
+            store.readiness.firings("acme/post", "other") == [] and store.readiness.firings("acme/else") == []
+        )
+
     def test_registries_are_added_listed_and_removed(self, store: Store):
         store.registry.add_registry("zeta", "https://z.example.com/simple/", None, "root")
         added = store.registry.add_registry(

@@ -1704,6 +1704,63 @@ class WebhookEventStore(Protocol):
         ...
 
 
+READY_CHANNEL = (
+    "feather_ready"  # NOTIFY payload: the tenant whose versions sealed or deliveries closed (readiness)
+)
+
+
+@dataclass(frozen=True)
+class PartitionClose:
+    """Someone said a partition is complete (readiness design §4.1): it is ready once its last version is sealed."""
+
+    dataset: str
+    partition: str
+    closed_at: datetime
+    closed_by: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class Firing:
+    """One run of a waiting flow for one (readiness set, period, scope), and `seq` 0 for the first, 1 and on for the
+    reruns late data starts (readiness design §6). `ready_set` names the set within the flow; `period` is an ISO
+    start (`2026-11-08`, `2026-11-08T13:00`) or `run:<id>` of an upstream run; `scope` is `field=value` or empty."""
+
+    flow: str
+    ready_set: str
+    period: str
+    scope: str
+    seq: int
+    reason: str  # ready, late data or manual
+    versions: Mapping[str, Any]  # what the firing saw: dataset -> partition -> version id
+    fired_at: datetime
+    actor: str
+    run_id: str | None = None
+
+
+class ReadinessStore(Protocol):
+    """Closed partitions and firings (readiness design §7.2). What is sealed and applied is read from the versions and
+    the ledger, which already hold it."""
+
+    def close(self, dataset: str, partition: str, actor: str, reason: str, at: datetime) -> PartitionClose:
+        """Close the partition. A partition closed already stays as it was, and that close is returned."""
+        ...
+
+    def closes(self, dataset: str, partitions: Sequence[str]) -> dict[str, PartitionClose]:
+        """The closes of those of `partitions` that are closed."""
+        ...
+
+    def fire(self, firing: Firing, params: Mapping[str, Any]) -> str | None:
+        """Record the firing and queue its run, with `params` and the trigger `ready`, in one transaction, and return
+        the run's id. None, recording and queueing nothing, when the firing's (flow, set, period, scope, seq) is there
+        already: so a firing happens once however many evaluators race to it."""
+        ...
+
+    def firings(self, flow: str, ready_set: str | None = None, limit: int = 200) -> list[Firing]:
+        """The flow's firings, newest first."""
+        ...
+
+
 @dataclass(frozen=True)
 class Store:
     """The ports together. A backend provides one of these."""
@@ -1728,6 +1785,7 @@ class Store:
     env_config: EnvConfigStore
     secrets: SecretStore
     webhooks: WebhookEventStore
+    readiness: ReadinessStore
 
     def is_unavailable(self, error: BaseException) -> bool:
         """Whether `error` says that the store can't be reached, or can't keep up, just now, so that the same call may

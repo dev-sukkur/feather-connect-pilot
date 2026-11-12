@@ -27,6 +27,7 @@ from feather_connect.storage.port import (
     CLOSED,
     MAX_ENV_ROWS,
     MAX_PACKAGE_ROWS,
+    READY_CHANNEL,
     SHARED_TENANT,
     STREAM_TRIGGER,
     Attempt,
@@ -46,6 +47,7 @@ from feather_connect.storage.port import (
     EnvKind,
     EnvState,
     FailureGroup,
+    Firing,
     FlowActivation,
     FlowRow,
     Grant,
@@ -64,10 +66,12 @@ from feather_connect.storage.port import (
     PackageState,
     PackageStore,
     PackageVersion,
+    PartitionClose,
     PartitionRow,
     Priority,
     QuarantineRow,
     QuarantineStore,
+    ReadinessStore,
     ReadStore,
     RecordStateStore,
     RegistryFile,
@@ -696,6 +700,8 @@ class _Versions(VersionStore):
         if missing := next((v for v in version_ids if v not in found), None):
             raise KeyError(f"no such version: {missing}")  # before sealing any, so it is all or nothing
         now = self._db.clock.now()
+        if any(found[v]["status"] != "sealed" for v in version_ids):  # readiness looks again (M2 plan 1)
+            conn.execute("select pg_notify(%s, %s)", (READY_CHANNEL, self._db.tenant))
         for version_id in version_ids:
             if found[version_id]["status"] == "sealed":
                 continue
@@ -1141,6 +1147,8 @@ class _Ledger(Ledger):
             current = _delivery(row)
             check_transition(current.status, to)
             applied = to == "applied"
+            if to in ("applied", "skipped"):  # what is delivered through moved: readiness looks again
+                conn.execute("select pg_notify(%s, %s)", (READY_CHANNEL, self._db.tenant))
             updated = conn.execute(
                 """update feather.delivery set status = %(to)s, attempts = attempts + %(started)s::int,
                        last_error = case when %(applied)s then null else coalesce(%(error)s, last_error) end,
@@ -3445,6 +3453,95 @@ class _Webhooks(WebhookEventStore):
         return done.rowcount
 
 
+class _Readiness(ReadinessStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def close(self, dataset: str, partition: str, actor: str, reason: str, at: datetime) -> PartitionClose:
+        with self._db.tx() as conn:
+            conn.execute(
+                """insert into feather.readiness_close (tenant_id, dataset, partition, closed_at, closed_by, reason)
+                   values (%s, %s, %s, %s, %s, %s) on conflict do nothing""",
+                (self._db.tenant, dataset, partition, at, actor, reason),
+            )
+            row = conn.execute(
+                """select * from feather.readiness_close where tenant_id = %s and dataset = %s and partition = %s""",
+                (self._db.tenant, dataset, partition),
+            ).fetchone()
+            conn.execute("select pg_notify(%s, %s)", (READY_CHANNEL, self._db.tenant))
+        assert row is not None
+        return _close(row)
+
+    def closes(self, dataset: str, partitions: Sequence[str]) -> dict[str, PartitionClose]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.readiness_close
+                   where tenant_id = %s and dataset = %s and partition = any(%s)""",
+                (self._db.tenant, dataset, list(partitions)),
+            ).fetchall()
+        return {r["partition"]: _close(r) for r in rows}
+
+    def fire(self, firing: Firing, params: Mapping[str, Any]) -> str | None:
+        run_id = new_id()
+        now = self._db.clock.now()
+        with self._db.tx() as conn:
+            done = conn.execute(
+                """insert into feather.readiness_firing (tenant_id, flow, ready_set, period, scope, seq, reason,
+                       versions, fired_at, actor, run_id)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) on conflict do nothing""",
+                (
+                    self._db.tenant,
+                    firing.flow,
+                    firing.ready_set,
+                    firing.period,
+                    firing.scope,
+                    firing.seq,
+                    firing.reason,
+                    _json(dict(firing.versions)),
+                    firing.fired_at,
+                    firing.actor,
+                    run_id,
+                ),
+            )
+            if done.rowcount == 0:
+                return None
+            conn.execute(
+                """insert into feather.run (tenant_id, run_id, flow, trigger, actor, params, status, reason,
+                                            created_at, updated_at)
+                   values (%s, %s, %s, 'ready', %s, %s, 'queued', null, %s, %s)""",
+                (self._db.tenant, run_id, firing.flow, firing.actor, _json(dict(params)), now, now),
+            )
+        return run_id
+
+    def firings(self, flow: str, ready_set: str | None = None, limit: int = 200) -> list[Firing]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.readiness_firing
+                   where tenant_id = %s and flow = %s and (%s::text is null or ready_set = %s)
+                   order by fired_at desc, seq desc limit %s""",
+                (self._db.tenant, flow, ready_set, ready_set, max(0, min(limit, 1000))),
+            ).fetchall()
+        return [
+            Firing(
+                r["flow"],
+                r["ready_set"],
+                r["period"],
+                r["scope"],
+                r["seq"],
+                r["reason"],
+                _unjson(r["versions"]),
+                r["fired_at"],
+                r["actor"],
+                r["run_id"],
+            )
+            for r in rows
+        ]
+
+
+def _close(r: Row) -> PartitionClose:
+    return PartitionClose(r["dataset"], r["partition"], r["closed_at"], r["closed_by"], r["reason"])
+
+
 class PostgresStore(Store):
     """A `Store` that keeps everything in Postgres, for one tenant. `clock` defaults to the system clock."""
 
@@ -3476,6 +3573,7 @@ class PostgresStore(Store):
             env_config=_EnvConfig(db),
             secrets=_Secrets(db),
             webhooks=_Webhooks(db, inbox),
+            readiness=_Readiness(db),
         )
         object.__setattr__(self, "_pool", pool)  # `Store` is frozen
         object.__setattr__(self, "_db", db)
