@@ -444,7 +444,7 @@ connections:
                to: [ops@example.com], username: feather, password: "${secret:env:SMTP_PASSWORD}"}</code></pre>
   <p class="prose">The <b>Alerts</b> page lists what is firing (and what cleared), with <b>Acknowledge</b>, which quiets an alert for good, and <b>Snooze</b>, which quiets it for an hour, four hours or a day; both are an operator's and audited. Under it, a developer turns each rule on or off, sets its parameters and picks its channels (none picks them all), or resets it to its default. The API is <code>GET /api/v1/alerts?state=firing</code>, <code>POST /api/v1/alerts/{id}:ack</code>, <code>POST /api/v1/alerts/{id}:snooze</code> with <code>{"minutes": 60}</code>, <code>GET /api/v1/alert-rules</code>, <code>PUT /api/v1/alert-rules/{name}</code> with <code>{"enabled", "params", "channels"}</code> and <code>DELETE /api/v1/alert-rules/{name}</code>. Alerts and rules are kept in the <code>feather.alert</code> and <code>feather.alert_rule</code> tables.</p>
   <h3>Secrets</h3>
-  <p class="prose">Write secrets as references, <code>${secret:env:NAME}</code> or <code>${secret:file:path}</code>, under a connection's <code>auth</code>. Other providers arrive in M3. They are resolved when used. An error names the reference, never the value, and the dashboard never shows them. <code>feather validate</code> reports one that isn't set.</p>
+  <p class="prose">Write secrets as references, <code>${secret:env:NAME}</code> or <code>${secret:file:path}</code>, under a connection's <code>auth</code>. Other providers arrive in M4. They are resolved when used. An error names the reference, never the value, and the dashboard never shows them. <code>feather validate</code> reports one that isn't set.</p>
   <h3>When things go wrong</h3>
   <div class="scroll"><table>
     <tr><th>You see</th><th>What it means</th><th>Do this</th></tr>
@@ -684,10 +684,10 @@ docker compose -f deploy/compose.yaml exec feather-server feather server create-
     <tr><td>Connectors other than Zakya, Postgres, HTTP and SAP through CPI</td><td>M6</td></tr>
     <tr><td><code>sink.confirm</code>, with Magento</td><td>M6</td></tr>
     <tr><td>OAuth2 tokens shared across processes. M1 shares one per grant within a process</td><td>M2</td></tr>
-    <tr><td>Secret providers other than <code>env</code> and <code>file</code></td><td>M3</td></tr>
-    <tr><td>Row-level security policies (every table already carries <code>tenant_id</code>) and other tenants than <code>default</code></td><td>M3</td></tr>
+    <tr><td>Secret providers other than <code>env</code> and <code>file</code></td><td>M4</td></tr>
+    <tr><td>Row-level security policies (every table already carries <code>tenant_id</code>) and other tenants than <code>default</code></td><td>M5</td></tr>
     <tr><td>Handling after a backup restore, such as marking versions with missing chunks as lost</td><td>M3</td></tr>
-    <tr><td>The Compose profiles <code>objects</code>, <code>sso</code> and <code>observability</code>, which add nothing yet</td><td>M2 and M3</td></tr>
+    <tr><td>The Compose profiles <code>objects</code> and <code>observability</code>, and <code>sso</code>, which add nothing yet</td><td>M4, and M3 for <code>sso</code></td></tr>
   </table></div>
   <h3>Known open items</h3>
   <ul class="prose">

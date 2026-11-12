@@ -27,7 +27,7 @@ This page is the one source for milestones: scope, status, and which requirement
 | **M1: MVP, the core loop** | **Done**, 8 Nov 2026 (PR 8) | SDK, durable runtime on Postgres, JSON API and HTML dashboard, CLI and `feather dev`, generic connectors and templates, Compose | All met (§3.3) |
 | **M1.1: brought forward** | **Done**, 11 Nov 2026 (PRs 10, 15, 20–23, 25, 26 and the docs PR). The live Zakya run is deferred; readiness moved to M2 | Record trace, flow packages with the admin and operator roles, the Zakya connector, the dashboard redesign | §4 |
 | **M2: business connectors and operations** | Built: readiness ([plan 1](m2-01-readiness.md)), connectors and operations ([plan 2](m2-02-connectors-and-operations.md)), PR 30. The run in the reference organisation's qa/uat moved to the end of M3 | Readiness first (from M1.1); the Postgres connector and SAP through CPI; side effects and approvals; data rules; RBAC; alerts | §5 |
-| **M3: enterprise and v1.0** | Not started | Environment fleet view, SSO, hardening, the v1.0.0 release. Multi-tenancy stays light (ADR-0013) | §6 |
+| **M3: enterprise and v1.0** | Planned: [plan 1](m3-01-enterprise-and-v1.md) | Environment fleet view, SSO, hardening, the v1.0.0 release. Multi-tenancy stays light (ADR-0013) | §6 |
 | **M4: AI and integrations** | After v1.0 | MCP server and agent skills, Postgres CDC, metrics export, the `objects` spool, `feather diff`, SQL transforms, overrides and windows, SLA views, vaults | §7 |
 | **M5: full multi-tenancy** | After M4 | Row-level security, per-tenant config and roles, quotas, worker pools; test environments as tenants | §8 |
 | **M6: more business connectors** | Not scheduled. Moved out of M2 on 12 Nov 2026 | SAP direct (OData, HANA), Magento, GoFrugal, the retail templates, the on-prem agent and its gateway | §9 |
@@ -352,9 +352,9 @@ Where each use case (discovery §6) and functional requirement (discovery §7) l
 | **M1** | UC-01, UC-05, UC-08, UC-09, UC-11, UC-15; FR-A1–A6, FR-B1, FR-B3–B6, FR-B10, FR-C1, FR-C3, FR-D1, FR-D4, FR-E1–E4, FR-E7, FR-F1–F5, FR-G1, FR-G2, FR-G5, FR-H1, FR-I1, FR-J1, FR-J3, FR-J4, FR-K6, FR-L2, FR-M1 |
 | **M1.1** | FR-H2 (promotion by package checksum, ADR-0011), and the M1.1 parts of FR-F6, FR-J2 and FR-K2 below |
 | **M2** | UC-02, UC-03, UC-06, UC-07, UC-12, UC-14; FR-B7 and FR-D3 (readiness, moved back from M1.1), FR-B9, FR-E5, FR-F9, FR-G3, FR-K4, FR-K5, FR-M3 |
-| **M3** | UC-13; FR-F8, FR-H3, FR-H4 |
+| **M3** | FR-F8, FR-H3, FR-H4 |
 | **M4** | FR-C2, FR-C4, FR-C5, FR-F7, FR-G4, FR-L1, FR-L3, FR-M2 |
-| **M5** | FR-I2–I4 (ADR-0013) |
+| **M5** | UC-13; FR-I2–I4 (ADR-0013) |
 | **M6** | The connector parts of UC-04, FR-A7 and FR-J2 below; the on-prem agent |
 
 **Split across milestones:**
