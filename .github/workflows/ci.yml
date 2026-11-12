@@ -181,6 +181,24 @@ jobs:
           path: perf-results.jsonl
           if-no-files-found: ignore
 
+  # Every commit of a contribution from a fork is signed off under the DCO (CONTRIBUTING.md, M3 plan 1 L2).
+  dco:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Each commit has a Signed-off-by line
+        run: |
+          missing=0
+          for sha in $(git rev-list "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"); do
+            if ! git show -s --format=%B "$sha" | grep -q '^Signed-off-by: '; then
+              echo "::error::commit $sha is not signed off: git rebase --signoff main"; missing=1
+            fi
+          done
+          exit $missing
+
   # Security scans on every pull request (M3 plan 1 X1): Bandit over the product's code and pip-audit over the locked
   # dependencies. A finding of high severity fails the job; Trivy scans the images in the deploy job.
   security:

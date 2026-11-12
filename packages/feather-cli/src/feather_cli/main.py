@@ -2,6 +2,7 @@
 
 import os
 import sys
+from typing import Annotated
 
 import typer
 
@@ -32,8 +33,21 @@ app = typer.Typer(
 )
 
 
+def _version(asked: bool) -> None:
+    if asked:
+        from importlib.metadata import version
+
+        typer.echo(f"feather {version('feather-cli')}")
+        raise typer.Exit
+
+
 @app.callback()
-def main() -> None:
+def main(
+    _: Annotated[
+        bool,
+        typer.Option("--version", callback=_version, is_eager=True, help="Print the version and exit."),
+    ] = False,
+) -> None:
     # Logs go to stderr, so that stdout holds only what a command prints (one JSON document with --json).
     configure_logging(os.environ.get("FEATHER_LOG_LEVEL", "INFO"), stream=sys.stderr)
 
