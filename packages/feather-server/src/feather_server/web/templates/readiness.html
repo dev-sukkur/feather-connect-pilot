@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{{ m.page_head("Readiness", tiles, "Flows that wait for data: each period and scope they wait for, fired, waiting and for what, or late. Fire a period now, or say a partition is complete.") }}
+{{ m.notice_of(notice) }}
+{% call m.toolbar("/readiness", q, "periods", columns=[("set", "Waits for"), ("each", "Each"), ("run", "Run")], table="readiness") %}{% endcall %}
+<div id="live">
+{% if rows %}
+<div class="table-wrap scroll"><table class="data" data-table="readiness">
+  <caption class="sr-only">Periods of the flows that wait for data</caption>
+  <thead><tr><th scope="col" data-col="state" data-sort>Status</th><th scope="col" data-sort>Flow</th><th scope="col" data-sort>Period</th><th scope="col" data-sort>Scope</th><th scope="col" data-col="set">Waits for</th><th scope="col" data-col="each">Each</th><th scope="col" data-col="run">Run</th><th scope="col">Action</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    {% set tone = {"fired": "ok", "ready": "ok", "waiting": "", "late": "warn"}[r.state] %}
+    <tr>
+      <td data-col="state" data-value="{{ r.state }}"><span class="state{% if tone %} tone-{{ tone }}{% endif %}"><span class="dot" aria-hidden="true"></span>{{ r.state | capitalize }}</span></td>
+      <th scope="row"><a href="/flows/{{ r.flow | urlencode }}">{{ r.flow }}</a></th>
+      <td>{{ r.period }}</td>
+      <td>{{ r.scope or "all" }}</td>
+      <td data-col="set">{% if r.state == "waiting" %}{{ r.waiting_for or "its data" }}{% else %}{{ r.datasets | join(", ") }}{% endif %}</td>
+      <td data-col="each">{{ r.each }}</td>
+      <td data-col="run">{% if r.run_id %}<a href="/runs/{{ r.run_id }}">{{ r.run_id[:8] }}</a>{% if r.reason and r.reason != "ready" %} <span class="muted">({{ r.reason }})</span>{% endif %}{% endif %}</td>
+      <td>{% if r.state in ("waiting", "ready", "late") and actor and can(actor, "readiness.fire") and not r.period.startswith("run:") %}
+        <form method="post" action="/readiness/fire" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="flow" value="{{ r.flow }}">
+          <input type="hidden" name="period" value="{{ r.period }}">
+          <input type="hidden" name="scope" value="{{ r.scope }}">
+          <label class="sr-only" for="fire-reason-{{ loop.index }}">Reason to fire {{ r.flow }} for {{ r.period }} {{ r.scope }}</label>
+          <input id="fire-reason-{{ loop.index }}" name="reason" type="text" maxlength="500" required placeholder="Reason">
+          <button type="submit">Fire now</button>
+        </form>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{{ m.table_foot(rows | length, "period", "periods") }}
+{% elif sets %}
+<p class="empty">No periods to show yet. A set split by a field shows a scope once one of its datasets has a version for it.</p>
+{% else %}
+<p class="empty">No active flow waits for data. Give a flow <code>fc.on_ready(...)</code> to start one when its data is complete.</p>
+{% endif %}
+</div>
+{% if datasets and actor and can(actor, "partitions.close") %}
+<section aria-labelledby="close-title">
+  <h2 id="close-title">Close a partition</h2>
+  <p class="muted">Say that a partition is complete, for example when the till closes the store-day. It is ready once its last version is sealed. Kept in the audit log.</p>
+  <form method="post" action="/readiness/close">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p><label for="close-dataset">Dataset</label><br>
+      <select id="close-dataset" name="dataset">{% for d in datasets %}<option value="{{ d }}">{{ d }}</option>{% endfor %}</select></p>
+    <p><label for="close-partition">Partition</label><br>
+      <input id="close-partition" name="partition" type="text" maxlength="500" required placeholder="store_id=1509/date=2026-11-08"></p>
+    <p><label for="close-reason">Reason</label><br>
+      <input id="close-reason" name="reason" type="text" maxlength="500" required></p>
+    <p><button type="submit">Close partition</button></p>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

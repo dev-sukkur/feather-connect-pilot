@@ -71,6 +71,7 @@ NAV: list[NavItem] = [
     NavItem("Flows", "/flows", "flows"),
     NavItem("Runs", "/runs", "runs", ("/tasks",)),
     NavItem("Datasets", "/datasets", "datasets", ("/versions",)),
+    NavItem("Readiness", "/readiness", "readiness"),
     NavItem("Deliveries", "/deliveries", "deliveries", ("/routes",)),
     NavItem("Failures", "/failures", "failures"),
     NavItem("Quarantine", "/quarantine", "quarantine"),
@@ -1707,6 +1708,91 @@ def datasets(request: Request, actor: CurrentActor) -> HTMLResponse:
         tiles=tiles,
         q=q,
     )
+
+
+_READY_NOTICES = {
+    "closed": "The partition is closed: what waits for it can fire once its last version is sealed."
+}
+
+
+def _readiness_page(
+    request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
+) -> HTMLResponse:
+    sets = actions(request).readiness()
+    q = request.query_params.get("q", "")[:200]
+    rows = [
+        {**row, "flow": s["flow"], "set": s["set"], "each": s["each"], "datasets": s["datasets"]}
+        for s in sets
+        for row in s["periods"]
+        if _matches(q, s["flow"], row["period"], row["scope"], *s["datasets"])
+    ]
+    counts = {
+        state: sum(1 for r in rows if r["state"] == state) for state in ("waiting", "ready", "fired", "late")
+    }
+    tiles = [
+        Tile("Waiting flows", len(sets)),
+        Tile("Waiting", counts["waiting"]),
+        Tile("Fired", counts["fired"]),
+        Tile("Late", counts["late"], "warn" if counts["late"] else ""),
+    ]
+    fired = request.query_params.get("fired")
+    done = request.query_params.get("done")
+    if notice is None and fired:
+        notice = ("ok", f"Fired: run {fired} is queued.")
+    elif notice is None and done in _READY_NOTICES:
+        notice = ("ok", _READY_NOTICES[done])
+    datasets = sorted({d for s in sets for d in s["datasets"]})
+    return render(
+        request,
+        "readiness.html",
+        status=status,
+        title="Readiness",
+        actor=actor,
+        rows=rows,
+        sets=sets,
+        datasets=datasets,
+        tiles=tiles,
+        q=q,
+        notice=notice,
+    )
+
+
+@router.get("/readiness", response_class=HTMLResponse)
+def readiness(request: Request, actor: CurrentActor) -> HTMLResponse:
+    return _readiness_page(request, actor)
+
+
+@router.post("/readiness/fire", dependencies=[Depends(require_csrf)])
+def readiness_fire(
+    request: Request,
+    actor: CurrentActor,
+    flow: Annotated[str, Form(max_length=500)],
+    period: Annotated[str, Form(max_length=100)] = "",
+    scope: Annotated[str, Form(max_length=500)] = "",
+    reason: Reason = "",
+) -> Response:
+    try:
+        run_id = actions(request).fire_ready(actor, flow, period=period, scope=scope, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No waiting flow named {flow!r}.")
+    except (ValueError, FlowPaused) as error:
+        return _readiness_page(request, actor, status=422, notice=("bad", str(error)))
+    return RedirectResponse(f"/readiness?{urlencode({'fired': run_id})}", status_code=303)
+
+
+@router.post("/readiness/close", dependencies=[Depends(require_csrf)])
+def readiness_close(
+    request: Request,
+    actor: CurrentActor,
+    dataset: Annotated[str, Form(max_length=500)],
+    partition: Annotated[str, Form(max_length=500)] = "",
+    reason: Reason = "",
+) -> Response:
+    try:
+        actions(request).close_partition(actor, dataset, partition.strip(), reason=_reason(reason))
+    except ValueError as error:
+        return _readiness_page(request, actor, status=422, notice=("bad", str(error)))
+    return RedirectResponse("/readiness?done=closed", status_code=303)
 
 
 @router.get("/deliveries", response_class=HTMLResponse)
