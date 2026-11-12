@@ -1256,6 +1256,23 @@ class _Ledger(Ledger):
             ).fetchall()
         return [_delivery(r) for r in rows]
 
+    def last_applied(self, route: str, partition: str, dataset: str, before_seq: int) -> Delivery | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select * from feather.delivery
+                   where tenant_id = %(tenant)s and route = %(route)s and partition = %(partition)s
+                     and dataset = %(dataset)s and status = 'applied' and seal_seq < %(before)s
+                   order by seal_seq desc limit 1""",
+                {
+                    "tenant": self._db.tenant,
+                    "route": route,
+                    "partition": partition,
+                    "dataset": dataset,
+                    "before": before_seq,
+                },
+            ).fetchone()
+        return None if row is None else _delivery(row)
+
     def count_by_status(
         self, routes: Sequence[str], statuses: Sequence[DeliveryStatus]
     ) -> dict[tuple[str, DeliveryStatus], int]:

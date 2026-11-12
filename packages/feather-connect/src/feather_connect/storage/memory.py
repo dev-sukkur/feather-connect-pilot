@@ -846,6 +846,19 @@ class _Ledger(Ledger):
         ]
         return found[:limit]
 
+    def last_applied(self, route: str, partition: str, dataset: str, before_seq: int) -> Delivery | None:
+        with self._d.lock:
+            found = [
+                d
+                for d in self._d.deliveries.values()
+                if d.route == route
+                and d.partition == partition
+                and d.dataset == dataset
+                and d.status == "applied"
+                and d.seal_seq < before_seq
+            ]
+        return max(found, key=lambda d: d.seal_seq, default=None)
+
     def count_by_status(
         self, routes: Sequence[str], statuses: Sequence[DeliveryStatus]
     ) -> dict[tuple[str, DeliveryStatus], int]:

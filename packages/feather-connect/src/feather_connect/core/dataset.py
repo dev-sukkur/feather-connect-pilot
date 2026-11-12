@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from feather_connect.core.connector import PushSource, Source
 from feather_connect.core.partitions import PartitionScheme, none
+from feather_connect.core.schema_policy import SchemaPolicy
 from feather_connect.core.strategies import Strategy
 from feather_connect.storage.port import Priority
 
@@ -27,7 +28,8 @@ class Dataset:
     `keep_state` keeps the latest state of every record, which allows moves between partitions to be
     noticed. `schema` is the shape records are checked against. A record that fails is quarantined, or
     fails the whole version when `on_record_error` is `"fail"`. A complete read that returns no rows fails
-    unless `allow_empty` is set. `priority` is the share of a shared budget its reads may use.
+    unless `allow_empty` is set. `priority` is the share of a shared budget its reads may use. `schema_policy` says
+    which changes of its fields hold a delivery (`feather_connect.core.schema_policy`); a route's overrides it.
     """
 
     name: str
@@ -42,3 +44,4 @@ class Dataset:
     on_record_error: OnRecordError = "quarantine"
     allow_empty: bool = False
     planner: Callable[[datetime], list[str]] | None = None
+    schema_policy: SchemaPolicy = "default"

@@ -14,6 +14,7 @@ from feather_connect.core.dataset import Dataset
 from feather_connect.core.partitions import none
 from feather_connect.core.readiness import OnReady, dataset_spec
 from feather_connect.core.records import Record
+from feather_connect.core.schema_policy import SchemaPolicy
 from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Trigger, is_stream
 from feather_connect.storage.port import Priority
 
@@ -45,6 +46,11 @@ class RouteSpec:
     mode: RouteMode
     priority: Priority
     approval: Approval | None = None  # holds a delivery for an approver (design §5.3)
+    schema_policy: SchemaPolicy | None = None  # the dataset's when None (design §4.7)
+
+
+def _policy_name(policy: SchemaPolicy) -> str:
+    return policy if isinstance(policy, str) else "custom"
 
 
 def to(
@@ -55,14 +61,17 @@ def to(
     priority: Priority = "normal",
     name: str | None = None,
     approval: Approval | None = None,
+    schema_policy: SchemaPolicy | None = None,
 ) -> RouteSpec:
     """Return a route that delivers to `sink`.
 
     The route is named after the sink's connection unless `name` says otherwise, so two routes to one
     connection need a name each. `approval` (`fc.approval.when(...)`) holds a delivery with a record that needs one
-    until an approver decides.
+    until an approver decides. `schema_policy` overrides the datasets' for this route.
     """
-    return RouteSpec(sink.connection if name is None else name, sink, map, mode, priority, approval)
+    return RouteSpec(
+        sink.connection if name is None else name, sink, map, mode, priority, approval, schema_policy
+    )
 
 
 @dataclass(frozen=True)
@@ -225,6 +234,11 @@ class Flow:
                     "connector": d.source.spec.name,
                     "key": [d.key] if isinstance(d.key, str) else list(d.key),
                     "strategy": d.strategy.name,
+                    **(
+                        {"schema_policy": _policy_name(d.schema_policy)}
+                        if d.schema_policy != "default"
+                        else {}
+                    ),
                     "complete": d.strategy.complete,
                     "priority": d.priority,
                     "keep_state": d.keep_state,
@@ -241,6 +255,11 @@ class Flow:
                     "mode": r.mode,
                     "priority": r.priority,
                     **({"approval": r.approval.spec()} if r.approval is not None else {}),
+                    **(
+                        {"schema_policy": _policy_name(r.schema_policy)}
+                        if r.schema_policy is not None
+                        else {}
+                    ),
                 }
                 for r in self.routes
             ],

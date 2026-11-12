@@ -871,6 +871,20 @@ class StoreContract(
         rest = store.ledger.list_deliveries(cursor=delivery_cursor(first[-1]))
         assert first + rest == everything and len(rest) == 1
 
+    def test_last_applied_is_the_newest_applied_before_a_seal(self, store: Store):  # M2 plan 2 D1
+        for vid in ("v1", "v2", "v3"):
+            seal(store, vid, ["a"], part="p")
+        seal(store, "w1", ["a"], part="q")
+        for vid in ("v1", "v2", "w1"):
+            store.ledger.transition("a", vid, "running", actor="t")
+            store.ledger.transition("a", vid, "applied", actor="t")
+        v3 = store.ledger.get("a", "v3")
+        found = store.ledger.last_applied("a", "p", "d", v3.seal_seq)
+        assert found is not None and found.version_id == "v2"
+        v1 = store.ledger.get("a", "v1")
+        assert store.ledger.last_applied("a", "p", "d", v1.seal_seq) is None
+        assert store.ledger.last_applied("a", "p", "other", v3.seal_seq) is None
+
     def test_all_applied(self, store: Store):
         assert store.ledger.all_applied()
         seal(store, "v1", ["a"])

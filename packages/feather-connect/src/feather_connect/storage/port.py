@@ -550,6 +550,11 @@ class Ledger(Protocol):
         """In seal order. Pass `delivery_cursor(last)` as `cursor` to continue after `last`."""
         ...
 
+    def last_applied(self, route: str, partition: str, dataset: str, before_seq: int) -> Delivery | None:
+        """The latest delivery of `dataset` on the route's partition sealed before `before_seq` that is applied, or
+        None. The schema policy compares with it (M2 plan 2 D1)."""
+        ...
+
     def count_by_status(
         self, routes: Sequence[str], statuses: Sequence[DeliveryStatus]
     ) -> dict[tuple[str, DeliveryStatus], int]:

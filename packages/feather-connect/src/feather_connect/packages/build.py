@@ -59,6 +59,7 @@ PLATFORM_DISTRIBUTIONS = (
     "feather-postgres",
     "feather-retail",
     "feather-s3",
+    "feather-sap-cpi",
     "feather-server",
     "feather-zakya",
 )

@@ -5,6 +5,7 @@ numbers, never records. Each chunk reaches the sink under a key that names the c
 after a crash or a retry can't apply it twice. A replay of a delivery has a new key, and reaches the sink again.
 """
 
+import json
 import logging
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -15,6 +16,7 @@ from itertools import count
 from typing import Any, cast
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from feather_connect.core.approval import APPROVED
 from feather_connect.core.connector import ApplyBatch, ApplyRecord, ApplyResult, Key, RecordResponse
@@ -23,6 +25,7 @@ from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import BudgetDeferred, PermanentError, TransientError
 from feather_connect.core.flow import BatchMap, RouteSpec
 from feather_connect.core.records import Op, Record, canonical_json, decode_key
+from feather_connect.core.schema_policy import NULL, SCHEMA_CHANGE, judge
 from feather_connect.core.transforms import apply_map, is_batch_map
 from feather_connect.engine.port import RetryPolicy, TaskContext
 from feather_connect.logs import redact
@@ -37,7 +40,7 @@ from feather_connect.storage.port import (
     delivery_cursor,
     is_paused,
 )
-from feather_connect.storage.spool import ChunkKind, table_to_records
+from feather_connect.storage.spool import JSON_COLUMNS_KEY, ChunkKind, table_to_records
 
 log = logging.getLogger(__name__)
 
@@ -591,12 +594,90 @@ def _step_durably[T](ctx: TaskContext, name: str, fn: Callable[[], T], retry: Re
             ctx.sleep(max(wait, timedelta(seconds=asked)) if asked is not None else wait)
 
 
-def approved(route: str, version_id: str, deps: RuntimeDeps) -> bool:
-    """Whether an approver approved the delivery: a move from held to pending that says so."""
-    return any(
-        a.from_status == "held" and a.to_status == "pending" and (a.reason or "").startswith(APPROVED)
-        for a in deps.store.ledger.attempts(route, version_id)
+def _hold_kind(reason: str | None) -> str:
+    return SCHEMA_CHANGE if (reason or "").startswith(SCHEMA_CHANGE) else "approval"
+
+
+def approved(route: str, version_id: str, deps: RuntimeDeps, kind: str = "approval") -> bool:
+    """Whether an approver let the delivery go from a hold of `kind` ("approval" or "schema_change"): a move from
+    held to pending that says so, after a hold of that kind. Each hold needs its own decision."""
+    held: str | None = None
+    for a in deps.store.ledger.attempts(route, version_id):
+        if a.to_status == "held":
+            held = _hold_kind(a.reason)
+        elif a.from_status == "held" and a.to_status == "pending" and (a.reason or "").startswith(APPROVED):
+            if held == kind:
+                return True
+    return False
+
+
+_FIELDS: dict[str, dict[str, str] | None] = {}  # by version id: a sealed version's chunks never change
+_FIELDS_KEPT = 512
+
+
+def version_fields(version_id: str, deps: RuntimeDeps) -> dict[str, str] | None:
+    """The fields of the version's upserted records and their Arrow types (`null` for one null in all of them), or
+    None when it upserts nothing or its chunks are gone, which tells nothing of its schema."""
+    if version_id in _FIELDS:
+        return _FIELDS[version_id]
+    found: dict[str, str] = {}
+    try:
+        for ref in deps.spool.list_chunks(version_id):
+            table = deps.spool.get_chunk(version_id, ref.chunk_no)
+            upserts = table.filter(pc.not_equal(table.column("_fc_op"), "delete"))  # pyright: ignore[reportAttributeAccessIssue]
+            if not upserts.num_rows:
+                continue
+            metadata = table.schema.metadata or {}
+            json_columns = set(json.loads(metadata.get(JSON_COLUMNS_KEY.encode(), b"[]")))
+            for column in upserts.schema:
+                if column.name.startswith("_fc_"):
+                    continue
+                if upserts.column(column.name).null_count == upserts.num_rows:
+                    typed = NULL
+                else:
+                    typed = "json" if column.name in json_columns else str(column.type)
+                if found.get(column.name, NULL) == NULL:
+                    found[column.name] = typed
+    except KeyError:
+        return None
+    fields = found or None
+    if len(_FIELDS) >= _FIELDS_KEPT:
+        _FIELDS.pop(next(iter(_FIELDS)))
+    _FIELDS[version_id] = fields
+    return fields
+
+
+def _hold_for_schema(dataset: Dataset, route: RouteSpec, delivery: Delivery, deps: RuntimeDeps) -> bool:
+    """Hold the delivery when its fields changed from the last version the route applied in a way the policy holds
+    on (design §4.7, H12), unless an approver let it go; say whether it is held."""
+    policy = route.schema_policy if route.schema_policy is not None else dataset.schema_policy
+    ledger, version_id = deps.store.ledger, delivery.version_id
+    if policy == "permissive":
+        return False
+    if ledger.get(route.name, version_id).status == "held":
+        return True  # a step run again
+    if approved(route.name, version_id, deps, SCHEMA_CHANGE):
+        return False
+    last = ledger.last_applied(route.name, delivery.partition, delivery.dataset, delivery.seal_seq)
+    if last is None:
+        return False
+    before, after = version_fields(last.version_id, deps), version_fields(version_id, deps)
+    if before is None or after is None:
+        return False
+    why = judge(policy, before, after)
+    if why is None:
+        return False
+    _resume(delivery, "apply started", deps)
+    ledger.transition(
+        route.name,
+        version_id,
+        "held",
+        actor=_ACTOR,
+        reason=f"{why} (against version {last.version_id})",
+        code_sha=deps.code_sha,
     )
+    log.info("route %s, version %s: held for a schema change", route.name, version_id)
+    return True
 
 
 def _hold_for_approval(route: RouteSpec, delivery: Delivery, deps: RuntimeDeps) -> bool:
@@ -639,6 +720,9 @@ def _deliver(
     version_id = delivery.version_id
     totals: list[_Counts] = []
     try:
+        schema = partial(_hold_for_schema, dataset, route, delivery, deps)
+        if _step_durably(ctx, f"schema:{version_id}", schema, deps.retry):
+            return False
         if route.approval is not None:
             hold = partial(_hold_for_approval, route, delivery, deps)
             if _step_durably(ctx, f"approval:{version_id}", hold, deps.retry):
