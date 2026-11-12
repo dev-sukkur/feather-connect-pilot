@@ -27,7 +27,7 @@ from feather_server.api.errors import ApiProblem, translate
 from feather_server.api.paging import check_limit, decode, page
 from feather_server.auth import Actor, CurrentActor, require_csrf
 from feather_server.catalog_view import dataset_of, route_of
-from feather_server.services import pii
+from feather_server.services import diff, pii
 from feather_server.services import task_records as records
 from feather_server.services.access import require
 from feather_server.services.accounts import Accounts
@@ -742,6 +742,32 @@ def version_records(
     return ok(
         call(lambda: _version_records(request, who, version_id, check_limit(limit), decode(cursor), unmask))
     )
+
+
+@router.get("/versions/{version_id}/diff")
+def version_diff(
+    version_id: str,
+    request: Request,
+    who: CurrentActor,
+    against: Annotated[
+        str | None,
+        Query(description="The version to compare with; the partition's one before, if not given."),
+    ] = None,
+    unmask: Unmask = False,
+) -> JSONResponse:
+    """The keys this version added, removed and changed against another of its partition, with the changed fields."""
+
+    def read() -> dict[str, Any]:
+        state = request.app.state.feather
+        version = state.store.versions.get(version_id)
+        shown = pii.masking(state, who, version.dataset, unmask=unmask, target=f"version:{version_id}")
+        try:
+            found = diff.diff_versions(state, version_id, against, hidden=shown.hidden)
+        except diff.NotComparable as error:
+            raise ApiProblem(422, "Unprocessable Content", str(error)) from None
+        return {**diff.as_json(found), **pii.as_json(shown)}
+
+    return ok(call(read))
 
 
 # Tracing a record.

@@ -53,6 +53,7 @@ def test_openapi_is_3_1_and_lists_every_endpoint(api: TestClient) -> None:
         "/flows/{flow}:backfill:preview",
         "/versions/{version_id}",
         "/versions/{version_id}/records",
+        "/versions/{version_id}/diff",
         "/routes/{route}/deliveries",
         "/deliveries:retry",
         "/deliveries:skip",

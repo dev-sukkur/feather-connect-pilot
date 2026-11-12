@@ -85,6 +85,23 @@ def test_logs_print_a_run_task_logs(cli: Callable[..., Result], server: Served) 
     assert doc["run_id"] == run_id and doc["tasks"] and all("lines" in t for t in doc["tasks"])
 
 
+def test_trace_and_diff_print_a_records_story_and_a_versions_changes(
+    cli: Callable[..., Result], server: Served
+) -> None:  # M2 plan 2 O4 and O5
+    object.__setattr__(server.world.state.runtime.dataset("orders"), "pii", ("date",))
+    server.world.run([day(18)])
+    version = server.world.store.versions.latest_sealed("orders", day(18))
+    assert version is not None
+    r = cli("trace", "orders", "181", *_at(server))
+    assert r.exit_code == 0, r.output
+    assert "PII masked: date" in r.stdout and version.version_id in r.stdout
+    r = cli("diff", version.version_id, *_at(server))
+    assert r.exit_code == 0, r.output
+    assert "2 added" in r.stdout and "+ 181" in r.stdout and "+ 182" in r.stdout
+    refused = cli("diff", version.version_id, "--unmask", *_at(server))
+    assert refused.exit_code != 0 and "pii-reader" in refused.output
+
+
 def test_backfill_dry_run_prints_the_impact_and_changes_nothing(
     cli: Callable[..., Result], server: Served
 ) -> None:

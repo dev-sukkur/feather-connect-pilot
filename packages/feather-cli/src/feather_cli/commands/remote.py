@@ -1,4 +1,5 @@
-"""Commands that call a server: `status`, `runs`, `logs`, `backfill`, `replay`, and `run` without `--local`.
+"""Commands that call a server: `status`, `runs`, `logs`, `trace`, `diff`, `backfill`, `replay`, and `run` without
+`--local`.
 
 The server's URL and token come from `--server` and `--token`, then `FEATHER_SERVER` and `FEATHER_TOKEN`, then the
 `server:` entry of `env/<env>.yaml` (`url`, and `token` as a secret reference). A mass action shows its preview and
@@ -195,6 +196,89 @@ def logs(
                 typer.echo(line)
 
     emit({"run_id": run_id, "tasks": tasks}, json_mode=json_mode, human=human)
+
+
+Unmask = Annotated[
+    bool,
+    typer.Option("--unmask", help="Show PII fields as they are: needs the pii-reader grant, and is audited."),
+]
+
+
+def _masked(doc: dict[str, Any]) -> None:
+    if doc.get("masked"):
+        typer.echo(f"PII masked: {', '.join(doc['pii'])} (--unmask to see them)")
+
+
+def trace(
+    dataset: Annotated[str, typer.Argument(help="The dataset.")],
+    key: Annotated[str, typer.Argument(help="The record's key.")],
+    unmask: Unmask = False,
+    project: ProjectDir = Path("."),
+    env: Env = "dev",
+    server: Server = None,
+    token: Token = None,
+    json_mode: Json = False,
+) -> None:
+    """What happened to one record: each version that held it, oldest first, and what each route did with it."""
+    with client(project, env, server, token, json_mode) as api:
+        found = call(lambda: api.trace(dataset, key, unmask=unmask), json_mode)
+
+    def human(doc: dict[str, Any]) -> None:
+        _masked(doc)
+        for v in doc["versions"]:
+            typer.echo(f"{v['sealed_at']}  {v['version_id']}  {v['op']:<9} {v['partition']}")
+            for c in v["changes"]:
+                typer.echo(f"    {c['field']}: {c['before']!r} -> {c['after']!r}")
+            for d in v["deliveries"]:
+                typer.echo(
+                    f"    -> {d['route']}: {d['status']}"
+                    + (f" ({d['last_error']})" if d["last_error"] else "")
+                )
+        if not doc["versions"]:
+            typer.echo("no version holds this key")
+
+    emit(found, json_mode=json_mode, human=human)
+
+
+def diff(
+    version_id: Annotated[str, typer.Argument(help="The version.")],
+    against: Annotated[
+        str | None,
+        typer.Option(
+            "--against",
+            help="The version to compare with; the one before it if not given.",
+            show_default=False,
+        ),
+    ] = None,
+    unmask: Unmask = False,
+    project: ProjectDir = Path("."),
+    env: Env = "dev",
+    server: Server = None,
+    token: Token = None,
+    json_mode: Json = False,
+) -> None:
+    """The keys a version added, removed and changed against another of its partition, with the changed fields."""
+    with client(project, env, server, token, json_mode) as api:
+        found = call(lambda: api.version_diff(version_id, against, unmask=unmask), json_mode)
+
+    def human(doc: dict[str, Any]) -> None:
+        _masked(doc)
+        counts = doc["counts"]
+        typer.echo(
+            f"{doc['before'] or 'nothing'} -> {doc['after']}: {counts['added']} added, {counts['changed']} changed, "
+            f"{counts['removed']} removed, {doc['unchanged']} unchanged"
+            + (" (truncated)" if doc["truncated"] else "")
+        )
+        for k in doc["added"]:
+            typer.echo(f"+ {k}")
+        for c in doc["changed"]:
+            typer.echo(f"~ {c['key']}")
+            for f in c["fields"]:
+                typer.echo(f"    {f['field']}: {f['before']!r} -> {f['after']!r}")
+        for k in doc["removed"]:
+            typer.echo(f"- {k}")
+
+    emit(found, json_mode=json_mode, human=human)
 
 
 # Actions.

@@ -35,7 +35,7 @@ from feather_server.api.paging import decode, encode
 from feather_server.auth import Actor, CurrentActor, csrf_token, current_actor, require_csrf
 from feather_server.catalog_view import dataset_of, route_of
 from feather_server.services import actions as action_limits
-from feather_server.services import pii
+from feather_server.services import diff, pii
 from feather_server.services.access import Capability, Forbidden, can
 from feather_server.services.accounts import Accounts
 from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
@@ -1419,6 +1419,42 @@ def version_detail(
         rows=rows,
         next_cursor=encode(next_raw),
         first_page=not cursor,
+        pii=shown,
+        unmask_href=_unmask_href(request),
+    )
+
+
+@router.get("/versions/{version_id}/diff", response_class=HTMLResponse)
+def version_diff(request: Request, actor: CurrentActor, version_id: str, against: str = "") -> HTMLResponse:
+    """What a version added, removed and changed against the partition's one before it, or `against`."""
+    state = request.app.state.feather
+    try:
+        version = state.store.versions.get(version_id)
+    except KeyError:
+        return _not_found(request, f"No version {version_id!r}.")
+    shown = _masking(request, actor, version.dataset, f"version:{version_id}")
+    if not isinstance(shown, pii.Masking):
+        return shown
+    try:
+        found = diff.diff_versions(state, version_id, against or None, hidden=shown.hidden)
+    except KeyError:
+        return _not_found(request, f"No version {against!r}.")
+    except diff.NotComparable as error:
+        return render(request, "error.html", status=422, title="Not comparable", message=str(error))
+    counts = found.counts
+    tiles = [
+        Tile("Added", counts["added"], "ok" if counts["added"] else ""),
+        Tile("Changed", counts["changed"], "warn" if counts["changed"] else ""),
+        Tile("Removed", counts["removed"], "bad" if counts["removed"] else ""),
+        Tile("Unchanged", found.unchanged),
+    ]
+    return render(
+        request,
+        "version_diff.html",
+        title=f"Diff of {version.dataset}",
+        actor=actor,
+        diff=found,
+        tiles=tiles,
         pii=shown,
         unmask_href=_unmask_href(request),
     )

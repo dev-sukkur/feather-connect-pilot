@@ -52,7 +52,15 @@ app.add_typer(holds.holds_app, name="holds")
 app.add_typer(deliveries.deliveries_app, name="deliveries")
 app.command()(run.run)
 app.command("test")(test_command.test)
-for command in (remote.status, remote.runs, remote.logs, remote.backfill, remote.replay):
+for command in (
+    remote.status,
+    remote.runs,
+    remote.logs,
+    remote.trace,
+    remote.diff,
+    remote.backfill,
+    remote.replay,
+):
     app.command()(command)
 app.add_typer(processes.server_app, name="server")
 app.command()(processes.worker)

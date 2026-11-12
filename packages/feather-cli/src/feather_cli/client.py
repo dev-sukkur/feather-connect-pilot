@@ -135,6 +135,16 @@ class ApiClient:
     def task_logs(self, task_id: str) -> list[str]:
         return self._call("GET", f"/tasks/{task_id}/logs")["lines"]
 
+    def trace(self, dataset: str, key: str, *, unmask: bool = False) -> dict[str, Any]:
+        path = f"/datasets/{quote(dataset, safe='/')}/records/{quote(key, safe='')}/trace"
+        return self._call("GET", path, params={"unmask": unmask or None})
+
+    def version_diff(
+        self, version_id: str, against: str | None = None, *, unmask: bool = False
+    ) -> dict[str, Any]:
+        params = {"against": against, "unmask": unmask or None}
+        return self._call("GET", f"/versions/{quote(version_id, safe='')}/diff", params=params)
+
     # Actions.
 
     def start_run(

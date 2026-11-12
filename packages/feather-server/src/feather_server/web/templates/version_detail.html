@@ -4,7 +4,7 @@
 {% block content %}
 <h1>Version of {{ m.partition_label(v.dataset, v.partition) }}</h1>
 {% include "_pii.html" %}
-<p><a href="/datasets/{{ v.dataset | urlencode }}/partitions">&larr; The partitions of {{ v.dataset }}</a></p>
+<p><a href="/datasets/{{ v.dataset | urlencode }}/partitions">&larr; The partitions of {{ v.dataset }}</a>{% if v.seal_seq is not none %} &middot; <a href="/versions/{{ v.version_id | urlencode }}/diff">What it changed</a>{% endif %}</p>
 
 <section aria-labelledby="h-facts">
   <h2 id="h-facts">Version</h2>
