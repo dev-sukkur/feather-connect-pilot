@@ -1,0 +1,43 @@
+name: Docs
+
+# The documentation site (M3 plan 1 L1). On a pull request it is built strictly and its examples run (NFR-14); on main
+# it is also published to GitHub Pages, once the repository variable FEATHER_DOCS_PAGES is "true" and Pages is set to
+# deploy from GitHub Actions (an open question for the sponsor).
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uv sync --all-extras
+      - name: The site builds, and its examples run
+        run: uv run pytest tests/docs -q
+      - run: uv run python site-docs/build.py && uv run mkdocs build --strict
+      - if: github.event_name != 'pull_request' && vars.FEATHER_DOCS_PAGES == 'true'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: build/site
+
+  publish:
+    if: github.event_name != 'pull_request' && vars.FEATHER_DOCS_PAGES == 'true'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
