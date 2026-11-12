@@ -15,7 +15,6 @@ from types import ModuleType
 from typing import Any
 
 import pytest
-
 import uvicorn
 
 from feather_connect.clock import FrozenClock
