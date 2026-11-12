@@ -1738,6 +1738,20 @@ class Firing:
     run_id: str | None = None
 
 
+@dataclass(frozen=True)
+class SealedPartition:
+    """A partition's sealed version as readiness reads it: with its run's status and when the run was made, which is
+    no later than when it started to read (design §4)."""
+
+    partition: str
+    version_id: str
+    seal_seq: int
+    run_id: str
+    run_status: str
+    run_created_at: datetime
+    sealed_at: datetime
+
+
 class ReadinessStore(Protocol):
     """Closed partitions and firings (readiness design §7.2). What is sealed and applied is read from the versions and
     the ledger, which already hold it."""
@@ -1758,6 +1772,23 @@ class ReadinessStore(Protocol):
 
     def firings(self, flow: str, ready_set: str | None = None, limit: int = 200) -> list[Firing]:
         """The flow's firings, newest first."""
+        ...
+
+    def latest_sealed(self, dataset: str, since: datetime) -> dict[str, SealedPartition]:
+        """By partition, the newest sealed version of each partition of `dataset` that had a version sealed at `since`
+        or later."""
+        ...
+
+    def sealed_since(self, dataset: str, since: datetime) -> list[SealedPartition]:
+        """Every version of `dataset` sealed at `since` or later, in seal order: what `each="run"` groups by run."""
+        ...
+
+    def open_deliveries(self, route: str, dataset: str) -> dict[str, int]:
+        """By partition, the lowest `seal_seq` of the route's deliveries of `dataset` that aren't closed (`CLOSED`)."""
+        ...
+
+    def oldest_unsealed(self, dataset: str) -> datetime | None:
+        """When the oldest event of a push dataset that is neither sealed nor held arrived, or None."""
         ...
 
 

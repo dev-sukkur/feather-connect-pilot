@@ -75,6 +75,7 @@ from feather_connect.storage.port import (
     Run,
     RunJournal,
     ScheduleStore,
+    SealedPartition,
     SealedSecret,
     SecretStore,
     SliceFinished,
@@ -1938,9 +1939,10 @@ class _Reads(ReadStore):
 
 
 class _Readiness(ReadinessStore):
-    def __init__(self, data: _Data, runs: RunJournal) -> None:
+    def __init__(self, data: _Data, runs: RunJournal, inbox: "_Inbox") -> None:
         self._d = data
         self._runs = runs
+        self._inbox = inbox
         self._closes: dict[tuple[str, str], PartitionClose] = {}
         self._firings: dict[tuple[str, str, str, str, int], Firing] = {}
 
@@ -1973,6 +1975,42 @@ class _Readiness(ReadinessStore):
         found.sort(key=lambda f: (f.fired_at, f.seq), reverse=True)
         return found[: max(0, min(limit, 1000))]
 
+    def _sealed(self, v: Version) -> SealedPartition:
+        run = self._d.runs[v.run_id]
+        assert v.seal_seq is not None and v.sealed_at is not None
+        return SealedPartition(
+            v.partition, v.version_id, v.seal_seq, v.run_id, run.status, run.created_at, v.sealed_at
+        )
+
+    def _sealed_of(self, dataset: str) -> list[Version]:
+        found = [v for v in self._d.versions.values() if v.dataset == dataset and v.status == "sealed"]
+        return sorted(found, key=lambda v: v.seal_seq or 0)
+
+    def latest_sealed(self, dataset: str, since: datetime) -> dict[str, SealedPartition]:
+        with self._d.lock:
+            versions = self._sealed_of(dataset)
+            recent = {v.partition for v in versions if v.sealed_at is not None and v.sealed_at >= since}
+            return {v.partition: self._sealed(v) for v in versions if v.partition in recent}  # the last wins
+
+    def sealed_since(self, dataset: str, since: datetime) -> list[SealedPartition]:
+        with self._d.lock:
+            return [
+                self._sealed(v)
+                for v in self._sealed_of(dataset)
+                if v.sealed_at is not None and v.sealed_at >= since
+            ]
+
+    def open_deliveries(self, route: str, dataset: str) -> dict[str, int]:
+        found: dict[str, int] = {}
+        with self._d.lock:
+            for d in self._d.deliveries.values():
+                if d.route == route and d.dataset == dataset and d.status not in CLOSED:
+                    found[d.partition] = min(found.get(d.partition, d.seal_seq), d.seal_seq)
+        return found
+
+    def oldest_unsealed(self, dataset: str) -> datetime | None:
+        return self._inbox.oldest_unsealed(dataset)
+
 
 @dataclass
 class _InboxRow:
@@ -1989,6 +2027,15 @@ class _Inbox(InboxStore):
         self._rows: dict[int, _InboxRow] = {}
         self._seen: dict[tuple[str, str], date] = {}
         self._seq = 0
+
+    def oldest_unsealed(self, dataset: str) -> datetime | None:
+        with self._d.lock:
+            found = [
+                r.event.received_at
+                for r in self._rows.values()
+                if r.event.dataset == dataset and r.sealed_at is None and not r.held
+            ]
+        return min(found, default=None)
 
     def ensure_partitions(self, days_ahead: int = 7) -> None:
         """Memory needs no partitions."""
@@ -2143,5 +2190,5 @@ class MemoryStore(Store):
             env_config=_EnvConfig(data),
             secrets=_Secrets(data),
             webhooks=_Webhooks(data, inbox),
-            readiness=_Readiness(data, runs),
+            readiness=_Readiness(data, runs, inbox),
         )

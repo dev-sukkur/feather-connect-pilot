@@ -1970,6 +1970,41 @@ class StoreContract(
             store.readiness.firings("acme/post", "other") == [] and store.readiness.firings("acme/else") == []
         )
 
+    def test_readiness_reads_the_newest_sealed_version_of_each_partition_and_what_is_open(self, store: Store):
+        first = store.runs.create_run("f", "manual", "t", {})
+        second = store.runs.create_run("f", "manual", "t", {})
+        store.runs.set_run_status(first, "succeeded")
+        seal(store, "v1", ["staging"], ds="inv", part="day=1", run=first)
+        seal(store, "v2", ["staging"], ds="inv", part="day=2", run=first)
+        seal(store, "v3", ["staging"], ds="inv", part="day=1", run=second)
+        seal(store, "o1", ["staging"], ds="other", part="day=1", run=first)
+        latest = store.readiness.latest_sealed("inv", T0 - timedelta(days=1))
+        assert {p: (s.version_id, s.run_id, s.run_status) for p, s in latest.items()} == {
+            "day=1": ("v3", second, "queued"),
+            "day=2": ("v2", first, "succeeded"),
+        }
+        assert [s.version_id for s in store.readiness.sealed_since("inv", T0 - timedelta(days=1))] == [
+            "v1",
+            "v2",
+            "v3",
+        ]
+        assert store.readiness.latest_sealed("inv", datetime.now(UTC) + timedelta(days=3650)) == {}
+        store.ledger.transition("staging", "v1", "running", actor="t")
+        store.ledger.transition("staging", "v1", "applied", actor="t")
+        store.ledger.transition("staging", "v2", "running", actor="t")
+        store.ledger.transition("staging", "v2", "failed", actor="t", error="no")
+        store.ledger.transition("staging", "v2", "skipped", actor="t", reason="ops")
+        opened = store.readiness.open_deliveries("staging", "inv")
+        assert opened == {"day=1": latest["day=1"].seal_seq}  # v3; v1 is applied and v2 skipped
+        assert store.readiness.open_deliveries("staging", "nothing") == {}
+
+    def test_readiness_finds_the_oldest_push_event_not_sealed(self, store: Store):
+        assert store.readiness.oldest_unsealed("hooks") is None
+        store.inbox.put("hooks", inbound(b'{"n": 1}', at=T0), "e1")
+        store.inbox.put("hooks", inbound(b'{"n": 2}', at=T0 + timedelta(minutes=1)), "e2")
+        store.inbox.put("other", inbound(b"{}", at=T0 - timedelta(hours=1)), "e0")
+        assert store.readiness.oldest_unsealed("hooks") == T0
+
     def test_registries_are_added_listed_and_removed(self, store: Store):
         store.registry.add_registry("zeta", "https://z.example.com/simple/", None, "root")
         added = store.registry.add_registry(

@@ -84,6 +84,7 @@ from feather_connect.storage.port import (
     Run,
     RunJournal,
     ScheduleStore,
+    SealedPartition,
     SealedSecret,
     SecretStore,
     SliceFinished,
@@ -3536,6 +3537,64 @@ class _Readiness(ReadinessStore):
             )
             for r in rows
         ]
+
+    def latest_sealed(self, dataset: str, since: datetime) -> dict[str, SealedPartition]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                f"""select distinct on (v.partition) * from ({_SEALED}
+                        where v.tenant_id = %(t)s and v.dataset = %(d)s and v.status = 'sealed'
+                          and v.partition in (select partition from feather.version
+                                              where tenant_id = %(t)s and dataset = %(d)s and status = 'sealed'
+                                                and sealed_at >= %(since)s)) v
+                    order by v.partition, v.seal_seq desc""",
+                {"t": self._db.tenant, "d": dataset, "since": since},
+            ).fetchall()
+        return {r["partition"]: _sealed(r) for r in rows}
+
+    def sealed_since(self, dataset: str, since: datetime) -> list[SealedPartition]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                f"""{_SEALED} where v.tenant_id = %s and v.dataset = %s and v.status = 'sealed' and v.sealed_at >= %s
+                    order by v.seal_seq""",
+                (self._db.tenant, dataset, since),
+            ).fetchall()
+        return [_sealed(r) for r in rows]
+
+    def open_deliveries(self, route: str, dataset: str) -> dict[str, int]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select partition, min(seal_seq) as seq from feather.delivery
+                   where tenant_id = %s and route = %s and dataset = %s and status <> all(%s)
+                   group by partition""",
+                (self._db.tenant, route, dataset, sorted(CLOSED)),
+            ).fetchall()
+        return {r["partition"]: r["seq"] for r in rows}
+
+    def oldest_unsealed(self, dataset: str) -> datetime | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select min(received_at) as at from feather.inbox
+                   where tenant_id = %s and dataset = %s and sealed_at is null and held_at is null""",
+                (self._db.tenant, dataset),
+            ).fetchone()
+        return None if row is None else row["at"]
+
+
+_SEALED = """select v.partition, v.version_id, v.seal_seq, v.run_id, v.sealed_at, r.status as run_status,
+                     r.created_at as run_created_at
+              from feather.version v join feather.run r on r.tenant_id = v.tenant_id and r.run_id = v.run_id"""
+
+
+def _sealed(r: Row) -> SealedPartition:
+    return SealedPartition(
+        r["partition"],
+        r["version_id"],
+        r["seal_seq"],
+        r["run_id"],
+        r["run_status"],
+        r["run_created_at"],
+        r["sealed_at"],
+    )
 
 
 def _close(r: Row) -> PartitionClose:
