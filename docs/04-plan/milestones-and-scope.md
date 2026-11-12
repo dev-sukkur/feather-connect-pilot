@@ -11,7 +11,7 @@ What each milestone includes, where its scope is defined, and what the short IDs
 |---|---|
 | What is in v1.0, later, or not planned at all | [Discovery §5](../01-discovery/2026-10-30-feather-connect-discovery.md#5-scope) |
 | What each requirement says | [Discovery §6–§8](../01-discovery/2026-10-30-feather-connect-discovery.md#7-functional-requirements) |
-| Which milestone each use case and requirement lands in | §12 of this page |
+| Which milestone each use case and requirement lands in | §13 of this page |
 | Each milestone's scope, exit criteria and status | This page (§2–§8); design §19 points here |
 | How M1 was split into plans, tasks and stages | [Plan README](README.md) and its six plan files |
 | What M1 proved, with measured numbers | [M1 exit report](../06-release/m1-exit-report.md) |
@@ -26,11 +26,12 @@ This page is the one source for milestones: scope, status, and which requirement
 |---|---|---|---|
 | **M1: MVP, the core loop** | **Done**, 8 Nov 2026 (PR 8) | SDK, durable runtime on Postgres, JSON API and HTML dashboard, CLI and `feather dev`, generic connectors and templates, Compose | All met (§3.3) |
 | **M1.1: brought forward** | **Done**, 11 Nov 2026 (PRs 10, 15, 20–23, 25, 26 and the docs PR). The live Zakya run is deferred; readiness moved to M2 | Record trace, flow packages with the admin and operator roles, the Zakya connector, the dashboard redesign | §4 |
-| **M2: business connectors and operations** | Started: readiness built ([plan 1](m2-01-readiness.md)) | Readiness first (from M1.1); SAP and Magento connectors with retail templates; on-prem agent; side effects and approvals; RBAC; alerts | §5 |
+| **M2: business connectors and operations** | Started: readiness built ([plan 1](m2-01-readiness.md)) | Readiness first (from M1.1); the Postgres connector and SAP through CPI; side effects and approvals; data rules; RBAC; alerts | §5 |
 | **M3: enterprise and v1.0** | Not started | Environment fleet view, SSO, hardening, the v1.0.0 release. Multi-tenancy stays light (ADR-0013) | §6 |
 | **M4: AI and integrations** | After v1.0 | MCP server and agent skills, Postgres CDC, metrics export, the `objects` spool, `feather diff`, SQL transforms, overrides and windows, SLA views, vaults | §7 |
 | **M5: full multi-tenancy** | After M4 | Row-level security, per-tenant config and roles, quotas, worker pools; test environments as tenants | §8 |
-| **Later** | Not scheduled | Sandbox refresh, Helm, Kafka, more connectors, marketplace, lineage, in-dashboard AI | §9 |
+| **M6: more business connectors** | Not scheduled. Moved out of M2 on 12 Nov 2026 | SAP direct (OData, HANA), Magento, GoFrugal, the retail templates, the on-prem agent and its gateway | §9 |
+| **Later** | Not scheduled | Sandbox refresh, Helm, Kafka, more connectors, marketplace, lineage, in-dashboard AI | §10 |
 
 ## 3. M1: MVP, the core loop
 
@@ -171,15 +172,14 @@ Moved by the sponsor on 10 Nov 2026. The scope below is unchanged, and is the fi
 
 **Scope:**
 - **Readiness first**, moved back from M1.1: §4.2, stages R1–R3.
-- **Connectors and templates:** SAP (OData, HANA read), Magento, and the retail templates. Zoho Zakya moved to M1.1. GoFrugal too if its API docs arrive in time, otherwise M3.
-- **On-prem:** the agent and its gateway.
+- **Connectors:** Postgres, for the staging database, which runs in the cloud with Feather (mostly on Railway), and SAP through SAP's Cloud Platform Integration (CPI), over HTTPS. Zoho Zakya is done (M1.1). SAP direct (OData, HANA read), Magento, GoFrugal, the retail templates and the on-prem agent moved to M6 on 12 Nov 2026: with CPI and a cloud Postgres, nothing needs a connection from inside a customer's network.
 - **Side effects:** side-effect routes with compensate, approvals and holds.
 - **Data rules:** schema policy; bootstrapping newly added routes from history. Derived datasets and SQL transforms moved to M4.
 - **Operations:** budget priorities and a budgets page; RBAC (the two roles come earlier, in M1.1); audit; PII masking; version diff (record trace is in M1.1); alerts. Overrides, availability windows and SLA and anomaly views moved to M4.
 - **Delivery:** promotion between environments comes with flow packages in M1.1 (`feather package promote`).
 
 **Exit criteria:**
-- The reference flows run in the reference organisation's qa/uat: Zakya invoices → MotherDuck, SAP prices → Zakya/GoFrugal/Magento, Magento orders → SAP with approvals.
+- The reference flows run in the reference organisation's qa/uat: Zakya invoices → Postgres, then Postgres → SAP through CPI once each run is in staging (readiness), with approvals where a posting needs them. (Until 12 Nov 2026 these named MotherDuck, GoFrugal and Magento, now M6.)
 - All hard cases, H1–H15, pass.
 
 ## 6. M3: enterprise and v1.0 (~8 weeks)
@@ -216,7 +216,20 @@ Moved here from "after v1" on 9 Nov 2026; [ADR-0013](../02-design/adr/0013-light
 
 **Exit criteria:** cross-tenant tests pass on every API, HTML and MCP route; one tenant can't starve another of workers or budget.
 
-## 9. Later, and not planned
+## 9. M6: more business connectors (not scheduled)
+
+Moved out of M2 on 12 Nov 2026, so that M2 is Zakya, Postgres and SAP through CPI, with the operations around them.
+
+**Scope:**
+- **SAP direct:** OData and HANA read, for a site that doesn't go through CPI.
+- **Magento**, with `sink.confirm`.
+- **GoFrugal**, once its API docs and a sandbox arrive (discovery Q2).
+- **The retail templates** beyond the Zakya invoices one.
+- **On-prem:** the agent and its gateway (design §6.9), for systems reachable only inside a customer's network.
+
+**Exit criteria:** SAP prices → Zakya/GoFrugal/Magento and Magento orders → SAP with approvals run in the reference organisation's qa/uat; a flow with a `site:` connection runs on an agent.
+
+## 10. Later, and not planned
 
 From [discovery §5](../01-discovery/2026-10-30-feather-connect-discovery.md#5-scope), plus **sandbox refresh** from [ADR-0013](../02-design/adr/0013-light-tenancy-and-non-prod-layout.md) (`feather env refresh` with a masked sample or a full masked copy of production).
 
@@ -224,7 +237,7 @@ From [discovery §5](../01-discovery/2026-10-30-feather-connect-discovery.md#5-s
 |---|---|
 | Helm chart and Kubernetes; Kafka or Redpanda as an optional transport; a visual data-mapping assistant; an in-dashboard AI assistant; more connectors (Salesforce, Dynamics, NetSuite, Snowflake, BigQuery, Kafka, SFTP, Excel); a community connector marketplace; column-level lineage | A visual flow designer; a single-page JavaScript front end; hosted SaaS; an API gateway or developer portal; full BPM |
 
-## 10. What the IDs mean
+## 11. What the IDs mean
 
 **Read these with their context:**
 - **SP** is a *spike* (SP1–SP4). Spikes were first numbered S1–S4 and were renamed on 8 Nov 2026, so an old commit, branch or note may still say "spike S2".
@@ -242,15 +255,15 @@ From [discovery §5](../01-discovery/2026-10-30-feather-connect-discovery.md#5-s
 | SP1–SP4 | Spikes: SP1 engine (DBOS chosen), SP2 core model, SP3 connector research, SP4 Postgres spool | [Spikes](../03-spikes/README.md) |
 | 1–6 (plans), `2.3` (tasks) | The six M1 plans; `2.3` is Plan 2, Task 3 | [Plan README](README.md) |
 | Stage 1–5 | The order M1's tasks were built in | Plan README, *Build order* |
-| F1–F15 | Stage 2 review findings | §10.1 below |
-| S1–S23 (findings) | Stage 3 review findings | §10.2 below |
-| B1–B6, rulings 1–12 | Stage 4 preflight: blockers, and binding rulings | §10.3 below |
+| F1–F15 | Stage 2 review findings | §11.1 below |
+| S1–S23 (findings) | Stage 3 review findings | §11.2 below |
+| B1–B6, rulings 1–12 | Stage 4 preflight: blockers, and binding rulings | §11.3 below |
 | I1–I4, m1–m4 | End of M1 review (Stage 5): Important and Minor findings | [Exit report §6](../06-release/m1-exit-report.md#6-end-of-stage-review) |
 | ADR-0001 … 0013 | Architecture decision records | [ADR index](../02-design/adr/README.md) |
 
-The review notes behind §10.1–§10.3 are kept outside the repository, so their findings are summarised here.
+The review notes behind §11.1–§11.3 are kept outside the repository, so their findings are summarised here.
 
-### 10.1 Stage 2 review findings (F1–F15): all closed
+### 11.1 Stage 2 review findings (F1–F15): all closed
 
 | ID | Finding | Closed |
 |---|---|---|
@@ -272,7 +285,7 @@ The review notes behind §10.1–§10.3 are kept outside the repository, so thei
 
 The Stage 2 review's Minor findings (M1–M13) were fixed in Stages 3–5, except M13, which couldn't be reproduced.
 
-### 10.2 Stage 3 review findings (S1–S23)
+### 11.2 Stage 3 review findings (S1–S23)
 
 | ID | Finding | Closed |
 |---|---|---|
@@ -300,7 +313,7 @@ The Stage 2 review's Minor findings (M1–M13) were fixed in Stages 3–5, excep
 | S22 | The DBOS URL lost blank and repeated query keys | Stage 5 (`6b94b87`) |
 | S23 | F12's rest: budget waits could give up wrongly or stall | Stage 5 (`68892a0`) |
 
-### 10.3 Stage 4 preflight (B1–B6 and rulings)
+### 11.3 Stage 4 preflight (B1–B6 and rulings)
 
 | ID | Blocker | Closed |
 |---|---|---|
@@ -325,11 +338,11 @@ The **rulings** are binding decisions for the build:
 11. Data people may query, verify or retry goes in a table or object storage, never only in a log.
 12. Templates ship first as library functions; `feather new --template` copies one for full control.
 
-## 11. Numbering from now on
+## 12. Numbering from now on
 
-To stop the clashes in §10, new review findings carry their review's name: `PKG-R1-I3` is the third Important finding of the first flow packages review. Milestones keep M1–M3, spikes use SP1, SP2 and so on, and the other IDs above stay as they are.
+To stop the clashes in §11, new review findings carry their review's name: `PKG-R1-I3` is the third Important finding of the first flow packages review. Milestones keep M1–M3, spikes use SP1, SP2 and so on, and the other IDs above stay as they are.
 
-## 12. Requirements by milestone
+## 13. Requirements by milestone
 
 Where each use case (discovery §6) and functional requirement (discovery §7) lands. This list replaces the
 *Milestone* columns the discovery document had until 11 Nov 2026.
@@ -342,21 +355,22 @@ Where each use case (discovery §6) and functional requirement (discovery §7) l
 | **M3** | UC-13; FR-F8, FR-H3, FR-H4 |
 | **M4** | FR-C2, FR-C4, FR-C5, FR-F7, FR-G4, FR-L1, FR-L3, FR-M2 |
 | **M5** | FR-I2–I4 (ADR-0013) |
+| **M6** | The connector parts of UC-04, FR-A7 and FR-J2 below; the on-prem agent |
 
 **Split across milestones:**
 
 | ID | Split |
 |---|---|
-| UC-04 | M1 generic; M2 SAP |
+| UC-04 | M1 generic; M2 SAP through CPI; M6 SAP direct |
 | UC-10 | M1 the fix; M2 the trace view |
-| FR-A7 | M1 generic templates; M2 retail ones |
+| FR-A7 | M1 generic templates; M6 retail ones |
 | FR-B2 | M1 polling; M4 CDC |
 | FR-B8 | M1 replay; M2 bootstrapping new routes |
 | FR-D2 | M1 webhooks; M4 CDC events |
 | FR-D5 | M1 pause and resume; M4 windows |
 | FR-E6 | M1 budget windows; M2 priorities and the budgets page |
 | FR-F6 | M1.1 record trace; M2 version diffs and masked samples |
-| FR-J2 | M1–M3 by connector; Zakya in M1.1 |
+| FR-J2 | By connector: Zakya in M1.1; Postgres and SAP through CPI in M2; SAP direct, Magento and GoFrugal in M6 |
 | FR-K1 | M1 local users and tokens; M3 SSO |
 | FR-K2 | M1.1 admin and operator; M2 the rest |
 | FR-K3 | M1 env and file secrets, and encrypted database secrets in M1.1; M4 vaults |
