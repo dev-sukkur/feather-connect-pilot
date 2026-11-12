@@ -83,6 +83,7 @@ CAPABILITIES: dict[str, Capability] = {  # each action, as its audit rows name i
     "fire_ready": "readiness.fire",
     "close_partition": "partitions.close",
     "approve_delivery": "holds.decide",
+    "compensate_delivery": "deliveries.compensate",
     "reject_delivery": "holds.decide",
 }
 
@@ -944,6 +945,18 @@ class Actions:
             call(route, version_id, actor=actor.name, reason=reason)
 
         self._do(actor, action, f"route:{route}", {"version_id": version_id, "reason": reason}, decide)
+
+    def compensate(self, actor: Actor, route: str, version_id: str, *, reason: str | None) -> None:
+        """Reverse an applied delivery of a side-effect route, as a task (design §6.5). Audited, with a reason."""
+
+        def do() -> None:
+            if not (reason and reason.strip()):
+                raise ValueError("a reason is required to compensate a delivery")
+            self._rt.compensate(route, version_id, actor=actor.name, reason=reason)
+
+        self._do(
+            actor, "compensate_delivery", f"route:{route}", {"version_id": version_id, "reason": reason}, do
+        )
 
     # Connections.
 

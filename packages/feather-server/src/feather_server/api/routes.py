@@ -521,6 +521,23 @@ def reject_delivery(
     return _decide(request, actions, actor, key, route, version_id, approve=False, reason=body.reason)
 
 
+@router.post("/routes/{route:path}/deliveries/{version_id}:compensate", status_code=202)
+def compensate_delivery(
+    route: str,
+    version_id: str,
+    request: Request,
+    actions: Do,
+    actor: CurrentActor,
+    body: Reason,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    def do() -> dict[str, Any]:
+        actions.compensate(actor, route, version_id, reason=body.reason)
+        return {"route": route, "version_id": version_id, "status": "compensating"}
+
+    return _once(request, actor, key, do, 202)
+
+
 @router.post("/runs/{run_id}:cancel")
 def cancel_run(
     run_id: str,

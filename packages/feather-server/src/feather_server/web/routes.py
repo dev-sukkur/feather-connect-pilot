@@ -1281,7 +1281,34 @@ def delivery_detail(request: Request, actor: CurrentActor, route: str, version_i
         actor=actor,
         detail=detail,
         run=request.query_params.get("run", ""),
+        notice=("ok", "Compensating: the reversal runs as a task.")
+        if request.query_params.get("done") == "compensating"
+        else None,
     )
+
+
+@router.post("/routes/{route:path}/deliveries/{version_id}/compensate", dependencies=[Depends(require_csrf)])
+def delivery_compensate(
+    request: Request, actor: CurrentActor, route: str, version_id: str, reason: Reason = ""
+) -> Response:
+    back = f"/routes/{quote(route, safe='/')}/deliveries/{quote(version_id, safe='')}"
+    try:
+        actions(request).compensate(actor, route, version_id, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No delivery of {version_id!r} to {route!r}.")
+    except (ValueError, InvalidTransition) as error:
+        detail = reads(request).delivery_detail(route, version_id)
+        return render(
+            request,
+            "delivery_detail.html",
+            status=422,
+            title=f"{route} delivery",
+            actor=actor,
+            detail=detail,
+            run="",
+            notice=("bad", str(error)),
+        )
+    return RedirectResponse(f"{back}?done=compensating", status_code=303)
 
 
 # Versions.

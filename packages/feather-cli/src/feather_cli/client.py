@@ -281,6 +281,14 @@ class ApiClient:
             idempotency_key=str(uuid.uuid4()),
         )
 
+    def compensate(self, route: str, version_id: str, reason: str | None) -> dict[str, Any]:
+        return self._call(
+            "POST",
+            f"/routes/{quote(route, safe='/')}/deliveries/{quote(version_id, safe='')}:compensate",
+            body={"reason": reason},
+            idempotency_key=str(uuid.uuid4()),
+        )
+
     def holds(self, route: str | None = None) -> dict[str, Any]:
         return self._call("GET", "/holds" + (f"?route={quote(route, safe='')}" if route else ""))
 

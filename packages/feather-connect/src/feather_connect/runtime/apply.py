@@ -264,6 +264,29 @@ class _ChunkSender:
         for chunk_no in self._plan.chunks:
             self._records(version, chunk_no, context)
 
+    def reverse(self, chunk_no: int) -> int:
+        """Compensate one chunk: the sink reverses what it applied of it (design §6.5). Returns how many it reversed."""
+        version = self._deps.store.versions.get(self._delivery.version_id)
+        context = self._deps.make_context(self._route.sink.connection)
+        records, _ = self._records(version, chunk_no, context)
+        if not records:
+            return 0
+        route, delivery = self._route, self._delivery
+        batch = ApplyBatch(
+            route=route.name,
+            version_id=delivery.version_id,
+            chunk_no=chunk_no,
+            partition=delivery.partition,
+            mode=route.mode,
+            records=records,
+            idempotency_key=f"compensate:{route.name}:{delivery.version_id}:{chunk_no}",
+            is_first=chunk_no == self._plan.chunks[0],
+            is_last=chunk_no == self._plan.chunks[-1],
+        )
+        result = route.sink.compensate(context, batch)
+        self._keep_responses(chunk_no, result.responses, complete=False)
+        return result.applied
+
     def _send(self, chunk_no: int) -> _Counts:
         route, delivery, plan = self._route, self._delivery, self._plan
         version = self._deps.store.versions.get(delivery.version_id)
@@ -634,6 +657,46 @@ def _deliver(
         return False
     ctx.step(f"end:{version_id}", lambda: _finish(dataset, delivery, plan, totals, deps))
     return True
+
+
+def run_compensate(
+    ctx: TaskContext,
+    dataset: Dataset,
+    route: RouteSpec,
+    version_id: str,
+    deps: RuntimeDeps,
+    *,
+    actor: str,
+    reason: str | None,
+) -> None:
+    """Reverse an applied delivery of a side-effect route, chunk by chunk, then mark it `compensated` (design §6.5,
+    H9). Each chunk's reversal carries its own idempotency key, so a task run again reverses nothing twice."""
+    delivery = ctx.step("delivery", lambda: deps.store.ledger.get(route.name, version_id))
+    if delivery.status == "compensated":
+        return
+    if delivery.status != "applied":
+        raise PermanentError(
+            f"only an applied delivery can be compensated, and this one is {delivery.status}"
+        )
+    plan = _step_durably(
+        ctx,
+        f"plan:{version_id}",
+        lambda: _plan_of(route, deps.store.versions.get(version_id), deps),
+        deps.retry,
+    )
+    sender = _ChunkSender(dataset, route, delivery, plan, deps)
+    reversed_ = 0
+    for chunk_no in plan.chunks:
+        reversed_ += _step_durably(
+            ctx, f"reverse:{version_id}:{chunk_no}", partial(sender.reverse, chunk_no), deps.retry
+        )
+    why = f"compensated {reversed_} records" + (f": {reason}" if reason else "")
+    ctx.step(
+        "compensated",
+        lambda: deps.store.ledger.transition(
+            route.name, version_id, "compensated", actor=actor, reason=why, code_sha=deps.code_sha
+        ),
+    )
 
 
 def run_apply(

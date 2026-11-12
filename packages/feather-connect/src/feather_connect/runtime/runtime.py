@@ -26,7 +26,7 @@ from feather_connect.core.flow import Flow, RouteSpec
 from feather_connect.engine.port import Engine, RetryPolicy, TaskCall, TaskContext, TaskFn
 from feather_connect.ids import new_id
 from feather_connect.logs import bind, redact
-from feather_connect.runtime.apply import fail_open, oldest_open, replay_gap, run_apply
+from feather_connect.runtime.apply import fail_open, oldest_open, replay_gap, run_apply, run_compensate
 from feather_connect.runtime.budgets import BudgetHandle
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import ExtractFailed, VerifyResult, discard_abandoned, run_extract
@@ -236,6 +236,7 @@ class Runtime:
             "feather.extract": self._logged(self._extract_task),
             "feather.seal_run": self._logged(self._seal_task),
             "feather.apply": self._logged(self._apply_task),
+            "feather.compensate": self._logged(self._compensate_task),
         }
 
     def _logged(self, task: TaskFn) -> TaskFn:
@@ -596,6 +597,39 @@ class Runtime:
         self._require(route, version_id, "held", "be rejected")
         self._reopen(route, version_id, "skipped", actor, f"rejected: {reason}" if reason else "rejected")
 
+    def compensate(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
+        """Reverse an applied delivery of a side-effect route, as a task on the code of its version (design §6.5).
+        `InvalidTransition` unless it is applied, or when its sink can't compensate."""
+        self._require(route, version_id, "applied", "be compensated")
+        try:
+            spec = self.route(route)
+        except KeyError:
+            spec = None  # a packaged route: its host checks the sink
+        if spec is not None and not spec.sink.spec.side_effect:
+            raise InvalidTransition(f"route {route!r} is not a side-effect route: its sink can't compensate")
+        deps = self._deps
+        delivery = deps.store.ledger.get(route, version_id)
+        run_id = deps.store.versions.get(version_id).run_id
+        ref = f"compensate:{route}:{version_id}"
+        self._open_row(run_id, "compensate", ref, delivery.dataset, delivery.partition, route)
+        self._engine.submit(
+            TaskCall(
+                "feather.compensate",
+                {
+                    "run_id": run_id,
+                    "dataset": delivery.dataset,
+                    "partition": delivery.partition,
+                    "route": route,
+                    "version_id": version_id,
+                    "actor": actor,
+                    "reason": reason,
+                },
+                ref,
+                f"apply:{_TENANT}:{route}:{delivery.partition}",
+                retry=deps.retry,
+            )
+        )
+
     def skip(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
         """Give up on a failed delivery, so that the versions behind it can go ahead."""
         self._reopen(route, version_id, "skipped", actor, reason)
@@ -774,6 +808,24 @@ class Runtime:
             ctx.step("close", lambda: self._close_delivery(args["route"], version_id, message))
 
         self._tracked(ctx, run_id, body, on_failure=close)
+
+    def _compensate_task(self, ctx: TaskContext, args: Mapping[str, Any]) -> None:
+        run_id = args["run_id"]
+
+        def body() -> None:
+            route, dataset = self.route(args["route"]), self.dataset(args["dataset"])
+            run_compensate(
+                ctx,
+                dataset,
+                route,
+                args["version_id"],
+                self._deps,
+                actor=args["actor"],
+                reason=args.get("reason"),
+            )
+            self._finish_step(ctx, run_id)
+
+        self._tracked(ctx, run_id, body)
 
     def _tracked(
         self,

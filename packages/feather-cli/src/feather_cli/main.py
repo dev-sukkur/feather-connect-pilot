@@ -6,6 +6,7 @@ import sys
 import typer
 
 from feather_cli.commands import (
+    deliveries,
     describe,
     dev,
     environment,
@@ -48,6 +49,7 @@ app.add_typer(environment.secret_app, name="secret")
 app.add_typer(environment.flow_app, name="flow")
 app.add_typer(ready.ready_app, name="ready")
 app.add_typer(holds.holds_app, name="holds")
+app.add_typer(deliveries.deliveries_app, name="deliveries")
 app.command()(run.run)
 app.command("test")(test_command.test)
 for command in (remote.status, remote.runs, remote.logs, remote.backfill, remote.replay):
