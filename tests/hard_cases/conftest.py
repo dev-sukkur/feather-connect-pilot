@@ -126,7 +126,11 @@ class Cases:
 
     def routes_of_h11(self, *routes: str) -> None:
         """Deploy H11's flow with these routes: write them where its code reads them, and install the project again."""
-        (self.fixtures / "h11_routes.json").write_text(json.dumps(list(routes)), encoding="utf-8")
+        code = self.stack.project / "flows" / "cases.py"
+        text = code.read_text(encoding="utf-8").replace(
+            'H11_ROUTES = ["a"]\n', f"H11_ROUTES = {list(routes)!r}\n"
+        )
+        code.write_text(text, encoding="utf-8")
         self.stack.reinstall()
 
     def deliveries(self, route: str) -> list[Any]:

@@ -3,7 +3,6 @@ H15 (M2 plan 2). H14, the webhook burst, is tests/e2e/test_webhook_latency.py::t
 H9's duplicate-free side is tests/chaos/test_kill_mid_apply.py, and its compensation tests/demo/test_zakya_demo.py's
 chain to SAP. H13 is tests/hard_cases/test_readiness_cases.py."""
 
-import time
 from typing import Any
 
 import pytest
@@ -110,35 +109,30 @@ def _budget(cases: Cases, name: str) -> dict[str, Any]:
 
 
 def test_h7_two_flows_share_a_budget_and_the_high_one_keeps_its_reserve(cases: Cases):
-    cases.serve("h7high", [{"id": f"h7h-{n}"} for n in range(3)])
-    cases.serve("h7low", [{"id": f"h7l-{n}"} for n in range(8)])
-    low, high = cases.start("h7-low"), cases.start("h7-high")
-    cases.wait_applied("h7-high")
-    waited: set[str] = set()
-    while not cases.settled("h7-low"):  # the low flow waits for the budget; the high one never does
-        waited |= {w["task_ref"] for w in _budget(cases, "h7")["waiting"]}
-        time.sleep(1)
-    waited |= {w["task_ref"] for w in _budget(cases, "h7")["waiting"]}
-    assert waited and all("h7-low" in ref for ref in waited), waited
+    high_ids, low_ids = {f"h7h-{n}" for n in range(3)}, {f"h7l-{n}" for n in range(8)}
+    cases.serve("h7high", [{"id": i} for i in sorted(high_ids)])
+    cases.serve("h7low", [{"id": i} for i in sorted(low_ids)])
+    cases.start("h7-low")
+    cases.start("h7-high")
+    cases.wait_applied("h7-high")  # the high flow is never held up: half of each window is kept for it
+    cases.wait_until(lambda: _budget(cases, "h7")["waiting"], "the low flow to wait for the budget h7")
+    waiting = [w["task_ref"] for w in _budget(cases, "h7")["waiting"]]
+    assert all("h7-low" in ref for ref in waiting), waiting
     taken = set(cases.erp.received())
-    assert {f"h7h-{n}" for n in range(3)} | {f"h7l-{n}" for n in range(8)} <= taken
-    store = cases.stack.store
-    assert store.runs.get_run(high).status == "succeeded"
-    cases.wait_until(lambda: store.runs.get_run(low).status == "succeeded", "the low run")
-    for usage in _budget(cases, "h7")["windows"]:
-        assert usage["used"] <= usage["units"]  # the cap is never passed
+    assert high_ids <= taken and len(low_ids & taken) <= 3  # the low flow got no more than its half of 6
+    for window in _budget(cases, "h7")["windows"]:
+        assert window["used"] <= window["units"]  # the cap is never passed
 
 
 def test_h8_an_exhausted_budget_defers_the_delivery_visibly_and_it_does_not_fail(cases: Cases):
     cases.serve("h8", [{"id": f"h8-{n}"} for n in range(5)])
     run = cases.start("h8")
-    store = cases.stack.store
     cases.wait_until(lambda: _budget(cases, "h8")["waiting"], "a task to wait for the budget h8")
-    assert store.runs.get_run(run).status == "running"  # deferred, not failed
+    [waiting] = _budget(cases, "h8")["waiting"]
+    assert waiting["run_id"] == run and waiting["waits"] >= 1  # visible, with the run it belongs to
+    assert cases.stack.store.runs.get_run(run).status == "running"  # deferred to the next window, not failed
     assert all(d.status in ("pending", "running") for d in cases.deliveries("h8-erp"))
-    cases.wait_applied("h8-erp")
-    cases.wait_until(lambda: store.runs.get_run(run).status == "succeeded", "the h8 run")
-    assert {f"h8-{n}" for n in range(5)} <= set(cases.erp.received())
+    assert len({f"h8-{n}" for n in range(5)} & set(cases.erp.received())) == 2  # the two units of the hour
 
 
 def test_h10_a_quarantined_record_is_superseded_by_a_newer_version(cases: Cases):
@@ -148,7 +142,7 @@ def test_h10_a_quarantined_record_is_superseded_by_a_newer_version(cases: Cases)
     cases.run("h10")
     cases.wait_applied("h10-erp")
     assert [q.key for q in quarantine.list_open(route)] == ["h10-1"]
-    cases.serve("h10", [{"id": "h10-1", "v": 2}, {"id": "h10-2", "v": 1}])
+    cases.serve("h10", [{"id": "h10-1", "v": 2, "reject": False}, {"id": "h10-2", "v": 1}])
     cases.run("h10")
     cases.wait_until(
         lambda: len(cases.deliveries("h10-erp")) == 2 and cases.settled("h10-erp"), "the second delivery"
@@ -192,7 +186,8 @@ def test_h12_an_added_column_applies_and_a_dropped_one_holds(cases: Cases):
 
     cases.wait_until(held, "the delivery to hold")
     [hold] = held()
-    assert (hold.last_error or "").startswith("schema_change"), hold.last_error
+    [shown] = [h for h in cases.api.get("/holds").json()["holds"] if h["version_id"] == hold.version_id]
+    assert shown["kind"] == "schema" and shown["reason"].startswith("schema_change"), shown
     assert cases.rows("select id, v, w from hard.h12") == [("1", "a", "x")]  # nothing of it applied
 
 

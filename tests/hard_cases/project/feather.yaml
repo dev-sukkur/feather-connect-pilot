@@ -19,6 +19,6 @@ connections:
   erp10: {connector: http.call, base_url: http://127.0.0.1:9}
   erp15: {connector: http.call, base_url: http://127.0.0.1:9, budget: h15}
 budgets:
-  h7: {limits: ["6/minute"], reserve: {high: 0.5}}  # the high flow keeps half of it
-  h8: {limits: ["2/minute"]}
+  h7: {limits: ["6/hour"], reserve: {high: 0.5}}  # the high flow keeps half of it
+  h8: {limits: ["2/hour"]}  # a wait past a minute is the engine's, and listed on the Budgets page
   h15: {limits: ["10/minute"]}

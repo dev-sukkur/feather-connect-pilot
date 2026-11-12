@@ -1,7 +1,6 @@
 """A flow per hard case. Each dataset reads `<case>.json` in FEATHER_HARD_FIXTURES, which the test rewrites between runs;
 a simulation source reads a changed fixture again."""
 
-import json
 import os
 from pathlib import Path
 
@@ -107,9 +106,8 @@ h10 = fc.Flow(  # a record the ERP turned down is superseded by a newer version 
     deliver=[fc.to(erp("erp10"), name="h10-erp")],
     triggers=[fc.every("1d")],
 )
-# H11: the routes come from a file the test rewrites, so that installing the project again deploys a route more.
-_H11 = FIXTURES / "h11_routes.json" if FIXTURES is not None else None
-H11_ROUTES = json.loads(_H11.read_text(encoding="utf-8")) if _H11 is not None and _H11.is_file() else ["a"]
+# H11: the test rewrites this line in its copy of the project and installs it again, deploying a route more.
+H11_ROUTES = ["a"]
 h11 = fc.Flow(
     "h11",
     reads=fc.Dataset("h11.items", source=source("h11"), key="id", strategy=fc.strategy.by_stamp("u")),
