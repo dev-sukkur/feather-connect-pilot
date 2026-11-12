@@ -26,7 +26,7 @@ This page is the one source for milestones: scope, status, and which requirement
 |---|---|---|---|
 | **M1: MVP, the core loop** | **Done**, 8 Nov 2026 (PR 8) | SDK, durable runtime on Postgres, JSON API and HTML dashboard, CLI and `feather dev`, generic connectors and templates, Compose | All met (§3.3) |
 | **M1.1: brought forward** | **Done**, 11 Nov 2026 (PRs 10, 15, 20–23, 25, 26 and the docs PR). The live Zakya run is deferred; readiness moved to M2 | Record trace, flow packages with the admin and operator roles, the Zakya connector, the dashboard redesign | §4 |
-| **M2: business connectors and operations** | Started: readiness built ([plan 1](m2-01-readiness.md)) | Readiness first (from M1.1); the Postgres connector and SAP through CPI; side effects and approvals; data rules; RBAC; alerts | §5 |
+| **M2: business connectors and operations** | Built: readiness ([plan 1](m2-01-readiness.md)), connectors and operations ([plan 2](m2-02-connectors-and-operations.md)), PR 30. The run in the reference organisation's qa/uat moved to the end of M3 | Readiness first (from M1.1); the Postgres connector and SAP through CPI; side effects and approvals; data rules; RBAC; alerts | §5 |
 | **M3: enterprise and v1.0** | Not started | Environment fleet view, SSO, hardening, the v1.0.0 release. Multi-tenancy stays light (ADR-0013) | §6 |
 | **M4: AI and integrations** | After v1.0 | MCP server and agent skills, Postgres CDC, metrics export, the `objects` spool, `feather diff`, SQL transforms, overrides and windows, SLA views, vaults | §7 |
 | **M5: full multi-tenancy** | After M4 | Row-level security, per-tenant config and roles, quotas, worker pools; test environments as tenants | §8 |
@@ -179,7 +179,7 @@ Moved by the sponsor on 10 Nov 2026. The scope below is unchanged, and is the fi
 - **Delivery:** promotion between environments comes with flow packages in M1.1 (`feather package promote`).
 
 **Exit criteria:**
-- The reference flows run in the reference organisation's qa/uat: Zakya invoices → Postgres, then Postgres → SAP through CPI once each run is in staging (readiness), with approvals where a posting needs them. (Until 12 Nov 2026 these named MotherDuck, GoFrugal and Magento, now M6.)
+- The reference chain runs end to end on `feather dev` against the simulators: Zakya invoices → Postgres, then Postgres → SAP through CPI once each run is in staging (readiness), with approvals where a posting needs them (`tests/demo`). Running it in the reference organisation's qa/uat moved to the end of M3 on 12 Nov 2026, and the Railway deployment comes after M3. (Until 12 Nov 2026 these named MotherDuck, GoFrugal and Magento, now M6.)
 - All hard cases, H1–H15, pass.
 
 ## 6. M3: enterprise and v1.0 (~8 weeks)
@@ -191,7 +191,7 @@ Moved by the sponsor on 10 Nov 2026. The scope below is unchanged, and is the fi
 - **Hardening:** chaos and performance suites with published results; a security review.
 - **Launch:** the docs site and the v1.0.0 release.
 
-**Exit criteria:** NFR targets met; the release checklist complete; the reference organisation's in-scope flows cut over to prod.
+**Exit criteria:** NFR targets met; the release checklist complete; the reference chain (Zakya → Postgres staging → SAP through CPI, with approvals) runs in the reference organisation's qa/uat (moved from M2 on 12 Nov 2026); the reference organisation's in-scope flows cut over to prod. The Railway deployment follows M3.
 
 ## 7. M4: AI and integrations (after v1.0)
 
