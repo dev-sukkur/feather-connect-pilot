@@ -155,7 +155,7 @@ def test_at_most_every_gathers_the_runs_that_got_ready_meanwhile():
         deliver=[fc.to(memory.Sink(connection="dw"))],
         triggers=[fc.on_ready(fc.ready(invoices), at_most_every="4h")],
     )
-    first, _ = world.seal("invoices", part(1))
+    world.seal("invoices", part(1))
     assert len(world.evaluate(ingest, gathered)) == 1
     second, _ = world.seal("invoices", part(2))
     third, _ = world.seal("invoices", part(3))

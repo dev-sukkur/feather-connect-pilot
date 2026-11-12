@@ -331,7 +331,9 @@ def _trigger(
     for scope in scopes:
         for period in periods:
             before = done.get((period.id, scope or ""))
-            if before is not None and (trigger.get("on_late", "rerun") != "rerun" or before.reason == "manual"):
+            if before is not None and (
+                trigger.get("on_late", "rerun") != "rerun" or before.reason == "manual"
+            ):
                 continue  # a period fired by hand stays fired: what it read is what someone chose
             ready, _, versions = set_state(reads, sets, datasets, scope, period)
             if not ready:
