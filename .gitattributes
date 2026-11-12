@@ -1,2 +1,3 @@
 packages/feather-server/src/feather_server/web/static/htmx.min.js -text
 packages/feather-server/src/feather_server/web/static/LICENSE-htmx.txt -text
+*.sh text eol=lf
