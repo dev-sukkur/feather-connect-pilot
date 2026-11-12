@@ -5,14 +5,14 @@ want of the admin role is audited by `require`. The server's CLI acts as the `sy
 works on the database directly. Everything here is of the store's tenant only (ADR-0013).
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
 from feather_connect.clock import Clock
 from feather_connect.logs import redact
-from feather_connect.storage.port import ROLES, Role, Store, TokenScope, UserRow
+from feather_connect.storage.port import GRANTS, ROLES, AccessGrant, Role, Store, TokenScope, UserRow
 from feather_server.auth import MAX_PASSWORD, Actor, hash_password, issue_token
 from feather_server.services.access import Capability, at_least, require
 
@@ -27,17 +27,25 @@ class User:
     username: str
     role: Role
     created_at: str
+    grants: tuple[str, ...] = ()
 
     @classmethod
     def of(cls, row: UserRow) -> "User":
-        return cls(row.username, row.role, row.created_at.isoformat())
+        return cls(row.username, row.role, row.created_at.isoformat(), tuple(row.grants))
 
 
 def _role(value: str) -> Role:
     for role in ROLES:
         if value == role:
             return role
-    raise ValueError(f"{value!r} is not a role: it is admin or operator")
+    raise ValueError(f"{value!r} is not a role: it is {', '.join(ROLES[:-1])} or {ROLES[-1]}")
+
+
+def _grant(value: str) -> AccessGrant:
+    for grant in GRANTS:
+        if value == grant:
+            return grant
+    raise ValueError(f"{value!r} is not a grant: it is {' or '.join(GRANTS)}")
 
 
 def _scope(value: str) -> TokenScope:
@@ -120,7 +128,7 @@ class Accounts:
             if found.role == "admin" and wanted != "admin" and len(admins) == 1:
                 raise ValueError(f"{username} is the only admin: make another user an admin first")
             self._store.users.set_role(username, wanted)
-            return User(found.username, wanted, found.created_at.isoformat())
+            return User(found.username, wanted, found.created_at.isoformat(), tuple(found.grants))
 
         return self._do(
             actor,
@@ -128,6 +136,32 @@ class Accounts:
             "set_role",
             f"user:{username}",
             {"from": before, "to": role, "reason": reason},
+            change,
+        )
+
+    def set_grants(
+        self, actor: Actor, username: str, grants: Sequence[str], *, reason: str | None = None
+    ) -> User:
+        """Give the user these add-on grants and no others: `approver` decides holds, `pii-reader` unmasks PII
+        (design §13.2). Raises `KeyError` for an unknown user and `ValueError` for a grant there isn't."""
+        found = self._store.users.get_user(username)
+        before = None if found is None else list(found.grants)
+
+        def change() -> User:
+            wanted: list[AccessGrant] = [_grant(g) for g in grants]
+            if found is None:
+                raise KeyError(f"no user named {username!r}")
+            self._store.users.set_grants(username, wanted)
+            changed = self._store.users.get_user(username)
+            assert changed is not None
+            return User.of(changed)
+
+        return self._do(
+            actor,
+            "roles.manage",
+            "set_grants",
+            f"user:{username}",
+            {"from": before, "to": list(grants), "reason": reason},
             change,
         )
 

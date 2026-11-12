@@ -2,14 +2,14 @@
 {% import "_macros.html" as m with context %}
 {% block content %}
 {{ m.page_head("Users", tiles) }}
-<p class="muted lead">Who can sign in, and with what role. An operator runs, re-runs, backfills, retries, skips, replays, cancels, pauses and settles the quarantine. An admin can do all that, and manage users, their roles and API tokens too. A token acts with no higher a role than its user's, so changing a role changes what their tokens can do at once.</p>
+<p class="muted lead">Who can sign in, and with what role. A viewer sees everything but PII, and changes nothing. An operator also runs, re-runs, backfills, retries, skips, replays, cancels, pauses and settles the quarantine. A developer also manages the environment's connections, budgets, secrets and alert rules and deploys packages, where the environment isn't protected. An admin can do all that anywhere, and manage users, their roles and API tokens too. Two grants go beside a role: an approver decides holds, and a PII reader sees masked fields as they are. A token acts with no higher a role than its user's, and with their grants, so a change shows in their tokens at once.</p>
 {{ m.notice_of(notice) }}
 {% call m.toolbar("/users", q, "users", columns=[("role", "Role"), ("since", "Since")], table="users") %}{% endcall %}
 <div id="live">
 {% if users %}
 <div class="table-wrap scroll"><table class="data" data-table="users">
   <caption class="sr-only">Users and their roles</caption>
-  <thead><tr><th scope="col" data-sort>User</th><th scope="col" data-col="role" data-sort>Role</th><th scope="col" data-col="since" data-sort>Since</th><th scope="col">Change the role</th></tr></thead>
+  <thead><tr><th scope="col" data-sort>User</th><th scope="col" data-col="role" data-sort>Role</th><th scope="col" data-col="since" data-sort>Since</th><th scope="col">Change the role</th><th scope="col">Grants</th></tr></thead>
   <tbody>
   {% for u in users %}
     <tr id="user-{{ u.username }}">
@@ -24,6 +24,14 @@
             {% for r in roles %}<option value="{{ r }}"{% if r == u.role %} selected{% endif %}>{{ r }}</option>{% endfor %}
           </select>
           <button type="submit">Save<span class="sr-only"> the role of {{ u.username }}</span></button>
+        </form>
+      </td>
+      <td>
+        <form method="post" action="/users/{{ u.username | urlencode }}/grants" class="inline-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {% set row = loop.index %}
+          {% for g in grants %}<label><input type="checkbox" name="grant" value="{{ g }}"{% if g in u.grants %} checked{% endif %}> {{ g }}<span class="sr-only"> for {{ u.username }}</span></label> {% endfor %}
+          <button type="submit">Save<span class="sr-only"> the grants of {{ u.username }}</span></button>
         </form>
       </td>
     </tr>

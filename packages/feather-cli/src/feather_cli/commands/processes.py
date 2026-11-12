@@ -31,7 +31,7 @@ from feather_server.settings import Settings, SettingsError
 log = logging.getLogger(__name__)
 
 server_app = typer.Typer(
-    help="Run the server, or administer it: migrate, create-user, set-role, create-token.",
+    help="Run the server, or administer it: migrate, create-user, set-role, set-grants, create-token.",
     invoke_without_command=True,
     no_args_is_help=False,
 )
@@ -254,7 +254,7 @@ def create_user(
 @server_app.command()
 def set_role(
     username: str,
-    role: Annotated[str, typer.Argument(help="admin or operator.")],
+    role: Annotated[str, typer.Argument(help="admin, developer, operator or viewer.")],
     reason: Annotated[str | None, typer.Option(help="Why, for the audit log.")] = None,
     env: Env = "dev",
     database_url: DatabaseUrl = None,
@@ -272,6 +272,34 @@ def set_role(
         {"user": username, "role": role},
         json_mode=json_mode,
         human=lambda _: typer.echo(f"{username} is now {role}"),
+    )
+
+
+@server_app.command()
+def set_grants(
+    username: str,
+    grants: Annotated[
+        list[str] | None,
+        typer.Argument(help="approver, pii-reader, both or none: the grants the user has after."),
+    ] = None,
+    reason: Annotated[str | None, typer.Option(help="Why, for the audit log.")] = None,
+    env: Env = "dev",
+    database_url: DatabaseUrl = None,
+    json_mode: Json = False,
+) -> None:
+    """Give a user these add-on grants and no others: an approver decides holds, a pii-reader unmasks PII."""
+    chosen = list(grants or [])
+    with _store(database_url, json_mode) as store:
+        try:
+            _accounts(store).set_grants(CLI, username, chosen, reason=reason)
+        except KeyError:
+            fail(f"there is no user {username!r}", json_mode=json_mode)
+        except ValueError as error:
+            fail(str(error), json_mode=json_mode)
+    emit(
+        {"user": username, "grants": chosen},
+        json_mode=json_mode,
+        human=lambda _: typer.echo(f"{username} has {', '.join(chosen) or 'no grants'} now"),
     )
 
 

@@ -17,10 +17,12 @@ from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
     ENV_KINDS,
+    GRANTS,
     MAX_ENV_ROWS,
     MAX_PACKAGE_ROWS,
     STREAM_TRIGGER,
     WAITS_KEPT,
+    AccessGrant,
     ActivationState,
     Attempt,
     AuditRow,
@@ -1384,6 +1386,11 @@ class _Users(UserStore):
     def set_role(self, username: str, role: Role) -> None:
         with self._d.lock:
             self._d.users[username] = replace(self._d.users[username], role=role)
+
+    def set_grants(self, username: str, grants: Sequence[AccessGrant]) -> None:
+        with self._d.lock:
+            kept = tuple(g for g in GRANTS if g in grants)
+            self._d.users[username] = replace(self._d.users[username], grants=kept)
 
     def create_token(
         self,

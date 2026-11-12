@@ -21,8 +21,10 @@ VersionStatus = Literal["staged", "sealed"]
 DeliveryStatus = Literal["pending", "running", "applied", "failed", "held", "skipped", "compensated"]
 QuarantineStatus = Literal["open", "superseded"]
 WorkerState = Literal["alive", "draining", "dead"]
-Role = Literal["admin", "operator"]
-ROLES: tuple[Role, ...] = ("admin", "operator")  # highest first
+Role = Literal["admin", "developer", "operator", "viewer"]
+ROLES: tuple[Role, ...] = ("admin", "developer", "operator", "viewer")  # highest first (design §13.2)
+AccessGrant = Literal["approver", "pii-reader"]  # add-on grants beside a role: deciding holds, unmasking PII
+GRANTS: tuple[AccessGrant, ...] = ("approver", "pii-reader")
 TokenScope = Literal[
     "all", "publish"
 ]  # `publish`: it may upload to the built-in registry and do nothing else
@@ -1198,6 +1200,7 @@ class UserRow:
     password_hash: str
     created_at: datetime
     role: Role
+    grants: tuple[AccessGrant, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1233,6 +1236,11 @@ class UserStore(Protocol):
 
     def set_role(self, username: str, role: Role) -> None:
         """Give the user another role. Raises `KeyError` when there is no such user."""
+        ...
+
+    def set_grants(self, username: str, grants: Sequence[AccessGrant]) -> None:
+        """Give the user these grants, and no others, in the order of `GRANTS`. Raises `KeyError` when there is no
+        such user."""
         ...
 
     def set_password_hash(self, username: str, password_hash: str) -> None:

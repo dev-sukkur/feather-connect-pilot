@@ -33,7 +33,7 @@ from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from feather_connect.clock import Clock, SystemClock
-from feather_connect.storage.port import ROLES, Role, Store, TokenScope
+from feather_connect.storage.port import ROLES, AccessGrant, Role, Store, TokenScope
 
 if TYPE_CHECKING:
     from feather_server.app import AppState
@@ -72,6 +72,12 @@ class Actor:
     role: Role = "operator"
     user: str | None = None
     scope: TokenScope = "all"  # `publish`: a token that may only upload to the built-in registry
+    grants: frozenset[AccessGrant] = (
+        frozenset()
+    )  # the user's add-on grants: `approver`, `pii-reader` (design §13.2)
+    protected: bool = (
+        False  # whether it acts in a protected environment, where a developer's rights are an admin's
+    )
 
 
 class AuthError(Exception):
@@ -157,8 +163,9 @@ def _bearer_actor(request: Request, state: "AppState") -> Actor:
     now = state.clock.now()
     if row is None or row.revoked_at is not None or (row.expires_at is not None and row.expires_at <= now):
         raise AuthError(401, "Unauthorized", "the token is not valid")
+    protected = _protected(state)
     if row.created_by is None:
-        return Actor("token", row.name, row.role, scope=row.scope)
+        return Actor("token", row.name, row.role, scope=row.scope, protected=protected)
     user = state.store.users.get_user(row.created_by)
     if user is None:  # its user is gone, and with them what the token may do
         raise AuthError(401, "Unauthorized", "the token is not valid")
@@ -167,7 +174,12 @@ def _bearer_actor(request: Request, state: "AppState") -> Actor:
             403, "Forbidden", f"this publish token's user, {user.username}, is no longer an admin"
         )
     role = row.role if ROLES.index(row.role) >= ROLES.index(user.role) else user.role  # the lower
-    return Actor("token", row.name, role, user.username, row.scope)
+    return Actor("token", row.name, role, user.username, row.scope, frozenset(user.grants), protected)
+
+
+def _protected(state: "AppState") -> bool:
+    """Whether the server's environment is protected (`settings.protected` in its project)."""
+    return bool(state.project.settings.get("protected"))
 
 
 # Sessions. The cookie holds a random id and, once signed in, the user name; it is signed, not encrypted.
@@ -245,7 +257,14 @@ def current_actor(request: Request) -> Actor:
             and session.epoch is not None
             and _same(session.epoch, _epoch(state, user.username, user.password_hash))
         ):
-            return Actor("human", session.user, user.role, user.username)
+            return Actor(
+                "human",
+                session.user,
+                user.role,
+                user.username,
+                grants=frozenset(user.grants),
+                protected=_protected(state),
+            )
     raise AuthError(401, "Unauthorized", "sign in, or send a bearer token")
 
 

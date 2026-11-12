@@ -25,12 +25,14 @@ from feather_connect.core.connector import InboundRequest
 from feather_connect.ids import new_id, stable_id
 from feather_connect.storage.port import (
     CLOSED,
+    GRANTS,
     MAX_ENV_ROWS,
     MAX_PACKAGE_ROWS,
     READY_CHANNEL,
     SHARED_TENANT,
     STREAM_TRIGGER,
     WAITS_KEPT,
+    AccessGrant,
     Attempt,
     AuditRow,
     AuditStore,
@@ -2162,7 +2164,14 @@ class _Users(UserStore):
 
     @staticmethod
     def _user(row: Mapping[str, Any]) -> UserRow:
-        return UserRow(row["user_id"], row["username"], row["password_hash"], row["created_at"], row["role"])
+        return UserRow(
+            row["user_id"],
+            row["username"],
+            row["password_hash"],
+            row["created_at"],
+            row["role"],
+            tuple(g for g in GRANTS if g in (row["grants"] or ())),
+        )
 
     def get_user(self, username: str) -> UserRow | None:
         with self._db.tx() as conn:
@@ -2194,6 +2203,15 @@ class _Users(UserStore):
             changed = conn.execute(
                 "update feather.app_user set role = %s where tenant_id = %s and username = %s",
                 (role, self._db.tenant, username),
+            )
+        if changed.rowcount == 0:
+            raise KeyError(username)
+
+    def set_grants(self, username: str, grants: Sequence[AccessGrant]) -> None:
+        with self._db.tx() as conn:
+            changed = conn.execute(
+                "update feather.app_user set grants = %s where tenant_id = %s and username = %s",
+                ([g for g in GRANTS if g in grants], self._db.tenant, username),
             )
         if changed.rowcount == 0:
             raise KeyError(username)

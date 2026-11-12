@@ -838,6 +838,10 @@ class RoleBody(Reason):
     role: str
 
 
+class GrantsBody(Reason):
+    grants: list[str]
+
+
 class NewToken(BaseModel):
     name: str
     role: str | None = None  # the caller's own when left out
@@ -870,6 +874,21 @@ def set_role(
 ) -> JSONResponse:
     return _once(
         request, actor, key, lambda: accounts.set_role(actor, username, body.role, reason=body.reason)
+    )
+
+
+@router.put("/users/{username}/grants")
+def set_grants(
+    username: str,
+    request: Request,
+    accounts: Manage,
+    actor: CurrentActor,
+    body: GrantsBody,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    """Give the user these add-on grants, `approver` and `pii-reader`, and no others."""
+    return _once(
+        request, actor, key, lambda: accounts.set_grants(actor, username, body.grants, reason=body.reason)
     )
 
 

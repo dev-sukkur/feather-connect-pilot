@@ -7,7 +7,7 @@ reference that resolves to `SECRET` when the environment variable `WH_TOKEN` is 
 
 import re
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +23,7 @@ from feather_connect.engine.local import LocalEngine
 from feather_connect.project import load_project
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.memory import MemoryStore
-from feather_connect.storage.port import Role
+from feather_connect.storage.port import AccessGrant, Role
 from feather_connect.storage.spool import MemorySpool
 from feather_server.app import AppState
 from feather_server.auth import hash_password
@@ -153,11 +153,15 @@ def build_world(root: Path, clock: FrozenClock) -> World:
     return World(state, engine, clock, Actions(state), Reads(state))
 
 
-def sign_in(app: FastAPI, username: str = "op", role: Role = "operator") -> TestClient:
-    """A browser signed in to `app` as a new user with `role`. Redirects are not followed, as a test wants to see
-    them."""
+def sign_in(
+    app: FastAPI, username: str = "op", role: Role = "operator", grants: Sequence[AccessGrant] = ()
+) -> TestClient:
+    """A browser signed in to `app` as a new user with `role` and `grants`. Redirects are not followed, as a test
+    wants to see them."""
     state: AppState = app.state.feather
     state.store.users.create_user(username, hash_password(PASSWORD), role)
+    if grants:
+        state.store.users.set_grants(username, grants)
     browser = TestClient(app, base_url="http://localhost:8000", follow_redirects=False)
     found = re.search(r'name="csrf_token" value="([^"]+)"', browser.get("/login").text)
     assert found

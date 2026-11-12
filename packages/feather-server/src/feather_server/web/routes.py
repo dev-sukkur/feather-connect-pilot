@@ -20,6 +20,7 @@ from fastapi.templating import Jinja2Templates
 from feather_connect.core.errors import PermanentError
 from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.storage.port import (
+    GRANTS,
     ROLES,
     STREAM_TRIGGER,
     DeliveryStatus,
@@ -1680,7 +1681,7 @@ def _users_page(
     tiles = [
         Tile("Users", len(everyone)),
         Tile("Admins", sum(1 for u in everyone if u.role == "admin")),
-        Tile("Operators", sum(1 for u in everyone if u.role == "operator")),
+        Tile("Approvers", sum(1 for u in everyone if "approver" in u.grants or u.role == "admin")),
     ]
     return render(
         request,
@@ -1692,6 +1693,7 @@ def _users_page(
         tiles=tiles,
         q=q,
         roles=ROLES,
+        grants=GRANTS,
         notice=notice,
     )
 
@@ -1711,6 +1713,21 @@ def set_role(request: Request, actor: CurrentActor, username: str, role: Annotat
     except ValueError as error:
         return _users_page(request, actor, status=422, notice=("bad", str(error)))
     return _users_page(request, actor, notice=("ok", f"{username} is now an {role}."))
+
+
+@router.post("/users/{username}/grants", dependencies=[Depends(require_csrf)])
+async def set_grants(request: Request, actor: CurrentActor, username: str) -> Response:
+    accounts: Accounts = request.app.state.accounts
+    form = await request.form()
+    chosen = [str(g) for g in form.getlist("grant")]
+    try:
+        accounts.set_grants(actor, username, chosen)
+    except KeyError:
+        return _not_found(request, f"No user named {username!r}.")
+    except ValueError as error:
+        return _users_page(request, actor, status=422, notice=("bad", str(error)))
+    said = ", ".join(chosen) if chosen else "no grants"
+    return _users_page(request, actor, notice=("ok", f"{username} has {said} now."))
 
 
 # Datasets and routes: the lists the sidebar's Datasets and Deliveries open.

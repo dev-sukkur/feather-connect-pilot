@@ -909,6 +909,21 @@ class StoreContract(
         clock.advance(timedelta(minutes=3))
         assert [w.task_ref for w in store.budgets.waits("api")] == ["t1"]
 
+    def test_roles_and_grants_of_a_user(self, store: Store):  # M2 plan 2 O2
+        store.users.create_user("v", "h", "viewer")
+        store.users.create_user("d", "h", "developer")
+        assert [(u.username, u.role, u.grants) for u in store.users.list_users()] == [
+            ("d", "developer", ()),
+            ("v", "viewer", ()),
+        ]
+        store.users.set_grants("v", ["pii-reader", "approver", "approver"])
+        found = store.users.get_user("v")
+        assert found is not None and found.grants == ("approver", "pii-reader")
+        store.users.set_grants("v", [])
+        assert store.users.get_user("v").grants == ()  # pyright: ignore[reportOptionalMemberAccess]
+        with pytest.raises(KeyError):
+            store.users.set_grants("nobody", ["approver"])
+
     def test_all_applied(self, store: Store):
         assert store.ledger.all_applied()
         seal(store, "v1", ["a"])

@@ -32,7 +32,11 @@ def _csrf(page: str) -> str:
 def test_the_api_lists_a_hold_and_an_operator_approves_it(state: AppState):
     _held(state)
     app = create_app(state=state, loops=lambda s: [])
-    token = issue_token(state.store, "ops", timedelta(days=1), role="operator", clock=state.clock)
+    state.store.users.create_user("ops", "h", "operator")
+    state.store.users.set_grants("ops", ["approver"])  # deciding holds is an approver's (M2 plan 2 O2)
+    token = issue_token(
+        state.store, "ops", timedelta(days=1), role="operator", created_by="ops", clock=state.clock
+    )
     api = TestClient(app, headers={"Authorization": f"Bearer {token}"})
     [hold] = api.get("/api/v1/holds").json()["holds"]
     assert (hold["route"], hold["kind"], hold["reason"]) == (
@@ -51,7 +55,7 @@ def test_the_api_lists_a_hold_and_an_operator_approves_it(state: AppState):
 
 def test_the_holds_page_rejects_with_a_reason(state: AppState):
     _held(state)
-    browser = sign_in(create_app(state=state, loops=lambda s: []))
+    browser = sign_in(create_app(state=state, loops=lambda s: []), grants=["approver"])
     page = browser.get("/holds")
     assert page.status_code == 200 and "acme/sap" in page.text and "Approve" in page.text
     form = {"csrf_token": _csrf(page.text), "route": "acme/sap", "version_id": "v1", "decision": "reject"}

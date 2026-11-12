@@ -254,7 +254,15 @@ def test_holds_list_and_reject(cli: Callable[..., Result], server: Served) -> No
     store.ledger.transition("acme/sap", "v9", "held", actor="system", reason="approval: 1 record to approve")
     listed = cli("holds", "list", *_at(server))
     assert listed.exit_code == 0 and "acme/sap v9 [_]: approval: 1 record to approve" in listed.stdout
-    assert cli("holds", "reject", "acme/sap", "v9", *_at(server)).exit_code != 0  # no reason
-    done = cli("holds", "reject", "acme/sap", "v9", "--reason", "wrong", *_at(server))
+    refused = cli("holds", "reject", "acme/sap", "v9", "--reason", "wrong", *_at(server))
+    assert refused.exit_code != 0  # the token's user isn't an approver (M2 plan 2 O2)
+    store.users.create_user("ann", "h", "operator")
+    store.users.set_grants("ann", ["approver"])
+    token = issue_token(
+        store, "ann-cli", timedelta(days=1), role="operator", created_by="ann", clock=server.world.clock
+    )
+    at = ["--server", server.url, "--token", token]
+    assert cli("holds", "reject", "acme/sap", "v9", *at).exit_code != 0  # no reason
+    done = cli("holds", "reject", "acme/sap", "v9", "--reason", "wrong", *at)
     assert done.exit_code == 0, done.output
     assert "rejected" in done.stdout and store.ledger.get("acme/sap", "v9").status == "skipped"
