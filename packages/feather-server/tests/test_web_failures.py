@@ -125,7 +125,7 @@ def test_a_preview_of_nothing_is_refused(client: TestClient, world: World, csrf:
     assert forged.status_code == 422
 
 
-def test_skip_needs_a_reason_field_filled_when_protected(
+def test_a_change_needs_a_reason_field_filled_when_protected(
     client: TestClient, world: World, csrf: Csrf, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fail_warehouse(world, "no such table", day(17))
@@ -155,14 +155,14 @@ def test_skip_needs_a_reason_field_filled_when_protected(
         "skipped",
         "applied",
     } - {"applied"} | {"skipped"}
-    # Retrying needs no reason, even when protected.
+    # Retrying needs one too, when protected: every change does (M3 plan 1 E3).
     fail_warehouse(world, "again", day(15))
     page = client.get("/failures").text
     retry = client.post(
         "/deliveries/preview",
         data={"csrf_token": csrf(), **hidden_fields(page, "/deliveries/preview", "retry")},
     )
-    assert "required" not in retry.text.split('name="reason"')[1].split(">")[0]
+    assert "required" in retry.text.split('name="reason"')[1].split(">")[0]
 
 
 def test_replay_from_deliveries_page(client: TestClient, world: World, csrf: Csrf) -> None:

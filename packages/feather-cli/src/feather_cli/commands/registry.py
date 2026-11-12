@@ -11,6 +11,8 @@ from feather_cli.commands import remote
 from feather_cli.options import Env, Json, ProjectDir
 from feather_cli.output import emit
 
+Reason = Annotated[str | None, typer.Option(help="Why, for the audit log.", show_default=False)]
+
 registry_app = typer.Typer(help="Add, list, test and remove package registries.", no_args_is_help=True)
 
 
@@ -37,12 +39,13 @@ def add(
             "--api-token", envvar="FEATHER_TOKEN", help="The Feather server's API token.", show_default=False
         ),
     ] = None,
+    reason: Reason = None,
     json_mode: Json = False,
 ) -> None:
     """Trust another registry. Its token is a secret reference, never the token itself: --token names the index's
     token, as the other commands' --token names the server's, which this one takes as --api-token."""
     with remote.client(project, env, server, api_token, json_mode) as api:
-        added = remote.call(lambda: api.add_registry(name, index_url, registry_token), json_mode)
+        added = remote.call(lambda: api.add_registry(name, index_url, registry_token, reason), json_mode)
     emit(
         added,
         json_mode=json_mode,
@@ -77,11 +80,12 @@ def remove(
     env: Env = "dev",
     server: remote.Server = None,
     token: remote.Token = None,
+    reason: Reason = None,
     json_mode: Json = False,
 ) -> None:
     """Stop trusting a registry. Packages installed from it stay installed."""
     with remote.client(project, env, server, token, json_mode) as api:
-        done = remote.call(lambda: api.remove_registry(name), json_mode)
+        done = remote.call(lambda: api.remove_registry(name, reason), json_mode)
     emit(done, json_mode=json_mode, human=lambda d: typer.echo(f"removed registry {d['registry']}"))
 
 
