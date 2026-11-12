@@ -13,6 +13,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from latency_proxy import LatencyProxy, delayed
 from real_stack import (
     free_port,
     kill_abruptly,
@@ -36,6 +37,9 @@ HOOK_TOKEN = "chaos-hook-token"
 CONTAINER = "feather-chaos-postgres"
 CONTAINER_PORT = 25434  # the busy ports of the development machine are 5432, 55432, 7077 and 8888
 CONTAINER_URL = f"postgresql://feather:feather@127.0.0.1:{CONTAINER_PORT}/feather_chaos"
+SLOW_NETWORK_DELAY_S = (
+    0.002  # each chunk of bytes, each way: some ms a round trip, as between zones of a region
+)
 
 DDL = """
 create schema chaos;
@@ -371,5 +375,17 @@ def world_on_own_server(own_server: Server, tmp_path: Path) -> Iterator[tuple[Wo
         found = World(url, tmp_path)
         try:
             yield found, own_server
+        finally:
+            found.close()
+
+
+@pytest.fixture
+def slow_world(tmp_path: Path) -> Iterator[tuple[World, LatencyProxy]]:
+    """A world whose every connection to Postgres, the workers' and the test's own, goes through a slow network
+    (M3 plan 1 P2)."""
+    with scratch_database(server_url()) as url, delayed(url, SLOW_NETWORK_DELAY_S) as (slow, proxy):
+        found = World(slow, tmp_path)
+        try:
+            yield found, proxy
         finally:
             found.close()
