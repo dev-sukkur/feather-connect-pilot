@@ -18,6 +18,7 @@ from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.port import (
     BudgetSpec,
     BudgetStore,
+    BudgetWait,
     Grant,
     Priority,
     Store,
@@ -108,6 +109,15 @@ class SpyBudgets(BudgetStore):
         if grant.granted:
             self.grants.append((self._clock.now(), priority, units))
         return grant
+
+    def note_wait(self, name: str, task_ref: str, run_id: str | None, until: datetime) -> None:
+        self._inner.note_wait(name, task_ref, run_id, until)
+
+    def waits(self, name: str) -> list[BudgetWait]:
+        return self._inner.waits(name)
+
+    def specs(self) -> list[BudgetSpec]:
+        return self._inner.specs()
 
     def usage(self, name: str) -> list[WindowUsage]:
         return self._inner.usage(name)

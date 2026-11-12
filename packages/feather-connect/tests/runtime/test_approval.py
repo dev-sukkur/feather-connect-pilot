@@ -38,7 +38,7 @@ class World:
 
     def seal(self, rows: list[dict[str, Any]]) -> str:
         self.n += 1
-        self.ds.source.load(rows)
+        self.ds.source.load(rows)  # pyright: ignore[reportAttributeAccessIssue] - a memory source
         [version] = run_extract(
             self.ds, f"r{self.n}", "_", routes=[self.route], stage_only=False, deps=self.deps
         )

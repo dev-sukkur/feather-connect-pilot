@@ -48,6 +48,7 @@ RULES: Mapping[str, Mapping[str, Any]] = {
     "schedule_skipped": {"ticks": 3},
     "dataset_stale": {},
 }
+Send = Callable[[str, Mapping[str, Any], AlertRow], None]  # tells one channel of one alert
 CHANNEL_KINDS = ("webhook", "slack", "smtp")
 LOOKED_AT = 500  # deliveries, runs of a kind, that a pass reads
 NOTICE_TIMEOUT_S = 10.0
@@ -264,7 +265,7 @@ class PassReport:
     failed: tuple[str, ...]  # alert ids a channel turned down: retried next pass
 
 
-def evaluate_once(state: "AppState", send: "Sender | None" = None) -> PassReport:
+def evaluate_once(state: "AppState", send: "Send | None" = None) -> PassReport:
     """Evaluate every rule that is on, fire and clear its alerts, and tell the channels of the new ones."""
     now = state.clock.now()
     fired: list[AlertRow] = []
@@ -288,7 +289,7 @@ def evaluate_once(state: "AppState", send: "Sender | None" = None) -> PassReport
 
 
 def _notify(
-    state: "AppState", by_name: Mapping[str, Rule], now: datetime, send: "Sender"
+    state: "AppState", by_name: Mapping[str, Rule], now: datetime, send: "Send"
 ) -> tuple[list[str], list[str]]:
     notified: list[str] = []
     failed: list[str] = []
