@@ -228,3 +228,7 @@ def test_the_holds_page_lists_requests_and_a_second_person_decides(
         data={"csrf_token": csrf.group(1), "decision": "approve", "reason": "checked"},
     )
     assert sent.status_code == 303 and state.store.requests.get(request_id).status == "approved"
+
+
+def test_the_status_bar_says_protected(client: TestClient, protected: World) -> None:
+    assert ">protected</span>" in client.get("/status").text
