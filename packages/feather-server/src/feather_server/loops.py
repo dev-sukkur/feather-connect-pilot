@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from feather_connect.runtime.catalogue import Catalogue
 from feather_connect.runtime.leader import AlwaysLeader, LeaderLock, leader_key
+from feather_connect.runtime.ready_eval import evaluate as evaluate_readiness
 from feather_connect.runtime.retention import RetentionReport, retention_once
 from feather_connect.runtime.scheduler import tick
 from feather_connect.runtime.sealer import seal_once
@@ -172,10 +173,14 @@ def default_loops(state: "AppState") -> list[LoopRunner]:
     def seal() -> None:
         seal_once(state.runtime, now=state.clock.now())
 
+    def ready() -> None:  # readiness (M2 plan 1): fires what is ready, from the catalogue and the store
+        evaluate_readiness(state.store, catalogue.flows(), state.clock.now())
+
     return [
         LoopRunner("scheduler", schedule, 1.0, lock("scheduler")),
         LoopRunner("sweeper", sweep, 5.0, lock("sweeper")),
         LoopRunner("retention", retain, 3600.0, lock("retention")),
         # Often enough that a batch waits about `max_age` (1 s), and no more than a quarter of that again.
         LoopRunner("sealer", seal, 0.25, lock("sealer")),
+        LoopRunner("readiness", ready, 2.0, lock("readiness")),
     ]

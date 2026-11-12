@@ -55,6 +55,7 @@ class ActiveFlow:
     catch_up: str
     enabled: bool
     datasets: frozenset[str] = field(default_factory=frozenset[str])
+    spec: Mapping[str, Any] = field(default_factory=dict[str, Any])  # as the load check recorded it
 
 
 @dataclass(frozen=True)
@@ -202,6 +203,7 @@ class Catalogue:
                     str(spec.get("catch_up", "latest")),
                     bool(spec.get("enabled", True)),
                     datasets,
+                    spec,
                 )
             )
             try:

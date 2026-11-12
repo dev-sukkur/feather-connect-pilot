@@ -102,6 +102,7 @@ def test_default_loops_are_the_scheduler_sweeper_and_retention(state: AppState) 
         ("sweeper", 5.0),
         ("retention", 3600.0),
         ("sealer", 0.25),
+        ("readiness", 2.0),
     }
 
 
