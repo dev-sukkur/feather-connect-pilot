@@ -66,7 +66,9 @@ def test_the_loader_says_what_is_wrong_with_a_process(tmp_path: Path, entry: str
 def test_validate_accepts_the_zakya_demo_with_its_processes():
     result = CliRunner().invoke(app, ["validate", "--project", str(ROOT / "examples" / "zakya-demo")])
     assert result.exit_code == 0, result.output
-    assert len(load_project(ROOT / "examples" / "zakya-demo", "dev").dev_processes) == 2
+    assert (
+        len(load_project(ROOT / "examples" / "zakya-demo", "dev").dev_processes) == 4
+    )  # 3 simulators, staging
 
 
 def test_a_helper_runs_in_the_project_on_this_interpreter_and_stops(tmp_path: Path):
