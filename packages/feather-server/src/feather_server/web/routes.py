@@ -23,6 +23,7 @@ from feather_connect.storage.port import (
     ROLES,
     STREAM_TRIGGER,
     DeliveryStatus,
+    InvalidTransition,
     Run,
     delivery_cursor,
     failure_cursor,
@@ -73,6 +74,7 @@ NAV: list[NavItem] = [
     NavItem("Datasets", "/datasets", "datasets", ("/versions",)),
     NavItem("Readiness", "/readiness", "readiness"),
     NavItem("Deliveries", "/deliveries", "deliveries", ("/routes",)),
+    NavItem("Holds", "/holds", "holds"),
     NavItem("Failures", "/failures", "failures"),
     NavItem("Quarantine", "/quarantine", "quarantine"),
     NavItem("Connections", "/connections", "connections"),
@@ -1755,6 +1757,62 @@ def _readiness_page(
         q=q,
         notice=notice,
     )
+
+
+def _holds_page(
+    request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
+) -> HTMLResponse:
+    q = request.query_params.get("q", "")[:200]
+    rows = [
+        h
+        for h in actions(request).holds()
+        if _matches(q, h["route"], h["version_id"], h["dataset"], h["partition"], h["reason"] or "")
+    ]
+    approvals = sum(1 for h in rows if h["kind"] == "approval")
+    tiles = [Tile("Held", len(rows), "warn" if rows else ""), Tile("For approval", approvals)]
+    done = request.query_params.get("done")
+    if notice is None and done in ("approved", "rejected"):
+        word = (
+            "it applies now" if done == "approved" else "it is skipped, and the versions behind it go ahead"
+        )
+        notice = ("ok", f"{done.capitalize()}: {word}.")
+    return render(
+        request,
+        "holds.html",
+        status=status,
+        title="Holds",
+        actor=actor,
+        rows=rows,
+        tiles=tiles,
+        q=q,
+        notice=notice,
+    )
+
+
+@router.get("/holds", response_class=HTMLResponse)
+def holds(request: Request, actor: CurrentActor) -> HTMLResponse:
+    return _holds_page(request, actor)
+
+
+@router.post("/holds/decide", dependencies=[Depends(require_csrf)])
+def holds_decide(
+    request: Request,
+    actor: CurrentActor,
+    route: Annotated[str, Form(max_length=500)],
+    version_id: Annotated[str, Form(max_length=200)],
+    decision: Annotated[str, Form(max_length=10)],
+    reason: Reason = "",
+) -> Response:
+    try:
+        actions(request).decide_hold(
+            actor, route, version_id, approve=decision == "approve", reason=_reason(reason)
+        )
+    except KeyError:
+        return _not_found(request, f"No delivery of {version_id!r} on route {route!r}.")
+    except (ValueError, InvalidTransition) as error:
+        return _holds_page(request, actor, status=422, notice=("bad", str(error)))
+    word = "approved" if decision == "approve" else "rejected"
+    return RedirectResponse(f"/holds?done={word}", status_code=303)
 
 
 @router.get("/readiness", response_class=HTMLResponse)

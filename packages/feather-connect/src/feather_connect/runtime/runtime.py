@@ -18,6 +18,7 @@ from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from feather_connect.clock import Clock, SystemClock
+from feather_connect.core.approval import APPROVED
 from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import BudgetDeferred, PermanentError
@@ -584,6 +585,16 @@ class Runtime:
             f"version {version_id} is older than version {latest.version_id}, the latest of partition {partition!r}, "
             f"and replaying it would put older data in route {route!r}: replay {latest.version_id} instead"
         )
+
+    def approve(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
+        """Approve a delivery held for approval: it applies as it is, as a new task. `InvalidTransition` unless held."""
+        self._require(route, version_id, "held", "be approved")
+        self._reopen(route, version_id, "pending", actor, f"{APPROVED}: {reason}" if reason else APPROVED)
+
+    def reject(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
+        """Reject a delivery held for approval: it is skipped, and the versions behind it go ahead."""
+        self._require(route, version_id, "held", "be rejected")
+        self._reopen(route, version_id, "skipped", actor, f"rejected: {reason}" if reason else "rejected")
 
     def skip(self, route: str, version_id: str, *, actor: str, reason: str | None = None) -> None:
         """Give up on a failed delivery, so that the versions behind it can go ahead."""

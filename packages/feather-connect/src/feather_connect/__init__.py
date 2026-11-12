@@ -4,6 +4,7 @@
 # editable install puts each of those folders on the path, and this lets the namespace look in every one of them.
 __path__ = __import__("pkgutil").extend_path(__path__, __name__)
 
+from feather_connect.core import approval
 from feather_connect.core import partitions as partition
 from feather_connect.core import strategies as strategy
 from feather_connect.core.connector import (
@@ -46,6 +47,7 @@ __all__ = [
     "TransientError",
     "Unreadable",
     "__version__",
+    "approval",
     "batch_map",
     "cron",
     "every",

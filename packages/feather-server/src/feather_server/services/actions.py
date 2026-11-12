@@ -82,6 +82,8 @@ CAPABILITIES: dict[str, Capability] = {  # each action, as its audit rows name i
     "check_connection": "connections.check",
     "fire_ready": "readiness.fire",
     "close_partition": "partitions.close",
+    "approve_delivery": "holds.decide",
+    "reject_delivery": "holds.decide",
 }
 
 
@@ -904,6 +906,44 @@ class Actions:
         return self._do(
             actor, "close_partition", f"dataset:{dataset}", {"partition": partition, "reason": reason}, close
         )
+
+    # Holds (M2 plan 2 A1).
+
+    def holds(self, route: str | None = None) -> list[dict[str, Any]]:
+        """The deliveries held for an approver or by the schema policy, oldest first, with why."""
+        ledger = self._store.ledger
+        found: list[dict[str, Any]] = []
+        page = ledger.list_deliveries(route=route, status="held", limit=_PAGE)
+        for d in page:
+            held = [a for a in ledger.attempts(d.route, d.version_id) if a.to_status == "held"]
+            last = held[-1] if held else None
+            found.append(
+                {
+                    "route": d.route,
+                    "version_id": d.version_id,
+                    "dataset": d.dataset,
+                    "partition": d.partition,
+                    "reason": last.reason if last else None,
+                    "held_at": last.at.isoformat() if last else None,
+                    "kind": "approval" if last and (last.reason or "").startswith("approval") else "schema",
+                }
+            )
+        return found
+
+    def decide_hold(
+        self, actor: Actor, route: str, version_id: str, *, approve: bool, reason: str | None
+    ) -> None:
+        """Approve a held delivery, which then applies as it is, or reject it, which skips it. Audited, with a reason
+        when it is a rejection."""
+        action = "approve_delivery" if approve else "reject_delivery"
+
+        def decide() -> None:
+            if not approve and not (reason and reason.strip()):
+                raise ValueError("a reason is required to reject a held delivery")
+            call = self._rt.approve if approve else self._rt.reject
+            call(route, version_id, actor=actor.name, reason=reason)
+
+        self._do(actor, action, f"route:{route}", {"version_id": version_id, "reason": reason}, decide)
 
     # Connections.
 

@@ -478,6 +478,49 @@ def close_partition(
     return _once(request, actor, key, close)
 
 
+@router.get("/holds")
+def holds(actions: Do, _: CurrentActor, route: str | None = None) -> JSONResponse:
+    return ok(call(lambda: {"holds": actions.holds(route)}))
+
+
+def _decide(
+    request: Request, actions: Do, actor: Actor, key: str | None, route: str, version_id: str, *, approve: bool,
+    reason: str | None,
+) -> JSONResponse:  # fmt: skip
+    def decide() -> dict[str, Any]:
+        actions.decide_hold(actor, route, version_id, approve=approve, reason=reason)
+        return {"route": route, "version_id": version_id, "status": "pending" if approve else "skipped"}
+
+    return _once(request, actor, key, decide)
+
+
+@router.post("/routes/{route:path}/deliveries/{version_id}:approve")
+def approve_delivery(
+    route: str,
+    version_id: str,
+    request: Request,
+    actions: Do,
+    actor: CurrentActor,
+    key: IdempotencyKey = None,
+    body: Reason | None = None,
+) -> JSONResponse:
+    reason = (body or Reason()).reason
+    return _decide(request, actions, actor, key, route, version_id, approve=True, reason=reason)
+
+
+@router.post("/routes/{route:path}/deliveries/{version_id}:reject")
+def reject_delivery(
+    route: str,
+    version_id: str,
+    request: Request,
+    actions: Do,
+    actor: CurrentActor,
+    body: Reason,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    return _decide(request, actions, actor, key, route, version_id, approve=False, reason=body.reason)
+
+
 @router.post("/runs/{run_id}:cancel")
 def cancel_run(
     run_id: str,

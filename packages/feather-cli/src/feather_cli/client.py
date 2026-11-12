@@ -281,6 +281,18 @@ class ApiClient:
             idempotency_key=str(uuid.uuid4()),
         )
 
+    def holds(self, route: str | None = None) -> dict[str, Any]:
+        return self._call("GET", "/holds" + (f"?route={quote(route, safe='')}" if route else ""))
+
+    def decide_hold(self, route: str, version_id: str, approve: bool, reason: str | None) -> dict[str, Any]:
+        verb = "approve" if approve else "reject"
+        return self._call(
+            "POST",
+            f"/routes/{quote(route, safe='/')}/deliveries/{quote(version_id, safe='')}:{verb}",
+            body={"reason": reason},
+            idempotency_key=str(uuid.uuid4()),
+        )
+
     def deactivate_flow(self, flow: str, reason: str | None) -> dict[str, Any]:
         return self._call("POST", f"/flows/{quote(flow, safe='/')}:deactivate", body={"reason": reason})
 

@@ -7,6 +7,7 @@ from typing import Any, Literal, cast
 
 import pyarrow as pa
 
+from feather_connect.core.approval import Approval
 from feather_connect.core.connector import RouteMode, Sink
 from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
@@ -43,6 +44,7 @@ class RouteSpec:
     map: RecordMap | BatchMap | None
     mode: RouteMode
     priority: Priority
+    approval: Approval | None = None  # holds a delivery for an approver (design §5.3)
 
 
 def to(
@@ -52,13 +54,15 @@ def to(
     mode: RouteMode = "upsert",
     priority: Priority = "normal",
     name: str | None = None,
+    approval: Approval | None = None,
 ) -> RouteSpec:
     """Return a route that delivers to `sink`.
 
     The route is named after the sink's connection unless `name` says otherwise, so two routes to one
-    connection need a name each.
+    connection need a name each. `approval` (`fc.approval.when(...)`) holds a delivery with a record that needs one
+    until an approver decides.
     """
-    return RouteSpec(sink.connection if name is None else name, sink, map, mode, priority)
+    return RouteSpec(sink.connection if name is None else name, sink, map, mode, priority, approval)
 
 
 @dataclass(frozen=True)
@@ -236,6 +240,7 @@ class Flow:
                     "connector": r.sink.spec.name,
                     "mode": r.mode,
                     "priority": r.priority,
+                    **({"approval": r.approval.spec()} if r.approval is not None else {}),
                 }
                 for r in self.routes
             ],

@@ -241,3 +241,20 @@ def test_ready_close_fire_and_status(cli: Callable[..., Result], server: Served)
     assert "acme/posting: acme/invoices, each day" in shown.stdout and "2026-10-17" in shown.stdout
     refused = cli("ready", "fire", "acme/posting", "--period", "2026-10-17", *_at(server))
     assert refused.exit_code != 0  # no reason
+
+
+def test_holds_list_and_reject(cli: Callable[..., Result], server: Served) -> None:
+    from feather_connect.storage.port import VersionDraft
+
+    store = server.world.store
+    run = store.runs.create_run("acme/orders", "every", "t", {})
+    store.versions.stage(VersionDraft("v9", "acme/orders", "_", run, True, 1, 0, "h", None, None, "s"))
+    store.versions.seal(["v9"], ["acme/sap"])
+    store.ledger.transition("acme/sap", "v9", "running", actor="system")
+    store.ledger.transition("acme/sap", "v9", "held", actor="system", reason="approval: 1 record to approve")
+    listed = cli("holds", "list", *_at(server))
+    assert listed.exit_code == 0 and "acme/sap v9 [_]: approval: 1 record to approve" in listed.stdout
+    assert cli("holds", "reject", "acme/sap", "v9", *_at(server)).exit_code != 0  # no reason
+    done = cli("holds", "reject", "acme/sap", "v9", "--reason", "wrong", *_at(server))
+    assert done.exit_code == 0, done.output
+    assert "rejected" in done.stdout and store.ledger.get("acme/sap", "v9").status == "skipped"

@@ -16,6 +16,7 @@ from typing import Any, cast
 
 import pyarrow as pa
 
+from feather_connect.core.approval import APPROVED
 from feather_connect.core.connector import ApplyBatch, ApplyRecord, ApplyResult, Key, RecordResponse
 from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
@@ -567,13 +568,58 @@ def _step_durably[T](ctx: TaskContext, name: str, fn: Callable[[], T], retry: Re
             ctx.sleep(max(wait, timedelta(seconds=asked)) if asked is not None else wait)
 
 
+def approved(route: str, version_id: str, deps: RuntimeDeps) -> bool:
+    """Whether an approver approved the delivery: a move from held to pending that says so."""
+    return any(
+        a.from_status == "held" and a.to_status == "pending" and (a.reason or "").startswith(APPROVED)
+        for a in deps.store.ledger.attempts(route, version_id)
+    )
+
+
+def _hold_for_approval(route: RouteSpec, delivery: Delivery, deps: RuntimeDeps) -> bool:
+    """Hold the delivery for an approver when a record of it needs one and none has approved it; say whether it is
+    held (design §5.3). It reads the records the sink would get, before the map, as the route's approval judges them."""
+    approval, version_id = route.approval, delivery.version_id
+    ledger = deps.store.ledger
+    if approval is None:
+        return False
+    if ledger.get(route.name, version_id).status == "held":
+        return True  # a step run again
+    if approved(route.name, version_id, deps):
+        return False
+    plan = _plan_of(route, deps.store.versions.get(version_id), deps)
+    wanted = sum(
+        approval.wanted(record)
+        for chunk_no in plan.chunks
+        for record in table_to_records(deps.spool.get_chunk(version_id, chunk_no, plan.kind))
+    )
+    if not wanted:
+        return False
+    _resume(delivery, "apply started", deps)
+    why = f" ({approval.reason})" if approval.reason else ""
+    ledger.transition(
+        route.name,
+        version_id,
+        "held",
+        actor=_ACTOR,
+        reason=f"approval: {wanted} record{'s' if wanted != 1 else ''} to approve{why}",
+        code_sha=deps.code_sha,
+    )
+    log.info("route %s, version %s: held for approval", route.name, version_id)
+    return True
+
+
 def _deliver(
     ctx: TaskContext, dataset: Dataset, route: RouteSpec, delivery: Delivery, deps: RuntimeDeps
 ) -> bool:
-    """Apply one delivery and return True, or return False if it failed, which blocks its partition."""
+    """Apply one delivery and return True, or return False if it failed or is held, which blocks its partition."""
     version_id = delivery.version_id
     totals: list[_Counts] = []
     try:
+        if route.approval is not None:
+            hold = partial(_hold_for_approval, route, delivery, deps)
+            if _step_durably(ctx, f"approval:{version_id}", hold, deps.retry):
+                return False
         start = partial(_start, route, delivery, deps)
         plan = _step_durably(ctx, f"start:{version_id}", start, deps.retry)
         sender = _ChunkSender(dataset, route, delivery, plan, deps)
