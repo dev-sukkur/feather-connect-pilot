@@ -3,8 +3,7 @@
 M3 plan 1 L2. One line per NFR (discovery §8) with its evidence, then the release's own steps. A line is ticked when its
 evidence is in hand for the commit being released. Updated 13 Nov 2026, on branch `feat/m3-release`.
 
-**State**: the build is done; the release waits on the items marked **open**, which are the sponsor's decisions (Q9
-names, Pages, the accepted security findings) and the steps that are run at the release itself.
+**State**: **on hold** (sponsor, 13 Nov 2026). v1.0.0 is not released yet: Feather stays private and is deployed and used by its own team first. The build is done and merged (PRs 32 and 33). release-please runs only when started by hand, and its 1.0.0 pull request (PR 34) was closed unmerged. Neither PyPI nor GitHub Pages is needed for private use: flow packages go through the server's own registry, and the docs can be read in the repository or built with `uv run mkdocs build`. When the release is back on: put release-please's push trigger back, settle the items marked **open**, and rename `feather-http`, a name already taken on PyPI.
 
 ## The NFRs
 

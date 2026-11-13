@@ -5,9 +5,10 @@ name: Release Please
 # their pyproject.toml. Merging that pull request tags vX.Y.Z and makes the GitHub release; this workflow then builds,
 # signs and pushes the images and publishes to PyPI. They are called from here, since a tag pushed with GITHUB_TOKEN
 # starts no other workflow.
+# On hold since 13 Nov 2026: v1.0.0 waits while Feather is deployed and used privately first. It runs only when
+# started by hand (Actions, Release Please, Run workflow); put the push trigger back when releases resume.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
