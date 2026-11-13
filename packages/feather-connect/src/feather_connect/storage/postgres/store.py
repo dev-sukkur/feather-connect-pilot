@@ -175,10 +175,25 @@ class _Db:
 
     @contextmanager
     def tx(self) -> Generator[psycopg.Connection[Row]]:
-        """A transaction for this tenant. It commits when the block ends and rolls back if it raises."""
-        with self.pool.connection() as conn:
-            conn.execute("select set_config('feather.tenant_id', %s, true)", (self.tenant,))
-            yield conn
+        """A transaction for this tenant. It commits when the block ends and rolls back if it raises.
+
+        The pool checks a connection when it hands it out, but the connection can still be gone by the first statement:
+        Postgres restarted, or the network or a proxy dropped it. Nothing has run then, so the transaction starts again
+        once, on a new connection; the pool throws the broken one away. A failure later in the block isn't retried.
+        """
+        for attempt in (1, 2):
+            with self.pool.connection() as conn:
+                try:
+                    conn.execute("select set_config('feather.tenant_id', %s, true)", (self.tenant,))
+                except psycopg.OperationalError:
+                    if attempt == 2 or not conn.broken:
+                        raise
+                    log.warning(
+                        "a pooled connection was gone before its transaction began; starting it again"
+                    )
+                    continue
+                yield conn
+                return
 
     def ensure_month(self, parent: str, at: datetime) -> None:
         """Make sure the monthly partition of `parent` that holds `at` exists, before a transaction needs it."""
