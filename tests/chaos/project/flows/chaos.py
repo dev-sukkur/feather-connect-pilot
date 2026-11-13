@@ -180,6 +180,7 @@ def _flow(name: str, connection: str, sinks: list[str], rows: int = ROWS) -> fc.
 main = _flow("main", "source", ["slow_a", "slow_b", "slow_c"])
 fits = _flow("fits", "fits_source", ["fits_sink"], rows=2)  # two calls, and its budget holds two
 too_big = _flow("too_big", "big_source", ["big_sink"], rows=5)  # five calls, and its budget holds three
+windowed = _flow("windowed", "win_source", ["win_sink"])  # its sink has a window in test_windows.py
 # Feather's own simulation source: a package may not bring a push source of its own, which the server would run.
 hooks = fc.Dataset(
     "hooks",

@@ -553,6 +553,7 @@ def _flow_page(
         form=form or {},
         sha=state.project.code_sha[:8],
         today=state.clock.now().date().isoformat(),
+        closed_windows=reads(request).closed_windows(name),
     )
 
 

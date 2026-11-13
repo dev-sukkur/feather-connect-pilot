@@ -1,10 +1,13 @@
 import re
 from collections.abc import Callable
+from dataclasses import replace
+from datetime import timedelta
 
 import httpx2 as httpx  # what Starlette's TestClient answers with once httpx2 is installed (mcp brings it)
 from fastapi.testclient import TestClient
 
 from feather_connect.core.errors import PermanentError
+from feather_connect.core.windows import parse_window
 from feather_server.services.reads import (
     DatasetSummary,
     FlowDetail,
@@ -188,3 +191,23 @@ def test_the_graph_escapes_names() -> None:
     svg = flow_graph(FlowDetail(summary, (), ()))
     assert "<script>" not in svg and "<i>" not in svg and '"><x' not in svg
     assert "&lt;script&gt;d" in svg and svg.startswith("<svg") and "<title>" in svg
+
+
+def test_the_flow_page_warns_that_a_run_now_waits_for_a_closed_window(
+    client: TestClient, world: World
+) -> None:
+    """M3.1 F3: before the operator runs a flow, its page says which window the run will wait for, and until when."""
+    connections = world.state.project.connections
+    assert isinstance(connections, dict)  # the loaded project's, which the test changes in place
+    connections["gofrugal"] = replace(
+        connections["gofrugal"],
+        windows=parse_window({"tz": "UTC", "open": ["22:00-06:00"], "applies": ["write"]}),
+    )
+    page = client.get("/flows/orders").text
+    assert 'id="run-waits"' in page
+    assert "<code>gofrugal</code></a> is closed to writes until" in page
+    assert 'datetime="2026-10-18T22:00:00+00:00"' in page  # the frozen clock reads 10:00
+    assert "<code>warehouse</code>" not in page.split('id="run-waits"')[1].split("</p>")[0]
+
+    world.clock.advance(timedelta(hours=13))  # 23:00, inside the window
+    assert 'id="run-waits"' not in client.get("/flows/orders").text

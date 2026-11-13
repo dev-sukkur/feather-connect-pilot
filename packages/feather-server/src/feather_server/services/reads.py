@@ -15,6 +15,7 @@ from feather_connect.core.dataset import Dataset
 from feather_connect.core.flow import Flow
 from feather_connect.core.readiness import OnReady
 from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Reconcile, Trigger
+from feather_connect.core.windows import Use
 from feather_connect.project import ConfigValue, effective_config
 from feather_connect.runtime.retention import kept_days, kept_inbox_days
 from feather_connect.runtime.windows import wait_name
@@ -131,6 +132,16 @@ class StaleDataset:
     flow: str
     last_sealed_at: datetime | None  # None: no version has been sealed yet
     expected_every: timedelta
+
+
+@dataclass(frozen=True)
+class ClosedWindow:
+    """A connection that a flow reads or writes, whose availability window is closed now (M3.1 F3)."""
+
+    connection: str
+    use: Use
+    opens_at: datetime
+    window: str  # as `AvailabilityWindow.describe` says it
 
 
 @dataclass(frozen=True)
@@ -472,6 +483,32 @@ class Reads:
         live = {w.code_sha for w in self._store.workers.list_workers() if w.state != "dead"}
         shas = tuple(sorted(live | {v.code_sha for v in versions}))
         return FlowDetail(self._summary(flow), config, tuple(recent), tuple(versions), shas)
+
+    def closed_windows(self, flow: str) -> tuple[ClosedWindow, ...]:
+        """The windowed connections that `flow` reads or writes whose window is closed now, each with when it opens: a
+        run started now waits for them, so the flow page says so before the operator runs it. Empty for a flow neither
+        the runtime here nor the catalogue knows."""
+        uses: set[tuple[str, Use]] = set()
+        if flow in {f.name for f in self._rt.flows()}:
+            found = self._rt.flow(flow)
+            uses |= {(d.source.connection, "read") for d in found.datasets}
+            uses |= {(r.sink.connection, "write") for r in found.routes}
+        else:
+            try:
+                spec = self._store.catalog.flow(flow).spec
+            except KeyError:
+                return ()
+            uses |= {(str(d.get("connection") or ""), "read") for d in spec.get("datasets") or []}
+            uses |= {(str(r.get("connection") or ""), "write") for r in spec.get("routes") or []}
+        now = self._state.clock.now()
+        closed: list[ClosedWindow] = []
+        for name, use in sorted(uses):
+            connection = self._state.project.connections.get(name)
+            window = None if connection is None else connection.windows
+            if window is None or not window.gates(use) or window.is_open(now):
+                continue
+            closed.append(ClosedWindow(name, use, window.opens_at(now), window.describe()))
+        return tuple(closed)
 
     def _packaged_detail(self, name: str) -> FlowDetail:
         """A packaged flow's detail, from the catalogue: its configuration is its package's, shown on its page."""

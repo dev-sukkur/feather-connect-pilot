@@ -25,6 +25,7 @@
 <section aria-labelledby="h-actions">
   <h2 id="h-actions">Actions</h2>
   <div class="actions">
+    {% if closed_windows %}<p class="notice notice-warn" role="status" id="run-waits">A run started now waits: {% for w in closed_windows %}<a href="/connections"><code>{{ w.connection }}</code></a> is closed to {{ w.use }}s until <time datetime="{{ w.opens_at.isoformat() }}">{{ w.opens_at.strftime('%Y-%m-%d %H:%M %Z') }}</time> ({{ w.window }}){% if not loop.last %}; {% endif %}{% endfor %}.</p>{% endif %}
     <form method="post" action="/flows/{{ flow.name | urlencode }}/run">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <p><label for="run-reason">Reason (optional)</label><br><input id="run-reason" name="reason" type="text" maxlength="500"></p>
