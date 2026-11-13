@@ -24,6 +24,7 @@ LAYOUT = [
     "fixtures/.gitkeep",
     "tests/test_hello.py",
     "AGENTS.md",
+    ".claude/skills/investigate-failure/SKILL.md",
     "pyproject.toml",
 ]
 
@@ -125,3 +126,12 @@ def test_unknown_template_lists_the_available_ones(cli: Callable[..., Result], m
     doc = json.loads(r.stdout)
     assert r.exit_code == 1 and "fan-out-demo" in doc["hint"]
     assert _tree(made) == before
+
+
+def test_the_repository_s_skill_is_the_one_projects_get():  # M3.1 A1
+    from feather_cli.scaffolds import INVESTIGATE_FAILURE
+
+    root = Path(__file__).resolve().parents[3]
+    assert (root / "skills" / "investigate-failure" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == INVESTIGATE_FAILURE

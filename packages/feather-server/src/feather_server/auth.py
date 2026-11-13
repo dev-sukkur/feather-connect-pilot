@@ -14,6 +14,8 @@ import base64
 import hashlib
 import hmac
 import logging
+import os
+import re
 import secrets
 import threading
 from dataclasses import dataclass
@@ -248,6 +250,8 @@ def current_actor(request: Request) -> Actor:
         actor = _bearer_actor(request, state)
         if actor.scope == "publish" and not request.url.path.startswith(REGISTRY_PREFIX):
             raise AuthError(403, "Forbidden", "a publish token can only upload packages to the registry")
+        if AGENT_HEADER in request.headers:
+            return _as_agent(request, actor, state)
         return actor
     session = _session(request)
     if session is not None and session.user is not None:
@@ -269,6 +273,53 @@ def current_actor(request: Request) -> Actor:
 
 
 CurrentActor = Annotated[Actor, Depends(current_actor)]
+
+
+# Agents (M3.1 A1): an MCP tool's calls carry `X-Feather-Agent-Tool`, and are read only, three times over.
+
+AGENT_HEADER = "x-feather-agent-tool"
+_AGENT_TOOL = re.compile(r"^[a-z_]{1,64}$")
+
+
+class AgentLimiter:
+    """Calls per token in the last minute, in this process. An agent that calls more often is refused (429)."""
+
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+        self._calls: dict[str, list[datetime]] = {}
+        self._lock = threading.Lock()
+
+    def take(self, token: str, per_minute: int) -> bool:
+        with self._lock:
+            cutoff = self._clock.now() - timedelta(minutes=1)
+            recent = [at for at in self._calls.get(token, []) if at > cutoff]
+            if len(recent) >= per_minute:
+                self._calls[token] = recent
+                return False
+            self._calls[token] = [*recent, self._clock.now()]
+            return True
+
+
+def _as_agent(request: Request, actor: Actor, state: "AppState") -> Actor:
+    """The actor of an agent's call: a viewer token's, with no grants, so PII stays masked. Anything else is refused:
+    an agent reads, and a token that could do more is not one to give it. Each call is audited as the agent's."""
+    tool = request.headers[AGENT_HEADER]
+    if not _AGENT_TOOL.match(tool):
+        raise AuthError(400, "Bad Request", "X-Feather-Agent-Tool names the MCP tool, such as list_runs")
+    if actor.kind != "token" or actor.role != "viewer":
+        raise AuthError(
+            403,
+            "Forbidden",
+            "an agent's calls need a viewer token: feather server create-token claude --role viewer",
+        )
+    if request.method not in _SAFE_METHODS:
+        raise AuthError(403, "Forbidden", "an agent only reads")
+    limiter: AgentLimiter = request.app.state.agent_limiter
+    if not limiter.take(actor.name, int(os.environ.get("FEATHER_MCP_RATE_PER_MIN", "120"))):
+        raise AuthError(429, "Too Many Requests", "the agent calls too often: wait a minute")
+    path = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+    state.store.audit.record("agent", actor.name, f"mcp:{tool}", None, {"path": path}, "ok")
+    return Actor(actor.kind, actor.name, actor.role, actor.user, actor.scope, frozenset(), actor.protected)
 
 
 # Slowing down guesses.
@@ -458,6 +509,7 @@ def install(app: FastAPI, state: "AppState") -> None:
     """Add the login routes, the session cookie and the security headers to `app`."""
     secure = (urlparse(state.settings.base_url).hostname or "") not in _LOCAL_HOSTS
     app.state.login_throttle = LoginThrottle(state.clock)
+    app.state.agent_limiter = AgentLimiter(state.clock)
     app.include_router(router)
     app.add_exception_handler(AuthError, lambda request, error: _refuse(request, error))  # type: ignore[arg-type]
 

@@ -3,7 +3,7 @@ import logging
 import re
 from datetime import timedelta
 
-import httpx
+import httpx2 as httpx  # what Starlette's TestClient answers with once httpx2 is installed (mcp brings it)
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient

@@ -1,5 +1,6 @@
 """The files `feather new` writes. Each function returns text, or a mapping of relative paths to text."""
 
+from pathlib import Path
 from textwrap import dedent
 from typing import Any
 
@@ -34,6 +35,11 @@ feather dev                         # a local server, worker and dashboard
 """
 
 
+INVESTIGATE_FAILURE = (Path(__file__).parent / "investigate-failure.md").read_text(encoding="utf-8")
+"""The `investigate-failure` skill for an agent with Feather's read-only MCP tools (M3.1 A1). The repository keeps a copy
+in skills/investigate-failure/SKILL.md, which a test holds the same."""
+
+
 def project_files(name: str, ident: str) -> dict[str, str]:
     """A project with the layout of design §5.1 and one blank flow, `hello`, which runs on simulation data."""
     return {
@@ -58,6 +64,7 @@ def project_files(name: str, ident: str) -> dict[str, str]:
         "fixtures/.gitkeep": "",
         "tests/test_hello.py": flow_test("hello", fixtures=False),
         "AGENTS.md": AGENTS_MD,
+        ".claude/skills/investigate-failure/SKILL.md": INVESTIGATE_FAILURE,
         "README.md": f"# {name}\n\nA Feather Connect project. See AGENTS.md for the rules and the commands.\n",
         ".gitignore": ".data/\n__pycache__/\n.venv/\n",
         "pyproject.toml": dedent(

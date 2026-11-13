@@ -4,6 +4,7 @@ A copy of the demo runs with an overlay that points its three routes at this tes
 of the stack's database, a DuckDB file under tmp_path, and the demo's own `sims/targets.py` on a free port.
 """
 
+import asyncio
 import json
 import shutil
 import socket
@@ -18,7 +19,10 @@ from typing import Any
 
 import duckdb
 import httpx
+import httpx2
 import pytest
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 from real_stack import free_port, kill_abruptly
 
 from feather_server.auth import issue_token
@@ -181,11 +185,58 @@ def test_a_down_route_does_not_hold_the_others_and_catches_up(running: Demo, htt
     assert http_echo.received_keys() == set()  # they did not wait for the ERP
     wait_until(lambda: running.deliveries("erp", "failed"), GIVING_UP, "the ERP's delivery to fail")
     assert http_echo.received_keys() == set()
+    investigate_through_mcp(running)  # M3.1 A1's exit criterion, while the delivery is still failed
 
     http_echo.come_up()
     running.retry_failed("erp")
     wait_until(lambda: http_echo.received_keys() == EXPECTED, SETTLE, "the ERP to catch up")
     assert running.deliveries("erp", "failed") == []
+
+
+def investigate_through_mcp(running: Demo) -> None:
+    """An agent with a viewer token walks the failed delivery to its cause over /mcp, as the investigate-failure
+    skill does, and has no way to change anything."""
+    viewer = issue_token(running.stack.store, "claude", timedelta(hours=1), role="viewer")
+    operator = issue_token(running.stack.store, "claude-op", timedelta(hours=1), role="operator")
+
+    async def walk() -> dict[str, Any]:
+        headers = {"Authorization": f"Bearer {viewer}"}
+        async with (
+            httpx2.AsyncClient(headers=headers, timeout=60) as http,
+            streamable_http_client(f"{running.stack.url}/mcp", http_client=http) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            tools = {t.name for t in (await session.list_tools()).tools}
+
+            async def call(name: str, **arguments: Any) -> Any:
+                result = await session.call_tool(name, arguments)
+                assert not result.is_error, result
+                return json.loads(result.content[0].text)  # pyright: ignore[reportAttributeAccessIssue]
+
+            failures = (await call("list_failures"))["untrusted_data"]["items"]
+            [erp] = [f for f in failures if f["route"] == "demo/erp"]
+            [version] = erp["versions"][:1]
+            runs = (await call("list_runs", flow="demo/orders"))["items"]
+            run = await call("get_run", run_id=runs[0]["run_id"])
+            key = FIXTURE[0]["order_id"]
+            trace = await call("trace_record", dataset="demo/orders", key=key)
+            return {"tools": tools, "erp": erp, "version": version, "run": run, "trace": trace}
+
+    found = asyncio.run(walk())
+    assert not any(t.startswith(("retry", "skip", "pause", "run_", "approve")) for t in found["tools"])
+    assert "erp" in found["erp"]["message"].lower() or found["erp"]["count"] >= 1  # the cause, with the error
+    assert found["trace"]["untrusted_content_note"]  # record data comes wrapped
+    assert "demo/erp" in json.dumps(found["trace"])
+    agent_rows = [a for a in running.stack.store.audit.list_audit(actor="claude") if a.actor_type == "agent"]
+    assert {a.action for a in agent_rows} >= {"mcp:list_failures", "mcp:get_run", "mcp:trace_record"}
+    refused = httpx.post(
+        f"{running.stack.url}/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        headers={"Authorization": f"Bearer {operator}", "Accept": "application/json, text/event-stream"},
+        timeout=30,
+    )
+    assert refused.status_code == 403  # an operator's token can't be an agent's
 
 
 def test_new_data_produces_only_the_changes(running: Demo, http_echo: Echo, demo: Path):

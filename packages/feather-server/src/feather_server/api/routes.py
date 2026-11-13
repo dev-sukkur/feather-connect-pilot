@@ -1463,6 +1463,31 @@ def _alerting(request: Request) -> alerts.AlertActions:
     return alerts.AlertActions(request.app.state.feather)
 
 
+@router.get("/failures")
+def failures(reads: See, _: CurrentActor, route: str | None = None, limit: Limit = 100) -> JSONResponse:
+    """Failed deliveries grouped by route and error, with the partitions each group blocks (M3.1 A1)."""
+    views = reads.failure_views(route, limit=check_limit(limit))
+    return ok(
+        {
+            "items": [
+                {
+                    "route": v.group.route,
+                    "error_class": v.group.error_class,
+                    "message": v.group.message,
+                    "count": v.group.count,
+                    "versions": v.group.versions,
+                    "blocked": [
+                        {"dataset": b.dataset, "partition": b.partition, "waiting": b.waiting}
+                        for b in v.blocked
+                    ],
+                }
+                for v in views
+            ],
+            "next_cursor": None,
+        }
+    )
+
+
 @router.get("/alerts")
 def list_alerts(
     request: Request,

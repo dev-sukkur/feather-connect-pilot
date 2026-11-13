@@ -1,7 +1,7 @@
 import re
 from collections.abc import Callable
 
-import httpx
+import httpx2 as httpx  # what Starlette's TestClient answers with once httpx2 is installed (mcp brings it)
 from fastapi.testclient import TestClient
 
 from feather_connect.core.errors import PermanentError
