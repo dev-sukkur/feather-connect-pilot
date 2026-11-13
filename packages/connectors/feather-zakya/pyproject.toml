@@ -1,6 +1,6 @@
 [project]
 name = "feather-zakya"
-version = "0.1.0"
+version = "1.0.0"
 description = "A Zoho Zakya connector for Feather Connect: invoices, credit notes, payments, items and price lists in; items, prices and stock out."
 requires-python = ">=3.12"
 license = "MIT"

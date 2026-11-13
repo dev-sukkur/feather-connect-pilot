@@ -1,6 +1,6 @@
 [project]
 name = "feather-generic"
-version = "0.1.0"
+version = "1.0.0"
 description = "Generic flow templates for Feather Connect, as library functions: database, API, files and webhooks to warehouses, databases and APIs."
 requires-python = ">=3.12"
 license = "MIT"

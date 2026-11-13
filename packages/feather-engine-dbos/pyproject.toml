@@ -1,6 +1,6 @@
 [project]
 name = "feather-engine-dbos"
-version = "0.1.0"
+version = "1.0.0"
 description = "DBOS Transact engine and worker runtime for Feather Connect."
 requires-python = ">=3.12"
 license = "MIT"

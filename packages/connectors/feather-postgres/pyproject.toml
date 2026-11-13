@@ -1,6 +1,6 @@
 [project]
 name = "feather-postgres"
-version = "0.1.0"
+version = "1.0.0"
 description = "Postgres connectors for Feather Connect: a query source and a table sink."
 requires-python = ">=3.12"
 license = "MIT"

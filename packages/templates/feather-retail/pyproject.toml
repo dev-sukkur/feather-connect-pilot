@@ -1,6 +1,6 @@
 [project]
 name = "feather-retail"
-version = "0.1.0"
+version = "1.0.0"
 description = "Retail flow templates for Feather Connect, as library functions: Zakya invoices to an ERP."
 requires-python = ">=3.12"
 license = "MIT"

@@ -1,6 +1,6 @@
 [project]
 name = "feather-cli"
-version = "0.1.0"
+version = "1.0.0"
 description = "The feather command: validate, run the server and workers, and the local dev stack."
 requires-python = ">=3.12"
 license = "MIT"

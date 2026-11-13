@@ -1,6 +1,6 @@
 [project]
 name = "feather-sap-cpi"
-version = "0.1.0"
+version = "1.0.0"
 description = "SAP through SAP Integration Suite (Cloud Integration, CPI) for Feather Connect: read an iFlow's JSON, post records to an iFlow with a reversal."
 requires-python = ">=3.12"
 license = "MIT"

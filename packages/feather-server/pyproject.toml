@@ -1,6 +1,6 @@
 [project]
 name = "feather-server"
-version = "0.1.0"
+version = "1.0.0"
 description = "The Feather Connect server: dashboard, API, scheduler and the other leader-elected loops."
 requires-python = ">=3.12"
 license = "MIT"
