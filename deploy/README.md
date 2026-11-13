@@ -8,6 +8,7 @@
 | `.env.example` | The settings `compose.yaml` reads. Copy it to `.env`. |
 | `compose.nonprod.yaml` | The test environments qa and uat on one machine: one Postgres, a database each (layout B). |
 | `nonprod-init.sh`, `nonprod.env.example`, `qa.env.example`, `uat.env.example` | What `compose.nonprod.yaml` needs. |
+| `railway/` | Railway instead of Compose: `server.json` and `worker.json` (config-as-code) and `README.md`, the setup step by step. |
 | `compose.test.yaml` | The throwaway Postgres of the test suite (not for data you keep). |
 
 ## Run it
