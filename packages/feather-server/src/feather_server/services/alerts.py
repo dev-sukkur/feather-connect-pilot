@@ -12,9 +12,10 @@ The rules and their defaults:
 | `hold_waiting` | a delivery held for approval longer than `after` | `after: 2h` |
 | `schedule_skipped` | a flow whose newest `ticks` scheduled runs were all skipped | `ticks: 3` |
 | `dataset_stale` | a dataset whose newest sealed version is older than its `max_lag` | where a dataset has one |
+| `worker_missing` | no worker has sent a heartbeat for `after`, while a flow isn't paused (critical) | `after: 2m` |
 
 The environment turns a rule on or off, sets its parameters and names its channels (`alert_rule`). The channels are
-the project's `settings.alert_channels`: `{name: {kind: webhook | slack | smtp, ...}}`; a rule with no channels of its
+the project's `settings.alert_channels`: `{name: {kind: webhook | slack | teams | smtp, ...}}`; a rule with no channels of its
 own tells every channel.
 """
 
@@ -31,7 +32,7 @@ import httpx
 
 from feather_connect.core.strategies import parse_duration
 from feather_connect.project import resolve_secret
-from feather_connect.storage.port import AlertRow, AlertRuleRow
+from feather_connect.storage.port import AlertRow, AlertRuleRow, is_paused
 from feather_server.services.access import require, require_reason
 
 if TYPE_CHECKING:
@@ -47,9 +48,10 @@ RULES: Mapping[str, Mapping[str, Any]] = {
     "hold_waiting": {"after": "2h"},
     "schedule_skipped": {"ticks": 3},
     "dataset_stale": {},
+    "worker_missing": {"after": "2m"},
 }
 Send = Callable[[str, Mapping[str, Any], AlertRow], None]  # tells one channel of one alert
-CHANNEL_KINDS = ("webhook", "slack", "smtp")
+CHANNEL_KINDS = ("webhook", "slack", "teams", "smtp")
 LOOKED_AT = 500  # deliveries, runs of a kind, that a pass reads
 NOTICE_TIMEOUT_S = 10.0
 
@@ -213,6 +215,29 @@ def _dataset_stale(state: "AppState", rule: Rule, now: datetime) -> list[Finding
     return found
 
 
+def _worker_missing(state: "AppState", rule: Rule, now: datetime) -> list[Finding]:
+    """No worker has sent a heartbeat for `after`, while the environment has a flow that isn't paused: nothing runs
+    the work (M3.1 O1). A server that runs the work itself (the local engine of `feather dev`) has no workers."""
+    if state.settings.engine == "local":
+        return []
+    flows = _flows(state)
+    if not flows or all(is_paused(state.store.overrides, f"flow:{name}") for name in flows):
+        return []
+    after = parse_duration(str(rule.params["after"]))
+    seen = [w.last_seen for w in state.store.workers.list_workers() if w.state != "dead"]
+    last = max(seen, default=None)
+    if last is not None and now - last <= after:
+        return []
+    since = "no worker has ever sent one" if last is None else f"the last was {_ago(now - last)} ago"
+    return [
+        Finding(
+            f"environment:{state.settings.env}",
+            "critical",
+            f"no worker has sent a heartbeat for {rule.params['after']} ({since}): nothing runs the flows' work",
+        )
+    ]
+
+
 EVALUATORS: Mapping[str, Callable[["AppState", Rule, datetime], list[Finding]]] = {
     "run_failed": _run_failed,
     "delivery_failed": _delivery_failed,
@@ -220,6 +245,7 @@ EVALUATORS: Mapping[str, Callable[["AppState", Rule, datetime], list[Finding]]] 
     "hold_waiting": _hold_waiting,
     "schedule_skipped": _schedule_skipped,
     "dataset_stale": _dataset_stale,
+    "worker_missing": _worker_missing,
 }
 
 
@@ -409,8 +435,39 @@ def payload_of(alert: AlertRow) -> dict[str, Any]:
     }
 
 
+def teams_card(alert: AlertRow) -> dict[str, Any]:
+    """The alert as a Teams message with an Adaptive Card, which a Teams Workflows webhook ("When a Teams webhook
+    request is received") posts to its channel. A Workflows URL takes no other shape, so the plain webhook won't do."""
+    facts = [
+        {"title": "Rule", "value": alert.rule},
+        {"title": "Subject", "value": alert.subject},
+        {"title": "Severity", "value": alert.severity},
+        {"title": "Fired", "value": alert.fired_at.isoformat()},
+    ]
+    card = {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.4",
+        "body": [
+            {
+                "type": "TextBlock",
+                "text": f"Feather: {alert.rule}",
+                "weight": "Bolder",
+                "size": "Medium",
+                "color": "Attention" if alert.severity == "critical" else "Warning",
+            },
+            {"type": "TextBlock", "text": alert.message, "wrap": True},
+            {"type": "FactSet", "facts": facts},
+        ],
+    }
+    return {
+        "type": "message",
+        "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "content": card}],
+    }
+
+
 class Sender:
-    """Tells one channel of one alert: a webhook gets the alert as JSON, Slack its text, SMTP an email."""
+    """Tells one channel of one alert: a webhook gets the alert as JSON, Slack its text, Teams a card, SMTP an email."""
 
     def __init__(self, state: "AppState") -> None:
         self._root = state.project.root
@@ -429,6 +486,11 @@ class Sender:
         elif kind == "slack":
             answer = httpx.post(
                 self._secret(channel["url"]), json={"text": text_of(alert)}, timeout=NOTICE_TIMEOUT_S
+            )
+            answer.raise_for_status()
+        elif kind == "teams":
+            answer = httpx.post(
+                self._secret(channel["url"]), json=teams_card(alert), timeout=NOTICE_TIMEOUT_S
             )
             answer.raise_for_status()
         elif kind == "smtp":
