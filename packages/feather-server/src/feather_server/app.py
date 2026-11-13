@@ -189,7 +189,7 @@ def create_app(
         state.vault = Vault(state.store.secrets, state.settings.env, keyring_from_env())
     app.state.environment = Environment(state.store, state.clock, state.settings.env, state.vault)
     if state.catalogue is None:
-        state.catalogue = Catalogue(state.store)  # refreshed on NOTIFY, and every REFRESH_S seconds
+        state.catalogue = Catalogue(state.store, env=state.settings.env)  # refreshed on NOTIFY, and every REFRESH_S seconds
         state.catalogue.listen()
         state.closers.append(state.catalogue.close)
     if state.pushes is None:

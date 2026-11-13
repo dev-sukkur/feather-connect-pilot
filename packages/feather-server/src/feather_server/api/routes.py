@@ -1269,7 +1269,7 @@ def _environment(request: Request) -> Environment:
 
 
 Envs = Annotated[Environment, Depends(_environment)]
-Kind = Annotated[EnvKind, Path_(description="connection, budget or setting")]
+Kind = Annotated[EnvKind, Path_(description="connection, budget, setting or flow")]
 
 
 def _entry(entry: EnvEntry) -> dict[str, Any]:
@@ -1344,7 +1344,7 @@ def environment(envs: Envs, _: CurrentActor) -> JSONResponse:
     return ok({"env": envs.env, "items": [_entry(e) for e in envs.entries()], "next_cursor": None})
 
 
-@router.put("/environment/{kind}/{name}")
+@router.put("/environment/{kind}/{name:path}")
 def set_entry(
     request: Request,
     kind: Kind,
@@ -1359,7 +1359,7 @@ def set_entry(
     )
 
 
-@router.delete("/environment/{kind}/{name}")
+@router.delete("/environment/{kind}/{name:path}")
 def remove_entry(
     request: Request,
     kind: Kind,

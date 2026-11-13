@@ -32,6 +32,7 @@ from feather_connect.project import (
     check_environment,
     db_secret_name,
     environment_layer,
+    flow_override,
     is_secret_ref,
 )
 from feather_connect.storage.port import ENV_KINDS, EnvEntry, EnvKind, SealedSecret, Store
@@ -107,6 +108,8 @@ def _walk(node: Mapping[str, Any], at: str) -> Iterator[tuple[str, str, Any]]:
 def check_entry(kind: EnvKind, name: str, value: Any) -> Any:
     """`value` checked for its kind on its own; raises `ConfigProblem`. `Environment.put` then checks it together
     with the environment's other entries, as `load_project` would."""
+    if kind == "flow":
+        return _flow_entry(name, value)
     if not name or len(name) > 200 or "/" in name:
         raise ConfigProblem(f"{name!r} is not a name: 1 to 200 characters, no '/'")
     if kind != "connection":
@@ -144,6 +147,19 @@ def check_entry(kind: EnvKind, name: str, value: Any) -> Any:
                 "in its own store, each named for its connection and field"
             )
     return body
+
+
+def _flow_entry(name: str, value: Any) -> Any:
+    """A `flow` entry: named for an installed flow, `<package>/<flow>`, whose schedule it replaces or which it turns
+    off, such as {"triggers": {"cron": "0 6 * * *", "tz": "Asia/Kolkata"}} or {"enabled": false}."""
+    package, _, flow = name.partition("/")
+    if not package or not flow or len(name) > 200:
+        raise ConfigProblem(f"{name!r} is not a flow's name: give the package and the flow, such as acme-orders/orders")
+    try:
+        flow_override(value)
+    except ProjectError as error:
+        raise ConfigProblem(f"flow {name}: {error}") from None
+    return value
 
 
 def entries_from_file(path: Path) -> list[tuple[EnvKind, str, Any]]:
@@ -256,6 +272,7 @@ class Environment:
 
     def _check_with_others(self, changes: Sequence[tuple[EnvKind, str, Any]]) -> None:
         """Check `changes` with the environment's other entries, as a server would load them."""
+        changes = [c for c in changes if c[0] != "flow"]  # checked on its own: it names no other entry
         changed = {(k, n) for k, n, _ in changes}
         layer = environment_layer(e for e in self.entries() if (e.kind, e.name) not in changed)
         for kind, name, value in changes:

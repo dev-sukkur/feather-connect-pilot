@@ -3596,7 +3596,7 @@ class _EnvConfig(EnvConfigStore):
             rows = conn.execute(
                 """select env, kind, name, value, changed_by, changed_at from feather.env_config
                    where tenant_id = %s and env = %s and (%s::text is null or kind = %s)
-                   order by array_position(array['connection', 'budget', 'setting'], kind), name collate "C"
+                   order by array_position(array['connection', 'budget', 'setting', 'flow'], kind), name collate "C"
                    limit %s""",
                 (self._db.tenant, env, kind, kind, MAX_ENV_ROWS),
             ).fetchall()

@@ -1993,6 +1993,11 @@ class StoreContract(
         assert store.env_config.remove("prod", "connection", "zakya") == changed
         assert store.env_config.entry("prod", "connection", "zakya") is None
         assert store.env_config.remove("prod", "connection", "zakya") is None
+        store.env_config.put(EnvEntry("prod", "flow", "acme/orders", {"enabled": False}, "root", T0))
+        assert [(e.kind, e.name) for e in store.env_config.entries("prod")] == [
+            ("budget", "zoho-api"),
+            ("flow", "acme/orders"),
+        ]
 
     def test_secrets_are_kept_as_ciphertext_by_name(self, store: Store):
         from feather_connect.storage.port import SealedSecret

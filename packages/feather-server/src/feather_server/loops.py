@@ -160,7 +160,7 @@ def default_loops(state: "AppState") -> list[LoopRunner]:
         )
 
     if state.catalogue is None:
-        state.catalogue = Catalogue(state.store)  # installed packages' active flows (flow packages §7.2)
+        state.catalogue = Catalogue(state.store, env=state.settings.env)  # installed packages' active flows (flow packages §7.2)
         state.catalogue.listen()
         state.closers.append(state.catalogue.close)
     catalogue = state.catalogue

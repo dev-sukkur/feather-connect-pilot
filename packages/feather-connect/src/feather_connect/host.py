@@ -232,7 +232,7 @@ def _project(store: Store, package: str, version: str, env: str, cache: Path) ->
     if not where:
         raise LookupError(f"the entry point of {package} is not a module with a file")
     project = load_project(
-        Path(where).parent, env, environment=environment_layer(store.env_config.entries(env))
+        Path(where).parent, env, environment=environment_layer(store.env_config.entries(env), flows_of=package)
     )
     return project, row.sha256, row.version
 

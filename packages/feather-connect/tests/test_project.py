@@ -1,4 +1,5 @@
 import subprocess
+from datetime import timedelta
 from pathlib import Path
 from textwrap import dedent
 
@@ -397,3 +398,36 @@ def test_two_flows_with_different_routes_or_datasets_of_one_name_are_refused_by_
     assert (
         codes(one, fc.Flow("again", reads=one.datasets[0], deliver=[fc.to(memory.Sink("pos"))])) == []
     )  # shared
+
+
+def test_an_environment_flow_entry_replaces_the_overlays_triggers_and_turns_a_flow_off(project_dir):
+    from types import SimpleNamespace
+
+    from feather_connect.project import environment_layer
+
+    def entry(name: str, value: object) -> SimpleNamespace:
+        return SimpleNamespace(kind="flow", name=name, value=value)
+
+    rows = [
+        entry("acme/demo", {"triggers": {"cron": "0 6 * * *"}}),
+        entry("other/demo", {"enabled": False}),
+        entry("acme/broken", {"enabled": "nope"}),
+        entry("acme/gone", {"enabled": False}),
+    ]
+    assert "flows" not in environment_layer(rows)  # only a package host asks for its own flows
+    layer = environment_layer(rows, flows_of="acme")
+    assert set(layer["flows"]) == {"demo", "gone"}  # the bad one is left out
+    flow = load_project(project_dir, "prod", environment=layer).flows[0]  # prod's overlay says every
+    assert flow.triggers == (Cron("0 6 * * *", "Asia/Kolkata"),)  # replaced, in the project's time zone
+    off = load_project(project_dir, "prod", environment={"flows": {"demo": {"enabled": False}}}).flows[0]
+    assert not off.enabled and [type(t) for t in off.triggers] == [Every]
+
+
+def test_a_flow_entry_is_checked():
+    from feather_connect.project import flow_override
+
+    assert flow_override({"enabled": False}) == (False, None)
+    assert flow_override({"triggers": {"every": "15m"}})[1] == (Every(timedelta(minutes=15)),)
+    for bad in ({}, {"enabled": "no"}, {"triggers": {"cron": "not a cron"}}, {"triggers": {}}, {"paused": True}):
+        with pytest.raises(ProjectError):
+            flow_override(bad)

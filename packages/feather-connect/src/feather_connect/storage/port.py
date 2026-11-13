@@ -1648,8 +1648,9 @@ class AuditStore(Protocol):
 
 # Environment-level configuration (flow packages §8) and the secret store.
 
-EnvKind = Literal["connection", "budget", "setting"]
-ENV_KINDS: tuple[EnvKind, ...] = ("connection", "budget", "setting")
+EnvKind = Literal["connection", "budget", "setting", "flow"]
+# A `flow` entry, named `<package>/<flow>`, changes an installed flow's schedule or turns it off, with no new version.
+ENV_KINDS: tuple[EnvKind, ...] = ("connection", "budget", "setting", "flow")
 MAX_ENV_ROWS = 1000  # the most entries of an environment a listing returns
 
 
