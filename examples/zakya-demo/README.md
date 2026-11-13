@@ -98,6 +98,38 @@ invoice id: the first for an invoice makes its ERP id, and a later one (the invo
 second request for the same ERP id. It stores a repeat of an idempotency key only once, and answers 503 to about one
 request in 33.
 
+### Faults on purpose
+
+Each simulator's page has a **Faults on purpose** panel (`sims/faults.py`), to make the next calls fail and watch
+what Feather does: retry, wait, fail a delivery, or quarantine a record. Pick a fault, how many calls it takes (or
+**until cleared**), and which calls: `read` (GET), `write` (POST, PUT), `token` (a sign-in) or `any`; or press one of
+the quick buttons. The panel says what each fault should lead to, lists what is queued (each can be cleared) and the
+faults served, newest first, and sets the random share of calls that answer 429 or 503.
+
+| Fault | The call gets | Feather should |
+| --- | --- | --- |
+| `429` | Too many requests, `Retry-After: 2` | Wait and call again: the run goes on, later |
+| `429-long` | 429, `Retry-After: 600` | Give the wait to the runtime (`BudgetDeferred`), which sleeps it off durably |
+| `429-day` (Zakya) | Zoho's daily cap, code 45 | Wait for the cap to reset, durably; nothing fails |
+| `401` | Unauthorized, Zoho code 57 | Once: get a new token and call again. Every time: fail the chunk; fix the secret, then **Retry** |
+| `403` | Forbidden | Fail the chunk at once, no retry: the delivery goes to **Failures**; grant the right, then **Retry** |
+| `400`, `422` | The record is refused | On a write, quarantine that record with the answer, and deliver the rest. On a read, fail the run |
+| `404` | Not found | Fail the chunk: a wrong URL or a missing iFlow |
+| `409` | Conflict | An HTTP write counts it as applied already when the destination says so; else the record is quarantined |
+| `500`, `502`, `503`, `504` | A server error | Try again with backoff; then fail the chunk, and the runtime retries the delivery |
+| `timeout` | No answer for 35 s, past the client's 30 s | As a 5xx. A write is not resent by the client, but retried with its chunk |
+| `slow` | The right answer, 5 s late | Nothing fails: watch a run in progress |
+| `reset` (Zakya, SAP) | The connection drops | As a 5xx |
+| `garbage` | 200 with an HTML page | The read fails: "the answer is not JSON" |
+| `lost` | Carried out, then 504 | The retry must not do it twice: the idempotency key or a lookup finds it |
+| `csrf` (SAP) | 403, CSRF token validation failed | The next try fetches a new CSRF token and session |
+
+From a shell, the same through the page's JSON: `POST /sim/faults` with `{"kind": "503", "times": 2, "scope":
+"read"}` (`"times": null` until cleared), `POST /sim/faults/clear` (with `{"fault_id": n}` for one), `POST
+/sim/fault-rate` with `{"rate": 0.1}`, and `GET /sim/faults`. For example, to see a quarantine: queue `422` once
+on the plain ERP's writes, raise an invoice in Zakya, and the next run keeps that invoice in the **Quarantine** while
+the others go.
+
 ## The flows
 
 `env/dev.yaml` raises the `zoho-api` budget to 20000 calls a day: the simulator makes about 8 calls a minute, which

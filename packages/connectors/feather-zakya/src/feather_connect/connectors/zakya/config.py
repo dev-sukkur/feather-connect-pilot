@@ -50,6 +50,9 @@ class ZakyaError(PermanentError):
         super().__init__(message)
         self.code, self.status = code, status
 
+    def __reduce__(self) -> tuple[type["ZakyaError"], tuple[str, int | None, int]]:
+        return (type(self), (str(self), self.code, self.status))  # a durable engine pickles a step's error
+
 
 class ZakyaConfig(BaseModel):
     """The settings of a Zakya connection. The three credentials come from the connection's `auth`, as secret

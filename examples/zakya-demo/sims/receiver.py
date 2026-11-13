@@ -5,16 +5,20 @@ A PUT or a POST to any path is stored with its method, path, headers (without cr
 time, and answered `{"id": ...}`. A PUT is an upsert by its path (`/invoices/{invoice_id}`): the first one for a path
 makes an ERP id, answered 201, and each later one is stored too but keeps that id, answered 200. A POST always makes a
 new id. A request whose idempotency key was seen before is not stored again: it gets the same id, and the stored one
-counts the repeat. A few requests answer 503 on purpose.
+counts the repeat. A few requests answer 503 on purpose, and the page's **Faults on purpose** panel (`faults.py`)
+queues more for the next writes: a 422 that quarantines the record, a 403 that fails the delivery, a 5xx
+retried, an answer lost after the request was stored.
 
     python sims/receiver.py --port 29101 --db .data/receiver.sqlite
 """
 
 import argparse
+import asyncio
 import html
 import json
 import random
 import sqlite3
+import sys
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,8 +27,13 @@ from typing import Any
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
+
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent)
+)  # faults.py beside it, run as a script or loaded by path
+from faults import GARBAGE, KINDS, Faults, body_of  # pyright: ignore[reportMissingImports]
 
 HIDDEN_HEADERS = frozenset({"authorization", "cookie", "proxy-authorization"})
 KEY_HEADER = "idempotency-key"
@@ -54,6 +63,8 @@ class Receiver:
         self._lock = threading.Lock()
         self._random = random.Random(seed)
         self.fault_rate = fault_rate
+        # A starlette app can't drop its connection, and the daily cap is Zoho's.
+        self.faults = Faults({k: v for k, v in KINDS.items() if k not in ("reset", "429-day")})
 
     def take(self, method: str, path: str, headers: dict[str, str], body: str) -> tuple[str, bool]:
         """Store a request, and return the id it got and whether it was new."""
@@ -121,6 +132,9 @@ def _summary(body: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+PANEL = Path(__file__).with_name("faults.html").read_text(encoding="utf-8")  # put in by the f-string as it is
+
+
 def _page(receiver: Receiver) -> str:
     rows = []
     for row in receiver.newest():
@@ -142,7 +156,7 @@ def _page(receiver: Receiver) -> str:
     body = "\n".join(rows) or '<tr><td colspan="9" class="empty">No requests yet.</td></tr>'
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="10"><title>ERP receiver</title>
+<title>ERP receiver</title>
 <style>
   body {{ font: 14px/1.5 system-ui, sans-serif; margin: 24px; color: #1f2328; background: #fff; }}
   h1 {{ font-size: 20px; margin: 0 0 4px; }}
@@ -157,6 +171,7 @@ def _page(receiver: Receiver) -> str:
 <h1>ERP receiver</h1>
 <p>{requests} requests for {records} ERP invoices, newest first. A PUT for an invoice the ERP has updates it under
 the same ERP id. A repeat with the same idempotency key is not stored again.</p>
+{PANEL}
 <table>
 <thead><tr><th>Received</th><th>ERP id</th><th>Request</th><th>Invoice</th><th>Customer</th><th>Status</th>
 <th>Total</th><th>Idempotency key</th><th>Repeats</th></tr></thead>
@@ -168,18 +183,45 @@ the same ERP id. A repeat with the same idempotency key is not stored again.</p>
 
 
 def create_app(receiver: Receiver) -> Starlette:
-    async def take(request: Request) -> JSONResponse:
-        if receiver.fails_now():
+    async def take(request: Request) -> Response:
+        fault = receiver.faults.take(request.method, request.url.path)
+        if fault is not None and fault.kind in ("slow", "timeout"):
+            await asyncio.sleep(fault.seconds or 0)
+        if fault is not None and fault.kind == "garbage":
+            return Response(GARBAGE, media_type="text/html")
+        if fault is not None and fault.kind not in ("slow", "lost"):
+            status, headers, problem = body_of(fault, receiver.faults.kinds, "plain")
+            return JSONResponse(problem, status_code=status, headers=headers)
+        if fault is None and receiver.fails_now():
             return JSONResponse({"error": "busy, try again"}, status_code=503)
         body = (await request.body()).decode("utf-8", "replace")
         headers = {k.lower(): v for k, v in request.headers.items()}
         erp_id, new = receiver.take(request.method, request.url.path, headers, body)
+        if fault is not None and fault.kind == "lost":  # stored; the answer is lost
+            status, headers, problem = body_of(fault, receiver.faults.kinds, "plain")
+            return JSONResponse(problem, status_code=status, headers=headers)
         return JSONResponse({"id": erp_id}, status_code=201 if new else 200)
 
     async def page(request: Request) -> HTMLResponse:
         return HTMLResponse(_page(receiver))
 
-    return Starlette(routes=[Route("/", page), Route("/{path:path}", take, methods=["POST", "PUT"])])
+    async def faults(request: Request) -> JSONResponse:
+        body = await request.json() if request.method == "POST" and await request.body() else {}
+        try:
+            answer = receiver.faults.control(request.method, request.path_params["action"], body, receiver)
+        except (ValueError, TypeError) as error:
+            return JSONResponse({"error": str(error)}, status_code=400)
+        if answer is None:
+            return JSONResponse({"error": "no such action"}, status_code=404)
+        return JSONResponse(answer)
+
+    return Starlette(
+        routes=[
+            Route("/", page),
+            Route("/sim/{action:path}", faults, methods=["GET", "POST"]),
+            Route("/{path:path}", take, methods=["POST", "PUT"]),
+        ]
+    )
 
 
 def main() -> None:

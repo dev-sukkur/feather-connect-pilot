@@ -5,6 +5,9 @@
   POS code (Zakya's SKU), and each customer is B2B (`gst_treatment: business_gst`, with a GSTIN) or B2C (`consumer`).
 - Auto mode raises invoices as time passes, B2B and B2C, pays some open B2B ones, and now and then takes goods back
   (a credit note against an earlier invoice). Manual mode raises nothing on its own.
+- Faults on purpose (`faults.py`): the page's **Faults on purpose** panel queues a 401, 403, 429, 5xx, a
+  timeout, a dropped connection, an answer that isn't JSON or one lost after the call was carried out, for the
+  next reads, writes or sign-ins, to watch Feather retry, wait and fail.
 - The page at `/` is the manual counter: enter an invoice (customer, lines by either barcode, quantity, price), take
   goods back against an invoice, pay an invoice, and switch between the modes. It calls the JSON under `/sim/`.
 
@@ -17,6 +20,7 @@ invoices and credit notes are kept in a JSON file, so a restart carries on where
 
 import argparse
 import json
+import sys
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -31,6 +35,11 @@ from feather_connect.connectors.zakya.testing import (  # pyright: ignore[report
     stamp,
 )
 from feather_connect.connectors.zakya.testing import ZakyaSim as BaseZakyaSim  # pyright: ignore[reportMissingImports]
+
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent)
+)  # faults.py beside it, run as a script or loaded by path
+from faults import GARBAGE, KINDS, Faults, body_of  # pyright: ignore[reportMissingImports]
 
 __all__ = ["CUSTOMERS", "MATERIALS", "ZakyaSim", "channel_of", "main", "running"]
 
@@ -95,6 +104,7 @@ class ZakyaSim(BaseZakyaSim):
         self.bulk_rate = bulk_rate
         self.return_rate = return_rate
         self._next_note = 1
+        self.faults = Faults(dict(KINDS))
         self._auto_every: float | None = kwargs.get("every") or 20.0
         if state is not None and state.is_file():
             kept = json.loads(state.read_text(encoding="utf-8"))
@@ -311,6 +321,32 @@ class ZakyaSim(BaseZakyaSim):
             if self._random.random() < self.return_rate:
                 self.take_back_some()
 
+    # Faults on purpose.
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        """Answer a call, or answer it with the fault queued for it. A slow or hanging answer waits outside the
+        simulator's lock, so the page and other calls go on."""
+        path = request.url.path
+        if path == "/" or path.startswith("/sim/"):
+            return super().handle(request)
+        fault = self.faults.take(request.method, path)
+        if fault is None:
+            return super().handle(request)
+        if fault.kind in ("slow", "timeout"):
+            time.sleep(fault.seconds or 0)
+        if fault.kind in ("timeout", "reset"):
+            raise httpx.ReadError(
+                f"{fault.kind} on purpose", request=request
+            )  # the server drops the connection
+        if fault.kind == "slow":
+            return super().handle(request)
+        if fault.kind == "garbage":
+            return httpx.Response(200, headers={"Content-Type": "text/html"}, content=GARBAGE)
+        if fault.kind == "lost":
+            super().handle(request)  # carried out; the answer is lost
+        status, headers, body = body_of(fault, self.faults.kinds, "zoho")
+        return httpx.Response(status, headers=headers, json=body)
+
     # The manual counter: the page and its JSON.
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
@@ -326,6 +362,12 @@ class ZakyaSim(BaseZakyaSim):
         return super()._handle(request)
 
     def _counter(self, request: httpx.Request, action: str) -> httpx.Response:
+        body_in = (
+            cast(dict[str, Any], json.loads(request.content or b"{}")) if request.method == "POST" else {}
+        )
+        controlled = self.faults.control(request.method, action, body_in, self)
+        if controlled is not None:
+            return httpx.Response(200, json=controlled)
         if request.method == "GET" and action == "state":
             self.tick()  # in auto mode, the page brings the sales due, as a list call does
             return httpx.Response(200, json=self.snapshot())
@@ -370,7 +412,11 @@ class ZakyaSim(BaseZakyaSim):
         }
 
 
-PAGE = (Path(__file__).with_name("zakya.html")).read_text(encoding="utf-8")
+PAGE = (
+    (Path(__file__).with_name("zakya.html"))
+    .read_text(encoding="utf-8")
+    .replace("</main>", Path(__file__).with_name("faults.html").read_text(encoding="utf-8") + "</main>")
+)
 
 
 def main(argv: list[str] | None = None) -> None:
