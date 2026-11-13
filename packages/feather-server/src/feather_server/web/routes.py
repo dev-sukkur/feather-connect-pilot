@@ -1996,6 +1996,17 @@ def alerts_snooze(
     return _alerts_page(request, actor, notice=("ok", said))
 
 
+def _named_counts(raw: str) -> dict[str, int]:
+    """`"acme/invoices=1, acme/orders=20"` as a mapping; raises `ValueError` for anything else."""
+    found: dict[str, int] = {}
+    for part in raw.split(","):
+        name, sep, count = part.partition("=")
+        if not sep or not name.strip():
+            raise ValueError(part)
+        found[name.strip()] = int(count.strip())
+    return found
+
+
 @router.post("/alerts/rules/{name}", dependencies=[Depends(require_csrf)])
 async def alerts_rule(request: Request, actor: CurrentActor, name: str) -> Response:
     form = await request.form()
@@ -2005,6 +2016,13 @@ async def alerts_rule(request: Request, actor: CurrentActor, name: str) -> Respo
     for key, default in defaults.items():
         raw = str(form.get(key) or "").strip()
         if not raw:
+            continue
+        if isinstance(default, dict):  # `dataset_quiet`'s datasets: "name=5, other=1"
+            try:
+                params[key] = _named_counts(raw)
+            except ValueError:
+                said = f"{key} is written as name=count, separated by commas, such as acme/invoices=1."
+                return _alerts_page(request, actor, status=422, notice=("bad", said))
             continue
         try:
             params[key] = type(default)(raw) if not isinstance(default, str) else raw
