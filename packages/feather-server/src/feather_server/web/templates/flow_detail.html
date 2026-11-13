@@ -48,6 +48,34 @@
   {% if flow.paused %}<p class="muted">The flow is paused, so it cannot be run until it is resumed.</p>{% endif %}
 </section>
 
+<section aria-labelledby="h-routes">
+  <h2 id="h-routes">Routes</h2>
+  {% if flow.routes %}
+  <p class="muted">Pausing a route holds its deliveries, in order, while the flow goes on reading and sealing. Resuming sends what it held.</p>
+  <div class="table-panel"><div class="table-wrap"><table>
+    <thead><tr><th scope="col">Route</th><th scope="col">To</th><th scope="col">State</th><th scope="col">Pause or resume</th></tr></thead>
+    <tbody>
+    {% for r in flow.routes %}
+      <tr>
+        <th scope="row"><a href="/routes/{{ r.name | urlencode }}/deliveries">{{ r.name }}</a></th>
+        <td>{{ r.connection }}</td>
+        <td>{% if r.paused %}{{ m.status_dot("paused") }}{% else %}<span class="muted">delivering</span>{% endif %}</td>
+        <td>
+          <form method="post" action="/routes/{{ r.name | urlencode }}/{{ 'resume' if r.paused else 'pause' }}" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="flow" value="{{ flow.name }}">
+            <label class="sr-only" for="route-reason-{{ loop.index }}">Reason for {{ r.name }} (optional)</label>
+            <input id="route-reason-{{ loop.index }}" name="reason" type="text" size="16" maxlength="500" placeholder="reason (optional)">
+            <button type="submit">{{ 'Resume' if r.paused else 'Pause' }}<span class="sr-only"> the route {{ r.name }}</span></button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div></div>
+  {% else %}<p class="muted">This flow has no routes.</p>{% endif %}
+</section>
+
 {% if preview %}
 {{ m.confirm_form(preview, "/flows/" ~ (flow.name | urlencode) ~ "/backfill/confirm", "/flows/" ~ (flow.name | urlencode), "Start the backfill") }}
 {% endif %}

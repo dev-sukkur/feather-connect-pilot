@@ -13,6 +13,7 @@ The rules and their defaults:
 | `schedule_skipped` | a flow whose newest `ticks` scheduled runs were all skipped | `ticks: 3` |
 | `dataset_stale` | a dataset whose newest sealed version is older than its `max_lag` | where a dataset has one |
 | `worker_missing` | no worker has sent a heartbeat for `after`, while a flow isn't paused (critical) | `after: 2m` |
+| `dataset_quiet` | a dataset in `datasets` whose versions sealed in the last `within` hold fewer records than its minimum | `datasets: {}`, `within: 24h` |
 
 The environment turns a rule on or off, sets its parameters and names its channels (`alert_rule`). The channels are
 the project's `settings.alert_channels`: `{name: {kind: webhook | slack | teams | smtp, ...}}`; a rule with no channels of its
@@ -31,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from feather_connect.core.strategies import parse_duration
+from feather_connect.logs import redact
 from feather_connect.project import resolve_secret
 from feather_connect.storage.port import AlertRow, AlertRuleRow, is_paused
 from feather_server.services.access import require, require_reason
@@ -49,6 +51,7 @@ RULES: Mapping[str, Mapping[str, Any]] = {
     "schedule_skipped": {"ticks": 3},
     "dataset_stale": {},
     "worker_missing": {"after": "2m"},
+    "dataset_quiet": {"datasets": {}, "within": "24h"},
 }
 Send = Callable[[str, Mapping[str, Any], AlertRow], None]  # tells one channel of one alert
 CHANNEL_KINDS = ("webhook", "slack", "teams", "smtp")
@@ -94,8 +97,13 @@ def check_rule(name: str, params: Mapping[str, Any], channels: Sequence[str], st
     for key, value in params.items():
         if key not in RULES[name]:
             raise ValueError(f"rule {name} has no parameter {key!r}")
-        if key == "after":
+        if key in ("after", "within"):
             parse_duration(str(value))
+        elif key == "datasets" and not (
+            isinstance(value, Mapping)
+            and all(isinstance(k, str) and isinstance(v, int) and v >= 1 for k, v in value.items())  # pyright: ignore[reportUnknownVariableType]
+        ):
+            raise ValueError("datasets maps a dataset's name to the fewest records it should seal, 1 or more")
         elif key in ("warning", "critical") and not (isinstance(value, int | float) and 0 < value <= 1):
             raise ValueError(f"{key} is a share of a window, above 0 and at most 1")
         elif key == "ticks" and not (isinstance(value, int) and value >= 1):
@@ -238,6 +246,41 @@ def _worker_missing(state: "AppState", rule: Rule, now: datetime) -> list[Findin
     ]
 
 
+QUIET_VERSIONS = (
+    2_000  # the most versions of one dataset read back: a poller every 30 s seals 2,880 a day at most
+)
+
+
+def _dataset_quiet(state: "AppState", rule: Rule, now: datetime) -> list[Finding]:
+    """A dataset that sealed fewer records than expected over the last `within`: a read that succeeds and finds
+    nothing, because a token expired or a filter is wrong, is fresh to `dataset_stale` and quiet to everything else.
+    Each dataset is named with its minimum in the rule's `datasets`, since only its owner knows what is normal. One
+    never read yet isn't judged: nothing has run."""
+    within = parse_duration(str(rule.params["within"]))
+    expected: Mapping[str, int] = rule.params["datasets"]
+    found: list[Finding] = []
+    for name, least in sorted(expected.items()):
+        if state.store.versions.last_sealed_at(name) is None:
+            continue
+        recent = [
+            v
+            for v in state.store.versions.list_versions(name, limit=QUIET_VERSIONS)
+            if v.status == "sealed" and v.sealed_at is not None and now - v.sealed_at <= within
+        ]
+        records = sum(v.upserts + v.deletes for v in recent)
+        if records < least:
+            found.append(
+                Finding(
+                    f"dataset:{name}",
+                    "warning",
+                    f"{name} sealed {records} record{'s' if records != 1 else ''} in the last {rule.params['within']} "
+                    f"({len(recent)} version{'s' if len(recent) != 1 else ''}), fewer than the {least} expected: "
+                    "check the source's credentials and filters",
+                )
+            )
+    return found
+
+
 EVALUATORS: Mapping[str, Callable[["AppState", Rule, datetime], list[Finding]]] = {
     "run_failed": _run_failed,
     "delivery_failed": _delivery_failed,
@@ -246,6 +289,7 @@ EVALUATORS: Mapping[str, Callable[["AppState", Rule, datetime], list[Finding]]] 
     "schedule_skipped": _schedule_skipped,
     "dataset_stale": _dataset_stale,
     "worker_missing": _worker_missing,
+    "dataset_quiet": _dataset_quiet,
 }
 
 
@@ -342,6 +386,10 @@ def _notify(
 
 # What an operator or a developer does.
 
+
+class ChannelFailed(Exception):
+    """A test alert didn't reach its channel; the message says why."""
+
 SNOOZE_MAX = timedelta(days=7)
 
 
@@ -402,6 +450,35 @@ class AlertActions:
             {"enabled": enabled, "params": dict(params), "channels": list(channels), "reason": reason},
         )
         return next(r for r in rules(self._state) if r.name == name)
+
+    def test_channel(self, actor: "Actor", name: str, send: "Send | None" = None) -> None:
+        """Send the channel a test alert now, to see that it reaches someone: an alert that is never stored. Raises
+        `KeyError` for a channel there isn't, and `ChannelFailed`, with why, for one that the alert didn't reach."""
+        require(actor, "alerts.manage", self._state.store.audit, f"alert_channel:{name}")
+        channels = channels_of(self._state)
+        if name not in channels:
+            raise KeyError(name)
+        now = self._state.clock.now()
+        alert = AlertRow(
+            f"test-{now.strftime('%Y%m%d%H%M%S')}",
+            "test",
+            f"channel:{name}",
+            "info",
+            f"A test alert from Feather Connect ({self._state.settings.env}), sent by {actor.name}. "
+            "If you can read this, the channel works.",
+            "firing",
+            now,
+            now,
+        )
+        try:
+            (send or Sender(self._state))(name, channels[name], alert)
+        except Exception as error:  # noqa: BLE001 - what failed is shown and audited
+            said = redact(str(error)) or type(error).__name__
+            self._state.store.audit.record(
+                actor.kind, actor.name, "alerts.test_channel", f"alert_channel:{name}", {}, f"failed: {said}"
+            )
+            raise ChannelFailed(f"channel {name} wasn't reached: {said}") from error
+        self._audit(actor, "alerts.test_channel", f"alert_channel:{name}", {})
 
     def reset_rule(self, actor: "Actor", name: str, *, reason: str | None = None) -> Rule:
         """Back to the default. Raises `KeyError` for a rule the environment hasn't set."""

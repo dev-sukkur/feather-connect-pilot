@@ -105,7 +105,7 @@ def blank_flow(name: str, ident: str) -> str:
         flow = fc.Flow(
             "{name}",
             reads={ident},
-            deliver=[fc.to(simulation.Sink("hello_sink"))],
+            deliver=[fc.to(simulation.Sink("hello_sink"), name="{ident}")],  # each flow's route needs a name of its own
             triggers=[fc.manual()],
         )
         '''

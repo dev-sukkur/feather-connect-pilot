@@ -32,7 +32,7 @@ from feather_connect.core.flow import Flow, Problem, RouteSpec
 from feather_connect.core.readiness import OnReady, readiness_problems
 from feather_connect.core.readiness import prefixed as ready_prefixed
 from feather_connect.core.sql import reference_problems
-from feather_connect.core.triggers import OnEvent, Trigger, cron, every, manual
+from feather_connect.core.triggers import Cron, OnEvent, Trigger, cron, every, manual
 from feather_connect.core.windows import AvailabilityWindow, parse_window
 from feather_connect.storage.port import BudgetSpec, parse_limits
 
@@ -509,6 +509,14 @@ def _layered(
     for label, path in layer_files:
         _merge(config, layers, _read_yaml(label, path), label, "")
     if environment:
+        flows = config.get("flows")
+        for name, knobs in _strkeys(environment.get("flows") or {}).items():
+            if isinstance(flows, dict) and isinstance(knobs, dict) and "triggers" in knobs:
+                found = cast(dict[str, Any], flows).get(name)
+                if isinstance(found, dict):  # the environment's triggers replace the package's, not add to them
+                    cast(dict[str, Any], found).pop("triggers", None)
+                    for path in [p for p in layers if p.startswith(f"flows.{name}.triggers")]:
+                        del layers[path]
         _merge(config, layers, _strkeys(environment), _ENVIRONMENT_LAYER, "")
     _check_secrets(config, layers, package)
     return config, layers
@@ -601,8 +609,13 @@ def _apply_overlay(
     """Return the flows with the overlay's `flows:` section applied: the flow or its routes enabled or not, triggers replaced."""
     overlay = _mapping(config, "flows", layers)
     by_name = {flow.name: flow for flow in flows}
-    for name in overlay:
+    for name in list(overlay):
         if name not in by_name:
+            set_by = {v for k, v in layers.items() if k.startswith(f"flows.{name}.")}
+            if set_by == {_ENVIRONMENT_LAYER}:  # an environment's entry for a flow this version no longer has
+                log.warning("the environment's entry for flow %s is left out: this version has no such flow", name)
+                del overlay[name]
+                continue
             raise ProjectError(f"{_where(layers, f'flows.{name}')}: the project has no flow named {name!r}")
     result: list[Flow] = []
     for flow in flows:
@@ -810,6 +823,33 @@ def _code_sha(root: Path) -> str:
 # Checks across the whole project.
 
 
+def _shared_name_problems(flows: Sequence[Flow]) -> list[Problem]:
+    """Two flows with different routes, or different datasets, of one name. The ledger and the store know them by name
+    alone, and a route is named after its connection unless it is given `name=`, so two flows that each deliver to
+    `sap` clash. A worker refuses to load them; this says so before."""
+    routes = [(f.name, f"deliver[{i}].name", r.name, r) for f in flows for i, r in enumerate(f.routes)]
+    datasets = [(f.name, f"reads[{i}]", d.name, d) for f in flows for i, d in enumerate(f.datasets)]
+    problems: list[Problem] = []
+    for kind, code, hint, parts in (
+        ("route", "route_name_shared", "name the routes apart with fc.to(..., name=...)", routes),
+        ("dataset", "dataset_name_shared", "name the datasets apart, or share one Dataset object", datasets),
+    ):
+        seen: dict[str, tuple[str, object]] = {}
+        for flow, where, name, part in parts:
+            first_flow, first = seen.setdefault(name, (flow, part))
+            if first is not part and first_flow != flow:
+                problems.append(
+                    Problem(
+                        "error",
+                        code,
+                        f"flows {first_flow!r} and {flow!r} each have a {kind} named {name!r}",
+                        f"{flow}.{where}",
+                        hint,
+                    )
+                )
+    return problems
+
+
 def validate_project(project: Project) -> list[Problem]:
     """Return every mistake in a loaded project that shows without running it: each flow's own problems
     (`Flow.validate`, with the flow's name in front of the path), a flow that uses a connection the project
@@ -819,6 +859,7 @@ def validate_project(project: Project) -> list[Problem]:
     Nothing is run, no connection is opened and no secret is resolved.
     """
     problems: list[Problem] = readiness_problems(project.flows) + reference_problems(project.flows)
+    problems += _shared_name_problems(project.flows)
     for flow in project.flows:
         problems += [replace(p, path=f"{flow.name}.{p.path}") for p in flow.validate()]
         uses: list[tuple[str, Any]] = [(f"reads[{i}]", d.source) for i, d in enumerate(flow.datasets)]
@@ -974,12 +1015,52 @@ def _entry_value(kind: str, value: Any) -> Any:
     return copy.deepcopy(value)
 
 
-def environment_layer(entries: Iterable[Any]) -> dict[str, Any]:
+FLOW_KNOBS = frozenset({"enabled", "triggers"})
+
+
+def flow_override(value: Any, timezone: str = "UTC") -> tuple[bool | None, tuple[Trigger, ...] | None]:
+    """An environment's `flow` entry checked: whether the flow runs, and the triggers that replace its scheduled ones
+    (cron with tz, every, manual), each None when the entry leaves it as the package has it. A trigger the flow's code
+    starts it by, a webhook or another dataset, stays. Raises `ProjectError`."""
+    if not isinstance(value, dict) or not value or not set(cast(dict[str, Any], value)) <= FLOW_KNOBS:
+        raise ProjectError("a flow's entry holds enabled (true or false), triggers, or both")
+    knobs = cast(dict[str, Any], value)
+    enabled = knobs.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ProjectError("enabled must be true or false")
+    triggers = None
+    if "triggers" in knobs:
+        triggers = _triggers(knobs["triggers"], "triggers", {"triggers": _ENVIRONMENT_LAYER}, timezone)
+        if not triggers:
+            raise ProjectError("triggers: give cron (with tz), every or manual: true")
+        from datetime import datetime
+
+        from cronsim import CronSim, CronSimError
+
+        for trigger in triggers:
+            if isinstance(trigger, Cron):
+                try:
+                    CronSim(trigger.expr, datetime(2026, 1, 1))
+                except CronSimError as error:
+                    raise ProjectError(f"triggers.cron: {trigger.expr!r} is not a cron: {error}") from None
+    return enabled, triggers
+
+
+def environment_layer(entries: Iterable[Any], *, flows_of: str | None = None) -> dict[str, Any]:
     """The configuration layer of an environment's own entries (`EnvEntry` rows): its connections, budgets and
     settings, by name. An entry that doesn't pass `check_environment` is left out with a warning, so that one bad row
-    never stops a server or worker from starting."""
+    never stops a server or worker from starting. `flows_of` names the package whose `flow` entries are wanted too, as
+    the overlay's `flows:` section by each flow's short name: what a package host loads."""
     rows = list(entries)
     layer: dict[str, Any] = {}
+    prefix = f"{flows_of}/"
+    for entry in (e for e in rows if flows_of is not None and e.kind == "flow" and e.name.startswith(prefix)):
+        try:
+            flow_override(entry.value)
+        except ProjectError as error:
+            log.warning("the environment's flow %s is left out: %s", entry.name, error)
+            continue
+        layer.setdefault("flows", {})[entry.name[len(prefix) :]] = copy.deepcopy(entry.value)
     for kind in ("budget", "setting", "connection"):  # a connection is checked against the budgets kept
         for entry in (e for e in rows if e.kind == kind):
             value = _entry_value(kind, entry.value)

@@ -315,6 +315,61 @@ def test_an_admin_changes_a_role_on_the_users_page(world: World) -> None:
     )
 
 
+def _signs_in(app: Any, username: str, password: str) -> bool:
+    browser = TestClient(app, base_url="http://localhost:8000", follow_redirects=False)
+    found = re.search(r'name="csrf_token" value="([^"]+)"', browser.get("/login").text)
+    assert found
+    form = {"username": username, "password": password, "csrf_token": found.group(1)}
+    browser.post("/login", data=form)
+    return browser.get("/").status_code == 200
+
+
+def test_an_admin_adds_a_user_and_sets_a_password_on_the_users_page(world: World) -> None:
+    app = create_app(state=world.state, loops=lambda s: [])
+    browser = sign_in(app, "root", "admin")
+    page = browser.get("/users").text
+    assert 'action="/users"' in page and "Add a user" in page
+    form = {
+        "username": " ann ",
+        "password": "first password",
+        "role": "operator",
+        "csrf_token": _csrf(browser),
+    }
+    done = browser.post("/users", data=form)
+    assert done.status_code == 200 and "ann can sign in now, as an operator." in done.text
+    assert world.store.users.get_user("ann").role == "operator"  # type: ignore[union-attr]
+    assert "first password" not in str([a.request for a in world.store.audit.list_audit()])
+    again = browser.post("/users", data={**form, "csrf_token": _csrf(browser)})
+    assert again.status_code == 409 and "There is a user named &#39;ann&#39; already." in again.text
+    bad = browser.post(
+        "/users", data={**form, "username": "bob", "role": "boss", "csrf_token": _csrf(browser)}
+    )
+    assert bad.status_code == 422 and world.store.users.get_user("bob") is None
+    assert _signs_in(app, "ann", "first password")
+
+    reset = browser.post(
+        "/users/ann/password", data={"password": "second password", "csrf_token": _csrf(browser)}
+    )
+    assert reset.status_code == 200 and "ann has a new password." in reset.text
+    assert _signs_in(app, "ann", "second password") and not _signs_in(app, "ann", "first password")
+    gone = browser.post("/users/nobody/password", data={"password": "x", "csrf_token": _csrf(browser)})
+    assert gone.status_code == 404
+    actions = [(a.action, a.target, a.result) for a in world.store.audit.list_audit()]
+    assert ("create_user", "user:ann", "ok") in actions and ("set_password", "user:ann", "ok") in actions
+
+
+def test_an_operator_can_t_add_users_or_set_passwords(world: World) -> None:
+    browser = sign_in(create_app(state=world.state, loops=lambda s: []), "op", "operator")
+    _user(world.store, "ann", "operator")
+    form = {"username": "eve", "password": "pw", "role": "admin", "csrf_token": _csrf(browser)}
+    assert browser.post("/users", data=form).status_code == 403
+    assert (
+        browser.post("/users/ann/password", data={"password": "pw", "csrf_token": _csrf(browser)}).status_code
+        == 403
+    )
+    assert world.store.users.get_user("eve") is None
+
+
 # A second tenant (ADR-0013 rule 6).
 
 
@@ -336,3 +391,67 @@ def test_a_second_tenants_admin_cant_touch_the_first_tenants_users(
         theirs.create_token(boss, "steal", None, user="ann")
     assert first.users.get_user("op").role == "operator"
     assert second.users.get_user("ann") is None
+
+
+def test_an_admin_lists_and_revokes_tokens_and_a_revoked_token_is_refused(world: World) -> None:
+    agent = _bearer(world, "viewer", None)
+    assert agent.get(f"{API}/me").status_code == 200
+    _user(world.store, "root", "admin")
+    admin = _bearer(world, "admin", "root")
+    listed = admin.get(f"{API}/tokens").json()["items"]
+    found = next(t for t in listed if t["name"] == "t-viewer-None")
+    assert found["state"] == "active" and found["user"] is None and "token_hash" not in found
+    gone = admin.request("DELETE", f"{API}/tokens/{found['token_id']}", json={"reason": "leaked"})
+    assert gone.status_code == 200 and gone.json()["state"] == "revoked"
+    assert agent.get(f"{API}/me").status_code == 401
+    assert admin.request("DELETE", f"{API}/tokens/{found['token_id']}").status_code == 200  # twice: no change
+    assert admin.request("DELETE", f"{API}/tokens/nope").status_code == 404
+    assert ("revoke_token", "ok") in [(a.action, a.result) for a in world.store.audit.list_audit()]
+
+
+def test_an_admin_revokes_a_token_on_the_users_page(world: World) -> None:
+    agent = _bearer(world, "viewer", None)
+    app = create_app(state=world.state, loops=lambda s: [])
+    browser = sign_in(app, "root", "admin")
+    page = browser.get("/users").text
+    token = next(t for t in world.store.users.list_tokens() if t.name == "t-viewer-None")
+    assert "API tokens" in page and f'action="/tokens/{token.token_id}/revoke"' in page
+    done = browser.post(f"/tokens/{token.token_id}/revoke", data={"csrf_token": _csrf(browser)})
+    assert done.status_code == 200 and "The token t-viewer-None is revoked" in done.text
+    assert f'action="/tokens/{token.token_id}/revoke"' not in done.text
+    assert agent.get(f"{API}/me").status_code == 401
+
+
+def test_an_operator_cannot_list_tokens(world: World) -> None:
+    _user(world.store, "op", "operator")
+    assert _bearer(world, "operator", "op").get(f"{API}/tokens").status_code == 403
+
+
+def test_a_disabled_user_cant_sign_in_their_session_ends_and_their_tokens_are_refused(world: World) -> None:
+    app = create_app(state=world.state, loops=lambda s: [])
+    admin = sign_in(app, "root", "admin")
+    ann = sign_in(app, "ann", "operator")
+    token = issue_token(world.store, "ann-ci", timedelta(days=1), role="operator", created_by="ann")
+    robot = issue_token(world.store, "robot", timedelta(days=1), role="viewer")
+    bearer = TestClient(app, headers={"Authorization": f"Bearer {token}"})
+    assert bearer.get(f"{API}/me").status_code == 200 and ann.get("/").status_code == 200
+    page = admin.get("/users").text
+    assert 'action="/users/ann/disable"' in page and 'action="/users/root/disable"' not in page  # not yourself
+    done = admin.post("/users/ann/disable", data={"csrf_token": _csrf(admin), "reason": "left"})
+    assert done.status_code == 200 and "ann is disabled" in done.text and 'action="/users/ann/enable"' in done.text
+    assert ann.get("/").status_code in (303, 401) and bearer.get(f"{API}/me").status_code == 401
+    assert TestClient(app, headers={"Authorization": f"Bearer {robot}"}).get(f"{API}/me").status_code == 200
+    assert not _signs_in(app, "ann", PASSWORD)
+    assert ("ann", "login", "refused: disabled") in [(a.actor, a.action, a.result) for a in world.store.audit.list_audit()]
+    accounts = Accounts(world.store, world.clock)
+    with pytest.raises(ValueError, match="yourself"):
+        accounts.set_disabled(ADMIN, "root", True)
+    with pytest.raises(ValueError, match="only admin"):
+        accounts.set_disabled(CLI, "root", True)
+    with pytest.raises(KeyError):
+        accounts.set_disabled(ADMIN, "nobody", True)
+    api = TestClient(app, headers={"Authorization": f"Bearer {issue_token(world.store, 'a', None, role='admin', created_by='root')}"})
+    back = api.put(f"{API}/users/ann/disabled", json={"disabled": False, "reason": "back"})
+    assert back.status_code == 200 and back.json()["disabled"] is False
+    assert bearer.get(f"{API}/me").status_code == 200 and _signs_in(app, "ann", PASSWORD)
+    assert [a.action for a in world.store.audit.list_audit() if a.target == "user:ann"][:2] == ["enable_user", "disable_user"]

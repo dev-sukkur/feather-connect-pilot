@@ -1411,6 +1411,10 @@ class _Users(UserStore):
         with self._d.lock:
             self._d.users[username] = replace(self._d.users[username], role=role)
 
+    def set_disabled(self, username: str, at: datetime | None) -> None:
+        with self._d.lock:
+            self._d.users[username] = replace(self._d.users[username], disabled_at=at)
+
     def set_grants(self, username: str, grants: Sequence[AccessGrant]) -> None:
         with self._d.lock:
             kept = tuple(g for g in GRANTS if g in grants)
@@ -1443,6 +1447,10 @@ class _Users(UserStore):
             found = self._d.tokens.get(token_id)
             if found is not None and found.revoked_at is None:
                 self._d.tokens[token_id] = replace(found, revoked_at=self._d.clock.now())
+
+    def list_tokens(self) -> list[TokenRow]:
+        with self._d.lock:
+            return sorted(self._d.tokens.values(), key=lambda t: (t.created_at, t.token_id), reverse=True)
 
 
 class _Registry(RegistryStore):

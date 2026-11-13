@@ -20,7 +20,8 @@ from packaging.utils import canonicalize_name
 from feather_connect.logs import redact
 from feather_connect.storage.port import FlowActivation, InUse, PackageEnv, PackageHost, PackageVersion
 from feather_server.auth import Actor, CurrentActor, require_csrf
-from feather_server.services.access import can
+from feather_server.services.access import can, require
+from feather_server.services.environment import ConfigProblem, Environment
 from feather_server.services.packages import CHECKS, PREPARE_STEPS, Busy, InstallFailed, NotReady, Packages
 from feather_server.services.registries import BUILT_IN, Registries, RegistryProblem
 from feather_server.web.routes import Tile, render
@@ -468,9 +469,14 @@ def _flow_page(
     if notice is None and done in _PACKAGE_DONE:
         notice = ("ok", _PACKAGE_DONE[done])
     states = {v.version: v for v in versions}
+    environment: Environment = request.app.state.environment
+    override = store.env_config.entry(environment.env, "flow", flow)
     return render(
         request,
         "package_flow.html",
+        env=environment.env,
+        override=None if override is None else override.value,
+        spec_triggers=_spec_triggers(store, flow),
         status=status,
         title=flow,
         actor=actor,
@@ -481,6 +487,69 @@ def _flow_page(
         notice=notice,
         ask=ask,
     )
+
+
+def _spec_triggers(store: Any, flow: str) -> list[str]:
+    """The scheduled triggers its package gives the flow, as the catalogue recorded them, before any override."""
+    for activation in store.packages.activations(flow.split("/", 1)[0]):
+        if activation.flow != flow:
+            continue
+        version = store.packages.version(activation.package, activation.version)
+        specs = cast(dict[str, Any], (version.load_check if version is not None else {}).get("specs") or {})
+        raw = cast(list[dict[str, Any]], (specs.get(flow) or {}).get("triggers") or [])
+        return [
+            f"cron {t['expr']} ({t.get('tz') or 'UTC'})"
+            if t.get("kind") == "cron"
+            else f"every {t['seconds']:g}s"
+            if t.get("kind") == "every"
+            else str(t.get("kind"))
+            for t in raw
+        ]
+    return []
+
+
+_SCHEDULE_DONE = {
+    "set": "The schedule here is changed. The scheduler uses it within seconds; a poller's host, when it next starts.",
+    "cleared": "The flow runs on its package's own schedule again.",
+}
+_PACKAGE_DONE.update({f"schedule-{k}": v for k, v in _SCHEDULE_DONE.items()})
+
+
+@router.post("/packages/{name}/flows/{short}/schedule", dependencies=[Depends(require_csrf)])
+def set_schedule(
+    request: Request,
+    actor: CurrentActor,
+    name: str,
+    short: str,
+    runs: Annotated[str, Form()] = "yes",
+    cron: Annotated[str, Form(max_length=200)] = "",
+    tz: Annotated[str, Form(max_length=64)] = "",
+    every: Annotated[str, Form(max_length=32)] = "",
+    reason: Text = "",
+) -> Response:
+    """Change the flow's schedule in this environment, or turn it off, with no new package version: an environment
+    `flow` entry. Nothing given means the package's own schedule."""
+    project = canonicalize_name(name)
+    flow = f"{project}/{short}"
+    environment: Environment = request.app.state.environment
+    require(actor, "environment.manage", request.app.state.feather.store.audit, f"flow:{flow}")
+    value: dict[str, Any] = {}
+    if runs == "no":
+        value["enabled"] = False
+    trigger = {k: v.strip() for k, v in (("cron", cron), ("tz", tz), ("every", every)) if v.strip()}
+    if set(trigger) - {"tz"}:
+        value["triggers"] = trigger
+    elif trigger:
+        return _flow_page(request, actor, name, short, status=422, notice=("bad", "A time zone goes with a cron."))
+    try:
+        if value:
+            environment.put(actor, "flow", flow, value, reason=reason.strip() or None)
+        elif request.app.state.feather.store.env_config.entry(environment.env, "flow", flow) is not None:
+            environment.remove(actor, "flow", flow, reason=reason.strip() or None)
+    except ConfigProblem as error:
+        return _flow_page(request, actor, name, short, status=422, notice=("bad", str(error)))
+    done = "schedule-set" if value else "schedule-cleared"
+    return RedirectResponse(f"/packages/{quote(project)}/flows/{quote(short)}?done={done}", status_code=303)
 
 
 @router.get("/packages/{name}/flows/{short}", response_class=HTMLResponse)

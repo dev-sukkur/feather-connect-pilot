@@ -24,6 +24,7 @@ from feather_connect.storage.port import (
     ROLES,
     STREAM_TRIGGER,
     DeliveryStatus,
+    DuplicateUser,
     InvalidTransition,
     Run,
     delivery_cursor,
@@ -307,6 +308,8 @@ Reason = Annotated[str, Form(max_length=500)]
 _NOTICES = {
     "paused": "The flow is paused. Nothing new will start until you resume it.",
     "resumed": "The flow is resumed.",
+    "route-paused": "The route is paused: its deliveries wait, in order, and the flow goes on reading and sealing.",
+    "route-resumed": "The route is resumed: the deliveries it held go out in order.",
 }
 
 
@@ -594,6 +597,31 @@ def resume_flow(request: Request, actor: CurrentActor, name: str, reason: Reason
     except KeyError:
         return _not_found(request, f"No flow named {name!r}.")
     return _back(name, done="resumed")
+
+
+def _route_pause(request: Request, actor: CurrentActor, route: str, flow: str, reason: str, paused: bool) -> Response:
+    try:
+        if paused:
+            actions(request).pause_route(actor, route, reason=_reason(reason))
+        else:
+            actions(request).resume_route(actor, route, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No route named {route!r}.")
+    return _back(flow, done="route-paused" if paused else "route-resumed")
+
+
+@router.post("/routes/{route:path}/pause", dependencies=[Depends(require_csrf)])
+def pause_route(
+    request: Request, actor: CurrentActor, route: str, flow: Annotated[str, Form()], reason: Reason = ""
+) -> Response:
+    return _route_pause(request, actor, route, flow, reason, True)
+
+
+@router.post("/routes/{route:path}/resume", dependencies=[Depends(require_csrf)])
+def resume_route(
+    request: Request, actor: CurrentActor, route: str, flow: Annotated[str, Form()], reason: Reason = ""
+) -> Response:
+    return _route_pause(request, actor, route, flow, reason, False)
 
 
 @router.post("/flows/{name:path}/backfill/preview", dependencies=[Depends(require_csrf)])
@@ -1756,9 +1784,10 @@ def _users_page(
 ) -> HTMLResponse:
     accounts: Accounts = request.app.state.accounts
     everyone = accounts.users(actor)
+    tokens = accounts.tokens(actor)
     q = request.query_params.get("q", "")[:200]
     tiles = [
-        Tile("Users", len(everyone)),
+        Tile("Users", sum(1 for u in everyone if not u.disabled)),
         Tile("Admins", sum(1 for u in everyone if u.role == "admin")),
         Tile("Approvers", sum(1 for u in everyone if "approver" in u.grants or u.role == "admin")),
     ]
@@ -1773,13 +1802,94 @@ def _users_page(
         q=q,
         roles=ROLES,
         grants=GRANTS,
+        tokens=tokens,
         notice=notice,
     )
+
+
+@router.post("/tokens/{token_id}/revoke", dependencies=[Depends(require_csrf)])
+def revoke_token(request: Request, actor: CurrentActor, token_id: str, reason: Reason = "") -> Response:
+    accounts: Accounts = request.app.state.accounts
+    try:
+        token = accounts.revoke_token(actor, token_id, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No token {token_id!r}.")
+    return _users_page(request, actor, notice=("ok", f"The token {token.name} is revoked: calls made with it fail now."))
 
 
 @router.get("/users", response_class=HTMLResponse)
 def users(request: Request, actor: CurrentActor) -> HTMLResponse:
     return _users_page(request, actor)
+
+
+@router.post("/users", dependencies=[Depends(require_csrf)])
+def add_user(
+    request: Request,
+    actor: CurrentActor,
+    username: Annotated[str, Form()],
+    password: Annotated[str, Form()],
+    role: Annotated[str, Form()],
+    reason: Reason = "",
+) -> Response:
+    accounts: Accounts = request.app.state.accounts
+    name = username.strip()
+    try:
+        accounts.create_user(actor, name, password, role, reason=_reason(reason))
+    except DuplicateUser:
+        return _users_page(
+            request, actor, status=409, notice=("bad", f"There is a user named {name!r} already.")
+        )
+    except ValueError as error:
+        return _users_page(request, actor, status=422, notice=("bad", str(error)))
+    return _users_page(
+        request,
+        actor,
+        notice=("ok", f"{name} can sign in now, as an {role}. Tell them the password another way."),
+    )
+
+
+@router.post("/users/{username}/disable", dependencies=[Depends(require_csrf)])
+def disable_user(request: Request, actor: CurrentActor, username: str, reason: Reason = "") -> Response:
+    return _set_disabled(request, actor, username, reason, True)
+
+
+@router.post("/users/{username}/enable", dependencies=[Depends(require_csrf)])
+def enable_user(request: Request, actor: CurrentActor, username: str, reason: Reason = "") -> Response:
+    return _set_disabled(request, actor, username, reason, False)
+
+
+def _set_disabled(request: Request, actor: Actor, username: str, reason: str, disabled: bool) -> Response:
+    accounts: Accounts = request.app.state.accounts
+    try:
+        accounts.set_disabled(actor, username, disabled, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No user named {username!r}.")
+    except ValueError as error:
+        return _users_page(request, actor, status=409, notice=("bad", str(error)))
+    said = (
+        f"{username} is disabled: they can't sign in, and their tokens are refused."
+        if disabled
+        else f"{username} is enabled again."
+    )
+    return _users_page(request, actor, notice=("ok", said))
+
+
+@router.post("/users/{username}/password", dependencies=[Depends(require_csrf)])
+def set_password(
+    request: Request,
+    actor: CurrentActor,
+    username: str,
+    password: Annotated[str, Form()],
+    reason: Reason = "",
+) -> Response:
+    accounts: Accounts = request.app.state.accounts
+    try:
+        accounts.set_password(actor, username, password, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No user named {username!r}.")
+    except ValueError as error:
+        return _users_page(request, actor, status=422, notice=("bad", str(error)))
+    return _users_page(request, actor, notice=("ok", f"{username} has a new password."))
 
 
 @router.post("/users/{username}/role", dependencies=[Depends(require_csrf)])
@@ -1954,6 +2064,7 @@ def _alerts_page(
         now=now,
         rules=alerts.rules(state),
         channels=sorted(alerts.channels_of(state)),
+        channel_kinds={k: str(v.get("kind", "")) for k, v in alerts.channels_of(state).items()},
         notice=notice,
     )
 
@@ -1996,6 +2107,28 @@ def alerts_snooze(
     return _alerts_page(request, actor, notice=("ok", said))
 
 
+def _named_counts(raw: str) -> dict[str, int]:
+    """`"acme/invoices=1, acme/orders=20"` as a mapping; raises `ValueError` for anything else."""
+    found: dict[str, int] = {}
+    for part in raw.split(","):
+        name, sep, count = part.partition("=")
+        if not sep or not name.strip():
+            raise ValueError(part)
+        found[name.strip()] = int(count.strip())
+    return found
+
+
+@router.post("/alerts/channels/{name}/test", dependencies=[Depends(require_csrf)])
+def alerts_test_channel(request: Request, actor: CurrentActor, name: str) -> Response:
+    try:
+        alerts.AlertActions(request.app.state.feather).test_channel(actor, name)
+    except KeyError:
+        return _not_found(request, f"No alert channel {name!r}.")
+    except alerts.ChannelFailed as error:
+        return _alerts_page(request, actor, status=502, notice=("bad", str(error)))
+    return _alerts_page(request, actor, notice=("ok", f"A test alert went to {name}. Check that it arrived."))
+
+
 @router.post("/alerts/rules/{name}", dependencies=[Depends(require_csrf)])
 async def alerts_rule(request: Request, actor: CurrentActor, name: str) -> Response:
     form = await request.form()
@@ -2005,6 +2138,13 @@ async def alerts_rule(request: Request, actor: CurrentActor, name: str) -> Respo
     for key, default in defaults.items():
         raw = str(form.get(key) or "").strip()
         if not raw:
+            continue
+        if isinstance(default, dict):  # `dataset_quiet`'s datasets: "name=5, other=1"
+            try:
+                params[key] = _named_counts(raw)
+            except ValueError:
+                said = f"{key} is written as name=count, separated by commas, such as acme/invoices=1."
+                return _alerts_page(request, actor, status=422, notice=("bad", said))
             continue
         try:
             params[key] = type(default)(raw) if not isinstance(default, str) else raw

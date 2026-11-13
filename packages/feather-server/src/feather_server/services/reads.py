@@ -401,12 +401,16 @@ class Reads:
             return []
         found: list[FlowSummary] = []
         for active in catalogue.flows():
-            summary = self._packaged_summary(active.name, tuple(_describe(t) for t in active.triggers))
+            summary = self._packaged_summary(
+                active.name, tuple(_describe(t) for t in active.triggers), active.enabled
+            )
             if summary is not None:
                 found.append(summary)
         return found
 
-    def _packaged_summary(self, name: str, triggers: tuple[str, ...] | None = None) -> FlowSummary | None:
+    def _packaged_summary(
+        self, name: str, triggers: tuple[str, ...] | None = None, enabled: bool | None = None
+    ) -> FlowSummary | None:
         """A packaged flow's summary, from its catalogue spec (`catalog_view`); None for a flow it doesn't have."""
         try:
             spec = self._store.catalog.flow(name).spec
@@ -430,7 +434,7 @@ class Reads:
             triggers
             if triggers is not None
             else tuple(str(t.get("kind", t)) for t in spec.get("triggers") or []),
-            bool(spec.get("enabled", True)),
+            bool(spec.get("enabled", True)) if enabled is None else enabled,  # an environment may turn it off
             self._rt.is_flow_paused(name),
             datasets,
             tuple(

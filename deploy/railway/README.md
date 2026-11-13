@@ -137,7 +137,19 @@ backups) is set in Railway, as below. No secret is in the repository.
    The server reads the environment's settings when it starts: *Restart* `feather-server` after the import.
    `kind` is `teams`, `slack`, `smtp` or `webhook`. For Teams, add the *Workflows* template *Post to a channel when
    a webhook request is received* to the channel, and use its URL: Feather sends it an Adaptive Card. Then see one
-   arrive: scale the worker to 0 replicas for three minutes, then back to 1. `worker_missing` fires, and clears.
+   arrive: press **Send a test alert** beside each channel on the **Alerts** page, and check that it came. Then see a
+   real one: scale the worker to 0 replicas for three minutes, then back to 1. `worker_missing` fires, and clears.
+
+   Then tune the rules on the dashboard's **Alerts** page (a developer's), or with `PUT /api/v1/alert-rules/<rule>`.
+   For the pilot:
+
+   | Rule | Set | Why |
+   |---|---|---|
+   | `delivery_failed` | `after: 5m` | The default waits 15 minutes; the pilot wants every failure seen within 5 |
+   | `dataset_quiet` | `datasets: <package>/<dataset>=<fewest records a day>` for each source dataset, `within: 24h` | A read that succeeds and finds nothing (an expired token, a wrong filter) is otherwise silent. On the page, `datasets` is written `zakya-demo/invoices=1, ...` |
+   | `dataset_stale` | nothing here: give each source dataset `max_lag=` in its flow's code | It fires only for a dataset that has one |
+
+   Pick each rule's channels there too: `worker_missing` and `delivery_failed` to both, the rest to Teams only.
 
 10. **An uptime check.** A server that is down sends no alerts, so something outside Railway has to notice. With
     any uptime service (UptimeRobot, Better Stack, Uptime Kuma, a cron on another machine), check

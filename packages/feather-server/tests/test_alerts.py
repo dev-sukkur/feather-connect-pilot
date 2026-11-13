@@ -1,6 +1,7 @@
 """Alerts (M2 plan 2 O6): each rule fires once for its subject and clears by itself, its channels hear of it once (again
 when it turns critical), an acknowledged or snoozed one is quiet, and the rules are the environment's to set."""
 
+import re
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import timedelta
@@ -205,3 +206,69 @@ def test_a_teams_channel_gets_an_adaptive_card(world: World):
     [attachment] = card["attachments"]
     assert attachment["contentType"] == "application/vnd.microsoft.card.adaptive"
     assert attachment["content"]["body"][1]["text"] == "no worker"
+
+
+def test_a_dataset_that_seals_fewer_records_than_expected_is_quiet(world: World, told: Told):  # pilot review
+    doing = AlertActions(world.state)
+    doing.set_rule(
+        DEV, "dataset_quiet", enabled=True, params={"datasets": {"orders": 5, "never": 1}}, channels=[]
+    )
+    evaluate_once(world.state, told)
+    assert _firing(world, "dataset_quiet") == []  # nothing read yet: not judged
+    world.run([day(18)])  # two records
+    evaluate_once(world.state, told)
+    [quiet] = _firing(world, "dataset_quiet")
+    assert quiet.subject == "dataset:orders" and "sealed 2 records in the last 24h" in quiet.message
+    doing.set_rule(DEV, "dataset_quiet", enabled=True, params={"datasets": {"orders": 2}}, channels=[])
+    evaluate_once(world.state, told)
+    assert _firing(world, "dataset_quiet") == []  # enough: it clears
+    world.clock.advance(timedelta(hours=25))
+    evaluate_once(world.state, told)
+    [quiet] = _firing(world, "dataset_quiet")
+    assert "sealed 0 records in the last 24h (0 versions)" in quiet.message
+    for wrong in ({"datasets": {"orders": 0}}, {"datasets": ["orders"]}, {"within": "a while"}):
+        with pytest.raises(ValueError):
+            doing.set_rule(DEV, "dataset_quiet", enabled=True, params=wrong, channels=[])
+
+
+def test_the_alerts_page_sets_dataset_quiet_s_datasets_as_name_equals_count(world: World, told: Told):
+    browser = sign_in(create_app(state=world.state, loops=lambda s: []), "dev", "developer")
+    token = re.search(r'<meta name="csrf-token" content="([^"]+)"', browser.get("/alerts").text)
+    assert token
+    form = {
+        "csrf_token": token.group(1),
+        "enabled": "on",
+        "datasets": "orders=5, acme/invoices=1",
+        "within": "12h",
+    }
+    page = browser.post("/alerts/rules/dataset_quiet", data=form)
+    assert page.status_code == 200 and "Rule dataset_quiet is saved." in page.text
+    [rule] = [r for r in world.store.alerts.rules() if r.name == "dataset_quiet"]
+    assert rule.params == {"datasets": {"orders": 5, "acme/invoices": 1}, "within": "12h"}
+    assert 'value="orders=5, acme/invoices=1"' in page.text
+    wrong = browser.post("/alerts/rules/dataset_quiet", data={**form, "datasets": "orders"})
+    assert wrong.status_code == 422 and "name=count" in wrong.text
+
+
+def test_a_test_alert_reaches_the_channel_or_says_why_not(world: World, told: Told, monkeypatch: pytest.MonkeyPatch):
+    AlertActions(world.state).test_channel(DEV, "ops", told)
+    assert told.calls == [("ops", "test", "info")] and world.store.alerts.list_alerts("firing") == []
+    with pytest.raises(KeyError):
+        AlertActions(world.state).test_channel(DEV, "nobody", told)
+    with pytest.raises(Forbidden):
+        AlertActions(world.state).test_channel(OPS, "ops", told)
+    from feather_server.services import alerts
+
+    monkeypatch.setattr(alerts.Sender, "__call__", Told(fail=True).__call__)
+    browser = sign_in(create_app(state=world.state, loops=lambda s: []), "dev", "developer")
+    page = browser.get("/alerts").text
+    assert 'action="/alerts/channels/ops/test"' in page
+    token = re.search(r'name="csrf_token" value="([^"]+)"', page)
+    assert token
+    failed = browser.post("/alerts/channels/ops/test", data={"csrf_token": token.group(1)})
+    assert failed.status_code == 502 and "the hook is down" in failed.text
+    monkeypatch.setattr(alerts.Sender, "__call__", lambda self, *a: None)
+    sent = browser.post("/alerts/channels/ops/test", data={"csrf_token": token.group(1)})
+    assert sent.status_code == 200 and "A test alert went to ops" in sent.text
+    results = [a.result for a in world.store.audit.list_audit() if a.action == "alerts.test_channel"]
+    assert results[:2] == ["ok", "failed: the hook is down"]

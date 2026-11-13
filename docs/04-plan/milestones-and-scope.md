@@ -205,6 +205,7 @@ discovery's flow scenarios still need, and what a pilot needs to be watched and 
 - **Operations** (from M4): connection availability windows (FR-D5's second half).
 - **AI, read only** (from M8): the MCP server's read tools and the local author tools that change nothing, for a viewer token only, and an `investigate-failure` skill (FR-L1's read half).
 - **The pilot:** a `worker_missing` alert (FR-M3's "agent down"); Teams if needed; the Railway guide's uptime check and code version; the pilot plan.
+- **Operating gaps** (found reviewing discovery against the build, 13 Nov 2026): add a user and reset a password on the Users page; list and revoke API tokens; disable a user (FR-K1); pause and resume a route from the flow page, a package's too; a test alert per channel (FR-M3); and a flow's schedule changed, or the flow turned off, per environment with no new package version (FR-G4's schedule part, brought forward from M4). Also the `dataset_quiet` alert, and `feather validate` refusing a route or dataset name two flows share.
 
 **Exit criteria:** hard cases H16–H19 pass; UC-06 runs with a derived dataset; an MCP session with a viewer token investigates a failed delivery and can change nothing; `worker_missing` fires and clears in the chaos suite; the pilot plan is agreed and the pilot runs on Railway with alerts reaching someone.
 
@@ -218,7 +219,7 @@ Moved out of v1 by the sponsor on 9 Nov 2026. The AI part moved to [M8](#9b-m8-a
 - **The `objects` spool backend** (S3-compatible, Azure Blob, GCS) for bulk extracts and long archives.
 - **`feather diff --from qa --to prod`.**
 - **Data rules:** derived datasets, SQL transforms and reference lookups moved to M3.1 on 13 Nov 2026; partitioned derived datasets stay here.
-- **Operations:** runtime overrides, including of availability windows (FR-G4; the windows themselves moved to M3.1); freshness/SLA and volume-anomaly views (FR-F7); vault and cloud secret providers (FR-K3).
+- **Operations:** runtime overrides of budgets, concurrency and availability windows (FR-G4; the windows themselves moved to M3.1, and a flow's schedule and on/off per environment came to M3.1 on 13 Nov 2026); freshness/SLA and volume-anomaly views (FR-F7); vault and cloud secret providers (FR-K3).
 
 **Exit criteria:** a CDC dataset passes the hard cases that apply to push datasets; a 100-million-row extract runs on the `objects` spool.
 
@@ -351,7 +352,7 @@ The Stage 2 review's Minor findings (M1–M13) were fixed in Stages 3–5, excep
 | S18 | A multi-slice complete dataset on a poller failed at each tick, not at load | Stage 5 (`54ed131`) |
 | S19 | Latency numbers were optimistic (the test Postgres had fsync off) | Stage 5: measured on a durable Postgres, p95 2.004 s (`7d7e424`) |
 | S20 | The sealer could hold about 500 MB | Stage 5 (`1da6f2f`) |
-| S21 | Built-in sinks honoured idempotency keys in memory only | No commit names it; to check |
+| S21 | Built-in sinks honoured idempotency keys in memory only | Checked 13 Nov 2026: the Postgres and DuckDB sinks keep each chunk's key in the destination's `_feather_applied`, in the chunk's transaction. HTTP, GraphQL and SAP CPI send the key (`Idempotency-Key`) for the destination to honour: for SAP, the iFlow must dedupe on it, a pilot prerequisite |
 | S22 | The DBOS URL lost blank and repeated query keys | Stage 5 (`6b94b87`) |
 | S23 | F12's rest: budget waits could give up wrongly or stall | Stage 5 (`68892a0`) |
 
@@ -395,8 +396,8 @@ Where each use case (discovery §6) and functional requirement (discovery §7) l
 | **M1.1** | FR-H2 (promotion by package checksum, ADR-0011), and the M1.1 parts of FR-F6, FR-J2 and FR-K2 below |
 | **M2** | UC-02, UC-03, UC-06, UC-07, UC-12, UC-14; FR-B7 and FR-D3 (readiness, moved back from M1.1), FR-B9, FR-E5, FR-F9, FR-G3, FR-K4, FR-K5, FR-M3 |
 | **M3** | FR-H3 |
-| **M3.1** | FR-C2, FR-C4, FR-C5 |
-| **M4** | FR-F7, FR-G4, FR-M2 |
+| **M3.1** | FR-C2, FR-C4, FR-C5; FR-G4's schedule part |
+| **M4** | FR-F7, FR-G4 (the rest), FR-M2 |
 | **M6** | The connector parts of UC-04, FR-A7 and FR-J2 below; the on-prem agent |
 | **M8** | FR-L3, and FR-L1's act half below |
 | **M9** | UC-13; FR-I2–I4 (ADR-0013); FR-F8, FR-H4; FR-K1's SSO half |
