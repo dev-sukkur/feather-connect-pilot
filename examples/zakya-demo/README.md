@@ -141,25 +141,40 @@ Each delivery's page on the dashboard lists the document number SAP gave each re
 
 ## Goods returns
 
+**This is a proposal, for finance to confirm.** Whether a change after a posting is reversed and posted again, or
+posted as the difference, is open (discovery Q8, D8 in the pilot plan). The demo builds the difference, as below, and
+the other way is possible with what Feather has; the comparison follows.
+
 A return is a credit note in Zakya, against the invoice the goods were sold on. Zakya's simulator never lets more
 come back than was sold.
 
-- **B2B: a credit memo per credit note, against its invoice.** `b2b-returns-to-sap` posts it with `ReferenceInvoice`,
-  the Zakya invoice id, and SAP finds its own billing document by that id. SAP checks the return against the invoice:
-  no more of a material than the invoice sold, less earlier credit memos. It shows in the views as a negative line on
-  the day of the return. The approval rule is the invoices': over 500,000 is held. A credit memo that reaches SAP
-  before its invoice fails its delivery (SAP answers 424); retry it once the invoice is there.
-- **B2C: summed into the day's returns, on the day the goods came back.** A B2C credit note's lines join `b2c-lines`
-  with negative quantities, and each run posts them as a returns summary per material (`B2C_RETURNS`), apart from the
-  sales summary. The by-material view nets them: sold, returned and net per day. A return isn't booked against the
-  day of the sale: that day is closed in the ERP's books, and the counter's own returns are the day's business.
+- **B2B (proposed): a credit memo per credit note, against its invoice.** `b2b-returns-to-sap` posts it with
+  `ReferenceInvoice`, the Zakya invoice id, and SAP finds its own billing document by that id. SAP checks the return
+  against the invoice: no more of a material than the invoice sold, less earlier credit memos. It shows in the views
+  as a negative line on the day of the return. The approval rule is the invoices': over 500,000 is held. A credit
+  memo that reaches SAP before its invoice fails its delivery (SAP answers 424); retry it once the invoice is there.
+- **B2C (proposed): summed into the day's returns, on the day the goods came back.** A B2C credit note's lines join
+  `b2c-lines` with negative quantities, and each run posts them as a returns summary per material (`B2C_RETURNS`),
+  apart from the sales summary. The by-material view nets them: sold, returned and net per day. A return isn't booked
+  against the day of the sale.
 
-Why these choices:
+The two ways, side by side:
 
-- *Returns as their own documents rather than reversals.* Reversing a B2B invoice and posting a new one would undo
-  the original posting, its payment matching and its GST record; a credit memo is how SAP records goods coming back.
-  For B2C, a summary may hold many sales, so reversing it for one returned pack isn't possible. Feather's
-  **Compensate** stays for a posting that was wrong, not for goods that came back.
+| | Post the difference (built) | Reverse and post again |
+| --- | --- | --- |
+| B2B | A credit memo (G2) for what came back; the invoice stays as posted | Reverse the invoice's billing document and post it again, less what came back |
+| B2C | A returns summary on the day of the return | Reverse the day's summary for that material and post it again with the return netted in |
+| How, in Feather | As built: the credit note is its own record, posted once with its own idempotency key | B2B: **Compensate** reverses a whole delivery (every invoice in it), so a reversal per invoice needs a route that posts each invoice's reversal itself, from the credit note. B2C: one summary per material per closed day (read the day once it is complete, `fc.on_ready(..., each="day")`), so that a day has one document to reverse; a late return then reruns the day (`on_late="rerun"`) |
+| The books | The original invoice, its payment matching and its GST return stay as filed; the return is visible as its own document | The corrected document replaces the original; a filed GST return for the original month needs an amendment |
+| Within a day | Many small documents | One document per day and material, posted after the day closes |
+
+Why the proposal is the difference: a credit memo is how SAP records goods coming back; reversing a B2B invoice
+undoes its payment matching and GST record; and a B2C summary holds many customers' sales, so reversing it for one
+returned pack touches all of them. Feather's **Compensate** stays for a posting that was wrong, not for goods that came
+back.
+
+Other choices, also open to change:
+
 - *Returns apart from sales in the B2C summary.* Netting them into one document would hide returns in the books; one
   summary per direction keeps returns visible and the net still shows in the view.
 - *Per run, not once a day.* The ERP's view adds up the day's postings as they come, as asked for; a summary per
@@ -182,6 +197,8 @@ Why these choices:
   place of supply are the iFlow's or SAP's to work out.
 - **One summary per run and material.** A busy day makes many small summaries. Posting once a day after the day
   closes would make one per material.
+- **Q8 / D8: the difference or reverse and post again.** Proposed as above; finance confirms. If finance picks
+  reversal, the B2C flow moves to one summary per closed day, and B2B returns get a reversal route.
 - **Which ERP mode is meant.** The ERP's manual mode parks postings for a person to post, and its form books a
   document by hand; its auto mode books what arrives. Whether "manual" should mean something else on the ERP side
   is for the sponsor to say.

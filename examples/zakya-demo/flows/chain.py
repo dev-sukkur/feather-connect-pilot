@@ -15,6 +15,8 @@ To SAP, once a run's documents are in staging (`fc.on_ready`, at most every 5 mi
   a credit memo per credit note, against the invoice it names; while SAP doesn't have that invoice yet (it is held
   for approval, say), the credit memo's delivery fails, and a Retry on the Failures page posts it once it has. Either one over 500,000 holds its delivery for an
   approver (Holds page); an applied delivery can be reversed (Compensate, on the delivery's page).
+- Returns are posted as the difference (a credit memo, a returns summary), not by reversing and posting again: a
+  proposal for finance to confirm (discovery Q8, pilot D8); the README compares the two.
 - B2C, summarised: `b2c-to-sap` (flows/b2c.py) sums the new B2C lines per day and material and posts one summary per
   day, material and direction (sales, returns).
 """
