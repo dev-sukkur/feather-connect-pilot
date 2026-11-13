@@ -64,10 +64,12 @@ backups) is set in Railway, as below. No secret is in the repository.
    | `FEATHER_BASE_URL` | `https://${{RAILWAY_PUBLIC_DOMAIN}}`, or your own domain | Links, and a `Secure` session cookie |
    | `PORT` | `8080` | The port Railway's health check and domain use |
    | `FORWARDED_ALLOW_IPS` | `*` | Uvicorn takes the client's address from Railway's proxy. Only the proxy reaches the server |
+   | `FEATHER_CODE_SHA` | `${{RAILWAY_GIT_COMMIT_SHA}}` | The commit, shown on each run and in the catalogue |
 
 4. **The worker.** *New* → *GitHub Repo* → this repository again. Name it `feather-worker`. *Railway Config File*:
    `/deploy/railway/worker.json`; branch `main` with *Wait for CI*; **no** domain. Its variables are
-   `FEATHER_DATABASE_URL` (`${{Postgres.DATABASE_URL}}`) and the four shared ones. *Settings* → *Deploy* → *Replicas*
+   `FEATHER_DATABASE_URL` (`${{Postgres.DATABASE_URL}}`), `FEATHER_CODE_SHA` (`${{RAILWAY_GIT_COMMIT_SHA}}`) and the
+   four shared ones. *Settings* → *Deploy* → *Replicas*
    sets how many run (start with 1). Every replica shares the same variables.
 
 5. **Deploy.** *Deploy* the staged changes. The server's pre-deploy step runs `feather server migrate`; the server
@@ -107,7 +109,42 @@ backups) is set in Railway, as below. No secret is in the repository.
    Seal the variable.
 
 8. **Check it.** Open the domain and sign in. `https://<domain>/readyz` shows the database and schema as ok; the
-   overview shows the worker's heartbeat.
+   overview shows the worker's heartbeat, and a run shows the commit it ran.
+
+9. **Alerts.** Alerts come from the server: a failed delivery, a used-up budget, a late dataset, and
+   `worker_missing`, which fires (critical) when no worker has sent a heartbeat for 2 minutes. Give them somewhere
+   to go. Write the channels into an environment file:
+
+   ```yaml
+   # prod-alerts.yaml
+   settings:
+     alert_channels:
+       ops-teams: {kind: teams, url: "${secret:db:alerts/teams-url}"}   # a Teams Workflows webhook URL
+       ops-mail: {kind: smtp, host: smtp.example.com, port: 587, starttls: true, from: feather@example.com,
+                  to: [ops@example.com], username: feather, password: "${secret:db:alerts/smtp-password}"}
+   ```
+
+   Set the secrets (each reads its value from stdin), then import the file:
+
+   ```bash
+   feather secret set alerts/teams-url --server https://<domain>
+   ```
+
+   ```bash
+   feather config import prod-alerts.yaml --env prod --server https://<domain>
+   ```
+
+   `kind` is `teams`, `slack`, `smtp` or `webhook`. For Teams, add the *Workflows* template *Post to a channel when
+   a webhook request is received* to the channel, and use its URL: Feather sends it an Adaptive Card. Then see one
+   arrive: scale the worker to 0 replicas for three minutes, then back to 1. `worker_missing` fires, and clears.
+
+10. **An uptime check.** A server that is down sends no alerts, so something outside Railway has to notice. With
+    any uptime service (UptimeRobot, Better Stack, Uptime Kuma, a cron on another machine), check
+    `https://<domain>/readyz` every minute, expect 200, and alert the same people as the channels above. It
+    answers 503 when the database is unreachable or its schema isn't current.
+
+11. **A cost limit.** In the workspace's *Usage* settings, set a usage limit for the month, with the email alert
+    that comes before it. At the hard limit Railway stops the services, so set the alert well below it.
 
 ## Your flows
 
@@ -119,6 +156,19 @@ and *Deploy* pages (`site-docs/`).
 
 The images also hold the demo project (`examples/demo`), as on Compose. It has no schedule, so it does nothing in
 `prod` unless someone runs it.
+
+## An agent that reads
+
+Claude, or another MCP client, can read the deployment through `https://<domain>/mcp` with a **viewer** token, and
+nothing else: an operator's or an admin's token is refused there, and a viewer can change nothing anyway. Make one
+inside the server's container (`railway ssh --service feather-server`):
+
+```bash
+feather server create-token claude --role viewer --ttl 30d
+```
+
+On a laptop, `feather mcp --server https://<domain> --token <that token>` serves the same tools over stdio. Each
+call is in the audit log as the agent's. The Operating Guide's *Read-only MCP* section lists the tools.
 
 ## Backups and restore
 
