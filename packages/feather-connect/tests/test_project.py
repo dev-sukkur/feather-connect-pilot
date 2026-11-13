@@ -15,6 +15,7 @@ from feather_connect.project import (
 
 FLOW_MODULE = """
     import feather_connect as fc
+    import feather_connect as fc
     from feather_connect.connectors import memory
 
     orders = fc.Dataset("orders", source=memory.Source("shop"), key="id", strategy=fc.strategy.replace())
@@ -282,6 +283,7 @@ REAL_FLOW = """
     from typing import ClassVar
 
     import feather_connect as fc
+    import feather_connect as fc
     from feather_connect.connectors import memory
     from feather_connect.core.connector import ConnectorSpec
 
@@ -366,3 +368,32 @@ def test_a_connection_s_window_is_read_and_checked(project_dir):  # M3.1 F3
     write(project_dir, "env/badwindow.yaml", 'connections:\n  shop:\n    windows: {tz: UTC, open: ["9-5"]}\n')
     with pytest.raises(ProjectError, match=r"connections\.shop\.windows.*not a span"):
         load_project(project_dir, "badwindow")
+
+
+def test_two_flows_with_different_routes_or_datasets_of_one_name_are_refused_by_validate():
+    import feather_connect as fc
+    from feather_connect.connectors import memory
+    from feather_connect.project import Project
+
+    def flow(name: str, dataset: str, route: str | None = None) -> fc.Flow:
+        found = fc.Dataset(
+            dataset, source=memory.Source(f"{name}_src", []), key="id", strategy=fc.strategy.replace()
+        )
+        return fc.Flow(name, reads=found, deliver=[fc.to(memory.Sink("sap"), name=route)])
+
+    def codes(*flows: fc.Flow) -> list[tuple[str, str]]:
+        project = Project("p", Path("."), "dev", flows, {}, {}, {}, "sha")
+        shared = ("route_name_shared", "dataset_name_shared")
+        return [(p.code, p.path) for p in validate_project(project) if p.code in shared]
+
+    assert codes(flow("b2b", "b2b_inv"), flow("b2c", "b2c_inv")) == [
+        ("route_name_shared", "b2c.deliver[0].name")
+    ]
+    assert codes(flow("b2b", "b2b_inv", "sap-b2b"), flow("b2c", "b2c_inv", "sap-b2c")) == []
+    assert codes(flow("b2b", "inv", "a"), flow("b2c", "inv", "b")) == [
+        ("dataset_name_shared", "b2c.reads[0]")
+    ]
+    one = flow("b2b", "inv", "a")
+    assert (
+        codes(one, fc.Flow("again", reads=one.datasets[0], deliver=[fc.to(memory.Sink("pos"))])) == []
+    )  # shared

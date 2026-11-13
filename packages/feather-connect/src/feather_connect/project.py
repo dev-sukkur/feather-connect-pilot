@@ -810,6 +810,33 @@ def _code_sha(root: Path) -> str:
 # Checks across the whole project.
 
 
+def _shared_name_problems(flows: Sequence[Flow]) -> list[Problem]:
+    """Two flows with different routes, or different datasets, of one name. The ledger and the store know them by name
+    alone, and a route is named after its connection unless it is given `name=`, so two flows that each deliver to
+    `sap` clash. A worker refuses to load them; this says so before."""
+    routes = [(f.name, f"deliver[{i}].name", r.name, r) for f in flows for i, r in enumerate(f.routes)]
+    datasets = [(f.name, f"reads[{i}]", d.name, d) for f in flows for i, d in enumerate(f.datasets)]
+    problems: list[Problem] = []
+    for kind, code, hint, parts in (
+        ("route", "route_name_shared", "name the routes apart with fc.to(..., name=...)", routes),
+        ("dataset", "dataset_name_shared", "name the datasets apart, or share one Dataset object", datasets),
+    ):
+        seen: dict[str, tuple[str, object]] = {}
+        for flow, where, name, part in parts:
+            first_flow, first = seen.setdefault(name, (flow, part))
+            if first is not part and first_flow != flow:
+                problems.append(
+                    Problem(
+                        "error",
+                        code,
+                        f"flows {first_flow!r} and {flow!r} each have a {kind} named {name!r}",
+                        f"{flow}.{where}",
+                        hint,
+                    )
+                )
+    return problems
+
+
 def validate_project(project: Project) -> list[Problem]:
     """Return every mistake in a loaded project that shows without running it: each flow's own problems
     (`Flow.validate`, with the flow's name in front of the path), a flow that uses a connection the project
@@ -819,6 +846,7 @@ def validate_project(project: Project) -> list[Problem]:
     Nothing is run, no connection is opened and no secret is resolved.
     """
     problems: list[Problem] = readiness_problems(project.flows) + reference_problems(project.flows)
+    problems += _shared_name_problems(project.flows)
     for flow in project.flows:
         problems += [replace(p, path=f"{flow.name}.{p.path}") for p in flow.validate()]
         uses: list[tuple[str, Any]] = [(f"reads[{i}]", d.source) for i, d in enumerate(flow.datasets)]
