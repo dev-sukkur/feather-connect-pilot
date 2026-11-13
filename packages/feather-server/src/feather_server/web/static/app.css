@@ -205,6 +205,13 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 button .ic { width: 1rem; height: 1rem; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
 button.primary:hover { filter: brightness(1.08); }
+.button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+.add-panel { margin: 0 0 1rem; }
+.add-panel > summary { list-style: none; display: inline-block; cursor: pointer; }
+.add-panel > summary::-webkit-details-marker { display: none; }
+.add-panel[open] > summary { margin-bottom: .75rem; }
+.stack-form { max-width: 28rem; padding: .75rem 1rem; border: 1px solid var(--border); border-radius: 6px; }
+.stack-form input[type=text], .stack-form input[type=password], .stack-form select { width: 100%; }
 button.danger { border-color: var(--bad-fg); color: var(--bad-fg); }
 button.link { border: 0; background: none; color: var(--accent); padding: 0.2rem 0.3rem; text-decoration: underline; }
 .icon-button { display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; padding: 0; border-color: transparent; background: transparent; color: var(--muted); border-radius: 6px; cursor: pointer; }

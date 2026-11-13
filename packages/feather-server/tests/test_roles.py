@@ -315,6 +315,61 @@ def test_an_admin_changes_a_role_on_the_users_page(world: World) -> None:
     )
 
 
+def _signs_in(app: Any, username: str, password: str) -> bool:
+    browser = TestClient(app, base_url="http://localhost:8000", follow_redirects=False)
+    found = re.search(r'name="csrf_token" value="([^"]+)"', browser.get("/login").text)
+    assert found
+    form = {"username": username, "password": password, "csrf_token": found.group(1)}
+    browser.post("/login", data=form)
+    return browser.get("/").status_code == 200
+
+
+def test_an_admin_adds_a_user_and_sets_a_password_on_the_users_page(world: World) -> None:
+    app = create_app(state=world.state, loops=lambda s: [])
+    browser = sign_in(app, "root", "admin")
+    page = browser.get("/users").text
+    assert 'action="/users"' in page and "Add a user" in page
+    form = {
+        "username": " ann ",
+        "password": "first password",
+        "role": "operator",
+        "csrf_token": _csrf(browser),
+    }
+    done = browser.post("/users", data=form)
+    assert done.status_code == 200 and "ann can sign in now, as an operator." in done.text
+    assert world.store.users.get_user("ann").role == "operator"  # type: ignore[union-attr]
+    assert "first password" not in str([a.request for a in world.store.audit.list_audit()])
+    again = browser.post("/users", data={**form, "csrf_token": _csrf(browser)})
+    assert again.status_code == 409 and "There is a user named &#39;ann&#39; already." in again.text
+    bad = browser.post(
+        "/users", data={**form, "username": "bob", "role": "boss", "csrf_token": _csrf(browser)}
+    )
+    assert bad.status_code == 422 and world.store.users.get_user("bob") is None
+    assert _signs_in(app, "ann", "first password")
+
+    reset = browser.post(
+        "/users/ann/password", data={"password": "second password", "csrf_token": _csrf(browser)}
+    )
+    assert reset.status_code == 200 and "ann has a new password." in reset.text
+    assert _signs_in(app, "ann", "second password") and not _signs_in(app, "ann", "first password")
+    gone = browser.post("/users/nobody/password", data={"password": "x", "csrf_token": _csrf(browser)})
+    assert gone.status_code == 404
+    actions = [(a.action, a.target, a.result) for a in world.store.audit.list_audit()]
+    assert ("create_user", "user:ann", "ok") in actions and ("set_password", "user:ann", "ok") in actions
+
+
+def test_an_operator_can_t_add_users_or_set_passwords(world: World) -> None:
+    browser = sign_in(create_app(state=world.state, loops=lambda s: []), "op", "operator")
+    _user(world.store, "ann", "operator")
+    form = {"username": "eve", "password": "pw", "role": "admin", "csrf_token": _csrf(browser)}
+    assert browser.post("/users", data=form).status_code == 403
+    assert (
+        browser.post("/users/ann/password", data={"password": "pw", "csrf_token": _csrf(browser)}).status_code
+        == 403
+    )
+    assert world.store.users.get_user("eve") is None
+
+
 # A second tenant (ADR-0013 rule 6).
 
 

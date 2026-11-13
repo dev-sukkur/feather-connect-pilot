@@ -126,6 +126,22 @@ class Accounts:
             create,
         )
 
+    def set_password(self, actor: Actor, username: str, password: str, *, reason: str | None = None) -> User:
+        """Give the user a new password, as an admin does for someone who forgot theirs. The password is never in the
+        audit record. Raises `KeyError` for an unknown user and `ValueError` for a bad password."""
+
+        def change() -> User:
+            if not password or len(password) > MAX_PASSWORD:
+                raise ValueError(f"a password has 1 to {MAX_PASSWORD} characters")
+            if self._store.users.get_user(username) is None:
+                raise KeyError(username)
+            self._store.users.set_password_hash(username, hash_password(password))
+            found = self._store.users.get_user(username)
+            assert found is not None
+            return User.of(found)
+
+        return self._do(actor, "users.manage", "set_password", f"user:{username}", {"reason": reason}, change)
+
     def _first(self) -> bool:
         return not self._store.users.list_users()
 

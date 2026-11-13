@@ -44,6 +44,8 @@ ADMIN_ONLY = {
     ("POST", "/api/v1/tokens"),
     ("POST", "/users/{username}/role"),
     ("POST", "/users/{username}/grants"),
+    ("POST", "/users"),
+    ("POST", "/users/{username}/password"),
 }
 
 
@@ -180,7 +182,14 @@ def test_an_operator_cant_do_an_admins_work(app: FastAPI, world: World) -> None:
                 method, concrete(path), headers={"Authorization": f"Bearer {token}"}, **sent
             )
         else:
-            form = {"csrf_token": found.group(1), "reason": "a reason", "role": "admin", "grants": "approver"}
+            form = {
+                "csrf_token": found.group(1),
+                "reason": "a reason",
+                "role": "admin",
+                "grants": "approver",
+                "username": "eve",
+                "password": "pw",
+            }
             answer = browser.request(method, concrete(path), data=form)
         if answer.status_code != 403:
             answered.append((answer.status_code, method, path))

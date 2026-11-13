@@ -24,6 +24,7 @@ from feather_connect.storage.port import (
     ROLES,
     STREAM_TRIGGER,
     DeliveryStatus,
+    DuplicateUser,
     InvalidTransition,
     Run,
     delivery_cursor,
@@ -1780,6 +1781,50 @@ def _users_page(
 @router.get("/users", response_class=HTMLResponse)
 def users(request: Request, actor: CurrentActor) -> HTMLResponse:
     return _users_page(request, actor)
+
+
+@router.post("/users", dependencies=[Depends(require_csrf)])
+def add_user(
+    request: Request,
+    actor: CurrentActor,
+    username: Annotated[str, Form()],
+    password: Annotated[str, Form()],
+    role: Annotated[str, Form()],
+    reason: Reason = "",
+) -> Response:
+    accounts: Accounts = request.app.state.accounts
+    name = username.strip()
+    try:
+        accounts.create_user(actor, name, password, role, reason=_reason(reason))
+    except DuplicateUser:
+        return _users_page(
+            request, actor, status=409, notice=("bad", f"There is a user named {name!r} already.")
+        )
+    except ValueError as error:
+        return _users_page(request, actor, status=422, notice=("bad", str(error)))
+    return _users_page(
+        request,
+        actor,
+        notice=("ok", f"{name} can sign in now, as an {role}. Tell them the password another way."),
+    )
+
+
+@router.post("/users/{username}/password", dependencies=[Depends(require_csrf)])
+def set_password(
+    request: Request,
+    actor: CurrentActor,
+    username: str,
+    password: Annotated[str, Form()],
+    reason: Reason = "",
+) -> Response:
+    accounts: Accounts = request.app.state.accounts
+    try:
+        accounts.set_password(actor, username, password, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No user named {username!r}.")
+    except ValueError as error:
+        return _users_page(request, actor, status=422, notice=("bad", str(error)))
+    return _users_page(request, actor, notice=("ok", f"{username} has a new password."))
 
 
 @router.post("/users/{username}/role", dependencies=[Depends(require_csrf)])
