@@ -698,7 +698,8 @@ docker compose -f deploy/compose.yaml exec feather-server feather server create-
   <h2><span class="n">10</span>Not in M1</h2>
   <div class="scroll"><table>
     <tr><th>Missing</th><th>Arrives in</th></tr>
-    <tr><td>Overrides beyond pause and resume, availability windows, SLA and anomaly views, derived datasets and SQL transforms</td><td>M4</td></tr>
+    <tr><td>Availability windows, derived datasets, SQL transforms and reference lookups; a read-only MCP server</td><td>M3.1</td></tr>
+    <tr><td>Overrides beyond pause and resume, SLA and anomaly views</td><td>M4</td></tr>
     <tr><td>Connectors other than Zakya, Postgres, HTTP and SAP through CPI</td><td>M6</td></tr>
     <tr><td><code>sink.confirm</code>, with Magento</td><td>M6</td></tr>
     <tr><td>OAuth2 tokens shared across processes. M1 shares one per grant within a process</td><td>M2</td></tr>
