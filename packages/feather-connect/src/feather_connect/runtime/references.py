@@ -20,10 +20,11 @@ import pyarrow as pa
 from feather_connect.core.errors import PermanentError, TransientError
 from feather_connect.core.records import Record, canonical_json
 from feather_connect.core.sql import References
-from feather_connect.runtime.extract import STATE_MARK_KEY, state_marker
 from feather_connect.storage.port import Store
 from feather_connect.storage.spool import records_to_table
 
+STATE_MARK_TARGET = "sealer"  # named so before batch datasets marked their state too (M3.1 F1)
+STATE_MARK_KEY = "state_updated_to"  # the seal_seq up to which a dataset's record state is written
 _PAGE = 10_000
 _CACHED = 16  # references kept per process, least recently used out first
 
@@ -76,6 +77,10 @@ class _ProcessCache:
 
 
 CACHE = _ProcessCache()
+
+
+def state_marker(dataset_name: str) -> str:
+    return f"{STATE_MARK_TARGET}:{dataset_name}"
 
 
 def full_name(dataset: str, package: str | None) -> str:

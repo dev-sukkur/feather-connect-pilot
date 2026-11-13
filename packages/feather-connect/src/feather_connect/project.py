@@ -810,6 +810,8 @@ def validate_project(project: Project) -> list[Problem]:
         uses: list[tuple[str, Any]] = [(f"reads[{i}]", d.source) for i, d in enumerate(flow.datasets)]
         uses += [(f"deliver[{i}]", r.sink) for i, r in enumerate(flow.routes)]
         for where, obj in uses:
+            if getattr(obj, "connectionless", False):  # a derived dataset reads the store, not a connection
+                continue
             connection, connector = obj.connection, obj.spec.name
             path = f"{flow.name}.{where}"
             config = project.connections.get(connection)

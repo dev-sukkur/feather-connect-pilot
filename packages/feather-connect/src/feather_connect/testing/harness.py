@@ -67,6 +67,9 @@ class FlowHarness:
     def _swapped(self, flow: Flow) -> Flow:
         datasets: list[Dataset] = []
         for dataset in flow.datasets:
+            if getattr(dataset.source, "connectionless", False):  # a derived dataset reads the store: keep it
+                datasets.append(dataset)
+                continue
             stand = self._sources.setdefault(dataset.name, _source_like(dataset.source))
             datasets.append(replace(dataset, source=stand))
         routes: list[RouteSpec] = []

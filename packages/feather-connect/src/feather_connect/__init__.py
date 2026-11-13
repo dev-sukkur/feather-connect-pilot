@@ -24,7 +24,7 @@ from feather_connect.core.errors import PermanentError, RecordRejected, Transien
 from feather_connect.core.flow import Flow, to
 from feather_connect.core.readiness import on_ready, ready
 from feather_connect.core.records import Record
-from feather_connect.core.sql import sql
+from feather_connect.core.sql import derived, sql
 from feather_connect.core.transforms import batch_map
 from feather_connect.core.triggers import cron, every, manual, on_event, reconcile
 
@@ -51,6 +51,7 @@ __all__ = [
     "approval",
     "batch_map",
     "cron",
+    "derived",
     "every",
     "manual",
     "on_event",

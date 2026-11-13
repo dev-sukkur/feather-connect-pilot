@@ -47,15 +47,14 @@ from feather_connect.core.records import Record, make_key, row_hash
 from feather_connect.ids import new_id, stable_id
 from feather_connect.logs import redact
 from feather_connect.runtime.extract import (
-    STATE_MARK_KEY,
     check_columns,
     content_hash,
     mark_state,
     schema_hash,
-    state_marker,
     update_state,
     validate_row,
 )
+from feather_connect.runtime.references import STATE_MARK_KEY, state_marker
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage import spool as spool_settings
 from feather_connect.storage.port import InboxEvent, StaleWriter, Version, VersionDraft, VersionSealed
