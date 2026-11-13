@@ -2234,6 +2234,7 @@ class _Users(UserStore):
             row["created_at"],
             row["role"],
             tuple(g for g in GRANTS if g in (row["grants"] or ())),
+            row["disabled_at"],
         )
 
     def get_user(self, username: str) -> UserRow | None:
@@ -2266,6 +2267,15 @@ class _Users(UserStore):
             changed = conn.execute(
                 "update feather.app_user set role = %s where tenant_id = %s and username = %s",
                 (role, self._db.tenant, username),
+            )
+        if changed.rowcount == 0:
+            raise KeyError(username)
+
+    def set_disabled(self, username: str, at: datetime | None) -> None:
+        with self._db.tx() as conn:
+            changed = conn.execute(
+                "update feather.app_user set disabled_at = %s where tenant_id = %s and username = %s",
+                (at, self._db.tenant, username),
             )
         if changed.rowcount == 0:
             raise KeyError(username)

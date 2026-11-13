@@ -360,6 +360,27 @@ def create_token(
 
 
 @server_app.command()
+def disable_user(
+    username: str,
+    enable: Annotated[bool, typer.Option("--enable", help="Enable the user again instead.")] = False,
+    reason: Annotated[str | None, typer.Option(help="Why, for the audit log.")] = None,
+    env: Env = "dev",
+    database_url: DatabaseUrl = None,
+    json_mode: Json = False,
+) -> None:
+    """Disable a user, who then can't sign in and whose tokens are refused; --enable lets them in again."""
+    with _store(database_url, json_mode) as store:
+        try:
+            user = _accounts(store).set_disabled(CLI, username, not enable, reason=reason)
+        except KeyError:
+            fail(f"there is no user {username!r}", json_mode=json_mode)
+        except ValueError as error:
+            fail(str(error), json_mode=json_mode)
+    said = f"{username} is {'disabled' if user.disabled else 'enabled'}"
+    emit(asdict(user), json_mode=json_mode, human=lambda _: typer.echo(said))
+
+
+@server_app.command()
 def list_tokens(env: Env = "dev", database_url: DatabaseUrl = None, json_mode: Json = False) -> None:
     """List the API tokens, newest first, with their state. Never their secrets."""
     with _store(database_url, json_mode) as store:

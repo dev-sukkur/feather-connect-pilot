@@ -202,6 +202,16 @@ def test_create_token_prints_once_and_stores_only_the_hash(cli, migrated, open_s
     assert json.loads(again.stdout)["token"] != token
 
 
+def test_disable_and_enable_a_user(cli, migrated):
+    cli("server", "create-user", "boss", "--role", "admin", input="pw-boss-1\n")
+    cli("server", "create-user", "dora", "--role", "operator", input="pw-dora-1\n")
+    off = cli("server", "disable-user", "dora", "--reason", "left", "--json")
+    assert off.exit_code == 0 and json.loads(off.stdout)["disabled"] is True
+    on = cli("server", "disable-user", "dora", "--enable", "--json")
+    assert on.exit_code == 0 and json.loads(on.stdout)["disabled"] is False
+    assert cli("server", "disable-user", "nobody").exit_code == 1
+
+
 def test_list_tokens_and_revoke_one(cli, migrated):
     cli("server", "create-token", "rotate-me", "--json")
     listed = json.loads(cli("server", "list-tokens", "--json").stdout)["items"]

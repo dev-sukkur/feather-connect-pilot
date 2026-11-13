@@ -20,11 +20,11 @@
 {% if users %}
 <div class="table-wrap scroll"><table class="data" data-table="users">
   <caption class="sr-only">Users and their roles</caption>
-  <thead><tr><th scope="col" data-sort>User</th><th scope="col" data-col="role" data-sort>Role</th><th scope="col" data-col="since" data-sort>Since</th><th scope="col">Change the role</th><th scope="col">Grants</th><th scope="col">Password</th></tr></thead>
+  <thead><tr><th scope="col" data-sort>User</th><th scope="col" data-col="role" data-sort>Role</th><th scope="col" data-col="since" data-sort>Since</th><th scope="col">Change the role</th><th scope="col">Grants</th><th scope="col">Password</th><th scope="col">Access</th></tr></thead>
   <tbody>
   {% for u in users %}
     <tr id="user-{{ u.username }}">
-      <th scope="row">{{ u.username }}{% if actor and u.username == actor.user %} <span class="muted">(you)</span>{% endif %}</th>
+      <th scope="row">{{ u.username }}{% if actor and u.username == actor.user %} <span class="muted">(you)</span>{% endif %}{% if u.disabled %} {{ m.status_badge("disabled") }}{% endif %}</th>
       <td data-col="role">{{ u.role }}</td>
       <td data-col="since">{{ u.created_at[:10] }}</td>
       <td>
@@ -52,6 +52,19 @@
           <input id="password-{{ loop.index }}" name="password" type="password" size="12" maxlength="1024" required autocomplete="new-password" placeholder="new password">
           <button type="submit">Set<span class="sr-only"> the password of {{ u.username }}</span></button>
         </form>
+      </td>
+      <td>
+        {% if u.disabled %}
+        <form method="post" action="/users/{{ u.username | urlencode }}/enable" class="inline-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit">Enable<span class="sr-only"> {{ u.username }}</span></button>
+        </form>
+        {% elif not (actor and u.username == actor.user) %}
+        <form method="post" action="/users/{{ u.username | urlencode }}/disable" class="inline-form" onsubmit="return confirm('Disable {{ u.username }}? They can\'t sign in, and their tokens are refused, until enabled again.')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="danger">Disable<span class="sr-only"> {{ u.username }}</span></button>
+        </form>
+        {% endif %}
       </td>
     </tr>
   {% endfor %}

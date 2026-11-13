@@ -6,7 +6,7 @@ works on the database directly. Everything here is of the store's tenant only (A
 """
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -28,10 +28,13 @@ class User:
     role: Role
     created_at: str
     grants: tuple[str, ...] = ()
+    disabled: bool = False
 
     @classmethod
     def of(cls, row: UserRow) -> "User":
-        return cls(row.username, row.role, row.created_at.isoformat(), tuple(row.grants))
+        return cls(
+            row.username, row.role, row.created_at.isoformat(), tuple(row.grants), row.disabled_at is not None
+        )
 
 
 @dataclass(frozen=True)
@@ -162,6 +165,29 @@ class Accounts:
             create,
         )
 
+    def set_disabled(self, actor: Actor, username: str, disabled: bool, *, reason: str | None = None) -> User:
+        """Disable a user, who then can't sign in and whose tokens are refused, or enable them again. Their audit trail
+        and their tokens stay. Raises `KeyError` for an unknown user, and `ValueError` for disabling yourself or the
+        only admin who can still sign in."""
+
+        def change() -> User:
+            found = self._store.users.get_user(username)
+            if found is None:
+                raise KeyError(f"no user named {username!r}")
+            if disabled and username == actor.user:
+                raise ValueError("you can't disable yourself: ask another admin")
+            admins = [u for u in self._store.users.list_users() if u.role == "admin" and u.disabled_at is None]
+            if disabled and found.role == "admin" and found.disabled_at is None and len(admins) == 1:
+                raise ValueError(f"{username} is the only admin: make another user an admin first")
+            if disabled != (found.disabled_at is not None):
+                self._store.users.set_disabled(username, self._clock.now() if disabled else None)
+            changed = self._store.users.get_user(username)
+            assert changed is not None
+            return User.of(changed)
+
+        action = "disable_user" if disabled else "enable_user"
+        return self._do(actor, "users.manage", action, f"user:{username}", {"reason": reason}, change)
+
     def set_password(self, actor: Actor, username: str, password: str, *, reason: str | None = None) -> User:
         """Give the user a new password, as an admin does for someone who forgot theirs. The password is never in the
         audit record. Raises `KeyError` for an unknown user and `ValueError` for a bad password."""
@@ -192,11 +218,11 @@ class Accounts:
             wanted = _role(role)
             if found is None:
                 raise KeyError(f"no user named {username!r}")
-            admins = [u for u in self._store.users.list_users() if u.role == "admin"]
-            if found.role == "admin" and wanted != "admin" and len(admins) == 1:
+            admins = [u for u in self._store.users.list_users() if u.role == "admin" and u.disabled_at is None]
+            if found.role == "admin" and found.disabled_at is None and wanted != "admin" and len(admins) == 1:
                 raise ValueError(f"{username} is the only admin: make another user an admin first")
             self._store.users.set_role(username, wanted)
-            return User(found.username, wanted, found.created_at.isoformat(), tuple(found.grants))
+            return User.of(replace(found, role=wanted))
 
         return self._do(
             actor,

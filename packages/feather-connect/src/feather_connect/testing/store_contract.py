@@ -1613,6 +1613,13 @@ class StoreContract(
         assert revoked is not None and revoked.revoked_at == T0 + timedelta(hours=1)
         untouched = store.users.find_token("h2")
         assert untouched is not None and untouched.token_id == other and untouched.revoked_at is None
+        store.users.create_user("dora", "hash", "viewer")
+        store.users.set_disabled("dora", T0)
+        assert store.users.get_user("dora").disabled_at == T0  # type: ignore[union-attr]
+        store.users.set_disabled("dora", None)
+        assert store.users.get_user("dora").disabled_at is None  # type: ignore[union-attr]
+        with pytest.raises(KeyError):
+            store.users.set_disabled("nobody", T0)
         clock.advance(timedelta(hours=1))
         newest = store.users.create_token("agent", "h3", None, "viewer", "ann")
         listed = store.users.list_tokens()

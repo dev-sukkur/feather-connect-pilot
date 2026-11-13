@@ -1411,6 +1411,10 @@ class _Users(UserStore):
         with self._d.lock:
             self._d.users[username] = replace(self._d.users[username], role=role)
 
+    def set_disabled(self, username: str, at: datetime | None) -> None:
+        with self._d.lock:
+            self._d.users[username] = replace(self._d.users[username], disabled_at=at)
+
     def set_grants(self, username: str, grants: Sequence[AccessGrant]) -> None:
         with self._d.lock:
             kept = tuple(g for g in GRANTS if g in grants)

@@ -1787,7 +1787,7 @@ def _users_page(
     tokens = accounts.tokens(actor)
     q = request.query_params.get("q", "")[:200]
     tiles = [
-        Tile("Users", len(everyone)),
+        Tile("Users", sum(1 for u in everyone if not u.disabled)),
         Tile("Admins", sum(1 for u in everyone if u.role == "admin")),
         Tile("Approvers", sum(1 for u in everyone if "approver" in u.grants or u.role == "admin")),
     ]
@@ -1846,6 +1846,32 @@ def add_user(
         actor,
         notice=("ok", f"{name} can sign in now, as an {role}. Tell them the password another way."),
     )
+
+
+@router.post("/users/{username}/disable", dependencies=[Depends(require_csrf)])
+def disable_user(request: Request, actor: CurrentActor, username: str, reason: Reason = "") -> Response:
+    return _set_disabled(request, actor, username, reason, True)
+
+
+@router.post("/users/{username}/enable", dependencies=[Depends(require_csrf)])
+def enable_user(request: Request, actor: CurrentActor, username: str, reason: Reason = "") -> Response:
+    return _set_disabled(request, actor, username, reason, False)
+
+
+def _set_disabled(request: Request, actor: Actor, username: str, reason: str, disabled: bool) -> Response:
+    accounts: Accounts = request.app.state.accounts
+    try:
+        accounts.set_disabled(actor, username, disabled, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No user named {username!r}.")
+    except ValueError as error:
+        return _users_page(request, actor, status=409, notice=("bad", str(error)))
+    said = (
+        f"{username} is disabled: they can't sign in, and their tokens are refused."
+        if disabled
+        else f"{username} is enabled again."
+    )
+    return _users_page(request, actor, notice=("ok", said))
 
 
 @router.post("/users/{username}/password", dependencies=[Depends(require_csrf)])

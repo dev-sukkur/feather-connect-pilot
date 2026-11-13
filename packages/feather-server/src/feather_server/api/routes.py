@@ -947,6 +947,10 @@ class GrantsBody(Reason):
     grants: list[str]
 
 
+class DisabledBody(Reason):
+    disabled: bool
+
+
 class NewToken(Reason):
     name: str
     role: str | None = None  # the caller's own when left out
@@ -1019,6 +1023,21 @@ def revoke_token(
     """Revoke the token from now. Revoking it again changes nothing."""
     reason = None if body is None else body.reason
     return _once(request, actor, key, lambda: accounts.revoke_token(actor, token_id, reason=reason))
+
+
+@router.put("/users/{username}/disabled")
+def set_disabled(
+    username: str,
+    request: Request,
+    accounts: Manage,
+    actor: CurrentActor,
+    body: DisabledBody,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    """Disable the user, who then can't sign in and whose tokens are refused, or enable them again."""
+    return _once(
+        request, actor, key, lambda: accounts.set_disabled(actor, username, body.disabled, reason=body.reason)
+    )
 
 
 @router.post("/tokens", status_code=201)

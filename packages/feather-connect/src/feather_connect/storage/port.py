@@ -1215,6 +1215,7 @@ class UserRow:
     created_at: datetime
     role: Role
     grants: tuple[AccessGrant, ...] = ()
+    disabled_at: datetime | None = None  # set: they can't sign in, and their tokens are refused
 
 
 @dataclass(frozen=True)
@@ -1259,6 +1260,11 @@ class UserStore(Protocol):
 
     def set_password_hash(self, username: str, password_hash: str) -> None:
         """Give the user a new password hash. Raises `KeyError` when there is no such user."""
+        ...
+
+    def set_disabled(self, username: str, at: datetime | None) -> None:
+        """Disable the user as of `at`, or enable them again with None. Raises `KeyError` when there is no such
+        user."""
         ...
 
     def create_token(
