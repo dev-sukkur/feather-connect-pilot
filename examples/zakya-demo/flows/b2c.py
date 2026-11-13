@@ -75,9 +75,13 @@ b2c_to_sap = fc.Flow(
         )
     ],
     triggers=[
-        fc.on_ready(fc.ready("invoices", delivered_to="staging"), each="run", at_most_every=EVERY_FIVE_MINUTES),
         fc.on_ready(
-            fc.ready("credit_notes", delivered_to="staging-returns"), each="run", at_most_every=EVERY_FIVE_MINUTES
+            fc.ready("invoices", delivered_to="staging"), each="run", at_most_every=EVERY_FIVE_MINUTES
+        ),
+        fc.on_ready(
+            fc.ready("credit_notes", delivered_to="staging-returns"),
+            each="run",
+            at_most_every=EVERY_FIVE_MINUTES,
         ),
     ],
 )

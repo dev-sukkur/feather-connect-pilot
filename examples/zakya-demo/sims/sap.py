@@ -38,7 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-__all__ = ["ErpSim", "IFLOWS", "MATERIALS", "serve"]
+__all__ = ["IFLOWS", "MATERIALS", "ErpSim", "serve"]
 
 MASTER: dict[str, Any] = json.loads(Path(__file__).with_name("master.json").read_text(encoding="utf-8"))
 MATERIALS: list[dict[str, Any]] = MASTER["materials"]
@@ -185,7 +185,9 @@ class ErpSim:
 
     def _post(self, iflow: str, idem: str | None, content: bytes) -> tuple[int, dict[str, str], Any]:
         if idem:
-            seen = self._db.execute("select status, body from answers where idempotency_key = ?", (idem,)).fetchone()
+            seen = self._db.execute(
+                "select status, body from answers where idempotency_key = ?", (idem,)
+            ).fetchone()
             if seen is not None:
                 return int(seen["status"]), {}, json.loads(seen["body"])
         body = json.loads(content or b"{}")
@@ -199,7 +201,9 @@ class ErpSim:
         if key_field not in body:
             raise Turned(400, f"the body has no {key_field}")
         with self._db:
-            status, answer = (self._reverse if reverse else self._book)(name, str(body[key_field]), body, idem)
+            status, answer = (self._reverse if reverse else self._book)(
+                name, str(body[key_field]), body, idem
+            )
             if idem:
                 self._db.execute("insert into answers values (?, ?, ?)", (idem, status, json.dumps(answer)))
         return status, {}, answer
@@ -213,7 +217,9 @@ class ErpSim:
             (iflow, key),
         ).fetchone()
         if known is not None:  # a business document is posted once: the one there is the answer
-            return 409, {"d": {"BillingDocument": known["doc_no"], "Status": known["status"], "Duplicate": True}}
+            return 409, {
+                "d": {"BillingDocument": known["doc_no"], "Status": known["status"], "Duplicate": True}
+            }
         items = self._items(iflow, body)
         if iflow == "creditmemos":
             self._check_return(body, items)
@@ -227,7 +233,13 @@ class ErpSim:
         """The document's items, each signed: a sale positive, a return negative."""
         sign = -1.0 if iflow == "creditmemos" else 1.0
         if iflow == "salessummary":
-            raw = [{"Material": body.get("Material"), "Quantity": body.get("Quantity"), "NetAmount": body.get("NetAmount")}]
+            raw = [
+                {
+                    "Material": body.get("Material"),
+                    "Quantity": body.get("Quantity"),
+                    "NetAmount": body.get("NetAmount"),
+                }
+            ]
             sign = 1.0  # a summary carries its own sign
         else:
             raw = body.get("Items") or []
@@ -257,7 +269,9 @@ class ErpSim:
             (reference,),
         ).fetchone()
         if invoice is None:
-            raise Turned(422, f"invoice {reference or '(none)'} is not in the ERP: post it before its credit memo")
+            raise Turned(
+                422, f"invoice {reference or '(none)'} is not in the ERP: post it before its credit memo"
+            )
         sold = {
             r["material"]: r["quantity"]
             for r in self._db.execute(
@@ -286,7 +300,8 @@ class ErpSim:
         if found is None:
             raise Turned(404 if not idem else 422, f"no document {key} to reverse")
         self._db.execute(
-            "update documents set status = 'reversed', decided_at = ? where doc_no = ?", (_now(), found["doc_no"])
+            "update documents set status = 'reversed', decided_at = ? where doc_no = ?",
+            (_now(), found["doc_no"]),
         )
         return 200, {"d": {"Reversed": key, "BillingDocument": found["doc_no"]}}
 
@@ -320,7 +335,11 @@ class ErpSim:
                 kind,
                 channel,
                 str(body.get("BillingDocumentDate") or body.get("PostingDate") or today),
-                str(body.get("CustomerName") or body.get("SoldToParty") or ("B2C customers" if channel == "B2C" else "")),
+                str(
+                    body.get("CustomerName")
+                    or body.get("SoldToParty")
+                    or ("B2C customers" if channel == "B2C" else "")
+                ),
                 body.get("ReferenceInvoice") or body.get("ReferenceInvoiceNumber"),
                 round(sum(i["amount"] for i in items), 2),
                 status,
@@ -356,7 +375,9 @@ class ErpSim:
                 row["body"] = json.loads(row["body"])
                 row["items"] = [
                     dict(i)
-                    for i in self._db.execute("select * from items where doc_no = ? order by line_no", (row["doc_no"],))
+                    for i in self._db.execute(
+                        "select * from items where doc_no = ? order by line_no", (row["doc_no"],)
+                    )
                 ]
             return rows
 
@@ -430,7 +451,8 @@ class ErpSim:
             record = {
                 "Kind": f"manual {kind}",
                 "Channel": channel,
-                "CustomerName": body.get("customer") or ("B2C customers" if channel == "B2C" else "walk-in account"),
+                "CustomerName": body.get("customer")
+                or ("B2C customers" if channel == "B2C" else "walk-in account"),
                 "PostingDate": body.get("posting_date") or datetime.now(IST).date().isoformat(),
             }
             self._store(doc_no, "manual", doc_no, record, items, status="posted", origin="manual", idem=None)
@@ -478,7 +500,9 @@ def serve(sim: ErpSim, port: int) -> ThreadingHTTPServer:
                 self._send(200, {"Content-Type": "text/html; charset=utf-8"}, PAGE)
                 return
             length = int(self.headers.get("Content-Length") or 0)
-            status, headers, body = sim.answer(self.command, path, dict(self.headers), self.rfile.read(length))
+            status, headers, body = sim.answer(
+                self.command, path, dict(self.headers), self.rfile.read(length)
+            )
             self._send(status, {**headers, "Content-Type": "application/json"}, json.dumps(body).encode())
 
         def _send(self, status: int, headers: Mapping[str, str], data: bytes) -> None:
@@ -500,10 +524,14 @@ def serve(sim: ErpSim, port: int) -> ThreadingHTTPServer:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="The demo's SAP through CPI: postings, two views, auto or manual.")
+    parser = argparse.ArgumentParser(
+        description="The demo's SAP through CPI: postings, two views, auto or manual."
+    )
     parser.add_argument("--port", type=int, default=29102)
     parser.add_argument("--db", type=Path, default=Path(".data/sap.sqlite"))
-    parser.add_argument("--manual", action="store_true", help="park each posting for Post or Reject on the page")
+    parser.add_argument(
+        "--manual", action="store_true", help="park each posting for Post or Reject on the page"
+    )
     parser.add_argument("--fault-rate", type=float, default=0.02, help="share of requests answered 503")
     args = parser.parse_args()
     sim = ErpSim(args.db, fault_rate=args.fault_rate)

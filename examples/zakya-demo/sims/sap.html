@@ -24,6 +24,7 @@
   th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: top; }
   th { font-weight: 600; background: var(--head); }
   td.num, th.num { text-align: right; }
+  td.items { white-space: normal; min-width: 280px; }
   .scroll { overflow-x: auto; }
   .pill { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 12px; font-weight: 600; background: #eaeef2; color: var(--muted); }
   .B2B { background: #ddf4ff; color: var(--blue); }
@@ -142,7 +143,7 @@ function render() {
     const from = d.origin === "manual" ? "entered by hand" : `${esc(d.business_key)}${d.reference ? "<div class=small>against " + esc(d.reference) + "</div>" : ""}`;
     const actions = d.status === "parked" ? `<button data-post="${esc(d.doc_no)}">Post</button> <button data-reject="${esc(d.doc_no)}">Reject</button>` : "";
     return `<tr><td>${esc(d.doc_no)}</td><td>${esc(d.kind)}</td><td><span class="pill ${esc(d.channel)}">${esc(d.channel)}</span></td>` +
-      `<td>${esc(d.posting_date)}</td><td>${esc(d.customer)}</td><td>${from}</td><td>${items}</td>` +
+      `<td>${esc(d.posting_date)}</td><td>${esc(d.customer)}</td><td>${from}</td><td class="items">${items}</td>` +
       `<td class="num">${signed(d.total, money)}</td><td><span class="pill ${esc(d.status)}">${esc(d.status)}</span></td><td>${actions}</td></tr>`;
   }).join("") || '<tr><td colspan="10" class="small">No documents yet.</td></tr>';
   const mats = state.by_material.filter((m) => !day || m.posting_date === day);

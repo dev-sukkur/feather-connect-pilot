@@ -204,7 +204,11 @@ class ZakyaSim(BaseZakyaSim):
         return left
 
     def return_goods(
-        self, invoice_id: str, lines: list[dict[str, Any]] | None = None, *, reason: str = "returned by customer"
+        self,
+        invoice_id: str,
+        lines: list[dict[str, Any]] | None = None,
+        *,
+        reason: str = "returned by customer",
     ) -> str:
         """Take goods back against an invoice: a credit note for `lines` (`{"code": ..., "quantity": n}`), or for all
         that is left of the invoice when None. Each line goes back at the invoice's rate, and no more than was sold
@@ -275,7 +279,9 @@ class ZakyaSim(BaseZakyaSim):
                 lines = [
                     {
                         "code": m["ean"] if self._random.random() < 0.5 else m["pos_code"],  # either barcode
-                        "quantity": self._random.randint(800, 1200) if bulk else self._random.randint(1, most),
+                        "quantity": self._random.randint(800, 1200)
+                        if bulk
+                        else self._random.randint(1, most),
                     }
                     for m in self._random.sample(MATERIALS, self._random.randint(1, 3))
                 ]
@@ -321,6 +327,7 @@ class ZakyaSim(BaseZakyaSim):
 
     def _counter(self, request: httpx.Request, action: str) -> httpx.Response:
         if request.method == "GET" and action == "state":
+            self.tick()  # in auto mode, the page brings the sales due, as a list call does
             return httpx.Response(200, json=self.snapshot())
         if request.method != "POST":
             return httpx.Response(405, json={"error": "POST it"})
@@ -347,14 +354,17 @@ class ZakyaSim(BaseZakyaSim):
     def snapshot(self, newest: int = 40) -> dict[str, Any]:
         """What the page shows: the mode, the master data, and the newest invoices and credit notes."""
         invoices = sorted(self.invoices.values(), key=lambda v: v["invoice_number"], reverse=True)[:newest]
-        notes = sorted(self.credit_notes.values(), key=lambda v: v["creditnote_number"], reverse=True)[:newest]
+        notes = sorted(self.credit_notes.values(), key=lambda v: v["creditnote_number"], reverse=True)[
+            :newest
+        ]
         return {
             "mode": self.mode,
             "every": self.every or self._auto_every,
             "materials": MATERIALS,
             "customers": [{**c, "channel": channel_of(c)} for c in CUSTOMERS],
             "invoices": [
-                {**v, "channel": channel_of(v), "returnable": self.returnable(v["invoice_id"])} for v in invoices
+                {**v, "channel": channel_of(v), "returnable": self.returnable(v["invoice_id"])}
+                for v in invoices
             ],
             "creditnotes": [{**v, "channel": channel_of(v)} for v in notes],
         }
@@ -367,8 +377,12 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="The demo's Zakya: B2B and B2C sales, auto or by hand.")
     parser.add_argument("--port", type=int, default=29100)
     parser.add_argument("--every", type=float, default=20.0, help="auto mode: seconds between new sales")
-    parser.add_argument("--manual", action="store_true", help="start in manual mode: sales only from the page")
-    parser.add_argument("--fault-rate", type=float, default=0.04, help="share of API calls that answer 429 or 503")
+    parser.add_argument(
+        "--manual", action="store_true", help="start in manual mode: sales only from the page"
+    )
+    parser.add_argument(
+        "--fault-rate", type=float, default=0.04, help="share of API calls that answer 429 or 503"
+    )
     parser.add_argument("--start", type=int, default=5, help="invoices to begin with")
     parser.add_argument("--state", type=Path, help="a JSON file that keeps the sales across restarts")
     args = parser.parse_args(argv)

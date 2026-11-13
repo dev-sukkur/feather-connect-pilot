@@ -31,7 +31,14 @@ from feather_connect.templates.retail import zakya_invoices_to_erp  # pyright: i
 
 REPO = Path(__file__).resolve().parents[2]
 DEMO = REPO / "examples" / "zakya-demo"
-FLOWS = ["zakya-invoices", "zakya-credit-notes", "sap-materials", "invoices-to-sap", "b2b-returns-to-sap", "b2c-to-sap"]
+FLOWS = [
+    "zakya-invoices",
+    "zakya-credit-notes",
+    "sap-materials",
+    "invoices-to-sap",
+    "b2b-returns-to-sap",
+    "b2c-to-sap",
+]
 TEA, RICE, SUGAR = "8901234500101", "8901234500200", "8901234500507"  # EANs of master.json
 
 
@@ -188,7 +195,13 @@ def test_each_invoice_reaches_the_receiver_once_and_a_changed_one_again(sims, mo
     assert store.runs.get_run(first).status == "succeeded"
     received = _received(db)
     assert sorted(r["external_id"] for r in received) == sorted(zakya.invoices)  # each invoice once
-    assert sorted(r["status"] for r in received) == ["paid", "paid", "sent", "sent", "sent"]  # B2C is paid at once
+    assert sorted(r["status"] for r in received) == [
+        "paid",
+        "paid",
+        "sent",
+        "sent",
+        "sent",
+    ]  # B2C is paid at once
     assert all(r["lines"] and all(line["sku"] for line in r["lines"]) for r in received)
     assert all(r["_call"] == f"PUT /invoices/{r['external_id']}" for r in received)  # an upsert by invoice id
     assert all("authorization" not in r["_headers"] for r in received)  # the receiver keeps no credentials
@@ -226,7 +239,11 @@ def test_the_zakya_simulator_keeps_its_sales_and_returns_across_a_restart(tmp_pa
     first.change()
     note = first.take_back_some()
     again = zakya_sim.ZakyaSim(start=3, state=state)
-    assert again.invoices == first.invoices and again.credit_notes == first.credit_notes and note in again.credit_notes
+    assert (
+        again.invoices == first.invoices
+        and again.credit_notes == first.credit_notes
+        and note in again.credit_notes
+    )
     assert again.add() == ["4600000000004"]
     assert again.take_back_some() == "4700000000002"
 
@@ -247,24 +264,45 @@ def test_the_zakya_counter_raises_invoices_and_takes_goods_back_by_either_barcod
         return sim.handle(httpx.Request(method, f"http://sim{path}", json=body))
 
     assert "text/html" in call("GET", "/").headers["content-type"]
-    made = call("POST", "/sim/invoices", {"customer_id": "c-900", "lines": [{"code": "TEA-250", "quantity": 2}]})
+    made = call(
+        "POST", "/sim/invoices", {"customer_id": "c-900", "lines": [{"code": "TEA-250", "quantity": 2}]}
+    )
     assert made.status_code == 201
     invoice = sim.invoices[made.json()["invoice_id"]]
     assert invoice["status"] == "paid" and zakya_sim.channel_of(invoice) == "B2C"  # a counter sale
     (line,) = invoice["line_items"]
     assert (line["ean"], line["sku"], line["rate"], line["item_total"]) == (TEA, "TEA-250", 180.0, 360.0)
 
-    b2b = call("POST", "/sim/invoices", {"customer_id": "c-101", "lines": [{"code": RICE, "quantity": 5, "rate": 600}]})
+    b2b = call(
+        "POST",
+        "/sim/invoices",
+        {"customer_id": "c-101", "lines": [{"code": RICE, "quantity": 5, "rate": 600}]},
+    )
     assert sim.invoices[b2b.json()["invoice_id"]]["status"] == "sent"
     assert sim.invoices[b2b.json()["invoice_id"]]["gst_no"]  # a B2B customer has a GSTIN
 
-    too_many = call("POST", "/sim/creditnotes", {"invoice_id": invoice["invoice_id"], "lines": [{"code": TEA, "quantity": 3}]})
+    too_many = call(
+        "POST",
+        "/sim/creditnotes",
+        {"invoice_id": invoice["invoice_id"], "lines": [{"code": TEA, "quantity": 3}]},
+    )
     assert too_many.status_code == 400 and "only 2" in too_many.json()["error"]
-    back = call("POST", "/sim/creditnotes", {"invoice_id": invoice["invoice_id"], "lines": [{"code": TEA, "quantity": 2}]})
+    back = call(
+        "POST",
+        "/sim/creditnotes",
+        {"invoice_id": invoice["invoice_id"], "lines": [{"code": TEA, "quantity": 2}]},
+    )
     note = sim.credit_notes[back.json()["creditnote_id"]]
     assert note["invoice_id"] == invoice["invoice_id"] and note["total"] == invoice["total"]
-    assert call("POST", "/sim/creditnotes", {"invoice_id": invoice["invoice_id"]}).status_code == 400  # all back
-    assert call("POST", "/sim/invoices", {"customer_id": "c-900", "lines": [{"code": "NOPE", "quantity": 1}]}).status_code == 400
+    assert (
+        call("POST", "/sim/creditnotes", {"invoice_id": invoice["invoice_id"]}).status_code == 400
+    )  # all back
+    assert (
+        call(
+            "POST", "/sim/invoices", {"customer_id": "c-900", "lines": [{"code": "NOPE", "quantity": 1}]}
+        ).status_code
+        == 400
+    )
 
     assert call("POST", "/sim/mode", {"mode": "auto", "every": 5}).json() == {"mode": "auto", "every": 5.0}
     state = call("GET", "/sim/state").json()
@@ -304,27 +342,43 @@ def test_the_erp_posts_once_checks_returns_against_their_invoice_and_reverses(tm
     status, _, answer = erp.sim.answer("GET", "/http/materials", erp.auth, b"")
     assert status == 200 and {m["ean"] for m in answer["d"]["results"]} >= {TEA, RICE, SUGAR}
 
-    memo = {"creditnote_id": "47-1", "ReferenceInvoice": "46-1", "BillingDocumentDate": "2026-11-13",
-            "Items": [{"Material": "MAT-1001", "Quantity": 4, "NetAmount": 720}]}
+    memo = {
+        "creditnote_id": "47-1",
+        "ReferenceInvoice": "46-1",
+        "BillingDocumentDate": "2026-11-13",
+        "Items": [{"Material": "MAT-1001", "Quantity": 4, "NetAmount": 720}],
+    }
     status, answer = erp.post("creditmemos", memo)
     assert status == 422 and "not in the ERP" in answer["error"]  # its invoice isn't posted yet
 
     status, answer = erp.post("invoices", _invoice("46-1", ("MAT-1001", 10, 1800), (TEA, 2, 360)), key="a")
     assert status == 201 and answer["d"]["Status"] == "posted"
-    assert erp.post("invoices", _invoice("46-1", ("MAT-1001", 10, 1800)), key="a") == (status, answer)  # a resend
+    assert erp.post("invoices", _invoice("46-1", ("MAT-1001", 10, 1800)), key="a") == (
+        status,
+        answer,
+    )  # a resend
     duplicate = erp.post("invoices", _invoice("46-1", ("MAT-1001", 10, 1800)), key="b")
     assert duplicate[0] == 409 and duplicate[1]["d"]["BillingDocument"] == answer["d"]["BillingDocument"]
     assert erp.post("invoices", _invoice("46-2", ("MAT-9999", 1, 1)))[0] == 422  # a material SAP doesn't know
 
     assert erp.post("creditmemos", memo)[0] == 201
-    status, answer = erp.post("creditmemos", {**memo, "creditnote_id": "47-2", "Items": [{"Material": TEA, "Quantity": 9, "NetAmount": 1}]})
+    status, answer = erp.post(
+        "creditmemos",
+        {**memo, "creditnote_id": "47-2", "Items": [{"Material": TEA, "Quantity": 9, "NetAmount": 1}]},
+    )
     assert status == 422 and "only 8 left" in answer["error"]  # 12 sold, 4 back already
 
     status, _, answer = erp.sim.answer(
         "POST", "/http/creditmemos/reverse", {**erp.auth, "X-CSRF-Token": erp.csrf}, json.dumps(memo).encode()
     )
     assert status == 200 and [d["status"] for d in erp.sim.documents(iflow="creditmemos")] == ["reversed"]
-    assert erp.post("creditmemos", {**memo, "creditnote_id": "47-3", "Items": [{"Material": TEA, "Quantity": 12, "NetAmount": 1}]})[0] == 201
+    assert (
+        erp.post(
+            "creditmemos",
+            {**memo, "creditnote_id": "47-3", "Items": [{"Material": TEA, "Quantity": 12, "NetAmount": 1}]},
+        )[0]
+        == 201
+    )
 
 
 def test_the_erp_adds_up_a_day_by_material_and_parks_postings_in_manual_mode(tmp_path):
@@ -332,12 +386,24 @@ def test_the_erp_adds_up_a_day_by_material_and_parks_postings_in_manual_mode(tmp
     erp.post("invoices", _invoice("46-1", (TEA, 10, 1800), (RICE, 5, 3200)))
     summary = {"PostingDate": "2026-11-13", "Material": "MAT-1001", "EAN": TEA}
     erp.post("salessummary", {**summary, "document_id": "B2C-1", "Quantity": 3, "NetAmount": 540})
-    erp.post("salessummary", {**summary, "document_id": "B2C-2", "Quantity": 1, "NetAmount": 180})  # later that day
-    erp.post("salessummary", {**summary, "document_id": "B2C-3", "Quantity": -1, "NetAmount": -180})  # a return
-    erp.post("salessummary", {**summary, "document_id": "B2C-4", "PostingDate": "2026-11-14", "Quantity": 2, "NetAmount": 360})
+    erp.post(
+        "salessummary", {**summary, "document_id": "B2C-2", "Quantity": 1, "NetAmount": 180}
+    )  # later that day
+    erp.post(
+        "salessummary", {**summary, "document_id": "B2C-3", "Quantity": -1, "NetAmount": -180}
+    )  # a return
+    erp.post(
+        "salessummary",
+        {**summary, "document_id": "B2C-4", "PostingDate": "2026-11-14", "Quantity": 2, "NetAmount": 360},
+    )
     tea = {(r["posting_date"], r["material"]): r for r in erp.sim.by_material()}
     first = tea[("2026-11-13", "MAT-1001")]
-    assert (first["sold_qty"], first["returned_qty"], first["net_qty"], first["net_amount"]) == (14, 1, 13, 2340)
+    assert (first["sold_qty"], first["returned_qty"], first["net_qty"], first["net_amount"]) == (
+        14,
+        1,
+        13,
+        2340,
+    )
     assert (first["b2b_qty"], first["b2c_qty"], first["documents"]) == (10, 3, 4)
     second = tea[("2026-11-14", "MAT-1001")]
     assert (second["net_qty"], second["qty_to_date"], second["amount_to_date"]) == (2, 15, 2700)
@@ -345,20 +411,33 @@ def test_the_erp_adds_up_a_day_by_material_and_parks_postings_in_manual_mode(tmp
     assert kinds["B2C-3"] == "B2C returns summary" and kinds["B2C-1"] == "B2C summary"
 
     erp.sim.set_mode("manual")
-    status, answer = erp.post("salessummary", {**summary, "document_id": "B2C-5", "Quantity": 5, "NetAmount": 900})
+    status, answer = erp.post(
+        "salessummary", {**summary, "document_id": "B2C-5", "Quantity": 5, "NetAmount": 900}
+    )
     assert status == 201 and answer["d"]["Status"] == "parked"
-    assert tea == {(r["posting_date"], r["material"]): r for r in erp.sim.by_material()}  # a parked one doesn't count
+    assert tea == {
+        (r["posting_date"], r["material"]): r for r in erp.sim.by_material()
+    }  # a parked one doesn't count
     erp.sim.decide(answer["d"]["BillingDocument"], "post")
     first = {(r["posting_date"], r["material"]): r for r in erp.sim.by_material()}[("2026-11-13", "MAT-1001")]
     assert first["net_qty"] == 18
 
-    by_hand = erp.sim.enter({"kind": "return", "channel": "B2C", "posting_date": "2026-11-13", "lines": [{"code": "TEA-250", "quantity": 2}]})
+    by_hand = erp.sim.enter(
+        {
+            "kind": "return",
+            "channel": "B2C",
+            "posting_date": "2026-11-13",
+            "lines": [{"code": "TEA-250", "quantity": 2}],
+        }
+    )
     (entered,) = [d for d in erp.sim.documents() if d["doc_no"] == by_hand]
     assert entered["origin"] == "manual" and entered["total"] == -360.0
 
 
 @pytest.mark.postgres
-def test_the_chain_posts_b2b_per_invoice_and_b2c_per_material_with_a_return_of_each(sims, monkeypatch, tmp_path):
+def test_the_chain_posts_b2b_per_invoice_and_b2c_per_material_with_a_return_of_each(
+    sims, monkeypatch, tmp_path
+):
     """The reference chain, Zakya → Postgres staging → SAP through CPI. A B2B invoice is one billing document, held
     for approval over 500,000, and its credit note one credit memo against it. B2C sales and returns are summed per day
     and material, each run's new lines one summary each, and the ERP adds a day's summaries up."""
@@ -369,7 +448,9 @@ def test_the_chain_posts_b2b_per_invoice_and_b2c_per_material_with_a_return_of_e
     zakya, _db, urls = sims
     small = zakya.raise_invoice("c-101", [{"code": TEA, "quantity": 10}, {"code": "RICE-5", "quantity": 5}])
     big = zakya.raise_invoice("c-102", [{"code": RICE, "quantity": 800}])  # 537,600 with tax: held
-    counter = zakya.raise_invoice("c-900", [{"code": "TEA-250", "quantity": 2}, {"code": SUGAR, "quantity": 3}])
+    counter = zakya.raise_invoice(
+        "c-900", [{"code": "TEA-250", "quantity": 2}, {"code": SUGAR, "quantity": 3}]
+    )
     zakya.raise_invoice("c-901", [{"code": TEA, "quantity": 1}])
     b2b_return = zakya.return_goods(small, [{"code": TEA, "quantity": 4}])
     zakya.return_goods(counter, [{"code": "SUGAR-1", "quantity": 1}])
@@ -428,8 +509,12 @@ def test_the_chain_posts_b2b_per_invoice_and_b2c_per_material_with_a_return_of_e
                 run(flow)
             with psycopg.connect(staging_url) as conn:
                 staged = dict(conn.execute("select invoice_id, channel from zakya_demo.invoices").fetchall())
-                returns = dict(conn.execute("select creditnote_id, channel from zakya_demo.credit_notes").fetchall())
-            assert sorted(staged.values()) == ["B2B", "B2B", "B2C", "B2C"] and set(staged) == set(zakya.invoices)
+                returns = dict(
+                    conn.execute("select creditnote_id, channel from zakya_demo.credit_notes").fetchall()
+                )
+            assert sorted(staged.values()) == ["B2B", "B2B", "B2C", "B2C"] and set(staged) == set(
+                zakya.invoices
+            )
             assert sorted(returns.values()) == ["B2B", "B2C"]
 
             clock.advance(timedelta(minutes=5))  # on_ready's at_most_every
@@ -441,7 +526,10 @@ def test_the_chain_posts_b2b_per_invoice_and_b2c_per_material_with_a_return_of_e
             assert store.ledger.get("sap", delivery.version_id).status == "applied"
             invoices = {d["business_key"]: d for d in erp.documents(iflow="invoices")}
             assert sorted(invoices) == sorted([small, big])  # B2B only: one billing document per invoice
-            assert [(i["material"], i["quantity"]) for i in invoices[small]["items"]] == [("MAT-1001", 10), ("MAT-1002", 5)]
+            assert [(i["material"], i["quantity"]) for i in invoices[small]["items"]] == [
+                ("MAT-1001", 10),
+                ("MAT-1002", 5),
+            ]
             answers = store.responses.of_delivery("sap", delivery.version_id)
             assert len(answers) == 2 and all(str(a.fields["sap_document"]).startswith("9") for a in answers)
 
@@ -457,7 +545,11 @@ def test_the_chain_posts_b2b_per_invoice_and_b2c_per_material_with_a_return_of_e
                 ("B2C_SALES", "MAT-1005", 3, 144.0),
             ]
             day = {r["material"]: r for r in erp.by_material() if r["posting_date"] == today}
-            assert (day["MAT-1001"]["sold_qty"], day["MAT-1001"]["returned_qty"], day["MAT-1001"]["net_qty"]) == (13, 4, 9)
+            assert (
+                day["MAT-1001"]["sold_qty"],
+                day["MAT-1001"]["returned_qty"],
+                day["MAT-1001"]["net_qty"],
+            ) == (13, 4, 9)
             assert (day["MAT-1001"]["b2b_qty"], day["MAT-1001"]["b2c_qty"]) == (6, 3)
             assert (day["MAT-1005"]["net_qty"], day["MAT-1005"]["net_amount"]) == (2, 96.0)
             assert day["MAT-1002"]["net_qty"] == 805
@@ -468,12 +560,16 @@ def test_the_chain_posts_b2b_per_invoice_and_b2c_per_material_with_a_return_of_e
                 run(flow)  # nothing changed in staging: nothing posted
             assert erp.posts == posts
 
-            zakya.raise_invoice("c-900", [{"code": TEA, "quantity": 2}])  # later that day, another counter sale
+            zakya.raise_invoice(
+                "c-900", [{"code": TEA, "quantity": 2}]
+            )  # later that day, another counter sale
             run("zakya-invoices")
             clock.advance(timedelta(minutes=5))
             run("b2c-to-sap")
             assert erp.posts == posts + 1  # only the new line, summed on its own
-            tea = next(r for r in erp.by_material() if r["posting_date"] == today and r["material"] == "MAT-1001")
+            tea = next(
+                r for r in erp.by_material() if r["posting_date"] == today and r["material"] == "MAT-1001"
+            )
             assert (tea["b2c_qty"], tea["net_qty"]) == (5, 11)  # the day's summaries add up
 
             answered = {
@@ -481,11 +577,18 @@ def test_the_chain_posts_b2b_per_invoice_and_b2c_per_material_with_a_return_of_e
                 for d in store.ledger.list_deliveries(route="sap-b2c-summary")
             }
             first, second = answered[3], answered[1]
-            runtime.compensate("sap-b2c-summary", second.version_id, actor="ann", reason="posted twice by hand")
+            runtime.compensate(
+                "sap-b2c-summary", second.version_id, actor="ann", reason="posted twice by hand"
+            )
             engine.run_until_idle()
             assert store.ledger.get("sap-b2c-summary", second.version_id).status == "compensated"
-            tea = next(r for r in erp.by_material() if r["posting_date"] == today and r["material"] == "MAT-1001")
-            assert tea["b2c_qty"] == 3 and store.ledger.get("sap-b2c-summary", first.version_id).status == "applied"
+            tea = next(
+                r for r in erp.by_material() if r["posting_date"] == today and r["material"] == "MAT-1001"
+            )
+            assert (
+                tea["b2c_qty"] == 3
+                and store.ledger.get("sap-b2c-summary", first.version_id).status == "applied"
+            )
         finally:
             erp_server.shutdown()
             erp.close()
