@@ -16,7 +16,8 @@ class RuntimeDeps:
 
     `code_sha` identifies the running code, and is recorded on what it produces. `make_context` returns the
     context to call a connector with, given the name of its connection. `retry` is the policy that `apply` tasks
-    are submitted with, and sets how many tries each delivery gets.
+    are submitted with, and sets how many tries each delivery gets. `package` is the prefix of an installed package's
+    names, by which a bare dataset name in a reference is the package's own (M3.1 F1).
     """
 
     store: Store
@@ -25,6 +26,7 @@ class RuntimeDeps:
     code_sha: str
     make_context: Callable[[str], Context]
     retry: RetryPolicy = field(default_factory=RetryPolicy)
+    package: str | None = None
 
     def __post_init__(self) -> None:
         self.spool.bind(

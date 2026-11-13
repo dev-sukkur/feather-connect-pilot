@@ -259,7 +259,7 @@ class _ChunkSender:
         self._deps = deps
         self._last_chunks: dict[str, int] | None = None
         self._moves: dict[str, str] | None = None
-        self.references = TaskReferences(deps.store, deps.store.secrets.tenant)
+        self.references = TaskReferences(deps.store, deps.store.secrets.tenant, deps.package)
 
     def _context(self) -> Context:
         """A context for the sink's connection, reading references through this delivery's (M3.1 F1)."""

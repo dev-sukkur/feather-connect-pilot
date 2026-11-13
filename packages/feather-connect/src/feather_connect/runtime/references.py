@@ -78,6 +78,12 @@ class _ProcessCache:
 CACHE = _ProcessCache()
 
 
+def full_name(dataset: str, package: str | None) -> str:
+    """The stored name of a referenced dataset: a bare name is the package's own, `<package>/<name>` another's, as in
+    `fc.ready`."""
+    return dataset if package is None or "/" in dataset else f"{package}/{dataset}"
+
+
 def stamp_of(store: Store, dataset: str) -> int | None:
     """The stamp of the dataset's state, or None if no state has been written: it doesn't keep state, or nothing of it
     is sealed yet."""
@@ -110,9 +116,10 @@ def _load(store: Store, dataset: str, stamp: int) -> _Loaded:
 class TaskReferences(References):
     """The references of one task. See the module's docstring."""
 
-    def __init__(self, store: Store, tenant: str) -> None:
+    def __init__(self, store: Store, tenant: str, package: str | None = None) -> None:
         self._store = store
         self._tenant = tenant
+        self._package = package
         self._pinned: dict[str, _Loaded] = {}
         self._lock = threading.Lock()
 
@@ -125,16 +132,17 @@ class TaskReferences(References):
         with self._lock:
             if dataset in self._pinned:
                 return self._pinned[dataset]
-            stamp = stamp_of(self._store, dataset)
+            stored = full_name(dataset, self._package)
+            stamp = stamp_of(self._store, stored)
             if stamp is None:
                 raise TransientError(
                     f"reference {dataset!r} has no sealed state yet: it is read once its first version is sealed "
                     "(and it must keep its state, keep_state=True)"
                 )
-            loaded = CACHE.get(self._tenant, dataset, stamp)
+            loaded = CACHE.get(self._tenant, stored, stamp)
             if loaded is None:
-                loaded = _load(self._store, dataset, stamp)
-                CACHE.put(self._tenant, dataset, loaded)
+                loaded = _load(self._store, stored, stamp)
+                CACHE.put(self._tenant, stored, loaded)
             self._pinned[dataset] = loaded
             return loaded
 

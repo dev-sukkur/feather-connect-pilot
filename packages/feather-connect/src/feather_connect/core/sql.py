@@ -23,6 +23,8 @@ from feather_connect.core.errors import PermanentError
 
 if TYPE_CHECKING:
     from feather_connect.core.context import Context
+    from feather_connect.core.dataset import Dataset
+    from feather_connect.core.flow import Flow, Problem
 
 _REFERENCE = re.compile(r"\{\{\s*dataset\(\s*(['\"])([^'\"]+)\1\s*\)\s*\}\}")
 _ANY_TEMPLATE = re.compile(r"\{\{.*?\}\}", re.DOTALL)
@@ -143,6 +145,61 @@ def is_sql(value: object) -> bool:
     return isinstance(value, SqlMap)
 
 
-def referenced(maps: Sequence[object]) -> list[str]:
-    """The reference datasets of the SQL maps among `maps`."""
-    return [name for m in maps if isinstance(m, SqlMap) for name in m.references]
+def reference_problems(flows: "Sequence[Flow]") -> "list[Problem]":
+    """The mistakes in the flows' references that show without running them (M3.1 F1): a reference to a dataset no
+    flow reads, or to one that doesn't keep its state, which a reference reads; and SQL with DuckDB not installed. A
+    `<package>/<name>` of another package is checked when its flow runs."""
+    from feather_connect.core.flow import Problem
+
+    datasets = {d.name: d for flow in flows for d in flow.datasets}
+    problems: list[Problem] = []
+    for flow in flows:
+        for i, route in enumerate(flow.routes):
+            if not isinstance(route.map, SqlMap):
+                continue
+            path = f"{flow.name}.deliver[{i}].map"
+            problems += _named_problems(route.map.references, datasets, path)
+            if _missing_duckdb():
+                problems.append(
+                    Problem(
+                        "error", "sql_unavailable", "SQL needs DuckDB, which isn't installed", path, INSTALL
+                    )
+                )
+    return problems
+
+
+def _named_problems(names: Sequence[str], datasets: "Mapping[str, Dataset]", path: str) -> "list[Problem]":
+    from feather_connect.core.flow import Problem
+
+    found: list[Problem] = []
+    for name in names:
+        if "/" in name:
+            continue
+        dataset = datasets.get(name)
+        if dataset is None:
+            found.append(
+                Problem(
+                    "error",
+                    "reference_unknown",
+                    f"the SQL reads {name!r}, which no flow of the project reads",
+                    path,
+                    "name a dataset a flow reads, or another package's as <package>/<dataset>",
+                )
+            )
+        elif not dataset.keep_state:
+            found.append(
+                Problem(
+                    "error",
+                    "reference_without_state",
+                    f"the SQL reads {name!r}, which doesn't keep its state",
+                    path,
+                    f"set keep_state=True on the dataset {name!r}: a reference reads its latest state",
+                )
+            )
+    return found
+
+
+def _missing_duckdb() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("duckdb") is None

@@ -149,7 +149,9 @@ class Runtime:
         )  # every call, context and log line says it (ADR-0013 rules 4 and 7)
         self._prefix = prefix
         self._clock: Clock = SystemClock() if clock is None else clock
-        self._deps = RuntimeDeps(store, spool, self._clock, code_sha, make_context or self._default_context)
+        self._deps = RuntimeDeps(
+            store, spool, self._clock, code_sha, make_context or self._default_context, package=prefix
+        )
         self._flows: dict[str, Flow] = {}
         self._datasets: dict[str, Dataset] = {}
         self._routes: dict[str, RouteSpec] = {}
