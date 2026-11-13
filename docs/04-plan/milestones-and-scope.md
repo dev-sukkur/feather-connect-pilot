@@ -351,7 +351,7 @@ The Stage 2 review's Minor findings (M1–M13) were fixed in Stages 3–5, excep
 | S18 | A multi-slice complete dataset on a poller failed at each tick, not at load | Stage 5 (`54ed131`) |
 | S19 | Latency numbers were optimistic (the test Postgres had fsync off) | Stage 5: measured on a durable Postgres, p95 2.004 s (`7d7e424`) |
 | S20 | The sealer could hold about 500 MB | Stage 5 (`1da6f2f`) |
-| S21 | Built-in sinks honoured idempotency keys in memory only | No commit names it; to check |
+| S21 | Built-in sinks honoured idempotency keys in memory only | Checked 13 Nov 2026: the Postgres and DuckDB sinks keep each chunk's key in the destination's `_feather_applied`, in the chunk's transaction. HTTP, GraphQL and SAP CPI send the key (`Idempotency-Key`) for the destination to honour: for SAP, the iFlow must dedupe on it, a pilot prerequisite |
 | S22 | The DBOS URL lost blank and repeated query keys | Stage 5 (`6b94b87`) |
 | S23 | F12's rest: budget waits could give up wrongly or stall | Stage 5 (`68892a0`) |
 

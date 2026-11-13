@@ -296,7 +296,7 @@ items = db_to_warehouse(source="app_db", destination="warehouse", table="items",
   <pre><code>uv run feather validate                    # or --project my-shop, --env qa, --json
 uv run feather describe flow orders-to-warehouse
 uv run feather describe dataset orders</code></pre>
-  <p class="prose">A good project prints <code>no problems</code>. Otherwise each problem names the file and key and gives a hint, and errors exit 1. A missing secret is reported here, before anything runs.</p>
+  <p class="prose">A good project prints <code>no problems</code>. Otherwise each problem names the file and key and gives a hint, and errors exit 1. A missing secret is reported here, before anything runs. Routes and datasets are known by name alone, and a route is named after its connection unless <code>fc.to(..., name=...)</code> says otherwise: two flows that each deliver to <code>sap</code> are <code>route_name_shared</code>, an error, and two different datasets of one name are <code>dataset_name_shared</code>. Two flows may share one <code>Dataset</code> object.</p>
 </section>
 
 <section id="test">
@@ -435,6 +435,7 @@ connections:
     <tr><td><code>schedule_skipped</code></td><td>A flow whose newest <code>ticks</code> scheduled runs were all skipped</td><td><code>ticks: 3</code></td></tr>
     <tr><td><code>dataset_stale</code></td><td>A dataset whose newest version is older than its <code>max_lag</code></td><td>Where a dataset has <code>max_lag="2h"</code></td></tr>
     <tr><td><code>worker_missing</code> (M3.1)</td><td>No worker has sent a heartbeat for <code>after</code>, while a flow isn't paused: nothing runs the work. Critical, and it comes from the server, so it needs no worker to say there is none. Quiet under <code>feather dev</code>'s local engine, and when every flow is paused</td><td><code>after: 2m</code></td></tr>
+    <tr><td><code>dataset_quiet</code></td><td>A dataset named in <code>datasets</code> that sealed fewer records over the last <code>within</code> than its minimum: a read that succeeds and finds nothing, because a token expired or a filter is wrong, is otherwise silent. A dataset never read yet isn't judged. On the Alerts page, <code>datasets</code> is written <code>acme/invoices=1, acme/orders=20</code></td><td>Off until datasets are named; <code>within: 24h</code></td></tr>
   </table></div>
   <p class="prose">Channels go in the project's settings; a secret reference works in a URL or an SMTP password:</p>
   <pre><code>settings:
