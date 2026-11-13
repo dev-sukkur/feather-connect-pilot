@@ -839,6 +839,14 @@ class StoreContract(
         d = store.ledger.get("a", "v1")
         assert d.last_error is None and (d.rows_applied, d.rows_rejected, d.attempts) == (2, 1, 2)
 
+    def test_an_attempt_keeps_the_references_its_transforms_read(self, store: Store):
+        seal(store, "v1", ["a"])
+        store.ledger.transition("a", "v1", "running", actor="t")
+        refs = {"sap.material": 7, "sap.plant": 3}
+        store.ledger.transition("a", "v1", "applied", actor="t", rows_applied=1, references=refs)
+        running, applied = store.ledger.attempts("a", "v1")
+        assert running.references is None and applied.references == refs
+
     def test_replay_returns_applied_to_pending(self, store: Store):
         seal(store, "v1", ["a"])
         store.ledger.transition("a", "v1", "running", actor="t")
@@ -1328,6 +1336,16 @@ class StoreContract(
         assert store.state.get_many("d", ["a"]) == {"a": c}
         store.state.delete_many("d", ["a", "never-there"])
         assert store.state.get_many("d", ["a", "b"]) == {"b": b}
+
+    def test_record_state_scans_in_key_order_by_pages(self, store: Store):
+        rows = [StateRow(k, "p", i, {"k": k}, "v1") for i, k in enumerate(["b", "a", "d", "c", "B"])]
+        store.state.put_many("d", rows)
+        store.state.put_many("other", [StateRow("a", "p", 9, {}, "v1")])
+        first = store.state.scan("d", limit=2)
+        assert [r.key for r in first] == ["B", "a"]  # byte order, as the store keeps keys
+        rest = store.state.scan("d", after=first[-1].key, limit=10)
+        assert [r.key for r in rest] == ["b", "c", "d"] and rest[0].payload == {"k": "b"}
+        assert store.state.scan("d", after="d") == [] and store.state.scan("none") == []
 
     def test_supersede_resolves_only_older_entries(self, store: Store):
         for v in ("v1", "v2", "v3"):

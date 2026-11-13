@@ -1147,6 +1147,7 @@ class _Ledger(Ledger):
         rows_applied: int = 0,
         rows_rejected: int = 0,
         code_sha: str | None = None,
+        references: Mapping[str, int] | None = None,
     ) -> Delivery:
         now = self._db.clock.now()
         self._db.ensure_month("delivery_attempt", now)
@@ -1191,8 +1192,8 @@ class _Ledger(Ledger):
             conn.execute(
                 """insert into feather.delivery_attempt (tenant_id, route, version_id, from_status, to_status,
                                                          actor, reason, error, rows_applied, rows_rejected,
-                                                         code_sha, at)
-                   values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                                                         code_sha, at, reference_versions)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     self._db.tenant,
                     route,
@@ -1206,6 +1207,7 @@ class _Ledger(Ledger):
                     rows_rejected,
                     code_sha,
                     now,
+                    None if references is None else _json(dict(references)),
                 ),
             )
         assert updated is not None
@@ -1231,6 +1233,7 @@ class _Ledger(Ledger):
                 r["rows_rejected"],
                 r["code_sha"],
                 r["at"],
+                None if r["reference_versions"] is None else dict(_unjson(r["reference_versions"])),
             )
             for r in rows
         ]
@@ -1398,6 +1401,19 @@ class _State(RecordStateStore):
             )
             for r in rows
         }
+
+    def scan(self, dataset: str, *, after: str | None = None, limit: int = 10_000) -> list[StateRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.record_state
+                   where tenant_id = %s and dataset = %s and (%s::text is null or key collate "C" > %s)
+                   order by key collate "C" limit %s""",
+                (self._db.tenant, dataset, after, after, limit),
+            ).fetchall()
+        return [
+            StateRow(r["key"], r["partition"], int(r["row_hash"]), _unjson(r["payload"]), r["last_version"])
+            for r in rows
+        ]
 
     def put_many(self, dataset: str, rows: Iterable[StateRow]) -> None:
         with self._db.tx() as conn, conn.cursor() as cursor:

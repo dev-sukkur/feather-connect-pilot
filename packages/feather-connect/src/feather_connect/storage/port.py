@@ -193,6 +193,7 @@ class Attempt:
     rows_rejected: int
     code_sha: str | None
     at: datetime
+    references: Mapping[str, int] | None = None  # reference dataset -> state stamp the apply used (M3.1 F1)
 
 
 @dataclass(frozen=True)
@@ -532,8 +533,12 @@ class Ledger(Protocol):
         rows_applied: int = 0,
         rows_rejected: int = 0,
         code_sha: str | None = None,
+        references: Mapping[str, int] | None = None,
     ) -> Delivery:
         """Move a delivery and write an attempt. `InvalidTransition` if the move is illegal (I3).
+
+        `references` names the reference datasets the attempt's transforms read, each with the stamp of the state it
+        read (M3.1 F1), so that a delivery can be explained afterwards.
 
         Going to `applied` sets the row counts and clears `last_error`; any other move sets a count only
         when it is not zero, and `last_error` only when `error` is given.
@@ -614,6 +619,11 @@ class RecordStateStore(Protocol):
 
     def put_many(self, dataset: str, rows: Iterable[StateRow]) -> None: ...
     def delete_many(self, dataset: str, keys: Iterable[str]) -> None: ...
+
+    def scan(self, dataset: str, *, after: str | None = None, limit: int = 10_000) -> list[StateRow]:
+        """Up to `limit` rows of the dataset, in key order, with keys after `after`: a page of its whole state, for
+        reference lookups (M3.1 F1)."""
+        ...
 
 
 class QuarantineStore(Protocol):

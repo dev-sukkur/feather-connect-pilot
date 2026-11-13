@@ -800,6 +800,7 @@ class _Ledger(Ledger):
         rows_applied: int = 0,
         rows_rejected: int = 0,
         code_sha: str | None = None,
+        references: Mapping[str, int] | None = None,
     ) -> Delivery:
         with self._d.lock:
             current = self.get(route, version_id)
@@ -830,6 +831,7 @@ class _Ledger(Ledger):
                     rows_rejected,
                     code_sha,
                     self._d.clock.now(),
+                    None if references is None else dict(references),
                 )
             )
             return updated
@@ -962,6 +964,12 @@ class _State(RecordStateStore):
             table = self._d.state.get(dataset, {})
             for key in keys:
                 table.pop(key, None)
+
+    def scan(self, dataset: str, *, after: str | None = None, limit: int = 10_000) -> list[StateRow]:
+        with self._d.lock:
+            rows = self._d.state.get(dataset, {})
+            keys = sorted(k for k in rows if after is None or k > after)[:limit]
+            return [replace(rows[k], payload=dict(rows[k].payload)) for k in keys]
 
 
 class _Quarantine(QuarantineStore):
