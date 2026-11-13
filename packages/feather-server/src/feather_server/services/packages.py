@@ -68,7 +68,7 @@ from feather_connect.storage.port import (
     VersionNotReady,
 )
 from feather_server.auth import Actor
-from feather_server.services.access import require
+from feather_server.services.access import require, require_reason
 from feather_server.services.registries import BUILT_IN, Fetched, Registries, RegistryProblem, VersionExists
 
 __all__ = [
@@ -278,6 +278,7 @@ class Packages:
         project = canonicalize_name(name)
         target = f"package:{project}"
         require(actor, "packages.install", self._store.audit, target)
+        require_reason(actor, "packages.install", reason)
         request: dict[str, Any] = {
             "version": version,
             "registry": registry,
@@ -543,6 +544,7 @@ class Packages:
         failed."""
         target = f"package:{filename}"
         require(actor, "packages.promote", self._store.audit, target)
+        require_reason(actor, "packages.promote", reason)
         request: dict[str, Any] = {"filename": filename, "sha256": sha256, "from": source, "reason": reason}
         with self._slot():
             try:
@@ -631,6 +633,7 @@ class Packages:
         project = canonicalize_name(name)
         target = f"package:{project}"
         require(actor, "packages.uninstall", self._store.audit, target)
+        require_reason(actor, "packages.uninstall", reason)
         request: dict[str, Any] = {"version": version, "reason": reason}
         try:
             row = self._store.packages.version(project, version)
@@ -660,6 +663,7 @@ class Packages:
         from its next tick, with no restart. Raises `KeyError` when the version or the flow isn't installed."""
         target = f"flow:{flow}"
         require(actor, "flows.activate", self._store.audit, target)
+        require_reason(actor, "flows.activate", reason)
         package = canonicalize_name(flow.split("/", 1)[0])
         installed = self._store.packages.version(package, version)
         if installed is None:
@@ -705,6 +709,7 @@ class Packages:
         """Take `flow` out of service: its triggers stop at the next tick. Runs in progress finish."""
         target = f"flow:{flow}"
         require(actor, "flows.activate", self._store.audit, target)
+        require_reason(actor, "flows.activate", reason)
         done = self._store.packages.deactivate(flow, actor.name, self._clock.now(), reason)
         installed = self._store.packages.version(done.package, done.version)
         if installed is not None:

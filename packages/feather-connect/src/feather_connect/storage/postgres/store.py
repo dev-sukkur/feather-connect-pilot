@@ -34,6 +34,8 @@ from feather_connect.storage.port import (
     STREAM_TRIGGER,
     WAITS_KEPT,
     AccessGrant,
+    ActionRequestRow,
+    ActionRequestStore,
     AlertRow,
     AlertRuleRow,
     AlertState,
@@ -65,6 +67,7 @@ from feather_connect.storage.port import (
     InboxEvent,
     InboxStore,
     InUse,
+    InvalidTransition,
     KeyMismatch,
     KeySighting,
     Ledger,
@@ -86,6 +89,7 @@ from feather_connect.storage.port import (
     RegistryFile,
     RegistryRow,
     RegistryStore,
+    RequestStatus,
     ResponseRow,
     ResponseStore,
     Role,
@@ -2933,6 +2937,94 @@ class _Audit(AuditStore):
         return [_audit_row(r) for r in rows]
 
 
+def _request_row(row: Row) -> ActionRequestRow:
+    return ActionRequestRow(
+        row["request_id"],
+        row["action"],
+        row["target"],
+        _unjson(row["params"]) or {},
+        row["requested_by"],
+        row["reason"],
+        row["status"],
+        row["created_at"],
+        row["decided_by"],
+        row["decided_at"],
+        row["decision_reason"],
+        row["result"],
+    )
+
+
+class _Requests(ActionRequestStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def add(
+        self, action: str, target: str, params: Mapping[str, Any], requested_by: str, reason: str | None
+    ) -> ActionRequestRow:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """insert into feather.action_request (tenant_id, request_id, action, target, params, requested_by,
+                                                       reason, status, created_at)
+                   values (%s, %s, %s, %s, %s, %s, %s, 'waiting', %s) returning *""",
+                (
+                    self._db.tenant,
+                    new_id(),
+                    action,
+                    target,
+                    _json(dict(params)),
+                    requested_by,
+                    reason,
+                    self._db.clock.now(),
+                ),
+            ).fetchone()
+        assert row is not None
+        return _request_row(row)
+
+    def get(self, request_id: str) -> ActionRequestRow:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                "select * from feather.action_request where tenant_id = %s and request_id = %s",
+                (self._db.tenant, request_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(request_id)
+        return _request_row(row)
+
+    def list_requests(self, status: RequestStatus | None = None, limit: int = 100) -> list[ActionRequestRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select * from feather.action_request where tenant_id = %s and (%s::text is null or status = %s)
+                   order by created_at desc, request_id desc limit %s""",
+                (self._db.tenant, status, status, limit),
+            ).fetchall()
+        return [_request_row(r) for r in rows]
+
+    def decide(
+        self,
+        request_id: str,
+        status: Literal["approved", "rejected"],
+        by: str,
+        reason: str | None,
+        result: str | None = None,
+    ) -> ActionRequestRow:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """update feather.action_request set status = %s, decided_by = %s, decided_at = %s,
+                          decision_reason = %s, result = %s
+                   where tenant_id = %s and request_id = %s and status = 'waiting' returning *""",
+                (status, by, self._db.clock.now(), reason, result, self._db.tenant, request_id),
+            ).fetchone()
+            if row is None:
+                found = conn.execute(
+                    "select status from feather.action_request where tenant_id = %s and request_id = %s",
+                    (self._db.tenant, request_id),
+                ).fetchone()
+                if found is None:
+                    raise KeyError(request_id)
+                raise InvalidTransition(f"request {request_id} was {found['status']} already")
+        return _request_row(row)
+
+
 class _Alerts(AlertStore):
     def __init__(self, db: _Db) -> None:
         self._db = db
@@ -3955,6 +4047,7 @@ class PostgresStore(Store):
             webhooks=_Webhooks(db, inbox),
             readiness=_Readiness(db),
             alerts=_Alerts(db),
+            requests=_Requests(db),
         )
         object.__setattr__(self, "_pool", pool)  # `Store` is frozen
         object.__setattr__(self, "_db", db)

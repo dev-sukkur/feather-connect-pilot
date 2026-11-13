@@ -28,3 +28,6 @@ Thumbs.db
 
 # The demo receiver's SQLite file
 examples/zakya-demo/.data/
+
+# The test environments' own settings (deploy/compose.nonprod.yaml)
+deploy/*.env

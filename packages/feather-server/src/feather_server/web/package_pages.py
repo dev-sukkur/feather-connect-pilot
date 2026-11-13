@@ -535,6 +535,7 @@ def add_registry(
     name: Annotated[str, Form(max_length=64)],
     index_url: Annotated[str, Form(max_length=500)],
     token_ref: Annotated[str, Form(max_length=500)] = "",
+    reason: Text = "",
 ) -> Response:
     form = {
         "name": name,
@@ -542,7 +543,9 @@ def add_registry(
         "token_ref": token_ref if token_ref.startswith("${") else "",
     }
     try:
-        added = _registries(request).add(actor, name.strip(), index_url.strip(), token_ref.strip() or None)
+        added = _registries(request).add(
+            actor, name.strip(), index_url.strip(), token_ref.strip() or None, reason=_reason(reason)
+        )
     except ValueError as error:
         return _registries_page(request, actor, status=422, notice=("bad", redact(str(error))), form=form)
     return RedirectResponse(f"/registries?{urlencode({'added': added.name})}", status_code=303)
@@ -585,7 +588,7 @@ def test_registry(request: Request, actor: CurrentActor, name: str) -> Response:
 
 @router.post("/registries/{name}/remove", dependencies=[Depends(require_csrf)])
 def remove_registry(
-    request: Request, actor: CurrentActor, name: str, confirm: Annotated[str, Form()] = ""
+    request: Request, actor: CurrentActor, name: str, confirm: Annotated[str, Form()] = "", reason: Text = ""
 ) -> Response:
     if not _confirmed(confirm):
         ask = Ask(
@@ -598,7 +601,7 @@ def remove_registry(
         )
         return _registries_page(request, actor, ask=ask)
     try:
-        _registries(request).remove(actor, name)
+        _registries(request).remove(actor, name, reason=_reason(reason))
     except (KeyError, ValueError) as error:
         text = str(error.args[0] if isinstance(error, KeyError) and error.args else error)
         return _registries_page(request, actor, status=404, notice=("bad", redact(text)))

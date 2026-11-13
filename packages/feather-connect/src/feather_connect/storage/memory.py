@@ -9,7 +9,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from fractions import Fraction
-from typing import Any
+from typing import Any, Literal
 
 from feather_connect.clock import Clock, SystemClock
 from feather_connect.core.connector import InboundRequest
@@ -24,6 +24,8 @@ from feather_connect.storage.port import (
     STREAM_TRIGGER,
     WAITS_KEPT,
     AccessGrant,
+    ActionRequestRow,
+    ActionRequestStore,
     ActivationState,
     AlertRow,
     AlertRuleRow,
@@ -56,6 +58,7 @@ from feather_connect.storage.port import (
     InboxEvent,
     InboxStore,
     InUse,
+    InvalidTransition,
     KeyMismatch,
     KeySighting,
     Ledger,
@@ -77,6 +80,7 @@ from feather_connect.storage.port import (
     RegistryFile,
     RegistryRow,
     RegistryStore,
+    RequestStatus,
     ResponseRow,
     ResponseStore,
     Role,
@@ -184,6 +188,7 @@ class _Data:
     audit: list[AuditRow] = field(default_factory=list[AuditRow])
     alerts: dict[str, AlertRow] = field(default_factory=dict[str, AlertRow])
     alert_rules: dict[str, AlertRuleRow] = field(default_factory=dict[str, AlertRuleRow])
+    requests: dict[str, ActionRequestRow] = field(default_factory=dict[str, ActionRequestRow])
     # The key index, by (dataset, key): (version, partition, op, row hash, chunk), in seal order.
     keys: dict[tuple[str, str], list[tuple[str, str, str, int, int]]] = field(
         default_factory=dict[tuple[str, str], list[tuple[str, str, str, int, int]]]
@@ -1881,6 +1886,60 @@ class _Webhooks(WebhookEventStore):
         return len(old)
 
 
+class _Requests(ActionRequestStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def add(
+        self, action: str, target: str, params: Mapping[str, Any], requested_by: str, reason: str | None
+    ) -> ActionRequestRow:
+        with self._d.lock:
+            row = ActionRequestRow(
+                new_id(),
+                action,
+                target,
+                copy.deepcopy(dict(params)),
+                requested_by,
+                reason,
+                "waiting",
+                self._d.clock.now(),
+            )
+            self._d.requests[row.request_id] = row
+            return row
+
+    def get(self, request_id: str) -> ActionRequestRow:
+        with self._d.lock:
+            return self._d.requests[request_id]
+
+    def list_requests(self, status: RequestStatus | None = None, limit: int = 100) -> list[ActionRequestRow]:
+        with self._d.lock:
+            rows = [r for r in self._d.requests.values() if status is None or r.status == status]
+        return sorted(rows, key=lambda r: (r.created_at, r.request_id), reverse=True)[:limit]
+
+    def decide(
+        self,
+        request_id: str,
+        status: Literal["approved", "rejected"],
+        by: str,
+        reason: str | None,
+        result: str | None = None,
+    ) -> ActionRequestRow:
+        with self._d.lock:
+            found = self._d.requests[request_id]
+            if found.status != "waiting":
+                raise InvalidTransition(f"request {request_id} was {found.status} already")
+            row = replace(
+                found,
+                status=status,
+                decided_by=by,
+                decided_at=self._d.clock.now(),
+                decision_reason=reason,
+                result=result,
+            )
+            self._d.requests[request_id] = row
+            return row
+
+
 class _Alerts(AlertStore):
     def __init__(self, data: _Data) -> None:
         self._d = data
@@ -2369,4 +2428,5 @@ class MemoryStore(Store):
             webhooks=_Webhooks(data, inbox),
             readiness=_Readiness(data, runs, inbox),
             alerts=_Alerts(data),
+            requests=_Requests(data),
         )

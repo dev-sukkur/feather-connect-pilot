@@ -13,6 +13,8 @@ M1 is too large for one plan, so it is split into six. Each one ends with softwa
 | [5. Control plane](m1-05-control-plane.md) | Auth, service layer, JSON API, HTML dashboard | Monitor and act on flows from the dashboard | 2, 3 | 11 |
 | [6. CLI and M1 exit](m1-06-cli-exit.md) | `feather` CLI, `feather dev`, Compose, demo, hard-case suite | Run the whole demo in under 5 minutes, and pass the M1 exit criteria | 2–5 | 9 |
 
+Later milestones have plans of their own: M2 [plan 1 (readiness)](m2-01-readiness.md) and [plan 2 (connectors and operations)](m2-02-connectors-and-operations.md), both built; M3 [plan 1 (environments, SSO, hardening and v1.0)](m3-01-enterprise-and-v1.md). [Milestones and scope](milestones-and-scope.md) holds where each stands.
+
 **Order.** See [Build order](#build-order-changed-31-oct-2026): the plans below are no longer built in sequence.
 
 **Later plans depend on earlier code.** The interfaces between plans are fixed here, but details may shift during the build. Re-read a plan's **Consumes** lines against the real code before you start it.

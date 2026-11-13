@@ -1,0 +1,94 @@
+# Two test environments, qa and uat, on one machine (layout B, ADR-0013 decision 3, M3 plan 1 E4): one Postgres
+# server holding a database each, feather_qa and feather_uat, and a migrate, a server and a worker per environment.
+# Each environment has its own .env, so its own secret key, database password and port; neither reaches the other's
+# data, since each has its own database and its own database user. There is no dev environment: developers use
+# `feather dev`. Production is never here: it runs on its own deployment, with deploy/compose.yaml.
+#
+#   cp deploy/nonprod.env.example deploy/nonprod.env   # the Postgres superuser password and the two users' passwords
+#   cp deploy/qa.env.example deploy/qa.env             # FEATHER_SECRET_KEY, the qa password again, the port
+#   cp deploy/uat.env.example deploy/uat.env           # the same for uat, with another key
+#   docker compose -f deploy/compose.nonprod.yaml --env-file deploy/nonprod.env up -d --build
+#   docker compose -f deploy/compose.nonprod.yaml --env-file deploy/nonprod.env exec qa-server feather server create-user admin
+#
+# qa is at http://127.0.0.1:${QA_PORT:-8180} and uat at http://127.0.0.1:${UAT_PORT:-8280}. Seven containers in all:
+# Postgres, two one-shot migrates, two servers and two workers.
+name: ${COMPOSE_PROJECT_NAME:-feather-nonprod}
+
+x-feather: &feather
+  restart: unless-stopped
+  depends_on:
+    postgres: {condition: service_healthy}
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/nonprod.env}
+      QA_DB_PASSWORD: ${QA_DB_PASSWORD:?set QA_DB_PASSWORD in deploy/nonprod.env}
+      UAT_DB_PASSWORD: ${UAT_DB_PASSWORD:?set UAT_DB_PASSWORD in deploy/nonprod.env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs once, on an empty volume: the two databases, each owned by its own user, closed to the other.
+      - ./nonprod-init.sh:/docker-entrypoint-initdb.d/10-feather-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d feather_uat"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  qa-migrate:
+    <<: *feather
+    env_file: qa.env
+    image: ghcr.io/${FEATHER_IMAGE_ORG:-feather-connect}/feather-server:${FEATHER_VERSION:-dev}
+    build: {context: .., dockerfile: deploy/Dockerfile.server}
+    command: ["server", "migrate"]
+    restart: "no"
+
+  qa-server:
+    <<: *feather
+    env_file: qa.env
+    image: ghcr.io/${FEATHER_IMAGE_ORG:-feather-connect}/feather-server:${FEATHER_VERSION:-dev}
+    ports:
+      - "127.0.0.1:${QA_PORT:-8180}:8080"
+    depends_on:
+      qa-migrate: {condition: service_completed_successfully}
+
+  qa-worker:
+    <<: *feather
+    env_file: qa.env
+    image: ghcr.io/${FEATHER_IMAGE_ORG:-feather-connect}/feather-worker:${FEATHER_VERSION:-dev}
+    build: {context: .., dockerfile: deploy/Dockerfile.worker}
+    depends_on:
+      qa-migrate: {condition: service_completed_successfully}
+
+  uat-migrate:
+    <<: *feather
+    env_file: uat.env
+    image: ghcr.io/${FEATHER_IMAGE_ORG:-feather-connect}/feather-server:${FEATHER_VERSION:-dev}
+    command: ["server", "migrate"]
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+      qa-migrate: {condition: service_started}  # so the server image is built once
+
+  uat-server:
+    <<: *feather
+    env_file: uat.env
+    image: ghcr.io/${FEATHER_IMAGE_ORG:-feather-connect}/feather-server:${FEATHER_VERSION:-dev}
+    ports:
+      - "127.0.0.1:${UAT_PORT:-8280}:8080"
+    depends_on:
+      uat-migrate: {condition: service_completed_successfully}
+
+  uat-worker:
+    <<: *feather
+    env_file: uat.env
+    image: ghcr.io/${FEATHER_IMAGE_ORG:-feather-connect}/feather-worker:${FEATHER_VERSION:-dev}
+    depends_on:
+      uat-migrate: {condition: service_completed_successfully}
+      qa-worker: {condition: service_started}  # so the worker image is built once
+
+volumes:
+  pgdata:

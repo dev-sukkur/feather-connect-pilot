@@ -24,7 +24,7 @@ from feather_connect.packages.wheel import MAX_WHEEL, read_wheel
 from feather_connect.project import ProjectError, is_secret_ref, resolve_secret
 from feather_connect.storage.port import DuplicateFile, RegistryFile, RegistryRow, Store
 from feather_server.auth import Actor
-from feather_server.services.access import Capability, require
+from feather_server.services.access import Capability, require, require_reason
 
 BUILT_IN = "feather"
 _REGISTRY_NAME = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
@@ -169,6 +169,7 @@ class Registries:
         project = canonicalize_name(name)
         target = f"package:{project}"
         self._require(actor, "packages.yank", target)
+        require_reason(actor, "packages.yank", reason)
         found = self._store.registry.yank(project, version, reason)
         self._audit(
             actor,
@@ -191,14 +192,23 @@ class Registries:
     def _shown(row: RegistryRow) -> Registry:
         return Registry(row.name, row.index_url, row.token_ref, False, row.added_by, row.added_at.isoformat())
 
-    def add(self, actor: Actor, name: str, index_url: str, token_ref: str | None = None) -> Registry:
+    def add(
+        self,
+        actor: Actor,
+        name: str,
+        index_url: str,
+        token_ref: str | None = None,
+        *,
+        reason: str | None = None,
+    ) -> Registry:
         """Trust another Python package index. Its token must be a secret reference such as `${secret:env:NAME}`,
         never the token itself. Raises `ValueError` for a bad name, URL or token, and when the name is taken."""
         target = f"registry:{name}"
         self._require(actor, "registries.manage", target)
+        require_reason(actor, "registries.manage", reason)
         # Audited as given only when it is a reference: a token pasted in by mistake never reaches the audit.
         shown = token_ref if token_ref is None or is_secret_ref(token_ref) else "***"
-        request = {"index_url": index_url, "token_ref": shown}
+        request = {"index_url": index_url, "token_ref": shown, "reason": reason}
         try:
             if name == BUILT_IN or not _REGISTRY_NAME.match(name) or len(name) > 64:
                 raise ValueError(
@@ -228,16 +238,17 @@ class Registries:
         self._audit(actor, "add_registry", target, request, "ok")
         return self._shown(row)
 
-    def remove(self, actor: Actor, name: str) -> None:
+    def remove(self, actor: Actor, name: str, *, reason: str | None = None) -> None:
         """Stop trusting a registry. The built-in one can only be turned off, with FEATHER_REGISTRY=0."""
         target = f"registry:{name}"
         self._require(actor, "registries.manage", target)
+        require_reason(actor, "registries.manage", reason)
         if name == BUILT_IN:
-            self._audit(actor, "remove_registry", target, {}, "failed: built in")
+            self._audit(actor, "remove_registry", target, {"reason": reason}, "failed: built in")
             raise ValueError("the built-in registry can't be removed: set FEATHER_REGISTRY=0 to turn it off")
         if not self._store.registry.remove_registry(name):
             raise KeyError(f"no registry named {name!r}")
-        self._audit(actor, "remove_registry", target, {}, "ok")
+        self._audit(actor, "remove_registry", target, {"reason": reason}, "ok")
 
     def _index(self, name: str) -> SimpleIndex:
         row = self._store.registry.get_registry(name)

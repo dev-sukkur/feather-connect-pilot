@@ -172,6 +172,7 @@ class World:
             webhooks=base.webhooks,
             readiness=base.readiness,
             alerts=base.alerts,
+            requests=base.requests,
         )
         self.store.budgets.define(spec)
         self.engine = LocalEngine(self.clock)

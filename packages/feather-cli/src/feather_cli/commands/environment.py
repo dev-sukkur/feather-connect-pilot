@@ -223,11 +223,12 @@ def delete_secret(
     env: Env = "dev",
     server: remote.Server = None,
     token: remote.Token = None,
+    reason: Reason = None,
     json_mode: Json = False,
 ) -> None:
     """Delete a secret. A connection that refers to it fails until it is set again."""
     with remote.client(project, env, server, token, json_mode) as api:
-        done = remote.call(lambda: api.delete_secret(name), json_mode)
+        done = remote.call(lambda: api.delete_secret(name, reason), json_mode)
     emit(done, json_mode=json_mode, human=lambda d: typer.echo(f"deleted secret {name}"))
 
 

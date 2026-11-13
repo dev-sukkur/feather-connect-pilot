@@ -30,5 +30,11 @@ def compensate(
     with remote.client(project, env, server, token, json_mode) as api:
         done = remote.call(lambda: api.compensate(route, version, reason), json_mode)
     emit(
-        done, json_mode=json_mode, human=lambda d: typer.echo(f"{d['route']} {d['version_id']}: compensating")
+        done,
+        json_mode=json_mode,
+        human=lambda d: typer.echo(
+            f"asked for: request {d['request_id']} waits for a second person (feather holds requests)"
+            if d.get("request_id")
+            else f"{d['route']} {d['version_id']}: compensating"
+        ),
     )

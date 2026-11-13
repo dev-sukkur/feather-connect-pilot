@@ -85,6 +85,27 @@ def test_every_table_has_tenant_id(pg_url: str):  # FR-I1
     assert tables_without(pg_url, "feather", "tenant_id", except_={"alembic_version"}) == []
 
 
+def unique_keys_without(url: str, schema: str, column: str) -> list[str]:
+    """The primary keys and unique indexes of `schema` that leave `column` out."""
+    with psycopg.connect(url) as conn:
+        rows = conn.execute(
+            """select r.relname, i.relname from pg_index ix
+               join pg_class i on i.oid = ix.indexrelid
+               join pg_class r on r.oid = ix.indrelid
+               join pg_namespace n on n.oid = r.relnamespace
+               where n.nspname = %s and ix.indisunique
+                 and not exists (select 1 from pg_attribute a
+                                 where a.attrelid = ix.indrelid and a.attnum = any(ix.indkey) and a.attname = %s)""",
+            (schema, column),
+        ).fetchall()
+    return sorted(f"{table}.{index}" for table, index in rows if table != "alembic_version")
+
+
+def test_every_key_and_unique_index_has_tenant_id(pg_url: str):  # ADR-0013 rules 1, 3 and 5
+    migrate(pg_url)
+    assert unique_keys_without(pg_url, "feather", "tenant_id") == []
+
+
 def test_no_extensions_are_needed(pg_url: str):  # NFR-07
     migrate(pg_url)
     assert extensions(pg_url) == {"plpgsql"}

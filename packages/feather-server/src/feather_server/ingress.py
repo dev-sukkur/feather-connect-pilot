@@ -49,7 +49,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_TENANT = "default"  # the only tenant until M3
 _PUSH = "push"
 _ACCEPTED = {"status": "accepted"}
 _TITLES = {
@@ -127,9 +126,14 @@ class RateLimiter:
             self._buckets = dict(newest)
 
 
+def _tenant(state: "AppState") -> str:
+    """The tenant this server serves: its store's. An address of another tenant is not found (ADR-0013)."""
+    return state.store.secrets.tenant
+
+
 def _push_dataset(state: "AppState", tenant: str, source: str) -> Dataset | None:
     """Return the dataset that takes events at this address, or None if there is none."""
-    if tenant != _TENANT:
+    if tenant != _tenant(state):
         return None
     try:
         dataset = state.runtime.dataset(source)
@@ -559,14 +563,14 @@ def _check_declared(state: "AppState", declared: _Declared, request: InboundRequ
     event = WebhookEvent(package, hook.name, key[:_MAX_EVENT_ID], stamp, body, kept, now)
     # Into the push dataset's inbox, which its stream run reads on the package's host, where its transform parses the
     # event (§7.2). The raw copy is kept as processed: retention may delete it.
-    path = f"/ingress/{_TENANT}/{package}/{hook.name}"
+    path = f"/ingress/{_tenant(state)}/{package}/{hook.name}"
     return _Kept(hook, (event, f"{package}/{hook.dataset}", InboundRequest("POST", path, kept, body, now)))
 
 
 @router.post("/ingress/{tenant}/{package}/{webhook}")
 async def declared_webhook(request: Request, tenant: str, package: str, webhook: str) -> Response:
     state: AppState = request.app.state.feather
-    if tenant != _TENANT:
+    if tenant != _tenant(state):
         return _problem(404)
     address = request.client.host if request.client else "unknown"
     # Before anything reads the database: a flood of unknown paths costs nothing but this.

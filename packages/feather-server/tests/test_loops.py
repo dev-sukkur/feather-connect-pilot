@@ -181,6 +181,17 @@ def test_a_new_leader_takes_over(pg_url: str) -> None:
         b.stop()
 
 
+def test_each_tenant_has_its_own_loop_locks_and_the_default_keeps_its_keys() -> None:  # ADR-0013 rule 7
+    import zlib
+
+    assert (
+        leader_key("scheduler")
+        == leader_key("scheduler", "default")
+        == 7_262_411_000_000_000 + zlib.crc32(b"scheduler")
+    )
+    assert leader_key("scheduler", "acme") not in (leader_key("scheduler"), leader_key("scheduler", "other"))
+
+
 @pytest.mark.postgres
 def test_loops_with_different_names_lead_independently(pg_url: str) -> None:
     assert leader_key("scheduler") != leader_key("sweeper")

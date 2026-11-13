@@ -31,7 +31,7 @@ from feather_server.services import alerts, diff, pii
 from feather_server.services import task_records as records
 from feather_server.services.access import require
 from feather_server.services.accounts import Accounts
-from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection
+from feather_server.services.actions import Actions, DeliveryAction, DeliverySelection, Requested, request_doc
 from feather_server.services.environment import Environment
 from feather_server.services.packages import Packages
 from feather_server.services.previews import Preview
@@ -181,6 +181,8 @@ def _answer(fn: Callable[[], Any], status: int) -> JSONResponse:
 
     try:
         return ok(call(fn), status)
+    except Requested as asked:  # a protected environment: it waits for a second person (M3 plan 1 E3)
+        return ok({**request_doc(asked.request), "detail": str(asked)}, 202)
     except ApiProblem as problem:
         return problem_response(problem)
 
@@ -504,6 +506,47 @@ def _decide(
         return {"route": route, "version_id": version_id, "status": "pending" if approve else "skipped"}
 
     return _once(request, actor, key, decide)
+
+
+@router.get("/action-requests")
+def action_requests(actions: Do, _: CurrentActor, status: str | None = "waiting") -> JSONResponse:
+    """Destructive actions asked for in a protected environment: those waiting, or `status=approved`, `rejected`
+    or `all`."""
+    return ok(call(lambda: {"items": actions.requests(status), "next_cursor": None}))
+
+
+def _decide_request(
+    request: Request, actions: Do, actor: Actor, key: str | None, request_id: str, *, approve: bool,
+    reason: str | None,
+) -> JSONResponse:  # fmt: skip
+    return _once(
+        request, actor, key, lambda: actions.decide_request(actor, request_id, approve=approve, reason=reason)
+    )
+
+
+@router.post("/action-requests/{request_id}:approve")
+def approve_request(
+    request_id: str,
+    request: Request,
+    actions: Do,
+    actor: CurrentActor,
+    body: Reason,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    """Do the action as it was asked for. An approver other than the one who asked."""
+    return _decide_request(request, actions, actor, key, request_id, approve=True, reason=body.reason)
+
+
+@router.post("/action-requests/{request_id}:reject")
+def reject_request(
+    request_id: str,
+    request: Request,
+    actions: Do,
+    actor: CurrentActor,
+    body: Reason,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    return _decide_request(request, actions, actor, key, request_id, approve=False, reason=body.reason)
 
 
 @router.post("/routes/{route:path}/deliveries/{version_id}:approve")
@@ -890,7 +933,7 @@ def replay(
 # Users, roles and tokens: admin only.
 
 
-class NewUser(BaseModel):
+class NewUser(Reason):
     username: str
     password: str
     role: str = "operator"
@@ -904,7 +947,7 @@ class GrantsBody(Reason):
     grants: list[str]
 
 
-class NewToken(BaseModel):
+class NewToken(Reason):
     name: str
     role: str | None = None  # the caller's own when left out
     scope: str = "all"  # or publish: it may only upload packages to the built-in registry
@@ -921,7 +964,11 @@ def create_user(
     request: Request, accounts: Manage, actor: CurrentActor, body: NewUser, key: IdempotencyKey = None
 ) -> JSONResponse:
     return _once(
-        request, actor, key, lambda: accounts.create_user(actor, body.username, body.password, body.role), 201
+        request,
+        actor,
+        key,
+        lambda: accounts.create_user(actor, body.username, body.password, body.role, reason=body.reason),
+        201,
     )
 
 
@@ -961,7 +1008,7 @@ def create_token(
     ttl = None if body.ttl_days is None else timedelta(days=body.ttl_days)
 
     def create() -> dict[str, Any]:
-        token = accounts.create_token(actor, body.name, ttl, body.role, scope=body.scope)
+        token = accounts.create_token(actor, body.name, ttl, body.role, scope=body.scope, reason=body.reason)
         return {"name": body.name, "token": token, "ttl_days": body.ttl_days, "scope": body.scope}
 
     return _once(request, actor, key, create, 201)
@@ -970,7 +1017,7 @@ def create_token(
 # Registries: the built-in one, `feather`, and the ones an admin adds (flow packages §4.3, §10).
 
 
-class NewRegistry(BaseModel):
+class NewRegistry(Reason):
     name: str
     index_url: str
     token_ref: str | None = None  # a secret reference such as ${secret:env:ACME_REGISTRY_TOKEN}
@@ -986,16 +1033,27 @@ def add_registry(
     request: Request, trusted: Trusted, actor: CurrentActor, body: NewRegistry, key: IdempotencyKey = None
 ) -> JSONResponse:
     return _once(
-        request, actor, key, lambda: trusted.add(actor, body.name, body.index_url, body.token_ref), 201
+        request,
+        actor,
+        key,
+        lambda: trusted.add(actor, body.name, body.index_url, body.token_ref, reason=body.reason),
+        201,
     )
 
 
 @router.delete("/registries/{name}")
 def remove_registry(
-    name: str, request: Request, trusted: Trusted, actor: CurrentActor, key: IdempotencyKey = None
+    name: str,
+    request: Request,
+    trusted: Trusted,
+    actor: CurrentActor,
+    body: Reason | None = None,
+    key: IdempotencyKey = None,
 ) -> JSONResponse:
+    reason = (body or Reason()).reason
+
     def remove() -> dict[str, Any]:
-        trusted.remove(actor, name)
+        trusted.remove(actor, name, reason=reason)
         return {"registry": name, "removed": True}
 
     return _once(request, actor, key, remove)
@@ -1283,10 +1341,18 @@ def set_entry(
 
 @router.delete("/environment/{kind}/{name}")
 def remove_entry(
-    request: Request, kind: Kind, name: str, envs: Envs, actor: CurrentActor, key: IdempotencyKey = None
+    request: Request,
+    kind: Kind,
+    name: str,
+    envs: Envs,
+    actor: CurrentActor,
+    body: Reason | None = None,
+    key: IdempotencyKey = None,
 ) -> JSONResponse:
+    reason = (body or Reason()).reason
+
     def remove() -> Any:
-        envs.remove(actor, kind, name)
+        envs.remove(actor, kind, name, reason=reason)
         return {"kind": kind, "name": name, "removed": True}
 
     return _once(request, actor, key, remove)
@@ -1323,10 +1389,17 @@ def set_secret(request: Request, name: str, envs: Envs, actor: CurrentActor, bod
 
 @router.delete("/secrets/{name:path}")
 def delete_secret(
-    request: Request, name: str, envs: Envs, actor: CurrentActor, key: IdempotencyKey = None
+    request: Request,
+    name: str,
+    envs: Envs,
+    actor: CurrentActor,
+    body: Reason | None = None,
+    key: IdempotencyKey = None,
 ) -> JSONResponse:
+    reason = (body or Reason()).reason
+
     def remove() -> Any:
-        envs.delete_secret(actor, name)
+        envs.delete_secret(actor, name, reason=reason)
         return {"name": name, "deleted": True}
 
     return _once(request, actor, key, remove)
@@ -1447,10 +1520,15 @@ def set_alert_rule(
 
 @router.delete("/alert-rules/{name}")
 def reset_alert_rule(
-    name: str, request: Request, actor: CurrentActor, key: IdempotencyKey = None
+    name: str,
+    request: Request,
+    actor: CurrentActor,
+    body: Reason | None = None,
+    key: IdempotencyKey = None,
 ) -> JSONResponse:
     """Back to the rule's default."""
-    return _once(request, actor, key, lambda: _alerting(request).reset_rule(actor, name))
+    reason = (body or Reason()).reason
+    return _once(request, actor, key, lambda: _alerting(request).reset_rule(actor, name, reason=reason))
 
 
 @router.get("/audit")

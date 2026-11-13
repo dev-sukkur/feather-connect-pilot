@@ -12,7 +12,7 @@ then a waiting delivery has a row but no task, which keeps its run going while a
 import logging
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -56,7 +56,6 @@ from feather_connect.storage.port import (
 from feather_connect.storage.spool import Spool
 
 log = logging.getLogger(__name__)
-_TENANT = "default"
 _UTC = "UTC"
 _ACTIVE = ("queued", "running")
 _PAUSED = "route paused"  # why a task ended without delivering: the key of its successor ends in `#n`
@@ -145,6 +144,9 @@ class Runtime:
         prefix: str | None = None,
     ) -> None:
         self._engine = engine
+        self._tenant = (
+            store.secrets.tenant
+        )  # every call, context and log line says it (ADR-0013 rules 4 and 7)
         self._prefix = prefix
         self._clock: Clock = SystemClock() if clock is None else clock
         self._deps = RuntimeDeps(store, spool, self._clock, code_sha, make_context or self._default_context)
@@ -195,7 +197,7 @@ class Runtime:
             self._clock.now(),
             self._timezone,
             budget=handle,
-            tenant=_TENANT,
+            tenant=self._tenant,
         )
 
     @property
@@ -237,6 +239,10 @@ class Runtime:
             return found[prefixed]  # an M1 task's name, from before the upgrade
         raise KeyError(f"no {kind} is named {name!r}")
 
+    def _send(self, call: TaskCall) -> str:
+        """Submit the call with the tenant in its args (ADR-0013 rule 4)."""
+        return self._engine.submit(replace(call, args={**call.args, "tenant": self._tenant}))
+
     def tasks(self) -> Mapping[str, TaskFn]:
         return {
             "feather.plan": self._logged(self._plan_task),
@@ -250,10 +256,13 @@ class Runtime:
         """Wrap a task so that everything it logs carries the ids of its run and its journal row."""
 
         def run(ctx: TaskContext, args: Mapping[str, Any]) -> Mapping[str, Any] | None:
+            tenant = args.get("tenant", self._tenant)  # a task submitted before M3 carries none: it is ours
+            if tenant != self._tenant:
+                raise RuntimeError(f"a task of tenant {tenant!r} reached a worker of tenant {self._tenant!r}")
             run_id = args["run_id"]
             row = self._deps.store.runs.task_by_ref(run_id, ctx.task_ref)
             with bind(
-                tenant=_TENANT,
+                tenant=self._tenant,
                 flow=args.get("flow"),
                 run=run_id,
                 task=row.task_id if row else None,
@@ -373,7 +382,7 @@ class Runtime:
                 "feather.plan",
                 {"run_id": run_id, "flow": flow},
                 f"plan:{run_id}",
-                f"plan:{_TENANT}:{flow}",
+                f"plan:{self._tenant}:{flow}",
                 retry=self._deps.retry,
             ),
             run_id,
@@ -447,7 +456,7 @@ class Runtime:
         self._open_row(run_id, "plan", _tick_ref(run_id, tick, "plan"), None, None)
         runs.set_run_status(run_id, "running")
         try:
-            self._engine.submit(self._tick_plan_call(flow, run_id, tick))
+            self._send(self._tick_plan_call(flow, run_id, tick))
         except Exception as error:
             reason = redact(f"could not start: {error}")
             self._finish_task(_tick_ref(run_id, tick, "plan"), run_id, "failed", reason)
@@ -480,7 +489,7 @@ class Runtime:
             going = True
             if row.kind == "plan" and self._clock.now() - row.started_at >= _LOST_AFTER:
                 tick = row.ref.removeprefix(f"tick:{run_id}:").removesuffix(":plan")
-                self._engine.submit(self._tick_plan_call(runs.get_run(run_id).flow, run_id, tick))
+                self._send(self._tick_plan_call(runs.get_run(run_id).flow, run_id, tick))
         return going
 
     def sweep_stream_runs(self) -> list[str]:
@@ -510,7 +519,7 @@ class Runtime:
             "feather.plan",
             {"run_id": run_id, "flow": flow, "tick": tick},
             _tick_ref(run_id, tick, "plan"),
-            f"plan:{_TENANT}:{flow}",
+            f"plan:{self._tenant}:{flow}",
             retry=self._deps.retry,
         )
 
@@ -621,7 +630,7 @@ class Runtime:
         run_id = deps.store.versions.get(version_id).run_id
         ref = f"compensate:{route}:{version_id}"
         self._open_row(run_id, "compensate", ref, delivery.dataset, delivery.partition, route)
-        self._engine.submit(
+        self._send(
             TaskCall(
                 "feather.compensate",
                 {
@@ -634,7 +643,7 @@ class Runtime:
                     "reason": reason,
                 },
                 ref,
-                f"apply:{_TENANT}:{route}:{delivery.partition}",
+                f"apply:{self._tenant}:{route}:{delivery.partition}",
                 retry=deps.retry,
             )
         )
@@ -654,7 +663,7 @@ class Runtime:
         self._open_apply_row(delivery, run_id)
         next_up = self._next_of(delivery)
         if next_up is not None and next_up.version_id == version_id and not self.is_route_paused(route):
-            self._engine.submit(self._apply_call(delivery, run_id))
+            self._send(self._apply_call(delivery, run_id))
 
     def fail_stranded(self, route: str, version_id: str) -> bool:
         """Fail the delivery if it is pending or running and its task has ended, and return whether it did.
@@ -689,7 +698,7 @@ class Runtime:
                 "feather.seal_run",
                 {"run_id": run_id, "flow": flow, "dataset": dataset},
                 f"seal:{run_id}:{dataset}",
-                f"seal:{_TENANT}:{dataset}",
+                f"seal:{self._tenant}:{dataset}",
                 retry=self._deps.retry,
             ),
             run_id,
@@ -978,9 +987,14 @@ class Runtime:
             raise PermanentError(str(error)) from error
         return [version.version_id for version in versions]
 
-    @staticmethod
     def _extract_call(
-        flow: str, run_id: str, dataset: str, partition: str, retry: RetryPolicy, tick: str | None = None
+        self,
+        flow: str,
+        run_id: str,
+        dataset: str,
+        partition: str,
+        retry: RetryPolicy,
+        tick: str | None = None,
     ) -> TaskCall:
         args = {"run_id": run_id, "flow": flow, "dataset": dataset, "partition": partition}
         key = f"extract:{run_id}:{dataset}:{partition}"
@@ -991,7 +1005,7 @@ class Runtime:
             "feather.extract",
             args,
             key,
-            f"extract:{_TENANT}:{dataset}:{partition}",
+            f"extract:{self._tenant}:{dataset}:{partition}",
             retry=retry,
         )
 
@@ -1027,7 +1041,7 @@ class Runtime:
         if place + int(limit) < len(rows):
             waiting = rows[place + int(limit)]
             assert waiting.dataset is not None and waiting.partition is not None
-            self._engine.submit(
+            self._send(
                 self._extract_call(run.flow, run_id, waiting.dataset, waiting.partition, self._deps.retry)
             )
 
@@ -1157,7 +1171,7 @@ class Runtime:
         partition: str | None = None,
     ) -> None:
         self._open_row(run_id, kind, call.idempotency_key, dataset, partition)
-        self._engine.submit(call)
+        self._send(call)
 
     def _open_apply_row(self, delivery: Delivery, run_id: str) -> None:
         self._open_row(
@@ -1194,6 +1208,6 @@ class Runtime:
                 "version_id": delivery.version_id,
             },
             self._apply_ref(delivery, run_id),
-            f"apply:{_TENANT}:{delivery.route}:{delivery.partition}",
+            f"apply:{self._tenant}:{delivery.route}:{delivery.partition}",
             retry=self._deps.retry,
         )

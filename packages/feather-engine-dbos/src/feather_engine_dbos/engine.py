@@ -31,6 +31,17 @@ _CLIENT_POOL = 2  # a client only submits and looks things up, in short calls; D
 _ENDED = frozenset({"SUCCESS", "ERROR", "CANCELLED", "MAX_RECOVERY_ATTEMPTS_EXCEEDED"})
 
 
+def system_schema(tenant: str = "default") -> str:
+    """The schema of the DBOS system tables for `tenant`: `dbos` for the default tenant, as before, and `dbos_<tenant>`
+    for another. A tenant's queues, workflows and recovery are its own, so a worker of one tenant never takes another's
+    task (ADR-0013 rule 7)."""
+    if tenant == "default":
+        return "dbos"
+    if not tenant.replace("_", "").isalnum() or not tenant.isascii():
+        raise ValueError(f"tenant {tenant!r} can't name a schema: use letters, digits and underscores")
+    return f"dbos_{tenant.lower()}"
+
+
 def queue_name(base: str, pool: str | None) -> str:
     """Return the queue for `base` in `pool`: the shared queue when there is no pool."""
     return base if not pool else f"{base}@{pool}"
@@ -83,7 +94,8 @@ class DbosEngine(Engine):
     client does not.
     """
 
-    def __init__(self, database_url: str, *, schema: str = "dbos") -> None:
+    def __init__(self, database_url: str, *, schema: str | None = None, tenant: str = "default") -> None:
+        schema = schema or system_schema(tenant)
         url = system_database_url(database_url)
         DBOS.migrate(url, schema=schema)
         self._client = DBOSClient(

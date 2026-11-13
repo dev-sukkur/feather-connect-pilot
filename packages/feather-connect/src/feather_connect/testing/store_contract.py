@@ -977,6 +977,35 @@ class StoreContract(
         with pytest.raises(KeyError):
             store.alerts.delete_rule("delivery_failed")
 
+    def test_an_action_request_is_decided_once(self, store: Store):  # M3 plan 1 E3
+        first = store.requests.add(
+            "compensate_delivery", "route:a", {"version_id": "v1"}, "ann", "wrong posting"
+        )
+        assert (first.status, first.requested_by, dict(first.params)) == (
+            "waiting",
+            "ann",
+            {"version_id": "v1"},
+        )
+        second = store.requests.add(
+            "skip_deliveries", "route:a", {"deliveries": [["a", "v2"]]}, "ann", "bad data"
+        )
+        assert [r.request_id for r in store.requests.list_requests()] == [second.request_id, first.request_id]
+        done = store.requests.decide(first.request_id, "approved", "bob", "checked", "ok")
+        assert (done.status, done.decided_by, done.decision_reason, done.result) == (
+            "approved",
+            "bob",
+            "checked",
+            "ok",
+        )
+        assert store.requests.get(first.request_id) == done
+        assert [r.request_id for r in store.requests.list_requests("waiting")] == [second.request_id]
+        with pytest.raises(InvalidTransition):
+            store.requests.decide(first.request_id, "rejected", "cy", "no")
+        with pytest.raises(KeyError):
+            store.requests.get("nope")
+        with pytest.raises(KeyError):
+            store.requests.decide("nope", "approved", "bob", None)
+
     def test_the_budgets_defined_are_listed(self, store: Store):  # M2 plan 2 O1
         store.budgets.define(BudgetSpec("z", parse_limits(["10/minute"]), reserve={"high": 0.6}))
         store.budgets.define(BudgetSpec("a", parse_limits(["5/hour", "9/day"])))

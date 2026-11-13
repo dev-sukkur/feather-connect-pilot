@@ -290,7 +290,7 @@ def run_host(
             check_connections(project)
             for budget in project.budgets.values():
                 store.budgets.define(budget)
-            engine = DbosEngine(database_url)
+            engine = DbosEngine(database_url, tenant=tenant)
         except Exception as error:
             if link is not None:
                 link.send("failed", error=f"{type(error).__name__}: {error}"[:2000])
@@ -356,7 +356,18 @@ def run_host(
         labels = {"pool": pool, "package": package, "version": version}
         log.info("package host %s runs %s %s", worker_id, package, version)
         return work(
-            runtime, store, database_url, worker_id, labels, slots, poll_s, told, sha, background, tasks
+            runtime,
+            store,
+            database_url,
+            worker_id,
+            labels,
+            slots,
+            poll_s,
+            told,
+            sha,
+            background,
+            tasks,
+            tenant,
         )
     finally:
         use_secret_broker(None)

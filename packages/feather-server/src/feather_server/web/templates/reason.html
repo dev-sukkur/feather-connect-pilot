@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ title }}</h1>
+<p class="notice notice-warn" role="alert">This is a protected environment, so every change needs a reason. It is kept in
+the audit log with the change.</p>
+{% if files %}
+<p>Go back, and send the form again with a reason.</p>
+<p><a class="button" href="{{ back }}">Back</a></p>
+{% else %}
+<form method="post" action="{{ action }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {% for name, value in fields %}<input type="hidden" name="{{ name }}" value="{{ value }}">
+  {% endfor %}<p><label for="reason">Reason (required here, and kept in the audit log)</label><br>
+    <input id="reason" name="reason" type="text" maxlength="500" required autofocus></p>
+  <p><button type="submit" class="primary">Send with this reason</button>
+     <a class="button" href="{{ back }}">Cancel</a></p>
+</form>
+{% endif %}
+{% endblock %}

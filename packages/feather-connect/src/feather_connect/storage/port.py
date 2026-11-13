@@ -1946,6 +1946,57 @@ class AlertStore(Protocol):
         ...
 
 
+RequestStatus = Literal["waiting", "approved", "rejected"]
+
+
+@dataclass(frozen=True)
+class ActionRequestRow:
+    """A destructive action asked for in a protected environment, such as compensating a delivery or skipping
+    deliveries, waiting for a second person (M3 plan 1 E3, design §11). `params` are what the action needs to be done
+    as asked; `result` says how it went, once approved."""
+
+    request_id: str
+    action: str
+    target: str
+    params: Mapping[str, Any]
+    requested_by: str
+    reason: str | None
+    status: RequestStatus
+    created_at: datetime
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+    decision_reason: str | None = None
+    result: str | None = None
+
+
+class ActionRequestStore(Protocol):
+    def add(
+        self, action: str, target: str, params: Mapping[str, Any], requested_by: str, reason: str | None
+    ) -> ActionRequestRow:
+        """Keep the request, waiting."""
+        ...
+
+    def get(self, request_id: str) -> ActionRequestRow:
+        """Raises `KeyError` when there is no such request."""
+        ...
+
+    def list_requests(self, status: RequestStatus | None = None, limit: int = 100) -> list[ActionRequestRow]:
+        """Newest first."""
+        ...
+
+    def decide(
+        self,
+        request_id: str,
+        status: Literal["approved", "rejected"],
+        by: str,
+        reason: str | None,
+        result: str | None = None,
+    ) -> ActionRequestRow:
+        """Record the decision. Raises `KeyError` for an unknown request and `InvalidTransition` for one that was
+        decided already, so a request is done at most once."""
+        ...
+
+
 @dataclass(frozen=True)
 class Store:
     """The ports together. A backend provides one of these."""
@@ -1972,6 +2023,7 @@ class Store:
     webhooks: WebhookEventStore
     readiness: ReadinessStore
     alerts: AlertStore
+    requests: ActionRequestStore
 
     def is_unavailable(self, error: BaseException) -> bool:
         """Whether `error` says that the store can't be reached, or can't keep up, just now, so that the same call may

@@ -187,13 +187,17 @@ class ApiClient:
     def registries(self) -> list[dict[str, Any]]:
         return self._call("GET", "/registries")["items"]
 
-    def add_registry(self, name: str, index_url: str, token_ref: str | None) -> dict[str, Any]:
+    def add_registry(
+        self, name: str, index_url: str, token_ref: str | None, reason: str | None = None
+    ) -> dict[str, Any]:
         return self._call(
-            "POST", "/registries", body={"name": name, "index_url": index_url, "token_ref": token_ref}
+            "POST",
+            "/registries",
+            body={"name": name, "index_url": index_url, "token_ref": token_ref, "reason": reason},
         )
 
-    def remove_registry(self, name: str) -> dict[str, Any]:
-        return self._call("DELETE", f"/registries/{quote(name, safe='')}")
+    def remove_registry(self, name: str, reason: str | None = None) -> dict[str, Any]:
+        return self._call("DELETE", f"/registries/{quote(name, safe='')}", body={"reason": reason})
 
     def test_registry(self, name: str) -> dict[str, Any]:
         return self._call("POST", f"/registries/{quote(name, safe='')}:test")
@@ -260,8 +264,8 @@ class ApiClient:
     def set_secret(self, name: str, value: str, reason: str | None) -> dict[str, Any]:
         return self._call("PUT", f"/secrets/{quote(name, safe='/')}", body={"value": value, "reason": reason})
 
-    def delete_secret(self, name: str) -> dict[str, Any]:
-        return self._call("DELETE", f"/secrets/{quote(name, safe='/')}")
+    def delete_secret(self, name: str, reason: str | None = None) -> dict[str, Any]:
+        return self._call("DELETE", f"/secrets/{quote(name, safe='/')}", body={"reason": reason})
 
     def rotate_key(self, reason: str | None) -> dict[str, Any]:
         return self._call("POST", "/secrets:rotate-key", body={"reason": reason})
@@ -295,6 +299,18 @@ class ApiClient:
         return self._call(
             "POST",
             f"/routes/{quote(route, safe='/')}/deliveries/{quote(version_id, safe='')}:compensate",
+            body={"reason": reason},
+            idempotency_key=str(uuid.uuid4()),
+        )
+
+    def action_requests(self, status: str = "waiting") -> dict[str, Any]:
+        return self._call("GET", "/action-requests", params={"status": status})
+
+    def decide_request(self, request_id: str, approve: bool, reason: str | None) -> dict[str, Any]:
+        verb = "approve" if approve else "reject"
+        return self._call(
+            "POST",
+            f"/action-requests/{quote(request_id, safe='')}:{verb}",
             body={"reason": reason},
             idempotency_key=str(uuid.uuid4()),
         )
