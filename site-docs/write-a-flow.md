@@ -56,15 +56,20 @@ it delivers, and a derived dataset is a query over references, read on its own t
 
 ```python
 materials = fc.Dataset(
-    "sap.material", source=memory.Source("sap"), key="material",
-    strategy=fc.strategy.snapshot_diff(), keep_state=True,
+    "sap.material",
+    source=memory.Source("sap"),
+    key="material",
+    strategy=fc.strategy.snapshot_diff(),
+    keep_state=True,
 )
 lines = fc.Dataset("zakya.line", source=memory.Source("zakya"), key="line", strategy=fc.strategy.replace())
 enrich = fc.sql(
     "select b.*, m.description from batch b left join {{ dataset('sap.material') }} m using (material)"
 )
 master = fc.Flow("materials", reads=materials, deliver=[fc.to(memory.Sink("lake"), name="materials-lake")])
-order_lines = fc.Flow("lines", reads=lines, deliver=[fc.to(memory.Sink("staging"), name="staging", map=enrich)])
+order_lines = fc.Flow(
+    "lines", reads=lines, deliver=[fc.to(memory.Sink("staging"), name="staging", map=enrich)]
+)
 
 h = FlowHarness(order_lines, also=[master])
 h.source("sap.material").load([{"material": "M1", "description": "Steel bar"}])
