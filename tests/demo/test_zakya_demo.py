@@ -301,7 +301,7 @@ def _invoice(invoice_id: str, *items: tuple[str, float, float], date: str = "202
 
 def test_the_erp_posts_once_checks_returns_against_their_invoice_and_reverses(tmp_path):
     erp = _Erp(_module("sap").ErpSim(tmp_path / "sap.sqlite"))
-    status, answer = erp.sim.answer("GET", "/http/materials", erp.auth, b"")
+    status, _, answer = erp.sim.answer("GET", "/http/materials", erp.auth, b"")
     assert status == 200 and {m["ean"] for m in answer["d"]["results"]} >= {TEA, RICE, SUGAR}
 
     memo = {"creditnote_id": "47-1", "ReferenceInvoice": "46-1", "BillingDocumentDate": "2026-11-13",
@@ -320,7 +320,7 @@ def test_the_erp_posts_once_checks_returns_against_their_invoice_and_reverses(tm
     status, answer = erp.post("creditmemos", {**memo, "creditnote_id": "47-2", "Items": [{"Material": TEA, "Quantity": 9, "NetAmount": 1}]})
     assert status == 422 and "only 8 left" in answer["error"]  # 12 sold, 4 back already
 
-    status, answer = erp.sim.answer(
+    status, _, answer = erp.sim.answer(
         "POST", "/http/creditmemos/reverse", {**erp.auth, "X-CSRF-Token": erp.csrf}, json.dumps(memo).encode()
     )
     assert status == 200 and [d["status"] for d in erp.sim.documents(iflow="creditmemos")] == ["reversed"]
@@ -410,10 +410,11 @@ def test_the_chain_posts_b2b_per_invoice_and_b2c_per_material_with_a_return_of_e
         )
         engine.register(runtime.tasks())
 
-        def run(flow: str) -> None:
+        def run(flow: str, *, held: bool = False) -> None:
             started = runtime.start_run(flow)
             engine.run_until_idle()
-            assert store.runs.get_run(started).status == "succeeded", flow
+            got = store.runs.get_run(started)
+            assert got.status == "succeeded" or (held and "held" in str(got.reason)), (flow, got.reason)
 
         def summaries() -> list[tuple[str, str, float, float]]:
             return sorted(
@@ -432,7 +433,7 @@ def test_the_chain_posts_b2b_per_invoice_and_b2c_per_material_with_a_return_of_e
             assert sorted(returns.values()) == ["B2B", "B2C"]
 
             clock.advance(timedelta(minutes=5))  # on_ready's at_most_every
-            run("invoices-to-sap")
+            run("invoices-to-sap", held=True)
             (delivery,) = store.ledger.list_deliveries(route="sap")
             assert delivery.status == "held" and erp.posts == 0  # nothing of it reaches SAP before approval
             runtime.approve("sap", delivery.version_id, actor="ann", reason="checked with finance")
