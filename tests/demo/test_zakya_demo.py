@@ -349,7 +349,7 @@ def test_the_erp_posts_once_checks_returns_against_their_invoice_and_reverses(tm
         "Items": [{"Material": "MAT-1001", "Quantity": 4, "NetAmount": 720}],
     }
     status, answer = erp.post("creditmemos", memo)
-    assert status == 422 and "not in the ERP" in answer["error"]  # its invoice isn't posted yet
+    assert status == 424 and "not in the ERP yet" in answer["error"]  # its invoice isn't posted yet
 
     status, answer = erp.post("invoices", _invoice("46-1", ("MAT-1001", 10, 1800), (TEA, 2, 360)), key="a")
     assert status == 201 and answer["d"]["Status"] == "posted"
@@ -521,6 +521,13 @@ def test_the_chain_posts_b2b_per_invoice_and_b2c_per_material_with_a_return_of_e
             run("invoices-to-sap", held=True)
             (delivery,) = store.ledger.list_deliveries(route="sap")
             assert delivery.status == "held" and erp.posts == 0  # nothing of it reaches SAP before approval
+
+            started = runtime.start_run("b2b-returns-to-sap")  # the credit note, before its invoice is in SAP
+            engine.run_until_idle()
+            assert store.runs.get_run(started).status == "failed"
+            (early,) = store.ledger.list_deliveries(route="sap-credit-memos")
+            assert early.status == "failed" and "424" in str(early.last_error) and erp.posts == 0
+
             runtime.approve("sap", delivery.version_id, actor="ann", reason="checked with finance")
             engine.run_until_idle()
             assert store.ledger.get("sap", delivery.version_id).status == "applied"
@@ -533,7 +540,11 @@ def test_the_chain_posts_b2b_per_invoice_and_b2c_per_material_with_a_return_of_e
             answers = store.responses.of_delivery("sap", delivery.version_id)
             assert len(answers) == 2 and all(str(a.fields["sap_document"]).startswith("9") for a in answers)
 
-            run("b2b-returns-to-sap")
+            runtime.retry(
+                "sap-credit-memos", early.version_id, actor="ann", reason="its invoice is posted now"
+            )
+            engine.run_until_idle()
+            assert store.ledger.get("sap-credit-memos", early.version_id).status == "applied"
             (memo,) = erp.documents(iflow="creditmemos")
             assert (memo["business_key"], memo["reference"], memo["status"]) == (b2b_return, small, "posted")
             assert [(i["material"], i["quantity"]) for i in memo["items"]] == [("MAT-1001", -4)]

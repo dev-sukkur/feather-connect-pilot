@@ -12,7 +12,8 @@ Staging, in the Postgres of `feather dev` (schema `zakya_demo`):
 To SAP, once a run's documents are in staging (`fc.on_ready`, at most every 5 minutes):
 
 - B2B, one document per document: `invoices-to-sap` posts a billing document per invoice, and `b2b-returns-to-sap`
-  a credit memo per credit note, against the invoice it names. Either one over 500,000 holds its delivery for an
+  a credit memo per credit note, against the invoice it names; while SAP doesn't have that invoice yet (it is held
+  for approval, say), the credit memo's delivery fails, and a Retry on the Failures page posts it once it has. Either one over 500,000 holds its delivery for an
   approver (Holds page); an applied delivery can be reversed (Compensate, on the delivery's page).
 - B2C, summarised: `b2c-to-sap` (flows/b2c.py) sums the new B2C lines per day and material and posts one summary per
   day, material and direction (sales, returns).
@@ -22,10 +23,11 @@ import json
 from typing import Any
 
 import feather_connect as fc
-from feather_connect.connectors import postgres, sap_cpi, zakya  # pyright: ignore[reportAttributeAccessIssue]
+from feather_connect.connectors import http, postgres, sap_cpi, zakya  # pyright: ignore[reportAttributeAccessIssue]
 from feather_connect.templates.retail import EVERY_MINUTE  # pyright: ignore[reportMissingImports]
 
 APPROVAL_ABOVE = 500_000
+NOT_YET = frozenset({424})  # SAP's answer to a credit memo whose invoice it doesn't have yet
 EVERY_FIVE_MINUTES = "5m"
 
 
@@ -270,6 +272,9 @@ b2b_returns_to_sap = fc.Flow(
                 path="/http/creditmemos",
                 reversal_path="/http/creditmemos/reverse",
                 response_map={"sap_document": "d.BillingDocument"},
+                # SAP answers 424 while the invoice isn't there: the delivery fails, to be retried once it is,
+                # rather than the credit memo being turned down for good.
+                fail_statuses=NOT_YET | http.DEFAULT_FAIL_STATUSES,
             ),
             name="sap-credit-memos",
             map=to_credit_memo,

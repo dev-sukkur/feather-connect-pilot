@@ -8,8 +8,9 @@ The iFlows:
   material has its ERP number, its EAN-13 and its POS code, so Zakya's lines can be matched by either barcode.
 - `POST /http/invoices`: a B2B invoice, one billing document (F2) per Zakya invoice, keyed by `invoice_id`.
 - `POST /http/creditmemos`: a B2B return, a credit memo (G2) keyed by `creditnote_id`, against the billing document
-  of `ReferenceInvoice`. It is turned down (422) when that invoice isn't in the ERP, or when it gives back more of a
-  material than the invoice sold and earlier credit memos took back.
+  of `ReferenceInvoice`. It answers 424 (Failed Dependency) while that invoice isn't in the ERP, for the sender to
+  try again later, and turns it down (422) when it gives back more of a material than the invoice sold and earlier
+  credit memos took back.
 - `POST /http/salessummary`: B2C sales or returns of one material on one day, as the integration summed them,
   keyed by `document_id`. Returns carry a negative quantity and amount.
 - `POST /http/<iflow>/reverse`: takes a posted document back, once (Feather's compensation).
@@ -270,7 +271,7 @@ class ErpSim:
         ).fetchone()
         if invoice is None:
             raise Turned(
-                422, f"invoice {reference or '(none)'} is not in the ERP: post it before its credit memo"
+                424, f"invoice {reference or '(none)'} is not in the ERP yet: post it before its credit memo"
             )
         sold = {
             r["material"]: r["quantity"]
