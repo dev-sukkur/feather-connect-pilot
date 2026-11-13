@@ -12,6 +12,7 @@ from feather_cli.commands import (
     dev,
     environment,
     holds,
+    mcp,
     new,
     package,
     processes,
@@ -78,6 +79,7 @@ for command in (
     app.command()(command)
 app.add_typer(processes.server_app, name="server")
 app.command()(processes.worker)
+app.command()(mcp.mcp)
 app.command()(dev.dev)
 
 if __name__ == "__main__":

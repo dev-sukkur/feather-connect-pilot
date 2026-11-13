@@ -316,7 +316,7 @@ def create_token(
         str | None,
         typer.Option(
             "--role",
-            help="admin or operator, no higher than its user's. Without it, its user's role, or operator.",
+            help="admin, developer, operator or viewer, no higher than its user's. Without it, its user's role, or operator. Give an agent a viewer token.",
             show_default=False,
         ),
     ] = None,

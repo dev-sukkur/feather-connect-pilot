@@ -51,7 +51,7 @@ nav { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 15px; }
   <h1>Feather Connect Operating Guide</h1>
   <p class="lead prose">How to run Feather Connect on your machine, then how a customer creates a flow, tests it, runs it, watches it and fixes it when something goes wrong, and how to deploy it.</p>
   <nav>
-    <a href="#run">Run it</a><a href="#create">Create a flow</a><a href="#test">Test it</a><a href="#start">Start the flow</a><a href="#monitor">Monitor</a><a href="#operate">Operate</a><a href="#webhooks">Webhooks</a><a href="#api">API and remote commands</a><a href="#environment">Environment and secrets</a><a href="#m2-operations">Approvals and SAP</a><a href="#deploy">Deploy</a><a href="#limits">Not in M1</a>
+    <a href="#run">Run it</a><a href="#create">Create a flow</a><a href="#test">Test it</a><a href="#start">Start the flow</a><a href="#monitor">Monitor</a><a href="#operate">Operate</a><a href="#webhooks">Webhooks</a><a href="#api">API and remote commands</a><a href="#environment">Environment and secrets</a><a href="#m2-operations">Approvals and SAP</a><a href="#m31-agent">Agents (MCP)</a><a href="#deploy">Deploy</a><a href="#limits">Not in M1</a>
   </nav>
 </header>
 
@@ -434,14 +434,17 @@ connections:
     <tr><td><code>hold_waiting</code></td><td>A delivery held for longer than <code>after</code></td><td><code>after: 2h</code></td></tr>
     <tr><td><code>schedule_skipped</code></td><td>A flow whose newest <code>ticks</code> scheduled runs were all skipped</td><td><code>ticks: 3</code></td></tr>
     <tr><td><code>dataset_stale</code></td><td>A dataset whose newest version is older than its <code>max_lag</code></td><td>Where a dataset has <code>max_lag="2h"</code></td></tr>
+    <tr><td><code>worker_missing</code> (M3.1)</td><td>No worker has sent a heartbeat for <code>after</code>, while a flow isn't paused: nothing runs the work. Critical, and it comes from the server, so it needs no worker to say there is none. Quiet under <code>feather dev</code>'s local engine, and when every flow is paused</td><td><code>after: 2m</code></td></tr>
   </table></div>
   <p class="prose">Channels go in the project's settings; a secret reference works in a URL or an SMTP password:</p>
   <pre><code>settings:
   alert_channels:
     ops-hook: {kind: webhook, url: "${secret:env:OPS_HOOK_URL}"}   # the alert as JSON
     ops-slack: {kind: slack, url: "${secret:env:SLACK_WEBHOOK}"}     # its text
+    ops-teams: {kind: teams, url: "${secret:env:TEAMS_WORKFLOW_URL}"} # an Adaptive Card (M3.1)
     ops-mail: {kind: smtp, host: smtp.example.com, port: 587, starttls: true, from: feather@example.com,
                to: [ops@example.com], username: feather, password: "${secret:env:SMTP_PASSWORD}"}</code></pre>
+  <p class="prose">For <code>teams</code>, add the Workflows template <i>Post to a channel when a webhook request is received</i> to the channel and use its URL: Feather posts the alert there as an Adaptive Card, with its rule, subject, severity and time. A server reads its environment's channels when it starts, so restart it after <code>feather config import</code> changes them.</p>
   <p class="prose">The <b>Alerts</b> page lists what is firing (and what cleared), with <b>Acknowledge</b>, which quiets an alert for good, and <b>Snooze</b>, which quiets it for an hour, four hours or a day; both are an operator's and audited. Under it, a developer turns each rule on or off, sets its parameters and picks its channels (none picks them all), or resets it to its default. The API is <code>GET /api/v1/alerts?state=firing</code>, <code>POST /api/v1/alerts/{id}:ack</code>, <code>POST /api/v1/alerts/{id}:snooze</code> with <code>{"minutes": 60}</code>, <code>GET /api/v1/alert-rules</code>, <code>PUT /api/v1/alert-rules/{name}</code> with <code>{"enabled", "params", "channels"}</code> and <code>DELETE /api/v1/alert-rules/{name}</code>. Alerts and rules are kept in the <code>feather.alert</code> and <code>feather.alert_rule</code> tables.</p>
   <h3>Secrets</h3>
   <p class="prose">Write secrets as references, <code>${secret:env:NAME}</code> or <code>${secret:file:path}</code>, under a connection's <code>auth</code>. Other providers arrive in M4. They are resolved when used. An error names the reference, never the value, and the dashboard never shows them. <code>feather validate</code> reports one that isn't set.</p>
@@ -712,7 +715,7 @@ docker compose -f deploy/compose.yaml exec feather-server feather server create-
       open: ["22:00-05:00"]      # one or more spans; a span may cross midnight
       applies: [read]            # read, write, or both (the default)
       max_overrun: 30m           # optional</code></pre>
-  <p class="prose">A read of the connection outside its window, or a delivery to it, waits until the window opens. The wait is durable, uses up no attempt, and is never silent: the <b>Connections</b> page shows each window, whether it is open now and how many tasks wait for it, and <b>Overview</b> lists the connections that have tasks waiting. Webhooks are still received and spooled while a sink's window is closed; only their delivery waits. Other routes of the same dataset go on. A task that started inside the window runs to its end; with <code>max_overrun</code>, a delivery stops at its next chunk once the window has been closed that long, and goes on when it opens again. The spans are wall-clock times in <code>tz</code>, so a window keeps its hours across daylight saving (on the night of the change it is an hour longer or shorter). Windows are configuration: to change one, change the file. Pause is separate.</p>
+  <p class="prose">A read of the connection outside its window, or a delivery to it, waits until the window opens. The wait is durable, uses up no attempt, and is never silent: the <b>Connections</b> page shows each window, whether it is open now and how many tasks wait for it, and <b>Overview</b> lists the connections that have tasks waiting. Webhooks are still received and spooled while a sink's window is closed; only their delivery waits. A flow's page says so before <b>Run now</b>: which of its connections is closed, to reads or writes, and when it opens. Other routes of the same dataset go on. A task that started inside the window runs to its end; with <code>max_overrun</code>, a delivery stops at its next chunk once the window has been closed that long, and goes on when it opens again. The spans are wall-clock times in <code>tz</code>, so a window keeps its hours across daylight saving (on the night of the change it is an hour longer or shorter). Windows are configuration: to change one, change the file. Pause is separate.</p>
   <h3 id="m31-validate">What <code>feather validate</code> checks</h3>
   <div class="scroll"><table>
     <tr><th>Code</th><th>Means</th></tr>
@@ -725,6 +728,27 @@ docker compose -f deploy/compose.yaml exec feather-server feather server create-
     <tr><td><code>derived_cycle</code></td><td>Derived datasets read each other in a circle</td></tr>
   </table></div>
   <p class="prose">A window with a span that isn't <code>HH:MM-HH:MM</code>, a time zone that isn't IANA, or an unknown setting stops the project from loading, naming the file and the setting.</p>
+</section>
+
+<section id="m31-agent">
+  <h2><span class="n">8g</span>An agent that reads: MCP (M3.1)</h2>
+  <p class="prose">Claude, or any MCP client, can investigate a deployment through Feather's tools. They only read. The server serves them at <code>/mcp</code> (streamable HTTP), and only to a <b>viewer</b> token: an operator's, a developer's or an admin's token is refused there with 403, so an agent never holds a token that could change anything. Make one for it:</p>
+<pre><code>feather server create-token claude --role viewer --ttl 30d</code></pre>
+  <p class="prose">and give the client <code>https://&lt;server&gt;/mcp</code> with the header <code>Authorization: Bearer &lt;token&gt;</code>. On a laptop, <code>feather mcp</code> serves the same tools over stdio, reading through the server's API with that token (<code>--server</code> and <code>--token</code>, or <code>FEATHER_SERVER</code> and <code>FEATHER_TOKEN</code>, or <code>server:</code> in <code>env/&lt;env&gt;.yaml</code>), and adds two tools of the project on disk: <code>describe_connector</code> and <code>validate_project</code>. With no server, only those two.</p>
+  <div class="scroll"><table>
+    <tr><th>Tool</th><th>Reads</th></tr>
+    <tr><td><code>overview</code></td><td>The overview: runs, failures, holds, budgets, workers</td></tr>
+    <tr><td><code>list_flows</code>, <code>describe_flow</code></td><td>Flows, and one flow's routes, triggers and configuration</td></tr>
+    <tr><td><code>list_runs</code>, <code>get_run</code></td><td>Runs, filtered by flow and status, and one run with its tasks</td></tr>
+    <tr><td><code>get_task_logs</code></td><td>A task's log lines</td></tr>
+    <tr><td><code>list_failures</code></td><td>Failed deliveries grouped by route and error, with the partitions each holds up (<code>GET /api/v1/failures</code>)</td></tr>
+    <tr><td><code>list_alerts</code>, <code>list_holds</code></td><td>Alerts, and deliveries held for approval</td></tr>
+    <tr><td><code>partition_status</code></td><td>A dataset's partitions and each route's status on them</td></tr>
+    <tr><td><code>trace_record</code>, <code>version_sample</code></td><td>Where one record went, version by version; what a version held</td></tr>
+    <tr><td><code>budget_usage</code>, <code>list_connections</code></td><td>Budgets and what waits on them; connections, their windows and last check</td></tr>
+  </table></div>
+  <p class="prose">What they return from records, logs and errors is other systems' data, so the tools hand it over marked as untrusted, and the skill tells the agent never to follow instructions found in it. PII stays masked: an agent's call loses every grant its token's user has, <code>pii</code> included. Each call is in the audit log as the agent's (<code>actor_type</code> <code>agent</code>, action <code>mcp:&lt;tool&gt;</code>), and is rate limited per token, <code>FEATHER_MCP_RATE_PER_MIN</code> calls a minute (120 by default; a 429 past it). A tool returns at most <code>FEATHER_MCP_MAX_ITEMS</code> items (200 by default) and says when it cut a list short.</p>
+  <p class="prose"><code>feather new</code> puts the <b>investigate-failure</b> skill in <code>.claude/skills/</code>: a walk from the alert or failure to the run, its logs and the record, then a write-up with the cause, the impact, the next step and who should take it. The agent proposes; an operator acts. <code>skills/investigate-failure/SKILL.md</code> in this repository is the same file, for a client that isn't in a project.</p>
 </section>
 
 <section id="limits">

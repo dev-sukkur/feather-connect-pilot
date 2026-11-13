@@ -29,7 +29,7 @@ from feather_connect.storage.postgres.migrate import at_head, migrate
 from feather_connect.storage.spool import Spool
 from feather_connect.vault import Vault, keyring_from_env
 from feather_connect.worker import config_of
-from feather_server import api, auth, ingress, registry, renames, web
+from feather_server import agent, api, auth, ingress, registry, renames, web
 from feather_server.loops import LoopRunner, default_loops
 from feather_server.package_push import PackagePushes
 from feather_server.services.accounts import Accounts
@@ -162,7 +162,8 @@ def create_app(
         for runner in running:
             runner.start()
         try:
-            yield
+            async with mcp_running():
+                yield
         finally:
             for runner in running:
                 runner.stop()
@@ -198,6 +199,7 @@ def create_app(
     auth.install(app, state)
     api.install(app)
     registry.install(app)
+    mcp_running = agent.install(app)  # before the dashboard's catch-all routes
     web.install(app, state)
 
     @app.get("/healthz")

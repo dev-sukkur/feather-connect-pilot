@@ -162,3 +162,46 @@ def test_the_api_and_the_alerts_page(world: World, told: Told):
     assert page.status_code == 200 and "budget_high" in page.text and '/ack"' not in page.text
     assert 'href="/alerts"' in page.text
     assert "budget api has used" in sign_in(app).get("/alerts").text
+
+
+def test_no_worker_heartbeat_fires_worker_missing_and_the_next_one_clears_it(
+    world: World, told: Told
+):  # M3.1 O1
+    world.state.settings = replace(
+        world.state.settings, engine="dbos"
+    )  # the local engine runs work in the server
+    world.store.workers.heartbeat("w1", {}, "sha", 4)
+    evaluate_once(world.state, told)
+    assert _firing(world, "worker_missing") == []
+    world.clock.advance(timedelta(minutes=3))
+    evaluate_once(world.state, told)
+    [alert] = _firing(world, "worker_missing")
+    assert (alert.subject, alert.severity) == ("environment:dev", "critical")
+    assert ("ops", "worker_missing", "critical") in told.calls
+    world.store.workers.heartbeat("w1", {}, "sha", 4)
+    evaluate_once(world.state, told)
+    assert _firing(world, "worker_missing") == []
+
+
+def test_worker_missing_is_quiet_when_every_flow_is_paused_or_the_server_runs_the_work(
+    world: World, told: Told
+):
+    world.clock.advance(timedelta(minutes=10))
+    evaluate_once(world.state, told)  # the local engine: no workers to miss
+    assert _firing(world, "worker_missing") == []
+    world.state.settings = replace(world.state.settings, engine="dbos")
+    world.store.overrides.set("flow:orders", "paused", True, actor="ops", reason="maintenance")
+    evaluate_once(world.state, told)
+    assert _firing(world, "worker_missing") == []
+
+
+def test_a_teams_channel_gets_an_adaptive_card(world: World):
+    from feather_server.services.alerts import teams_card
+
+    world.store.alerts.fire("worker_missing", "environment:dev", "critical", "no worker")
+    [alert] = world.store.alerts.list_alerts("firing")
+    card = teams_card(alert)
+    assert card["type"] == "message"
+    [attachment] = card["attachments"]
+    assert attachment["contentType"] == "application/vnd.microsoft.card.adaptive"
+    assert attachment["content"]["body"][1]["text"] == "no worker"

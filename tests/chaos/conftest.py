@@ -4,10 +4,12 @@ Each test gets its own database, on the test server or on a server of its own, s
 can reach the next test. A test only ever kills processes that it started and holds.
 """
 
+import shutil
 import subprocess
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +77,7 @@ class World:
         self.starts: dict[str, int] = {}
         self.hook_token = HOOK_TOKEN  # the bearer token of the declared webhook
         self.port = free_port()  # a server's, kept across its restarts
+        self.project = PROJECT  # or a copy of it, which `with_window` changes
 
     def reconnect(self) -> None:
         """Open the test's own session again, after the server has been away."""
@@ -94,7 +97,7 @@ class World:
         self.starts[worker_id] = self.starts.get(worker_id, 0) + 1
         with (self.logs / f"{worker_id}.log").open("ab") as log:
             self.procs[worker_id] = start_worker(
-                PROJECT, self.url, worker_id, env=self._env(worker_id), log=log
+                self.project, self.url, worker_id, env=self._env(worker_id), log=log
             )
         host = self.host_of(worker_id)
         wait_until(lambda: host in [w.worker_id for w in self.store.workers.list_workers()], 120)
@@ -106,6 +109,25 @@ class World:
             "FEATHER_CHAOS_WHO": self.who(process_id),
             "FEATHER_CHAOS_HOOK_TOKEN": HOOK_TOKEN,
         }
+
+    def with_window(self, connection: str, opens: datetime, minutes: int = 30) -> datetime:
+        """From now on, start processes on a copy of the project in which the sink `connection` takes writes only from
+        `opens`, a whole minute in UTC, for `minutes`. Call it before starting any. Returns `opens`."""
+        copy = self.logs / "project"
+        if not copy.exists():
+            shutil.copytree(PROJECT, copy, ignore=shutil.ignore_patterns("__pycache__"))
+        config = copy / "feather.yaml"
+        text = config.read_text(encoding="utf-8")
+        line = f"  {connection}: {{connector: chaos.slow_sink}}"
+        assert text.count(line) == 1, connection
+        span = f"{opens:%H:%M}-{opens + timedelta(minutes=minutes):%H:%M}"
+        window = f'{{tz: UTC, open: ["{span}"], applies: [write]}}'
+        config.write_text(
+            text.replace(line, f"  {connection}: {{connector: chaos.slow_sink, windows: {window}}}"),
+            encoding="utf-8",
+        )
+        self.project = copy
+        return opens
 
     def version(self) -> str:
         """The installed version, which the project's flows are active on once a worker has started."""
@@ -138,7 +160,7 @@ class World:
         env = self._env(server_id)
         log_file = self.logs / f"{server_id}.log"
         with log_file.open("ab") as log:
-            proc = start_server(PROJECT, self.url, self.port, env=env, log=log)
+            proc = start_server(self.project, self.url, self.port, env=env, log=log)
         self.procs[server_id] = proc
         try:
             wait_until(lambda: server_is_ready(proc, self.server_address, log_file), 90)
