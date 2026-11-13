@@ -43,9 +43,11 @@ class FlowHarness:
 
     Load rows into a source with `source(dataset).load(rows)`, which makes them the source's whole contents. `run`
     runs the flow to the end. `clock` defaults to a frozen clock shared by the engine, the store and the runtime.
+    `also` adds other flows of the project, swapped the same way, such as the one that keeps a reference dataset a
+    transform or a derived dataset reads; `run(flow=name)` runs one of them.
     """
 
-    def __init__(self, flow: Flow, *, clock: Clock | None = None) -> None:
+    def __init__(self, flow: Flow, *, clock: Clock | None = None, also: Sequence[Flow] = ()) -> None:
         self._flow = flow
         self.clock: Clock = FrozenClock(_START) if clock is None else clock
         self._sources: dict[str, memory.Source] = {}
@@ -53,7 +55,12 @@ class FlowHarness:
         self.store = MemoryStore(self.clock)
         self.engine = LocalEngine(self.clock if isinstance(self.clock, FrozenClock) else None)
         self.runtime = Runtime(
-            [self._swapped(flow)], self.store, MemorySpool(), self.engine, code_sha="test", clock=self.clock
+            [self._swapped(f) for f in (flow, *also)],
+            self.store,
+            MemorySpool(),
+            self.engine,
+            code_sha="test",
+            clock=self.clock,
         )
         self.engine.register(self.runtime.tasks())
 
@@ -78,9 +85,10 @@ class FlowHarness:
         """Return the in-memory sink standing in for the route's."""
         return self._sinks[route_name]
 
-    def run(self, *, partitions: Sequence[str] | None = None) -> str:
-        """Start a manual run of the flow, run it until nothing is left to do and return its id."""
-        run_id = self.runtime.start_run(self._flow.name, partitions=partitions)
+    def run(self, *, partitions: Sequence[str] | None = None, flow: str | None = None) -> str:
+        """Start a manual run of the flow, or of the flow named `flow`, run it until nothing is left to do and return
+        its id."""
+        run_id = self.runtime.start_run(flow or self._flow.name, partitions=partitions)
         self.engine.run_until_idle()
         return run_id
 

@@ -30,6 +30,7 @@ from feather_connect.engine.port import RetryPolicy, TaskContext
 from feather_connect.logs import redact
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import NOT_DELIVERED
+from feather_connect.runtime.references import TaskReferences
 from feather_connect.storage.port import (
     CLOSED,
     Delivery,
@@ -258,6 +259,13 @@ class _ChunkSender:
         self._deps = deps
         self._last_chunks: dict[str, int] | None = None
         self._moves: dict[str, str] | None = None
+        self.references = TaskReferences(deps.store, deps.store.secrets.tenant)
+
+    def _context(self) -> Context:
+        """A context for the sink's connection, reading references through this delivery's (M3.1 F1)."""
+        context = self._deps.make_context(self._route.sink.connection)
+        context.references = self.references
+        return context
 
     def send(self, chunk_no: int) -> _Counts:
         """Send one chunk."""
@@ -276,14 +284,14 @@ class _ChunkSender:
         if self._route.map is None or self._plan.clears:
             return
         version = self._deps.store.versions.get(self._delivery.version_id)
-        context = self._deps.make_context(self._route.sink.connection)
+        context = self._context()
         for chunk_no in self._plan.chunks:
             self._records(version, chunk_no, context)
 
     def reverse(self, chunk_no: int) -> int:
         """Compensate one chunk: the sink reverses what it applied of it (design §6.5). Returns how many it reversed."""
         version = self._deps.store.versions.get(self._delivery.version_id)
-        context = self._deps.make_context(self._route.sink.connection)
+        context = self._context()
         records, _ = self._records(version, chunk_no, context)
         if not records:
             return 0
@@ -306,7 +314,7 @@ class _ChunkSender:
     def _send(self, chunk_no: int) -> _Counts:
         route, delivery, plan = self._route, self._delivery, self._plan
         version = self._deps.store.versions.get(delivery.version_id)
-        context = self._deps.make_context(route.sink.connection)
+        context = self._context()
         records, rejected = ([], 0) if plan.clears else self._records(version, chunk_no, context)
         if not records and route.mode != "replace_partition":
             return _Counts(rejected=rejected)
@@ -511,7 +519,9 @@ class _ChunkSender:
         self._deps.store.quarantine.add(name, self._delivery.version_id, key, redact(message), payload=kept)
 
 
-def _fail(delivery: Delivery, error: str, deps: RuntimeDeps) -> None:
+def _fail(
+    delivery: Delivery, error: str, deps: RuntimeDeps, references: Mapping[str, int] | None = None
+) -> None:
     ledger = deps.store.ledger
     if ledger.get(delivery.route, delivery.version_id).status == "running":  # not if a crash came after this
         ledger.transition(
@@ -522,6 +532,7 @@ def _fail(delivery: Delivery, error: str, deps: RuntimeDeps) -> None:
             reason="permanent error",
             error=redact(error),
             code_sha=deps.code_sha,
+            references=references or None,
         )
 
 
@@ -555,7 +566,12 @@ def _supersede(delivery: Delivery, plan: _Plan, deps: RuntimeDeps) -> None:
 
 
 def _finish(
-    dataset: Dataset, delivery: Delivery, plan: _Plan, totals: Sequence[_Counts], deps: RuntimeDeps
+    dataset: Dataset,
+    delivery: Delivery,
+    plan: _Plan,
+    totals: Sequence[_Counts],
+    deps: RuntimeDeps,
+    references: Mapping[str, int] | None = None,
 ) -> None:
     """Mark the delivery applied, unless a crash came after that, and resolve what it supersedes."""
     ledger = deps.store.ledger
@@ -569,6 +585,7 @@ def _finish(
             rows_applied=sum(counts.applied for counts in totals),
             rows_rejected=sum(counts.rejected for counts in totals),
             code_sha=deps.code_sha,
+            references=references or None,
         )
     if dataset.keep_state:
         _supersede(delivery, plan, deps)
@@ -757,6 +774,7 @@ def _deliver(
     """Apply one delivery and return True, or return False if it failed or is held, which blocks its partition."""
     version_id = delivery.version_id
     totals: list[_Counts] = []
+    sender: _ChunkSender | None = None
     run_id = deps.store.versions.get(version_id).run_id
     waits = partial(note_wait, deps, ctx.task_ref, run_id)
     try:
@@ -777,9 +795,12 @@ def _deliver(
             totals.append(_step_durably(ctx, f"chunk:{version_id}:{chunk_no}", send, deps.retry, waits))
     except PermanentError as error:
         message = str(error)
-        ctx.step(f"fail:{version_id}", lambda: _fail(delivery, message, deps))
+        used = None if sender is None else sender.references.used
+        ctx.step(f"fail:{version_id}", lambda: _fail(delivery, message, deps, used))
         return False
-    ctx.step(f"end:{version_id}", lambda: _finish(dataset, delivery, plan, totals, deps))
+    assert sender is not None  # made before the first chunk, and nothing above returns without it
+    used = sender.references.used
+    ctx.step(f"end:{version_id}", lambda: _finish(dataset, delivery, plan, totals, deps, used))
     return True
 
 

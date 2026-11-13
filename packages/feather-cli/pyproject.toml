@@ -5,7 +5,7 @@ description = "The feather command: validate, run the server and workers, and th
 requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
-    "feather-connect[postgres]",
+    "feather-connect[postgres,sql]",
     "feather-engine-dbos",
     "feather-generic",
     "feather-server",

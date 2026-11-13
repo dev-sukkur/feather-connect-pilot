@@ -1055,6 +1055,25 @@ def update_state(dataset: Dataset, version: Version, deps: RuntimeDeps) -> None:
         deps.store.state.delete_many(dataset.name, (r.key for r in current if r.op == "delete"))
 
 
+STATE_MARK_TARGET = "sealer"  # named so before batch datasets marked their state too (M3.1 F1)
+STATE_MARK_KEY = (
+    "state_updated_to"  # the seal_seq up to which the dataset's record state is known to be written
+)
+
+
+def state_marker(dataset_name: str) -> str:
+    return f"{STATE_MARK_TARGET}:{dataset_name}"
+
+
+def mark_state(dataset: Dataset, versions: Sequence[Version], deps: RuntimeDeps) -> None:
+    """Note that the dataset's record state is written up to the newest of `versions`: the stamp a reference to it
+    is read and cached by (M3.1 F1), and where the sealer's catch-up starts (S11)."""
+    newest = max((v.seal_seq or 0 for v in versions), default=0)
+    done = deps.store.overrides.get(state_marker(dataset.name), STATE_MARK_KEY)
+    if newest and (done is None or newest > int(done)):
+        deps.store.overrides.set(state_marker(dataset.name), STATE_MARK_KEY, newest, actor="sealer")
+
+
 def finalize_versions(
     dataset: Dataset,
     versions: Sequence[Version],
@@ -1114,6 +1133,7 @@ def _finalize(
     if dataset.keep_state:
         for version in sealed:
             update_state(dataset, version, deps)
+        mark_state(dataset, sealed, deps)
     for version in sealed:
         deps.spool.delete_chunks(version.version_id, "candidates")
     for version_id in silent:
