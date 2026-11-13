@@ -31,6 +31,7 @@ from feather_connect.logs import redact
 from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import NOT_DELIVERED
 from feather_connect.runtime.references import TaskReferences
+from feather_connect.runtime.windows import wait_for_window
 from feather_connect.storage.port import (
     CLOSED,
     Delivery,
@@ -785,12 +786,15 @@ def _deliver(
             hold = partial(_hold_for_approval, route, delivery, deps)
             if _step_durably(ctx, f"approval:{version_id}", hold, deps.retry):
                 return False
+        connection = route.sink.connection
+        wait_for_window(ctx, deps, connection, "write", run_id, version_id)
         start = partial(_start, route, delivery, deps)
         plan = _step_durably(ctx, f"start:{version_id}", start, deps.retry)
         sender = _ChunkSender(dataset, route, delivery, plan, deps)
         if route.mode == "replace_partition":
             _step_durably(ctx, f"maps:{version_id}", sender.check_maps, deps.retry)
         for chunk_no in plan.chunks:
+            wait_for_window(ctx, deps, connection, "write", run_id, f"{version_id}:{chunk_no}", overrun=True)
             send = partial(sender.send, chunk_no)
             totals.append(_step_durably(ctx, f"chunk:{version_id}:{chunk_no}", send, deps.retry, waits))
     except PermanentError as error:

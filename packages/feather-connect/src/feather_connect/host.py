@@ -50,6 +50,7 @@ from feather_connect.packages.link import HostSide, LinkError
 from feather_connect.project import (
     Project,
     ProjectError,
+    connection_windows,
     environment_layer,
     load_project,
     prefixed,
@@ -306,6 +307,7 @@ def run_host(
             config_of=lambda connection: config_of(project, connection),
             timezone=str(project.settings["timezone"]),
             prefix=package,
+            windows=connection_windows(project),
         )
         submitted: dict[str, float] = {}
 

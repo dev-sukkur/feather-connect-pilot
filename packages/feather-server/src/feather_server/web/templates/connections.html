@@ -4,12 +4,12 @@
 {{ m.page_head("Connections", tiles) }}
 <p class="muted lead">The systems flows read from and deliver to. A check asks the connector to reach its system; it waits at most {{ timeout }} seconds. Secrets are never shown: only the names of the settings that hold them.</p>
 {{ m.notice_of(notice) }}
-{% call m.toolbar("/connections", q, "connections", columns=[("connector", "Connector"), ("site", "Site"), ("budget", "Budget"), ("flows", "Used by"), ("secrets", "Secret settings"), ("check", "Last check")], table="connections") %}{% endcall %}
+{% call m.toolbar("/connections", q, "connections", columns=[("connector", "Connector"), ("site", "Site"), ("budget", "Budget"), ("window", "Window"), ("flows", "Used by"), ("secrets", "Secret settings"), ("check", "Last check")], table="connections") %}{% endcall %}
 <div id="live">
 {% if connections %}
 <div class="table-wrap scroll"><table class="data" data-table="connections">
   <caption class="sr-only">Connections of the project</caption>
-  <thead><tr><th scope="col" data-sort>Connection</th><th scope="col" data-col="connector" data-sort>Connector</th><th scope="col" data-col="site" data-sort>Site</th><th scope="col" data-col="budget">Budget</th><th scope="col" data-col="flows">Used by</th><th scope="col" data-col="secrets">Secret settings</th><th scope="col" data-col="check" data-sort>Last check</th>{% if can(actor, "connections.check") %}<th scope="col">Check</th>{% endif %}</tr></thead>
+  <thead><tr><th scope="col" data-sort>Connection</th><th scope="col" data-col="connector" data-sort>Connector</th><th scope="col" data-col="site" data-sort>Site</th><th scope="col" data-col="budget">Budget</th><th scope="col" data-col="window">Window</th><th scope="col" data-col="flows">Used by</th><th scope="col" data-col="secrets">Secret settings</th><th scope="col" data-col="check" data-sort>Last check</th>{% if can(actor, "connections.check") %}<th scope="col">Check</th>{% endif %}</tr></thead>
   <tbody>
   {% for c in connections %}
     <tr id="{{ connection_anchor(c.name) }}">
@@ -17,6 +17,7 @@
       <td data-col="connector"><code>{{ c.connector }}</code></td>
       <td data-col="site">{% if c.site %}{{ c.site }}{% else %}<span class="muted">none</span>{% endif %}</td>
       <td data-col="budget">{% if c.budget %}{{ c.budget }}{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td data-col="window">{% if c.window %}{% if c.window_open %}<span class="state tone-ok"><span class="dot" aria-hidden="true"></span>Open</span>{% else %}<span class="state tone-warn"><span class="dot" aria-hidden="true"></span>Closed</span>{% endif %} <span class="muted">{{ c.window }}</span>{% if c.window_waits %}<div>{{ c.window_waits }} task{% if c.window_waits != 1 %}s{% endif %} waiting</div>{% endif %}{% else %}<span class="muted">always</span>{% endif %}</td>
       <td data-col="flows">{% for f in c.flows %}<a href="/flows/{{ f | urlencode }}">{{ f }}</a>{% if not loop.last %}, {% endif %}{% else %}<span class="muted">no flow</span>{% endfor %}</td>
       <td data-col="secrets">{% for name in c.credentials %}<code>{{ name }}</code> <span class="secret">***</span>{% if not loop.last %}, {% endif %}{% else %}<span class="muted">none</span>{% endfor %}</td>
       <td data-col="check">

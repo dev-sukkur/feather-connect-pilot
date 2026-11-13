@@ -23,6 +23,7 @@ from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import BudgetDeferred, PermanentError
 from feather_connect.core.flow import Flow, RouteSpec
+from feather_connect.core.windows import AvailabilityWindow
 from feather_connect.engine.port import Engine, RetryPolicy, TaskCall, TaskContext, TaskFn
 from feather_connect.ids import new_id
 from feather_connect.logs import bind, redact
@@ -39,6 +40,7 @@ from feather_connect.runtime.deps import RuntimeDeps
 from feather_connect.runtime.extract import ExtractFailed, VerifyResult, discard_abandoned, run_extract
 from feather_connect.runtime.plan import run_plan
 from feather_connect.runtime.seal import run_seal
+from feather_connect.runtime.windows import wait_for_window
 from feather_connect.storage.port import (
     CLOSED,
     STREAM_TRIGGER,
@@ -125,6 +127,7 @@ class Runtime:
     connector; it is called each time a context is made, so a secret is never kept. `timezone` is the IANA name of
     the time zone that contexts carry. `prefix` is the package prefix of an installed package's flows: a task an M1
     worker submitted before the upgrade to packages (§13) names them without it, and is found by the prefixed name.
+    `windows` maps a connection to its availability window (M3.1 F3).
     """
 
     def __init__(
@@ -142,6 +145,7 @@ class Runtime:
         config_of: Callable[[str], Mapping[str, Any]] | None = None,
         timezone: str = _UTC,
         prefix: str | None = None,
+        windows: Mapping[str, AvailabilityWindow] | None = None,
     ) -> None:
         self._engine = engine
         self._tenant = (
@@ -150,7 +154,13 @@ class Runtime:
         self._prefix = prefix
         self._clock: Clock = SystemClock() if clock is None else clock
         self._deps = RuntimeDeps(
-            store, spool, self._clock, code_sha, make_context or self._default_context, package=prefix
+            store,
+            spool,
+            self._clock,
+            code_sha,
+            make_context or self._default_context,
+            package=prefix,
+            windows=dict(windows or {}),
         )
         self._flows: dict[str, Flow] = {}
         self._datasets: dict[str, Dataset] = {}
@@ -786,6 +796,10 @@ class Runtime:
             flow, dataset = self.flow(args["flow"]), self.dataset(args["dataset"])
             sliced = ctx.step("sliced", lambda: bool(versions.slices_for_run(run_id, dataset.name)))
             extract = lambda: self._extract(flow, dataset, run_id, partition, sliced, tick)
+            if not getattr(dataset.source, "connectionless", False):
+                wait_for_window(
+                    ctx, self._deps, dataset.source.connection, "read", run_id, f"read:{partition}"
+                )
             found = self._read_through_deferrals(ctx, dataset, extract, run_id)
             if not sliced:
                 ctx.step("submit_applies", lambda: self._submit_applies(flow, run_id, found.version_ids))

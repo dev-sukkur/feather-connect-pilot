@@ -115,6 +115,17 @@
   </section>
   {% endif %}
 
+  {% if overview.window_waits %}
+  <section aria-labelledby="h-windows">
+    <h2 id="h-windows">Waiting for a window</h2>
+    <ul>
+    {% for name, n in overview.window_waits.items() %}
+      <li><a href="/connections#{{ connection_anchor(name) }}">{{ name }}</a>: {{ n }} task{% if n != 1 %}s{% endif %} wait for it to open</li>
+    {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
   <section aria-labelledby="h-budgets">
     <h2 id="h-budgets">Budgets</h2>
     {% if overview.budgets %}
