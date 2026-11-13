@@ -1001,6 +1001,26 @@ def set_grants(
     )
 
 
+@router.get("/tokens")
+def tokens(accounts: Manage, actor: CurrentActor) -> JSONResponse:
+    """Every API token, newest first, with its state: active, expired or revoked. Never its secret."""
+    return ok({"items": call(lambda: accounts.tokens(actor)), "next_cursor": None})
+
+
+@router.delete("/tokens/{token_id}")
+def revoke_token(
+    token_id: str,
+    request: Request,
+    accounts: Manage,
+    actor: CurrentActor,
+    body: Reason | None = None,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    """Revoke the token from now. Revoking it again changes nothing."""
+    reason = None if body is None else body.reason
+    return _once(request, actor, key, lambda: accounts.revoke_token(actor, token_id, reason=reason))
+
+
 @router.post("/tokens", status_code=201)
 def create_token(
     request: Request, accounts: Manage, actor: CurrentActor, body: NewToken, key: IdempotencyKey = None

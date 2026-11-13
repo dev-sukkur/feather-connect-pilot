@@ -391,3 +391,37 @@ def test_a_second_tenants_admin_cant_touch_the_first_tenants_users(
         theirs.create_token(boss, "steal", None, user="ann")
     assert first.users.get_user("op").role == "operator"
     assert second.users.get_user("ann") is None
+
+
+def test_an_admin_lists_and_revokes_tokens_and_a_revoked_token_is_refused(world: World) -> None:
+    agent = _bearer(world, "viewer", None)
+    assert agent.get(f"{API}/me").status_code == 200
+    _user(world.store, "root", "admin")
+    admin = _bearer(world, "admin", "root")
+    listed = admin.get(f"{API}/tokens").json()["items"]
+    found = next(t for t in listed if t["name"] == "t-viewer-None")
+    assert found["state"] == "active" and found["user"] is None and "token_hash" not in found
+    gone = admin.request("DELETE", f"{API}/tokens/{found['token_id']}", json={"reason": "leaked"})
+    assert gone.status_code == 200 and gone.json()["state"] == "revoked"
+    assert agent.get(f"{API}/me").status_code == 401
+    assert admin.request("DELETE", f"{API}/tokens/{found['token_id']}").status_code == 200  # twice: no change
+    assert admin.request("DELETE", f"{API}/tokens/nope").status_code == 404
+    assert ("revoke_token", "ok") in [(a.action, a.result) for a in world.store.audit.list_audit()]
+
+
+def test_an_admin_revokes_a_token_on_the_users_page(world: World) -> None:
+    agent = _bearer(world, "viewer", None)
+    app = create_app(state=world.state, loops=lambda s: [])
+    browser = sign_in(app, "root", "admin")
+    page = browser.get("/users").text
+    token = next(t for t in world.store.users.list_tokens() if t.name == "t-viewer-None")
+    assert "API tokens" in page and f'action="/tokens/{token.token_id}/revoke"' in page
+    done = browser.post(f"/tokens/{token.token_id}/revoke", data={"csrf_token": _csrf(browser)})
+    assert done.status_code == 200 and "The token t-viewer-None is revoked" in done.text
+    assert f'action="/tokens/{token.token_id}/revoke"' not in done.text
+    assert agent.get(f"{API}/me").status_code == 401
+
+
+def test_an_operator_cannot_list_tokens(world: World) -> None:
+    _user(world.store, "op", "operator")
+    assert _bearer(world, "operator", "op").get(f"{API}/tokens").status_code == 403

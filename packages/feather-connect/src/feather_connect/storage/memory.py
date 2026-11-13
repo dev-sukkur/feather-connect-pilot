@@ -1444,6 +1444,10 @@ class _Users(UserStore):
             if found is not None and found.revoked_at is None:
                 self._d.tokens[token_id] = replace(found, revoked_at=self._d.clock.now())
 
+    def list_tokens(self) -> list[TokenRow]:
+        with self._d.lock:
+            return sorted(self._d.tokens.values(), key=lambda t: (t.created_at, t.token_id), reverse=True)
+
 
 class _Registry(RegistryStore):
     def __init__(self, data: _Data) -> None:

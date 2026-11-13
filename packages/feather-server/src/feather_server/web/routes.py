@@ -1757,6 +1757,7 @@ def _users_page(
 ) -> HTMLResponse:
     accounts: Accounts = request.app.state.accounts
     everyone = accounts.users(actor)
+    tokens = accounts.tokens(actor)
     q = request.query_params.get("q", "")[:200]
     tiles = [
         Tile("Users", len(everyone)),
@@ -1774,8 +1775,19 @@ def _users_page(
         q=q,
         roles=ROLES,
         grants=GRANTS,
+        tokens=tokens,
         notice=notice,
     )
+
+
+@router.post("/tokens/{token_id}/revoke", dependencies=[Depends(require_csrf)])
+def revoke_token(request: Request, actor: CurrentActor, token_id: str, reason: Reason = "") -> Response:
+    accounts: Accounts = request.app.state.accounts
+    try:
+        token = accounts.revoke_token(actor, token_id, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No token {token_id!r}.")
+    return _users_page(request, actor, notice=("ok", f"The token {token.name} is revoked: calls made with it fail now."))
 
 
 @router.get("/users", response_class=HTMLResponse)

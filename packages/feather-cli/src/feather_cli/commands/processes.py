@@ -5,9 +5,10 @@ import os
 import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated, Any, NoReturn
 
 import psycopg
 import typer
@@ -356,6 +357,41 @@ def create_token(
         json_mode=json_mode,
         human=show,
     )
+
+
+@server_app.command()
+def list_tokens(env: Env = "dev", database_url: DatabaseUrl = None, json_mode: Json = False) -> None:
+    """List the API tokens, newest first, with their state. Never their secrets."""
+    with _store(database_url, json_mode) as store:
+        found = _accounts(store).tokens(CLI)
+
+    def show(data: dict[str, Any]) -> None:
+        for t in data["items"]:
+            typer.echo(
+                f"{t['token_id']}  {t['name']}  {t['state']}  {t['role']}  {t['scope']}  "
+                f"{t['user'] or 'automation'}  expires {(t['expires_at'] or 'never')[:10]}"
+            )
+        if not data["items"]:
+            typer.echo("no tokens")
+
+    emit({"items": [asdict(t) for t in found]}, json_mode=json_mode, human=show)
+
+
+@server_app.command()
+def revoke_token(
+    token_id: str,
+    reason: Annotated[str | None, typer.Option(help="Why, for the audit log.")] = None,
+    env: Env = "dev",
+    database_url: DatabaseUrl = None,
+    json_mode: Json = False,
+) -> None:
+    """Revoke an API token from now, by the id `list-tokens` shows."""
+    with _store(database_url, json_mode) as store:
+        try:
+            token = _accounts(store).revoke_token(CLI, token_id, reason=reason)
+        except KeyError:
+            fail(f"there is no token {token_id!r}", hint="feather server list-tokens shows them", json_mode=json_mode)
+    emit(asdict(token), json_mode=json_mode, human=lambda _: typer.echo(f"{token.name} is revoked"))
 
 
 def worker(

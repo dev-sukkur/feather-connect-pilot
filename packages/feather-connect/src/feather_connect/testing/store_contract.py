@@ -1613,6 +1613,14 @@ class StoreContract(
         assert revoked is not None and revoked.revoked_at == T0 + timedelta(hours=1)
         untouched = store.users.find_token("h2")
         assert untouched is not None and untouched.token_id == other and untouched.revoked_at is None
+        clock.advance(timedelta(hours=1))
+        newest = store.users.create_token("agent", "h3", None, "viewer", "ann")
+        listed = store.users.list_tokens()
+        assert [t.token_id for t in listed[:1]] == [newest]  # newest first
+        assert {t.token_id for t in listed} == {token_id, other, newest} and listed == sorted(
+            listed, key=lambda t: t.created_at, reverse=True
+        )
+        assert [t.revoked_at is not None for t in listed if t.token_id == token_id] == [True]
 
     def test_a_users_role_can_be_changed(self, store: Store):
         store.users.create_user("ann", "hash-1", "admin")

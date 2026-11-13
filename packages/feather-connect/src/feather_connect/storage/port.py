@@ -1282,6 +1282,10 @@ class UserStore(Protocol):
         """Revoke the token, from now. Revoking one twice, or one that isn't there, changes nothing."""
         ...
 
+    def list_tokens(self) -> list[TokenRow]:
+        """Every token of the tenant, revoked and expired ones too, newest first."""
+        ...
+
 
 @dataclass(frozen=True)
 class RegistryFile:

@@ -2314,19 +2314,15 @@ class _Users(UserStore):
                 "select * from feather.api_token where tenant_id = %s and token_hash = %s",
                 (self._db.tenant, token_hash),
             ).fetchone()
-        if row is None:
-            return None
-        return TokenRow(
-            row["token_id"],
-            row["name"],
-            row["token_hash"],
-            row["created_at"],
-            row["expires_at"],
-            row["revoked_at"],
-            row["role"],
-            row["created_by"],
-            row["scope"],
-        )
+        return None if row is None else _token(row)
+
+    def list_tokens(self) -> list[TokenRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                "select * from feather.api_token where tenant_id = %s order by created_at desc, token_id desc",
+                (self._db.tenant,),
+            ).fetchall()
+        return [_token(row) for row in rows]
 
     def revoke_token(self, token_id: str) -> None:
         with self._db.tx() as conn:
@@ -2335,6 +2331,20 @@ class _Users(UserStore):
                    where tenant_id = %s and token_id = %s and revoked_at is null""",
                 (self._db.clock.now(), self._db.tenant, token_id),
             )
+
+
+def _token(row: Mapping[str, Any]) -> TokenRow:
+    return TokenRow(
+        row["token_id"],
+        row["name"],
+        row["token_hash"],
+        row["created_at"],
+        row["expires_at"],
+        row["revoked_at"],
+        row["role"],
+        row["created_by"],
+        row["scope"],
+    )
 
 
 class _Registry(RegistryStore):

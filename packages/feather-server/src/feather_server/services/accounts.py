@@ -7,12 +7,12 @@ works on the database directly. Everything here is of the store's tenant only (A
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from feather_connect.clock import Clock
 from feather_connect.logs import redact
-from feather_connect.storage.port import GRANTS, ROLES, AccessGrant, Role, Store, TokenScope, UserRow
+from feather_connect.storage.port import GRANTS, ROLES, AccessGrant, Role, Store, TokenRow, TokenScope, UserRow
 from feather_server.auth import MAX_PASSWORD, Actor, hash_password, issue_token
 from feather_server.services.access import Capability, at_least, require, require_reason
 
@@ -32,6 +32,42 @@ class User:
     @classmethod
     def of(cls, row: UserRow) -> "User":
         return cls(row.username, row.role, row.created_at.isoformat(), tuple(row.grants))
+
+
+@dataclass(frozen=True)
+class Token:
+    """A token as the dashboard and the API show one: never its hash. `state` is active, expired or revoked."""
+
+    token_id: str
+    name: str
+    role: Role
+    scope: str
+    user: str | None
+    created_at: str
+    expires_at: str | None
+    revoked_at: str | None
+    state: str
+
+    @classmethod
+    def of(cls, row: TokenRow, now: datetime) -> "Token":
+        state = (
+            "revoked"
+            if row.revoked_at is not None
+            else "expired"
+            if row.expires_at is not None and row.expires_at <= now
+            else "active"
+        )
+        return cls(
+            row.token_id,
+            row.name,
+            row.role,
+            row.scope,
+            row.created_by,
+            row.created_at.isoformat(),
+            None if row.expires_at is None else row.expires_at.isoformat(),
+            None if row.revoked_at is None else row.revoked_at.isoformat(),
+            state,
+        )
 
 
 def _role(value: str) -> Role:
@@ -196,6 +232,25 @@ class Accounts:
             {"from": before, "to": list(grants), "reason": reason},
             change,
         )
+
+    def tokens(self, actor: Actor) -> list[Token]:
+        """Every API token, newest first, revoked and expired ones too, never with its secret."""
+        require(actor, "tokens.manage", self._store.audit, "tokens")
+        now = self._clock.now()
+        return [Token.of(row, now) for row in self._store.users.list_tokens()]
+
+    def revoke_token(self, actor: Actor, token_id: str, *, reason: str | None = None) -> Token:
+        """Revoke a token from now: a call made with it is refused from the next request on. Revoking one twice
+        changes nothing. Raises `KeyError` for a token that isn't there."""
+
+        def revoke() -> Token:
+            if not any(t.token_id == token_id for t in self._store.users.list_tokens()):
+                raise KeyError(f"no token {token_id!r}")
+            self._store.users.revoke_token(token_id)
+            now = self._clock.now()
+            return next(Token.of(t, now) for t in self._store.users.list_tokens() if t.token_id == token_id)
+
+        return self._do(actor, "tokens.manage", "revoke_token", f"token:{token_id}", {"reason": reason}, revoke)
 
     def create_token(
         self,

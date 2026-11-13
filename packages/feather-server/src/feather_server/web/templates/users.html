@@ -62,5 +62,32 @@
 <p class="empty">No users match {{ q }}.</p>
 {% endif %}
 </div>
+<h2 id="tokens">API tokens</h2>
+{% if tokens %}
+<div class="table-panel"><div class="table-wrap"><table>
+  <thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Role</th><th scope="col">Scope</th><th scope="col">User</th><th scope="col">Created</th><th scope="col">Expires</th><th scope="col">Revoke</th></tr></thead>
+  <tbody>
+  {% for t in tokens %}
+    <tr>
+      <th scope="row">{{ t.name }}</th>
+      <td data-col="state"><span class="state tone-{{ 'ok' if t.state == 'active' else 'muted' }}"><span class="dot" aria-hidden="true"></span>{{ t.state }}</span></td>
+      <td>{{ t.role }}</td>
+      <td>{{ t.scope }}</td>
+      <td>{{ t.user or "automation" }}</td>
+      <td>{{ t.created_at[:10] }}</td>
+      <td>{{ t.expires_at[:10] if t.expires_at else "never" }}</td>
+      <td>{% if t.state == "active" %}
+        <form method="post" action="/tokens/{{ t.token_id | urlencode }}/revoke" class="inline-form" onsubmit="return confirm('Revoke the token {{ t.name }}? Calls made with it fail from now on.')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="danger">Revoke<span class="sr-only"> the token {{ t.name }}</span></button>
+        </form>{% else %}<span class="muted">{{ t.revoked_at[:10] if t.revoked_at else "" }}</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div></div>
+{% else %}
+<p class="empty">No API tokens yet.</p>
+{% endif %}
 <p class="muted">Make API tokens with <code>feather server create-token</code>. Users can also be added with <code>feather server create-user</code>, or through the API.</p>
 {% endblock %}
