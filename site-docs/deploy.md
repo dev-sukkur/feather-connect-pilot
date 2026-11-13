@@ -6,6 +6,7 @@ Feather runs as a server and workers on Postgres 17, its only database. The repo
 |---|---|
 | `compose.yaml` | One environment on one machine: Postgres, a one-shot migrate, the server and the workers |
 | `compose.nonprod.yaml` | The test environments qa and uat on one machine: one Postgres, with a database each |
+| `railway/` | Railway instead of Compose: the server and the worker as two services on Railway's Postgres, set up step by step in `deploy/railway/README.md` |
 | `Dockerfile.server`, `Dockerfile.worker` | The images, also published, signed, as `ghcr.io/<org>/feather-server` and `feather-worker` |
 
 ```bash
