@@ -31,7 +31,9 @@ from feather_connect.core.connector import is_unsigned, signature_secret_of
 from feather_connect.core.flow import Flow, Problem, RouteSpec
 from feather_connect.core.readiness import OnReady, readiness_problems
 from feather_connect.core.readiness import prefixed as ready_prefixed
+from feather_connect.core.sql import reference_problems
 from feather_connect.core.triggers import OnEvent, Trigger, cron, every, manual
+from feather_connect.core.windows import AvailabilityWindow, parse_window
 from feather_connect.storage.port import BudgetSpec, parse_limits
 
 __all__ = [
@@ -73,7 +75,7 @@ _db_secrets: Callable[[str], str] | None = None
 # them: a package host, whose supervisor resolves them (flow packages §11). None resolves them here.
 _secret_broker: Callable[[str, str, str], str] | None = None
 _SECRET = re.compile(r"^\$\{secret:([^:{}]+):(.+)\}$")
-_CONNECTION_KEYS = frozenset({"connector", "site", "budget", "auth"})
+_CONNECTION_KEYS = frozenset({"connector", "site", "budget", "auth", "windows"})
 _ENV_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 _MASK = "***"
 
@@ -96,6 +98,8 @@ class ConnectionConfig:
     budget: str | None = None
     root: Path | None = None
     """The project directory, which a relative `file` secret's path is read against."""
+    windows: AvailabilityWindow | None = None
+    """When the connection may be read or written (M3.1 F3); None is always."""
 
     def resolve(self) -> dict[str, Any]:
         """Return the settings with every credential resolved, as a connector's `Context.config` holds them. A `db`
@@ -520,6 +524,11 @@ def connection_configs(
     return _connections(config, layers, _budgets(config, layers), root)
 
 
+def connection_windows(project: Project) -> dict[str, AvailabilityWindow]:
+    """The availability window of each connection that has one, for the runtime (M3.1 F3)."""
+    return {c.name: c.windows for c in project.connections.values() if c.windows is not None}
+
+
 def _connections(
     config: Mapping[str, Any], layers: Mapping[str, str], budgets: Mapping[str, BudgetSpec], root: Path
 ) -> dict[str, ConnectionConfig]:
@@ -538,8 +547,14 @@ def _connections(
         auth = {k: str(v) for k, v in _strkeys(body.get("auth", {})).items()}
         options = {k: v for k, v in body.items() if k not in _CONNECTION_KEYS}
         site = body.get("site")
+        windows = None
+        if body.get("windows") is not None:
+            try:
+                windows = parse_window(body["windows"])
+            except ValueError as error:
+                raise ProjectError(f"{_where(layers, path + '.windows')}: {error}") from None
         found[name] = ConnectionConfig(
-            name, connector, options, auth, None if site is None else str(site), budget, root
+            name, connector, options, auth, None if site is None else str(site), budget, root, windows
         )
     return found
 
@@ -803,12 +818,14 @@ def validate_project(project: Project) -> list[Problem]:
 
     Nothing is run, no connection is opened and no secret is resolved.
     """
-    problems: list[Problem] = readiness_problems(project.flows)
+    problems: list[Problem] = readiness_problems(project.flows) + reference_problems(project.flows)
     for flow in project.flows:
         problems += [replace(p, path=f"{flow.name}.{p.path}") for p in flow.validate()]
         uses: list[tuple[str, Any]] = [(f"reads[{i}]", d.source) for i, d in enumerate(flow.datasets)]
         uses += [(f"deliver[{i}]", r.sink) for i, r in enumerate(flow.routes)]
         for where, obj in uses:
+            if getattr(obj, "connectionless", False):  # a derived dataset reads the store, not a connection
+                continue
             connection, connector = obj.connection, obj.spec.name
             path = f"{flow.name}.{where}"
             config = project.connections.get(connection)

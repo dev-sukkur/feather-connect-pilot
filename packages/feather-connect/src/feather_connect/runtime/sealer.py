@@ -49,10 +49,12 @@ from feather_connect.logs import redact
 from feather_connect.runtime.extract import (
     check_columns,
     content_hash,
+    mark_state,
     schema_hash,
     update_state,
     validate_row,
 )
+from feather_connect.runtime.references import STATE_MARK_KEY, state_marker
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage import spool as spool_settings
 from feather_connect.storage.port import InboxEvent, StaleWriter, Version, VersionDraft, VersionSealed
@@ -329,13 +331,11 @@ def _drop_own_chunks(version_ids: Iterable[str], writer: str, deps: Any) -> None
             continue
 
 
-_STATE_TARGET = "sealer"
-_STATE_KEY = "state_updated_to"  # the seal_seq up to which the dataset's record state is known to be written
 _STATE_LOOKBACK = 50  # sealed versions looked at for state a crash left unwritten
 
 
 def _state_marker(dataset: Dataset) -> str:
-    return f"{_STATE_TARGET}:{dataset.name}"
+    return state_marker(dataset.name)
 
 
 def _catch_up_state(dataset: Dataset, deps: Any) -> None:
@@ -344,7 +344,7 @@ def _catch_up_state(dataset: Dataset, deps: Any) -> None:
     so writing a version's state again changes nothing."""
     if not dataset.keep_state:
         return
-    done = deps.store.overrides.get(_state_marker(dataset), _STATE_KEY)
+    done = deps.store.overrides.get(_state_marker(dataset), STATE_MARK_KEY)
     behind = sorted(
         (
             v
@@ -360,10 +360,7 @@ def _catch_up_state(dataset: Dataset, deps: Any) -> None:
 
 
 def _mark_state(dataset: Dataset, versions: Sequence[Version], deps: Any) -> None:
-    newest = max(v.seal_seq or 0 for v in versions)
-    done = deps.store.overrides.get(_state_marker(dataset), _STATE_KEY)
-    if done is None or newest > int(done):
-        deps.store.overrides.set(_state_marker(dataset), _STATE_KEY, newest, actor="sealer")
+    mark_state(dataset, versions, deps)
 
 
 def _after_seal(

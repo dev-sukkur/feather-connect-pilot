@@ -4,7 +4,7 @@ appears as `***` or not at all.
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -17,6 +17,7 @@ from feather_connect.core.readiness import OnReady
 from feather_connect.core.triggers import Cron, Every, Manual, OnEvent, Reconcile, Trigger
 from feather_connect.project import ConfigValue, effective_config
 from feather_connect.runtime.retention import kept_days, kept_inbox_days
+from feather_connect.runtime.windows import wait_name
 from feather_connect.storage.port import (
     STREAM_TRIGGER,
     Attempt,
@@ -196,6 +197,7 @@ class Overview:
     budgets: tuple[BudgetUse, ...]
     workers: tuple[WorkerRow, ...]
     kept_days: tuple[KeptDay, ...] = ()
+    window_waits: Mapping[str, int] = field(default_factory=dict[str, int])  # by connection (M3.1 F3)
 
 
 @dataclass(frozen=True)
@@ -301,6 +303,11 @@ class ConnectionStatus:
     last_check_at: datetime | None = None
     last_check_ok: bool | None = None
     last_check_message: str | None = None  # already redacted when it was stored
+    window: str | None = (
+        None  # its availability window, described; None when it is always available (M3.1 F3)
+    )
+    window_open: bool | None = None
+    window_waits: int = 0  # tasks waiting now for the window to open
 
 
 def _describe(trigger: Trigger) -> str:
@@ -620,7 +627,16 @@ class Reads:
             tuple(self._budgets()),
             tuple(self._store.workers.list_workers()),
             self._kept(),
+            {name: n for name, n in self._window_waits().items() if n},
         )
+
+    def _window_waits(self) -> dict[str, int]:
+        """How many tasks wait now for each windowed connection's window to open."""
+        return {
+            name: len(self._store.budgets.waits(wait_name(name)))
+            for name, c in self._state.project.connections.items()
+            if c.windows is not None
+        }
 
     # The partition grid, runs, failures.
 
@@ -854,6 +870,7 @@ class Reads:
                 if name in {d.source.connection for d in f.datasets} | {r.sink.connection for r in f.routes}
             )
             last = self._store.overrides.get(f"connection:{name}", "last_check") or {}
+            window = connection.windows
             found.append(
                 ConnectionStatus(
                     name,
@@ -865,6 +882,9 @@ class Reads:
                     datetime.fromisoformat(last["at"]) if last else None,
                     last.get("ok"),
                     last.get("message"),
+                    None if window is None else window.describe(),
+                    None if window is None else window.is_open(self._state.clock.now()),
+                    0 if window is None else len(self._store.budgets.waits(wait_name(name))),
                 )
             )
         return found

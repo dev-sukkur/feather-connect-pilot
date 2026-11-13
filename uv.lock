@@ -970,7 +970,7 @@ name = "feather-cli"
 version = "0.1.0"
 source = { editable = "packages/feather-cli" }
 dependencies = [
-    { name = "feather-connect", extra = ["postgres"] },
+    { name = "feather-connect", extra = ["postgres", "sql"] },
     { name = "feather-engine-dbos" },
     { name = "feather-generic" },
     { name = "feather-server" },
@@ -981,7 +981,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "feather-connect", extras = ["postgres"], editable = "packages/feather-connect" },
+    { name = "feather-connect", extras = ["postgres", "sql"], editable = "packages/feather-connect" },
     { name = "feather-engine-dbos", editable = "packages/feather-engine-dbos" },
     { name = "feather-generic", editable = "packages/templates/feather-generic" },
     { name = "feather-server", editable = "packages/feather-server" },
@@ -1011,12 +1011,16 @@ postgres = [
     { name = "alembic" },
     { name = "psycopg", extra = ["binary", "pool"] },
 ]
+sql = [
+    { name = "duckdb" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "alembic", marker = "extra == 'postgres'" },
     { name = "cronsim" },
     { name = "cryptography", specifier = ">=44" },
+    { name = "duckdb", marker = "extra == 'sql'", specifier = ">=1.5" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "jsonschema", specifier = ">=4" },
     { name = "packaging" },
@@ -1026,7 +1030,7 @@ requires-dist = [
     { name = "pyyaml" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
-provides-extras = ["postgres"]
+provides-extras = ["postgres", "sql"]
 
 [[package]]
 name = "feather-duckdb"

@@ -6,6 +6,7 @@ and a second pass over the `full` chunks keeps the rows that changed.
 """
 
 import hashlib
+import logging
 import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
@@ -18,6 +19,7 @@ import pyarrow as pa
 from pydantic import BaseModel
 
 from feather_connect.core.connector import ReadRequest, Source, Unreadable
+from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import MissingKeyError, PartitionError
 from feather_connect.core.flow import RouteSpec
@@ -26,6 +28,7 @@ from feather_connect.core.strategies import ByStamp, read_stamp
 from feather_connect.ids import new_id, stable_id
 from feather_connect.logs import redact
 from feather_connect.runtime.deps import RuntimeDeps
+from feather_connect.runtime.references import STATE_MARK_KEY, TaskReferences, state_marker
 from feather_connect.storage import spool as spool_settings
 from feather_connect.storage.port import SliceFinished, StateRow, Version, VersionDraft, VersionSealed
 from feather_connect.storage.spool import ChunkKind, records_to_table, snapshot_table, table_to_records
@@ -280,13 +283,24 @@ def _read_source(dataset: Dataset, read: _Read, since: Any, deps: RuntimeDeps, p
     request = ReadRequest(partition, dataset.partition, since=since, stamp_field=stamp_field)
     # A push dataset's events come in through ingestion. Only pull sources are read.
     source = cast(Source, dataset.source)
-    for batch in source.read(deps.make_context(source.connection), request):
+    for batch in source.read(_source_context(source, deps), request):
         for row in _rows_of(batch):
             if isinstance(row, Unreadable):
                 read.add_unreadable(row)
             else:
                 read.add(row)
     read.flush()
+
+
+def _source_context(source: Source, deps: RuntimeDeps) -> Context:
+    """The context to read `source` with. A source with no connection, such as a derived dataset's, gets one with no
+    settings; every source can read references (M3.1 F1, F2)."""
+    if getattr(source, "connectionless", False):
+        context = Context({}, logging.getLogger(source.connection), deps.clock.now(), "UTC")
+    else:
+        context = deps.make_context(source.connection)
+    context.references = TaskReferences(deps.store, deps.store.secrets.tenant, deps.package)
+    return context
 
 
 def _pairs(table: pa.Table) -> Iterator[tuple[str, int]]:
@@ -1055,6 +1069,15 @@ def update_state(dataset: Dataset, version: Version, deps: RuntimeDeps) -> None:
         deps.store.state.delete_many(dataset.name, (r.key for r in current if r.op == "delete"))
 
 
+def mark_state(dataset: Dataset, versions: Sequence[Version], deps: RuntimeDeps) -> None:
+    """Note that the dataset's record state is written up to the newest of `versions`: the stamp a reference to it
+    is read and cached by (M3.1 F1), and where the sealer's catch-up starts (S11)."""
+    newest = max((v.seal_seq or 0 for v in versions), default=0)
+    done = deps.store.overrides.get(state_marker(dataset.name), STATE_MARK_KEY)
+    if newest and (done is None or newest > int(done)):
+        deps.store.overrides.set(state_marker(dataset.name), STATE_MARK_KEY, newest, actor="sealer")
+
+
 def finalize_versions(
     dataset: Dataset,
     versions: Sequence[Version],
@@ -1114,6 +1137,7 @@ def _finalize(
     if dataset.keep_state:
         for version in sealed:
             update_state(dataset, version, deps)
+        mark_state(dataset, sealed, deps)
     for version in sealed:
         deps.spool.delete_chunks(version.version_id, "candidates")
     for version_id in silent:

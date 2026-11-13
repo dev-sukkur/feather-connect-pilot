@@ -348,3 +348,21 @@ def test_a_simulated_dataset_without_fixtures_is_refused(tmp_path):  # B2
     simulated_project(tmp_path, fixture=False)
     with pytest.raises(ProjectError, match=r"dataset 'orders'.*fixtures/orders\.json"):
         load_project(tmp_path, "dev")
+
+
+def test_a_connection_s_window_is_read_and_checked(project_dir):  # M3.1 F3
+    write(
+        project_dir,
+        "env/windowed.yaml",
+        """
+        connections:
+          shop:
+            windows: {tz: Asia/Kolkata, open: ["22:00-05:00"], applies: [read], max_overrun: 30m}
+        """,
+    )
+    shop = load_project(project_dir, "windowed").connections["shop"]
+    assert shop.windows is not None and shop.windows.applies == {"read"}
+    assert "windows" not in shop.options  # the connector isn't given it
+    write(project_dir, "env/badwindow.yaml", 'connections:\n  shop:\n    windows: {tz: UTC, open: ["9-5"]}\n')
+    with pytest.raises(ProjectError, match=r"connections\.shop\.windows.*not a span"):
+        load_project(project_dir, "badwindow")

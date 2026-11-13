@@ -14,7 +14,13 @@ from feather_connect.clock import Clock, SystemClock
 from feather_connect.engine.local import LocalEngine
 from feather_connect.engine.port import Engine
 from feather_connect.logs import configure_logging, install_task_logs
-from feather_connect.project import Project, environment_layer, environment_project, use_db_secrets
+from feather_connect.project import (
+    Project,
+    connection_windows,
+    environment_layer,
+    environment_project,
+    use_db_secrets,
+)
 from feather_connect.runtime.catalogue import Catalogue
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.port import Store
@@ -119,6 +125,7 @@ def build_state(settings: Settings) -> AppState:
         clock=clock,
         config_of=config,
         timezone=str(project.settings["timezone"]),
+        windows=connection_windows(project),
     )
     if local is not None:
         local.register(runtime.tasks())

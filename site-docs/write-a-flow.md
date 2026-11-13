@@ -49,6 +49,54 @@ assert harness.sink("pos").deleted_keys == ["B2"]
 assert harness.ledger.all_applied()
 ```
 
+## Join a reference, derive a dataset
+
+A dataset with `keep_state=True` can be read by other flows as a reference. A SQL transform joins it to each chunk
+it delivers, and a derived dataset is a query over references, read on its own triggers:
+
+```python
+materials = fc.Dataset(
+    "sap.material",
+    source=memory.Source("sap"),
+    key="material",
+    strategy=fc.strategy.snapshot_diff(),
+    keep_state=True,
+)
+lines = fc.Dataset("zakya.line", source=memory.Source("zakya"), key="line", strategy=fc.strategy.replace())
+enrich = fc.sql(
+    "select b.*, m.description from batch b left join {{ dataset('sap.material') }} m using (material)"
+)
+master = fc.Flow("materials", reads=materials, deliver=[fc.to(memory.Sink("lake"), name="materials-lake")])
+order_lines = fc.Flow(
+    "lines", reads=lines, deliver=[fc.to(memory.Sink("staging"), name="staging", map=enrich)]
+)
+
+h = FlowHarness(order_lines, also=[master])
+h.source("sap.material").load([{"material": "M1", "description": "Steel bar"}])
+h.run(flow="materials")
+h.source("zakya.line").load([{"line": 1, "material": "M1"}, {"line": 2, "material": "M9"}])
+h.run()
+assert {r["line"]: r["description"] for r in h.sink("staging").rows} == {1: "Steel bar", 2: None}
+
+effective = fc.Dataset(
+    "pricing.material_count",
+    source=fc.derived("select count(*) as n, 'all' as k from {{ dataset('sap.material') }}"),
+    key="k",
+    strategy=fc.strategy.snapshot_diff(),
+)
+counts = fc.Flow("counts", reads=effective, deliver=[fc.to(memory.Sink("report"), name="report")])
+h = FlowHarness(counts, also=[master])
+h.source("sap.material").load([{"material": "M1", "description": "Steel bar"}])
+h.run(flow="materials")
+h.run()
+assert h.sink("report").rows == [{"n": 1, "k": "all"}]
+```
+
+In SQL, `{{ today }}` and `{{ now }}` are the time of the read or the delivery, in the derived dataset's `tz=`; from
+Python, `ctx.lookup("sap.material", key)` and `ctx.reference("sap.material")` read the same state. A connection's
+`windows:` in `feather.yaml` says when it may be read or written; work outside it waits. The
+[Operating Guide](operating-guide/index.html#m31-flows) has the details.
+
 Put the flow in `flows/` of a project, its connections in `feather.yaml` and `env/<env>.yaml`, and its secrets as
 references (`${secret:env:NAME}`, or the environment's encrypted store). Then:
 

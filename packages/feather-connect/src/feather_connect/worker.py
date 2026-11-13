@@ -34,7 +34,9 @@ DRAIN_S = 30.0
 def check_connections(project: Project) -> None:
     """Fail at startup, not in a task, when a flow uses a connection the project does not define."""
     for flow in project.flows:
-        used = {d.source.connection for d in flow.datasets} | {r.sink.connection for r in flow.routes}
+        used = {
+            d.source.connection for d in flow.datasets if not getattr(d.source, "connectionless", False)
+        } | {r.sink.connection for r in flow.routes}  # a derived dataset reads the store, not a connection
         for name in sorted(used - project.connections.keys()):
             raise ProjectError(
                 f"flow {flow.name!r} uses the connection {name!r}, which {project.env!r} does not define: "

@@ -10,7 +10,10 @@ from feather_connect.core.errors import PermanentError
 from feather_connect.runtime.budgets import BudgetHandle
 
 if TYPE_CHECKING:
+    import pyarrow as pa
+
     from feather_connect.core.connector import RecordResponse
+    from feather_connect.core.sql import References
 
 
 @dataclass(eq=False)  # a context is a handle that remembers a checkpoint, not a value to compare
@@ -20,7 +23,8 @@ class Context:
     `config` holds the connection's settings, secrets included. `now` is the time of the run, the same for
     every call in it, and `tz` is the IANA name of the time zone the flow works in. `budget` and `http` are
     the metered services of the connection, when it has them. `tenant` is the store's tenant, by which anything a
-    connector keeps for the process, such as an OAuth token, is keyed (ADR-0013 rule 7).
+    connector keeps for the process, such as an OAuth token, is keyed (ADR-0013 rule 7). `references` reads other
+    datasets' latest state, for `lookup`, `reference` and SQL (M3.1 F1); the runtime sets it.
     """
 
     config: Mapping[str, Any] = field(repr=False)  # it can hold secrets, which must stay out of logs
@@ -30,6 +34,7 @@ class Context:
     budget: BudgetHandle | None = None
     http: Any | None = None
     tenant: str = "default"
+    references: "References | None" = field(default=None, repr=False)
     _checkpoint: str | None = field(default=None, init=False, repr=False)
     _answers: list["RecordResponse"] = field(default_factory=list["RecordResponse"], init=False, repr=False)
 
@@ -42,6 +47,20 @@ class Context:
         if not isinstance(value, str):
             raise PermanentError(f"no secret named {name!r} is configured")
         return value
+
+    def lookup(self, dataset: str, key: Any) -> dict[str, Any] | None:
+        """The latest sealed payload of the record of `dataset` with business key `key` (a value, or a tuple for a
+        compound key), or None. The dataset must keep its state (`keep_state=True`). Read once per task and cached."""
+        return self._references().lookup(dataset, key)
+
+    def reference(self, dataset: str) -> "pa.Table":
+        """The latest sealed state of `dataset` as an Arrow table, one row per record, for a batch map."""
+        return self._references().table(dataset)
+
+    def _references(self) -> "References":
+        if self.references is None:
+            raise PermanentError("nothing here can read other datasets: lookups work in a route's transform")
+        return self.references
 
     def checkpoint(self, value: str | None = None) -> str | None:
         """Save `value` as the point a read has reached, so that a restarted read can resume from it.

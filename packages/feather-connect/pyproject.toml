@@ -22,6 +22,10 @@ postgres = [
     "alembic",
     "psycopg[binary,pool]",
 ]
+# SQL transforms, reference lookups in SQL and derived datasets run on embedded DuckDB (M3.1 F1, F2).
+sql = [
+    "duckdb>=1.5",
+]
 
 # The connector registry finds connectors by these; each name is the connector's `spec.name`.
 [project.entry-points."feather_connect.connectors"]

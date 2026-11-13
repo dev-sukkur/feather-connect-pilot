@@ -6,7 +6,7 @@ not do, the stand-in can't do either.
 """
 
 import copy
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -15,6 +15,7 @@ from feather_connect.connectors import memory
 from feather_connect.core.connector import PushSource, Sink, Source
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.flow import Flow, RouteSpec
+from feather_connect.core.windows import AvailabilityWindow
 from feather_connect.engine.local import LocalEngine
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.memory import MemoryStore
@@ -43,9 +44,19 @@ class FlowHarness:
 
     Load rows into a source with `source(dataset).load(rows)`, which makes them the source's whole contents. `run`
     runs the flow to the end. `clock` defaults to a frozen clock shared by the engine, the store and the runtime.
+    `also` adds other flows of the project, swapped the same way, such as the one that keeps a reference dataset a
+    transform or a derived dataset reads; `run(flow=name)` runs one of them. `windows` maps a connection to its
+    availability window, as `connections.<name>.windows` does in feather.yaml.
     """
 
-    def __init__(self, flow: Flow, *, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        flow: Flow,
+        *,
+        clock: Clock | None = None,
+        also: Sequence[Flow] = (),
+        windows: Mapping[str, AvailabilityWindow] | None = None,
+    ) -> None:
         self._flow = flow
         self.clock: Clock = FrozenClock(_START) if clock is None else clock
         self._sources: dict[str, memory.Source] = {}
@@ -53,13 +64,22 @@ class FlowHarness:
         self.store = MemoryStore(self.clock)
         self.engine = LocalEngine(self.clock if isinstance(self.clock, FrozenClock) else None)
         self.runtime = Runtime(
-            [self._swapped(flow)], self.store, MemorySpool(), self.engine, code_sha="test", clock=self.clock
+            [self._swapped(f) for f in (flow, *also)],
+            self.store,
+            MemorySpool(),
+            self.engine,
+            code_sha="test",
+            clock=self.clock,
+            windows=windows,
         )
         self.engine.register(self.runtime.tasks())
 
     def _swapped(self, flow: Flow) -> Flow:
         datasets: list[Dataset] = []
         for dataset in flow.datasets:
+            if getattr(dataset.source, "connectionless", False):  # a derived dataset reads the store: keep it
+                datasets.append(dataset)
+                continue
             stand = self._sources.setdefault(dataset.name, _source_like(dataset.source))
             datasets.append(replace(dataset, source=stand))
         routes: list[RouteSpec] = []
@@ -78,9 +98,10 @@ class FlowHarness:
         """Return the in-memory sink standing in for the route's."""
         return self._sinks[route_name]
 
-    def run(self, *, partitions: Sequence[str] | None = None) -> str:
-        """Start a manual run of the flow, run it until nothing is left to do and return its id."""
-        run_id = self.runtime.start_run(self._flow.name, partitions=partitions)
+    def run(self, *, partitions: Sequence[str] | None = None, flow: str | None = None) -> str:
+        """Start a manual run of the flow, or of the flow named `flow`, run it until nothing is left to do and return
+        its id."""
+        run_id = self.runtime.start_run(flow or self._flow.name, partitions=partitions)
         self.engine.run_until_idle()
         return run_id
 

@@ -694,11 +694,45 @@ docker compose -f deploy/compose.yaml exec feather-server feather server create-
   <p class="prose">Every table carries a <code>tenant_id</code> and every key and unique index starts with it, so a store opened for one tenant sees only that tenant's rows; the test suite runs the whole store contract as a second tenant beside the first to prove it. Each tenant's workflows have their own DBOS system schema (<code>dbos</code> for the default tenant, <code>dbos_&lt;tenant&gt;</code> otherwise), its own leader locks, and a worker refuses a task of another tenant. A deployment serves one tenant, <code>default</code>; serving several from one server waits for M9, and may not come.</p>
 </section>
 
+<section id="m31-flows">
+  <h2><span class="n">8f</span>SQL, references, derived datasets and windows (M3.1)</h2>
+  <h3 id="references">References</h3>
+  <p class="prose">A dataset with <code>keep_state=True</code> keeps its latest sealed state: one row per record. Any flow can read that state as a <b>reference</b>, by the dataset's name (a bare name is the package's own; <code>&lt;package&gt;/&lt;name&gt;</code> is another package's). A delivery reads each reference once, when it starts, and uses that version to the end, so every chunk of it joins the same rows; the version is recorded on the delivery's attempts, and the next delivery reads whatever is newest then. A reference that has no sealed state yet makes the delivery wait and retry, not fail. A reference is held in memory, up to <code>FEATHER_SQL_REFERENCE_MAX_ROWS</code> rows (5 million by default); a bigger one fails the delivery and says so.</p>
+  <h3 id="sql">SQL transforms</h3>
+  <p class="prose"><code>fc.to(sink, map=fc.sql("select b.*, m.description from batch b left join {{ dataset('sap.material') }} m using (material)"))</code> runs the query on DuckDB over each chunk, as the table <code>batch</code>. It must keep the key column <code>_fc_key</code> (<code>b.*</code> does). DuckDB runs shut in: it can't read a file or a URL, it has <code>FEATHER_SQL_MEMORY</code> (1GB by default) and two threads. A query that fails fails the delivery with DuckDB's error. From Python, <code>ctx.lookup("sap.material", key)</code> gives one record's payload (or <code>None</code>) and <code>ctx.reference("sap.material")</code> the whole state as an Arrow table. SQL needs the <code>sql</code> extra, which the CLI and the images have.</p>
+  <h3 id="derived">Derived datasets</h3>
+  <p class="prose"><code>fc.Dataset("pricing.effective_price", source=fc.derived(query, tz="Asia/Kolkata"), key=..., strategy=fc.strategy.snapshot_diff())</code> is a dataset whose rows are a query over other datasets' state. It has no connection. It is read on its flow's triggers like any source, and <code>snapshot_diff</code> turns what changed into upserts and deletes, so a cron recomputes it with no change at the source: that is how a future-dated price takes effect on its date, and is delivered once. <code>{{ today }}</code> and <code>{{ now }}</code> in the query are the date and time of the read in <code>tz</code>; DuckDB's own <code>current_date</code> and <code>now()</code> are the worker's clock in UTC. Its inputs are the datasets its query names, and each must keep its state. A derived dataset isn't partitioned.</p>
+  <h3 id="windows">Availability windows</h3>
+  <p class="prose">A connection can say when it may be used:</p>
+<pre><code>connections:
+  erp:
+    connector: sap-cpi
+    windows:
+      tz: Asia/Kolkata
+      open: ["22:00-05:00"]      # one or more spans; a span may cross midnight
+      applies: [read]            # read, write, or both (the default)
+      max_overrun: 30m           # optional</code></pre>
+  <p class="prose">A read of the connection outside its window, or a delivery to it, waits until the window opens. The wait is durable, uses up no attempt, and is never silent: the <b>Connections</b> page shows each window, whether it is open now and how many tasks wait for it, and <b>Overview</b> lists the connections that have tasks waiting. Webhooks are still received and spooled while a sink's window is closed; only their delivery waits. Other routes of the same dataset go on. A task that started inside the window runs to its end; with <code>max_overrun</code>, a delivery stops at its next chunk once the window has been closed that long, and goes on when it opens again. The spans are wall-clock times in <code>tz</code>, so a window keeps its hours across daylight saving (on the night of the change it is an hour longer or shorter). Windows are configuration: to change one, change the file. Pause is separate.</p>
+  <h3 id="m31-validate">What <code>feather validate</code> checks</h3>
+  <div class="scroll"><table>
+    <tr><th>Code</th><th>Means</th></tr>
+    <tr><td><code>reference_unknown</code></td><td>A reference names a dataset no flow reads</td></tr>
+    <tr><td><code>reference_without_state</code></td><td>A referenced dataset doesn't keep its state: set <code>keep_state=True</code> on it</td></tr>
+    <tr><td><code>sql_unavailable</code></td><td>DuckDB isn't installed: install <code>feather-connect[sql]</code></td></tr>
+    <tr><td><code>sql_wall_clock</code> (warning)</td><td>The SQL reads DuckDB's clock: use <code>{{ today }}</code> or <code>{{ now }}</code></td></tr>
+    <tr><td><code>derived_reads_nothing</code> (warning)</td><td>A derived dataset's query names no dataset</td></tr>
+    <tr><td><code>derived_partitioned</code></td><td>A derived dataset is partitioned, which it can't be yet</td></tr>
+    <tr><td><code>derived_cycle</code></td><td>Derived datasets read each other in a circle</td></tr>
+  </table></div>
+  <p class="prose">A window with a span that isn't <code>HH:MM-HH:MM</code>, a time zone that isn't IANA, or an unknown setting stops the project from loading, naming the file and the setting.</p>
+</section>
+
 <section id="limits">
   <h2><span class="n">10</span>Not in M1</h2>
   <div class="scroll"><table>
     <tr><th>Missing</th><th>Arrives in</th></tr>
-    <tr><td>Availability windows, derived datasets, SQL transforms and reference lookups; a read-only MCP server</td><td>M3.1</td></tr>
+    <tr><td>A read-only MCP server</td><td>M3.1</td></tr>
+    <tr><td>A derived dataset that is partitioned, or reads a reference bigger than memory</td><td>Later</td></tr>
     <tr><td>Overrides beyond pause and resume, SLA and anomaly views</td><td>M4</td></tr>
     <tr><td>Connectors other than Zakya, Postgres, HTTP and SAP through CPI</td><td>M6</td></tr>
     <tr><td><code>sink.confirm</code>, with Magento</td><td>M6</td></tr>

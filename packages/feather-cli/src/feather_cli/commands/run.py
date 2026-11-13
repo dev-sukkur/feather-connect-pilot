@@ -16,7 +16,7 @@ from feather_cli.output import emit, fail
 from feather_connect.clock import SystemClock
 from feather_connect.core.flow import Flow
 from feather_connect.engine.local import LocalEngine
-from feather_connect.project import Project, ProjectError, load_project
+from feather_connect.project import Project, ProjectError, connection_windows, load_project
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.spool import MemorySpool
@@ -103,6 +103,7 @@ def run_local(found: Project, flow: Flow, partitions: list[str] | None) -> dict[
         clock=clock,
         config_of=lambda connection: config_of(found, connection) if connection in found.connections else {},
         timezone=str(found.settings["timezone"]),
+        windows=connection_windows(found),
     )
     engine.register(runtime.tasks())
     run_id = runtime.start_run(flow.name, trigger="manual", actor="cli", partitions=partitions)
