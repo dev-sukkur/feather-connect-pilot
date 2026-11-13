@@ -137,7 +137,8 @@ backups) is set in Railway, as below. No secret is in the repository.
    The server reads the environment's settings when it starts: *Restart* `feather-server` after the import.
    `kind` is `teams`, `slack`, `smtp` or `webhook`. For Teams, add the *Workflows* template *Post to a channel when
    a webhook request is received* to the channel, and use its URL: Feather sends it an Adaptive Card. Then see one
-   arrive: scale the worker to 0 replicas for three minutes, then back to 1. `worker_missing` fires, and clears.
+   arrive: press **Send a test alert** beside each channel on the **Alerts** page, and check that it came. Then see a
+   real one: scale the worker to 0 replicas for three minutes, then back to 1. `worker_missing` fires, and clears.
 
    Then tune the rules on the dashboard's **Alerts** page (a developer's), or with `PUT /api/v1/alert-rules/<rule>`.
    For the pilot:

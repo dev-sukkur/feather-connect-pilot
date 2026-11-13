@@ -107,7 +107,7 @@ These come before phase B, because phase B reads and writes real business data.
 
 | Week | What |
 |---|---|
-| 0 | Railway set up (the guide's steps 1–11); the first admin; alert channels; the uptime check; a usage limit; a viewer token for the agent; D1–D8 decided |
+| 0 | Railway set up (the guide's steps 1–11); the first admin, and the other users added on the Users page; alert channels, each sent a test alert; the uptime check; a usage limit; a viewer token for the agent; D1–D8 decided |
 | 1 | Phase A: the demo on a schedule; a restore tried into a second environment; the operator walks a failed delivery end to end; `worker_missing` seen by scaling the worker to 0 |
 | 2 | Phase A: the reference chain and UC-06 against the simulators; a window on the simulated SAP connection; the first MCP investigation |
 | 3 | Phase B starts if access is there: Zakya read only, staging; SAP postings held for approval at first, all of them, until the first ten are checked by hand |
