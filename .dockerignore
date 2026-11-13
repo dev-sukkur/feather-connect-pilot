@@ -9,3 +9,5 @@
 .superpowers
 spikes
 docs
+# A demo secret is fake, but no secret file goes into an image (M3 plan 1 X2).
+examples/*/secrets

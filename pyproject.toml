@@ -26,6 +26,7 @@ dev = [
     "moto[server]",
     "pytest-playwright>=0.10.0",
     "axe-playwright-python>=0.1.8",
+    "mkdocs-material>=9.6",
 ]
 
 [tool.ruff]
@@ -39,6 +40,11 @@ extend-exclude = ["spikes", "docs"]
 # The packages live under packages/*/src, where ruff can't see them, so name them here to keep
 # their imports in a separate group from third-party ones.
 known-first-party = ["feather_connect", "feather_engine_dbos", "feather_server", "feather_cli"]
+
+[tool.bandit]
+# The product's code only (M3 plan 1 X1); CI fails on high severity. The medium findings are accepted in
+# docs/06-release/security-review.md: SQL built from Feather's own identifiers, pickle in the local engine's own state.
+exclude_dirs = ["tests", "packages/feather-connect/tests", "packages/feather-server/tests", "packages/feather-cli/tests"]
 
 [tool.pyright]
 # Check the packages only: spikes/ is throwaway code with its own dependencies.

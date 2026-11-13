@@ -13,6 +13,9 @@ COPY templates templates
 RUN uv sync --frozen --no-dev --all-packages --no-editable
 
 FROM python:3.13-slim
+# Debian's security fixes that came after the base image was built, and no pip: nothing runs it here, and the
+# libraries it vendors are what scanners flag (M3 X2).
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/* \n    && python -m pip uninstall -y pip
 RUN groupadd --system --gid 10001 feather && useradd --system --uid 10001 --gid feather --home-dir /home/feather --create-home feather
 COPY --from=build /opt/feather/venv /opt/feather/venv
 COPY --chown=feather:feather examples/demo /project

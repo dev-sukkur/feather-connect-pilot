@@ -1,0 +1,59 @@
+# The documentation site (M3 plan 1 L1). Build it with:
+#   uv run python site-docs/build.py && uv run mkdocs build --strict
+# build.py writes the reference pages (connectors, templates, CLI, API) and copies the Operating Guide in; CI builds
+# the site on every pull request and publishes it to GitHub Pages from main once the repository allows it.
+site_name: Feather Connect
+site_description: A code-first integration hub for near-real-time data movement, ETL and application integration.
+docs_dir: site-docs
+site_dir: build/site
+strict: true
+repo_url: https://github.com/dev-sukkur/feather-connect-pilot
+edit_uri: ""
+copyright: Feather Connect is MIT licensed.
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: {icon: material/brightness-7, name: Dark mode}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: {icon: material/brightness-4, name: Light mode}
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc: {permalink: true}
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.details
+
+exclude_docs: |
+  build.py
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Concepts: concepts.md
+  - Write a flow: write-a-flow.md
+  - Deploy: deploy.md
+  - Operating Guide: operating.md
+  - Reference:
+      - Connectors: reference/connectors.md
+      - Templates: reference/templates.md
+      - CLI: reference/cli.md
+      - API: reference/api.md
+  - Runbooks:
+      - Failed deliveries: runbooks/failed-deliveries.md
+      - An exhausted budget: runbooks/exhausted-budget.md
+      - Postgres growth: runbooks/postgres-growth.md
+      - A restore drill: runbooks/restore-drill.md
+      - An engine upgrade: runbooks/engine-upgrade.md
+      - Secret rotation: runbooks/secret-rotation.md
+  - Security: security.md

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from perf_results import record
 from real_stack import free_port, kill_abruptly, server_url, wait_until
 
 pytestmark = [pytest.mark.postgres, pytest.mark.perf]
@@ -107,6 +108,8 @@ def test_webhook_to_http_p95_within_5s(
         }
         print(f"\nwebhook to http latency: {json.dumps(numbers)}")
         record_property("numbers", json.dumps(numbers))
+        if numbers["p95"] is not None:
+            record("NFR-01", "webhook_to_http_p95", numbers["p95"], "s", P95_TARGET_S, higher_is_better=False)
         if out := os.environ.get("FEATHER_LATENCY_OUT"):
             Path(out).write_text(json.dumps(numbers, indent=2), encoding="utf-8")
         assert set(report["statuses"]) == {"202"}, report["refused"]

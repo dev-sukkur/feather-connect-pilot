@@ -109,7 +109,8 @@ Questions for the sponsor, also in the ledger:
 
 ## 5. Where it stands
 
-Planned, 12 Nov 2026. T1, E3 and E4 built on 12 Nov 2026 (branch `feat/m3-dev`); the second PR is next.
+Planned, 12 Nov 2026. T1, E3 and E4 built on 12 Nov 2026 (PR 32, branch `feat/m3-dev`). P1, P2, X1, X2, L1 and L2 built
+on 13 Nov 2026 (branch `feat/m3-release`); what is left of v1.0.0 is in `docs/06-release/release-checklist.md`.
 
 - **T1.** A test checks every key and unique index of all 50 tables starts with `tenant_id`, and the store and spool
   contracts run again as a second tenant, `acme`, beside data in `default`. What the test found and fixed: leader
@@ -125,3 +126,22 @@ Planned, 12 Nov 2026. T1, E3 and E4 built on 12 Nov 2026 (branch `feat/m3-dev`);
 - **E4.** `deploy/compose.nonprod.yaml` with `nonprod-init.sh` and the three `.env` examples; the databases' isolation
   was checked on a scratch Postgres (qa's user is refused `connect` on uat's database). Not yet run as a whole: that is
   Q1's, when access comes.
+- **P1.** Each number is recorded with its machine (`tests/support/perf_results.py`); the throughput test warms up
+  first; NFR-03 is a sustained run of 5 million records, nightly; `tests/perf/compare.py` fails a number that misses
+  its target or is more than 20% worse than its machine's baseline, taking the better of two runs. A `perf` job of its
+  own in CI. Numbers in `docs/06-release/perf-results.md`.
+- **P2.** Chaos adds a server restart mid-task (NFR-05: at most one retry) and a slow network to Postgres through a
+  kill (a delaying TCP proxy). The restore drill (`deploy/restore_drill.py`) is a timed point-in-time restore in
+  containers of its own, nightly in the deploy job, with a runbook. Results in `docs/06-release/chaos-results.md`.
+- **X1.** Bandit, pip-audit and Trivy in CI; images signed keyless with cosign, a CycloneDX SBOM attested and on the
+  release; `SECURITY.md`, CODEOWNERS.
+- **X2.** `docs/06-release/security-review.md`: ASVS level 2 by chapter, 11 findings, 4 fixed (0.0.0.0 by default, a
+  secret file in the image, SHA-1, and the same bind finding of Bandit) and 7 for the sponsor to accept. A test
+  walks every route: anonymous, as a viewer and as an operator.
+- **L1.** The site in `site-docs/` (MkDocs Material): guides, six runbooks, and reference pages written from the code
+  (connectors' and templates' READMEs, the CLI, the API from OpenAPI) plus the Operating Guide. `tests/docs` builds it
+  strictly and runs its examples; `docs.yml` publishes to Pages once allowed.
+- **L2.** The release checklist; release-please with one version for the 12 packages and `release-as: 1.0.0`; images
+  and PyPI (trusted publishing, wheels only) called from release-please; `CONTRIBUTING.md` with the DCO, checked on
+  pull requests from forks; the Code of Conduct; `feather --version`. Found on the way: `feather-cli` doesn't build
+  from its sdist, as its templates sit outside it, so releases publish wheels.

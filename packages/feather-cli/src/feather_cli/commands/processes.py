@@ -104,7 +104,12 @@ def bind_warnings(host: str, environ: Mapping[str, str]) -> list[str]:
 @server_app.callback()
 def server(
     ctx: typer.Context,
-    host: Annotated[str, typer.Option(help="The address to listen on.")] = "0.0.0.0",
+    host: Annotated[
+        str,
+        typer.Option(
+            help="The address to listen on: this machine only, unless you say 0.0.0.0, as the image does."
+        ),
+    ] = "127.0.0.1",
     port: Annotated[int, typer.Option(help="The port to listen on.")] = 8080,
     project: ProjectDir = Path("."),
     env: Env = "dev",
