@@ -211,3 +211,22 @@ def test_the_flow_page_warns_that_a_run_now_waits_for_a_closed_window(
 
     world.clock.advance(timedelta(hours=13))  # 23:00, inside the window
     assert 'id="run-waits"' not in client.get("/flows/orders").text
+
+
+def test_a_route_is_paused_and_resumed_from_the_flow_page(
+    client: TestClient, world: World, csrf: Callable[[], str]
+) -> None:
+    page = client.get("/flows/orders").text
+    assert 'action="/routes/warehouse/pause"' in page and 'action="/routes/gofrugal/pause"' in page
+    form = {"csrf_token": csrf(), "flow": "orders", "reason": "warehouse upgrade"}
+    response = client.post("/routes/warehouse/pause", data=form)
+    assert response.status_code == 303 and response.headers["location"] == "/flows/orders?done=route-paused"
+    assert world.state.runtime.is_route_paused("warehouse") and not world.state.runtime.is_route_paused("gofrugal")
+    assert not world.state.runtime.is_flow_paused("orders")
+    page = client.get(response.headers["location"]).text
+    assert "The route is paused" in page and 'action="/routes/warehouse/resume"' in page
+    assert client.post("/routes/warehouse/resume", data={**form, "csrf_token": csrf()}).status_code == 303
+    assert not world.state.runtime.is_route_paused("warehouse")
+    assert client.post("/routes/nowhere/pause", data={**form, "csrf_token": csrf()}).status_code == 404
+    actions = [a.action for a in world.store.audit.list_audit(10)]
+    assert "pause_route" in actions and "resume_route" in actions

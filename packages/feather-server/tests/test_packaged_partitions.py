@@ -1,6 +1,7 @@
 """Backfill and partition checks of packaged datasets (flow packages §12): the server has none of a package's code, so it
 queues the work on the active version's host, which names a backfill's partitions as it plans and answers a check."""
 
+import re
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -156,3 +157,18 @@ def test_links_to_a_packaged_flow_keep_its_slash(app: FastAPI, state: AppState):
     assert paused.status_code == 303 and paused.headers["location"].startswith(f"/flows/{FLOW}?")
     found = operator.get("/search.json", params={"q": "invoices"}).text
     assert f"/flows/{FLOW}" in found and "%2F" not in found
+
+
+def test_a_packaged_route_is_paused_and_resumed_from_its_flow_page(app: FastAPI, state: AppState):
+    from feather_server.services.reads import Reads
+
+    [route] = [r.name for r in Reads(state).flow_detail(FLOW).summary.routes]
+    browser = sign_in(app, "ann", "operator")
+    page = browser.get(f"/flows/{FLOW}").text
+    token = re.search(r'name="csrf_token" value="([^"]+)"', page)
+    assert token and f'action="/routes/{route}/pause"' in page
+    form = {"csrf_token": token.group(1), "flow": FLOW}
+    assert browser.post(f"/routes/{route}/pause", data=form).status_code == 303
+    assert state.runtime.is_route_paused(route)
+    assert browser.post(f"/routes/{route}/resume", data=form).status_code == 303
+    assert not state.runtime.is_route_paused(route)

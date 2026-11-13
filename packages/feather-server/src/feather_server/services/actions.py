@@ -37,7 +37,7 @@ from feather_connect.storage.port import (
     split_error,
 )
 from feather_server.auth import Actor
-from feather_server.catalog_view import CatalogDataset, dataset_of
+from feather_server.catalog_view import CatalogDataset, dataset_of, route_of
 from feather_server.services.access import Capability, require, require_reason
 from feather_server.services.previews import (
     Impact,
@@ -900,7 +900,7 @@ class Actions:
             "pause_route",
             f"route:{route}",
             {"reason": reason},
-            lambda: self._rt.pause_route(route, actor=actor.name, reason=reason),
+            lambda: self._set_route_paused(route, actor, reason, True),
         )
 
     def resume_route(self, actor: Actor, route: str, *, reason: str | None = None) -> None:
@@ -909,8 +909,26 @@ class Actions:
             "resume_route",
             f"route:{route}",
             {"reason": reason},
-            lambda: self._rt.resume_route(route, actor=actor.name, reason=reason),
+            lambda: self._set_route_paused(route, actor, reason, False),
         )
+
+    def _set_route_paused(self, route: str, actor: Actor, reason: str | None, paused: bool) -> None:
+        """Pause or resume a route of the runtime, or of an installed package: its host reads the same pause, and its
+        sweeper submits the held deliveries again once the pause is lifted. Raises `KeyError` for neither."""
+        try:
+            self._rt.route(route)
+        except KeyError:
+            route_of(self._state, route)
+        else:
+            if paused:
+                self._rt.pause_route(route, actor=actor.name, reason=reason)
+            else:
+                self._rt.resume_route(route, actor=actor.name, reason=reason)
+            return
+        if paused:
+            self._store.overrides.set(f"route:{route}", "paused", True, actor=actor.name, reason=reason)
+        else:
+            self._store.overrides.clear(f"route:{route}", "paused", actor=actor.name, reason=reason)
 
     # Readiness (M2 plan 1).
 

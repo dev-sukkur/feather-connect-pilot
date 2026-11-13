@@ -308,6 +308,8 @@ Reason = Annotated[str, Form(max_length=500)]
 _NOTICES = {
     "paused": "The flow is paused. Nothing new will start until you resume it.",
     "resumed": "The flow is resumed.",
+    "route-paused": "The route is paused: its deliveries wait, in order, and the flow goes on reading and sealing.",
+    "route-resumed": "The route is resumed: the deliveries it held go out in order.",
 }
 
 
@@ -595,6 +597,31 @@ def resume_flow(request: Request, actor: CurrentActor, name: str, reason: Reason
     except KeyError:
         return _not_found(request, f"No flow named {name!r}.")
     return _back(name, done="resumed")
+
+
+def _route_pause(request: Request, actor: CurrentActor, route: str, flow: str, reason: str, paused: bool) -> Response:
+    try:
+        if paused:
+            actions(request).pause_route(actor, route, reason=_reason(reason))
+        else:
+            actions(request).resume_route(actor, route, reason=_reason(reason))
+    except KeyError:
+        return _not_found(request, f"No route named {route!r}.")
+    return _back(flow, done="route-paused" if paused else "route-resumed")
+
+
+@router.post("/routes/{route:path}/pause", dependencies=[Depends(require_csrf)])
+def pause_route(
+    request: Request, actor: CurrentActor, route: str, flow: Annotated[str, Form()], reason: Reason = ""
+) -> Response:
+    return _route_pause(request, actor, route, flow, reason, True)
+
+
+@router.post("/routes/{route:path}/resume", dependencies=[Depends(require_csrf)])
+def resume_route(
+    request: Request, actor: CurrentActor, route: str, flow: Annotated[str, Form()], reason: Reason = ""
+) -> Response:
+    return _route_pause(request, actor, route, flow, reason, False)
 
 
 @router.post("/flows/{name:path}/backfill/preview", dependencies=[Depends(require_csrf)])
