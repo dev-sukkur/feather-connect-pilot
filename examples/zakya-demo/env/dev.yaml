@@ -28,3 +28,10 @@ connections:
     auth:
       client_id: ${secret:file:secrets/cpi-client-id.txt}
       client_secret: ${secret:file:secrets/cpi-client-secret.txt}
+  sap_master:
+    base_url: http://127.0.0.1:29102
+    token_url: http://127.0.0.1:29102/oauth/token
+    retry_attempts: 4
+    auth:
+      client_id: ${secret:file:secrets/cpi-client-id.txt}
+      client_secret: ${secret:file:secrets/cpi-client-secret.txt}
