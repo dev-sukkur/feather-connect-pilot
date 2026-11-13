@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from feather_connect.core.strategies import parse_duration
+from feather_connect.logs import redact
 from feather_connect.project import resolve_secret
 from feather_connect.storage.port import AlertRow, AlertRuleRow, is_paused
 from feather_server.services.access import require, require_reason
@@ -385,6 +386,10 @@ def _notify(
 
 # What an operator or a developer does.
 
+
+class ChannelFailed(Exception):
+    """A test alert didn't reach its channel; the message says why."""
+
 SNOOZE_MAX = timedelta(days=7)
 
 
@@ -445,6 +450,35 @@ class AlertActions:
             {"enabled": enabled, "params": dict(params), "channels": list(channels), "reason": reason},
         )
         return next(r for r in rules(self._state) if r.name == name)
+
+    def test_channel(self, actor: "Actor", name: str, send: "Send | None" = None) -> None:
+        """Send the channel a test alert now, to see that it reaches someone: an alert that is never stored. Raises
+        `KeyError` for a channel there isn't, and `ChannelFailed`, with why, for one that the alert didn't reach."""
+        require(actor, "alerts.manage", self._state.store.audit, f"alert_channel:{name}")
+        channels = channels_of(self._state)
+        if name not in channels:
+            raise KeyError(name)
+        now = self._state.clock.now()
+        alert = AlertRow(
+            f"test-{now.strftime('%Y%m%d%H%M%S')}",
+            "test",
+            f"channel:{name}",
+            "info",
+            f"A test alert from Feather Connect ({self._state.settings.env}), sent by {actor.name}. "
+            "If you can read this, the channel works.",
+            "firing",
+            now,
+            now,
+        )
+        try:
+            (send or Sender(self._state))(name, channels[name], alert)
+        except Exception as error:  # noqa: BLE001 - what failed is shown and audited
+            said = redact(str(error)) or type(error).__name__
+            self._state.store.audit.record(
+                actor.kind, actor.name, "alerts.test_channel", f"alert_channel:{name}", {}, f"failed: {said}"
+            )
+            raise ChannelFailed(f"channel {name} wasn't reached: {said}") from error
+        self._audit(actor, "alerts.test_channel", f"alert_channel:{name}", {})
 
     def reset_rule(self, actor: "Actor", name: str, *, reason: str | None = None) -> Rule:
         """Back to the default. Raises `KeyError` for a rule the environment hasn't set."""

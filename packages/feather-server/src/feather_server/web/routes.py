@@ -2038,6 +2038,7 @@ def _alerts_page(
         now=now,
         rules=alerts.rules(state),
         channels=sorted(alerts.channels_of(state)),
+        channel_kinds={k: str(v.get("kind", "")) for k, v in alerts.channels_of(state).items()},
         notice=notice,
     )
 
@@ -2089,6 +2090,17 @@ def _named_counts(raw: str) -> dict[str, int]:
             raise ValueError(part)
         found[name.strip()] = int(count.strip())
     return found
+
+
+@router.post("/alerts/channels/{name}/test", dependencies=[Depends(require_csrf)])
+def alerts_test_channel(request: Request, actor: CurrentActor, name: str) -> Response:
+    try:
+        alerts.AlertActions(request.app.state.feather).test_channel(actor, name)
+    except KeyError:
+        return _not_found(request, f"No alert channel {name!r}.")
+    except alerts.ChannelFailed as error:
+        return _alerts_page(request, actor, status=502, notice=("bad", str(error)))
+    return _alerts_page(request, actor, notice=("ok", f"A test alert went to {name}. Check that it arrived."))
 
 
 @router.post("/alerts/rules/{name}", dependencies=[Depends(require_csrf)])

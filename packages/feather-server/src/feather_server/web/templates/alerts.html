@@ -41,6 +41,18 @@
 <p class="empty">{% if shown == "firing" %}Nothing is firing.{% else %}No alerts.{% endif %}</p>
 {% endif %}
 </div>
+<section aria-labelledby="h-channels">
+  <h2 id="h-channels">Channels</h2>
+  {% if channels %}
+  <ul class="plain-list">
+    {% for c in channels %}<li><strong>{{ c }}</strong> <span class="muted">{{ channel_kinds.get(c, "") }}</span>
+      {% if can(actor, "alerts.manage") %}<form method="post" action="/alerts/channels/{{ c | urlencode }}/test" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit">Send a test alert<span class="sr-only"> to {{ c }}</span></button>
+      </form>{% endif %}</li>{% endfor %}
+  </ul>
+  {% else %}<p class="empty">No channels yet: add them under <code>settings.alert_channels</code>.</p>{% endif %}
+</section>
 <section aria-labelledby="h-rules">
   <h2 id="h-rules">Rules</h2>
   <p class="muted">A rule with no channels of its own tells every channel in <code>settings.alert_channels</code>{% if channels %}: {{ channels | join(", ") }}{% else %}, and there are none yet{% endif %}.</p>

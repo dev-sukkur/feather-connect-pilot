@@ -248,3 +248,27 @@ def test_the_alerts_page_sets_dataset_quiet_s_datasets_as_name_equals_count(worl
     assert 'value="orders=5, acme/invoices=1"' in page.text
     wrong = browser.post("/alerts/rules/dataset_quiet", data={**form, "datasets": "orders"})
     assert wrong.status_code == 422 and "name=count" in wrong.text
+
+
+def test_a_test_alert_reaches_the_channel_or_says_why_not(world: World, told: Told, monkeypatch: pytest.MonkeyPatch):
+    AlertActions(world.state).test_channel(DEV, "ops", told)
+    assert told.calls == [("ops", "test", "info")] and world.store.alerts.list_alerts("firing") == []
+    with pytest.raises(KeyError):
+        AlertActions(world.state).test_channel(DEV, "nobody", told)
+    with pytest.raises(Forbidden):
+        AlertActions(world.state).test_channel(OPS, "ops", told)
+    from feather_server.services import alerts
+
+    monkeypatch.setattr(alerts.Sender, "__call__", Told(fail=True).__call__)
+    browser = sign_in(create_app(state=world.state, loops=lambda s: []), "dev", "developer")
+    page = browser.get("/alerts").text
+    assert 'action="/alerts/channels/ops/test"' in page
+    token = re.search(r'name="csrf_token" value="([^"]+)"', page)
+    assert token
+    failed = browser.post("/alerts/channels/ops/test", data={"csrf_token": token.group(1)})
+    assert failed.status_code == 502 and "the hook is down" in failed.text
+    monkeypatch.setattr(alerts.Sender, "__call__", lambda self, *a: None)
+    sent = browser.post("/alerts/channels/ops/test", data={"csrf_token": token.group(1)})
+    assert sent.status_code == 200 and "A test alert went to ops" in sent.text
+    results = [a.result for a in world.store.audit.list_audit() if a.action == "alerts.test_channel"]
+    assert results[:2] == ["ok", "failed: the hook is down"]

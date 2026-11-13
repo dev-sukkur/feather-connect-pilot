@@ -20,7 +20,7 @@ from packaging.utils import canonicalize_name
 from feather_connect.logs import redact
 from feather_connect.storage.port import FlowActivation, InUse, PackageEnv, PackageHost, PackageVersion
 from feather_server.auth import Actor, CurrentActor, require_csrf
-from feather_server.services.access import can
+from feather_server.services.access import can, require
 from feather_server.services.environment import ConfigProblem, Environment
 from feather_server.services.packages import CHECKS, PREPARE_STEPS, Busy, InstallFailed, NotReady, Packages
 from feather_server.services.registries import BUILT_IN, Registries, RegistryProblem
@@ -532,6 +532,7 @@ def set_schedule(
     project = canonicalize_name(name)
     flow = f"{project}/{short}"
     environment: Environment = request.app.state.environment
+    require(actor, "environment.manage", request.app.state.feather.store.audit, f"flow:{flow}")
     value: dict[str, Any] = {}
     if runs == "no":
         value["enabled"] = False

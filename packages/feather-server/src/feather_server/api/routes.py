@@ -1542,6 +1542,16 @@ def snooze_alert(
     )
 
 
+@router.post("/alert-channels/{name}:test")
+def test_alert_channel(name: str, request: Request, actor: CurrentActor) -> JSONResponse:
+    """Send the channel a test alert now. 502 with why when it isn't reached."""
+    try:
+        call(lambda: alerts.AlertActions(request.app.state.feather).test_channel(actor, name))
+    except alerts.ChannelFailed as error:
+        raise ApiProblem(502, "Bad Gateway", str(error)) from error
+    return ok({"channel": name, "sent": True})
+
+
 @router.get("/alert-rules")
 def alert_rules(request: Request, _: CurrentActor) -> JSONResponse:
     """Each rule as it applies here, the default or what the environment set, and the channels there are."""
