@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zakya simulator</title>
+<style>
+  :root { --fg: #1f2328; --muted: #59636e; --line: #d1d9e0; --head: #f6f8fa; --blue: #0969da; --green: #1a7f37;
+          --amber: #9a6700; --red: #cf222e; --bg: #fff; }
+  * { box-sizing: border-box; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; color: var(--fg); background: var(--bg); }
+  header { padding: 16px 24px 0; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 16px; margin: 0 0 8px; }
+  .sub { color: var(--muted); margin: 2px 0 12px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 8px 24px; border-bottom: 1px solid var(--line); }
+  .bar .grow { flex: 1; }
+  main { padding: 16px 24px 40px; display: grid; gap: 24px; }
+  .card { border: 1px solid var(--line); border-radius: 6px; padding: 16px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: top; }
+  th { font-weight: 600; background: var(--head); }
+  td.num, th.num { text-align: right; }
+  .scroll { overflow-x: auto; }
+  .pill { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+  .B2B { background: #ddf4ff; color: var(--blue); }
+  .B2C { background: #dafbe1; color: var(--green); }
+  .sent { background: #fff8c5; color: var(--amber); }
+  .paid, .open { background: #eaeef2; color: var(--muted); }
+  button { font: inherit; padding: 4px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--head); cursor: pointer; }
+  button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  input, select { font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; max-width: 100%; }
+  input.qty { width: 80px; } input.rate { width: 100px; }
+  .lines td { border: 0; padding: 4px 6px 4px 0; }
+  .toggle button { border-radius: 0; } .toggle button:first-child { border-radius: 6px 0 0 6px; }
+  .toggle button:last-child { border-radius: 0 6px 6px 0; } .toggle button.on { background: var(--blue); color: #fff; border-color: var(--blue); }
+  .msg { min-height: 1.5em; color: var(--muted); } .msg.error { color: var(--red); }
+  .small { font-size: 12px; color: var(--muted); }
+  dialog { border: 1px solid var(--line); border-radius: 8px; padding: 16px; max-width: 640px; width: calc(100% - 32px); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Zakya simulator</h1>
+  <p class="sub">Sales of organisation 60001. A B2B invoice (a customer with a GSTIN) is raised as sent and paid later; a
+  B2C one is a counter sale, paid as it is made. Goods come back as a credit note against the invoice.</p>
+</header>
+<div class="bar">
+  <span>Mode</span>
+  <span class="toggle"><button id="auto">Auto</button><button id="manual">Manual</button></span>
+  <span id="modeText" class="small"></span>
+  <span class="grow"></span>
+  <button id="refresh">Refresh</button>
+</div>
+<main>
+  <section class="card">
+    <h2>New invoice</h2>
+    <p class="small">Scan or type either barcode: the EAN-13 on the pack or the POS code. The price is the list price unless you change it.</p>
+    <p><label>Customer <select id="customer"></select></label> <span id="customerType"></span></p>
+    <table class="lines"><tbody id="lines"></tbody></table>
+    <p><button id="addLine">Add line</button> <button id="raise" class="primary">Raise invoice</button></p>
+    <p id="msg" class="msg"></p>
+  </section>
+  <section>
+    <h2>Invoices</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Invoice</th><th>Date</th><th>Customer</th><th>Type</th><th>Status</th><th>Lines</th>
+        <th class="num">Total</th><th>Actions</th></tr></thead>
+      <tbody id="invoices"></tbody>
+    </table></div>
+  </section>
+  <section>
+    <h2>Credit notes (goods returned)</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Credit note</th><th>Date</th><th>Against</th><th>Customer</th><th>Type</th><th>Lines</th>
+        <th class="num">Total</th><th>Reason</th></tr></thead>
+      <tbody id="notes"></tbody>
+    </table></div>
+  </section>
+  <section>
+    <h2>Materials</h2>
+    <p class="small">Shared with the ERP and the POS: the ERP's material number, the EAN-13 and the POS code (Zakya's SKU).</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Material</th><th>Description</th><th>EAN-13</th><th>POS code</th><th class="num">List price</th></tr></thead>
+      <tbody id="materials"></tbody>
+    </table></div>
+  </section>
+</main>
+<dialog id="returnDialog">
+  <h2 id="returnTitle">Return goods</h2>
+  <p class="small">How many of each line come back. No more than was sold and not yet returned.</p>
+  <table class="lines"><tbody id="returnLines"></tbody></table>
+  <p><button id="returnCancel">Cancel</button> <button id="returnSave" class="primary">Make credit note</button></p>
+  <p id="returnMsg" class="msg"></p>
+</dialog>
+<script>
+let state = null;
+let returning = null;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const money = (n) => Number(n).toLocaleString("en-IN", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+async function call(path, body) {
+  const res = await fetch(path, body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function say(el, text, error) { el.textContent = text; el.className = "msg" + (error ? " error" : ""); }
+
+function lineRow() {
+  const tr = document.createElement("tr");
+  tr.innerHTML = '<td><input class="code" list="codes" placeholder="EAN or POS code" size="18"></td>' +
+    '<td class="desc small"></td><td><input class="qty" type="number" min="1" value="1"></td>' +
+    '<td><input class="rate" type="number" min="0" step="0.01" placeholder="list price"></td><td><button>Remove</button></td>';
+  const code = tr.querySelector(".code");
+  code.addEventListener("input", () => {
+    const m = state.materials.find((x) => [x.ean, x.pos_code, x.material].includes(code.value.trim()));
+    tr.querySelector(".desc").textContent = m ? m.description + " (" + money(m.price) + ")" : "";
+  });
+  tr.querySelector("button").addEventListener("click", () => tr.remove());
+  $("lines").appendChild(tr);
+}
+
+function render() {
+  $("auto").className = state.mode === "auto" ? "on" : "";
+  $("manual").className = state.mode === "manual" ? "on" : "";
+  $("modeText").textContent = state.mode === "auto"
+    ? "new sales every " + state.every + " s, open B2B invoices paid, now and then a return"
+    : "nothing happens on its own: enter sales below";
+  const chosen = $("customer").value;
+  $("customer").innerHTML = state.customers.map((c) =>
+    `<option value="${esc(c.customer_id)}">${esc(c.customer_name)} (${c.channel})</option>`).join("");
+  if (chosen) $("customer").value = chosen;
+  showType();
+  let codes = $("codes");
+  if (!codes) { codes = document.createElement("datalist"); codes.id = "codes"; document.body.appendChild(codes); }
+  codes.innerHTML = state.materials.map((m) => `<option value="${esc(m.ean)}">${esc(m.description)}</option>` +
+    `<option value="${esc(m.pos_code)}">${esc(m.description)}</option>`).join("");
+  $("materials").innerHTML = state.materials.map((m) =>
+    `<tr><td>${esc(m.material)}</td><td>${esc(m.description)}</td><td>${esc(m.ean)}</td><td>${esc(m.pos_code)}</td><td class="num">${money(m.price)}</td></tr>`).join("");
+  const lines = (doc) => doc.line_items.map((l) => `${esc(l.name)} × ${l.quantity}`).join("<br>");
+  $("invoices").innerHTML = state.invoices.map((v) => {
+    const left = Object.values(v.returnable).some((q) => q > 0);
+    return `<tr><td>${esc(v.invoice_number)}<div class="small">${esc(v.invoice_id)}</div></td><td>${esc(v.date)}</td>` +
+      `<td>${esc(v.customer_name)}</td><td><span class="pill ${v.channel}">${v.channel}</span></td>` +
+      `<td><span class="pill ${esc(v.status)}">${esc(v.status)}</span></td><td>${lines(v)}</td><td class="num">${money(v.total)}</td>` +
+      `<td>${v.status === "sent" ? `<button data-pay="${esc(v.invoice_id)}">Mark paid</button> ` : ""}` +
+      `<button data-return="${esc(v.invoice_id)}" ${left ? "" : "disabled"}>Return goods</button></td></tr>`;
+  }).join("") || '<tr><td colspan="8" class="small">No invoices yet.</td></tr>';
+  $("notes").innerHTML = state.creditnotes.map((n) =>
+    `<tr><td>${esc(n.creditnote_number)}<div class="small">${esc(n.creditnote_id)}</div></td><td>${esc(n.date)}</td>` +
+    `<td>${esc(n.invoice_number)}</td><td>${esc(n.customer_name)}</td><td><span class="pill ${n.channel}">${n.channel}</span></td>` +
+    `<td>${lines(n)}</td><td class="num">${money(n.total)}</td><td>${esc(n.reason)}</td></tr>`).join("")
+    || '<tr><td colspan="8" class="small">No returns yet.</td></tr>';
+}
+
+function showType() {
+  const c = state.customers.find((x) => x.customer_id === $("customer").value);
+  $("customerType").innerHTML = c ? `<span class="pill ${c.channel}">${c.channel}</span> <span class="small">${c.gst_no ? "GSTIN " + esc(c.gst_no) : "consumer, no GSTIN"}</span>` : "";
+}
+
+async function load() {
+  try { state = await call("/sim/state"); render(); } catch (e) { say($("msg"), e.message, true); }
+}
+
+$("customer").addEventListener("change", showType);
+$("addLine").addEventListener("click", lineRow);
+$("refresh").addEventListener("click", load);
+$("auto").addEventListener("click", async () => { await call("/sim/mode", {mode: "auto"}); load(); });
+$("manual").addEventListener("click", async () => { await call("/sim/mode", {mode: "manual"}); load(); });
+$("raise").addEventListener("click", async () => {
+  const lines = [...$("lines").querySelectorAll("tr")].map((tr) => ({
+    code: tr.querySelector(".code").value.trim(),
+    quantity: Number(tr.querySelector(".qty").value),
+    rate: tr.querySelector(".rate").value ? Number(tr.querySelector(".rate").value) : null,
+  })).filter((l) => l.code);
+  try {
+    const made = await call("/sim/invoices", {customer_id: $("customer").value, lines});
+    say($("msg"), "Raised invoice " + made.invoice_id + ".");
+    $("lines").innerHTML = ""; lineRow(); load();
+  } catch (e) { say($("msg"), e.message, true); }
+});
+document.addEventListener("click", async (event) => {
+  const pay = event.target.dataset && event.target.dataset.pay;
+  const ret = event.target.dataset && event.target.dataset.return;
+  if (pay) { try { await call("/sim/pay", {invoice_id: pay}); load(); } catch (e) { say($("msg"), e.message, true); } }
+  if (ret) {
+    returning = state.invoices.find((v) => v.invoice_id === ret);
+    $("returnTitle").textContent = "Return goods of " + returning.invoice_number;
+    $("returnLines").innerHTML = returning.line_items.map((l) => {
+      const left = returning.returnable[l.ean] || 0;
+      return `<tr><td>${esc(l.name)}<div class="small">EAN ${esc(l.ean)} · POS ${esc(l.sku)}</div></td>` +
+        `<td class="small">${left} of ${l.quantity} left</td><td><input class="qty" type="number" min="0" max="${left}" value="0" data-code="${esc(l.ean)}"></td></tr>`;
+    }).join("");
+    say($("returnMsg"), "");
+    $("returnDialog").showModal();
+  }
+});
+$("returnCancel").addEventListener("click", () => $("returnDialog").close());
+$("returnSave").addEventListener("click", async () => {
+  const lines = [...$("returnLines").querySelectorAll("input")].map((i) => ({code: i.dataset.code, quantity: Number(i.value)}))
+    .filter((l) => l.quantity > 0);
+  try {
+    const made = await call("/sim/creditnotes", {invoice_id: returning.invoice_id, lines});
+    $("returnDialog").close(); say($("msg"), "Made credit note " + made.creditnote_id + "."); load();
+  } catch (e) { say($("returnMsg"), e.message, true); }
+});
+lineRow();
+load();
+setInterval(() => { if (!$("returnDialog").open) load(); }, 10000);
+</script>
+</body>
+</html>
