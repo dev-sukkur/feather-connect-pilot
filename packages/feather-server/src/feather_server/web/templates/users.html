@@ -24,7 +24,7 @@
   <tbody>
   {% for u in users %}
     <tr id="user-{{ u.username }}">
-      <th scope="row">{{ u.username }}{% if actor and u.username == actor.user %} <span class="muted">(you)</span>{% endif %}{% if u.disabled %} {{ m.status_badge("disabled") }}{% endif %}</th>
+      <th scope="row">{{ u.username }}{% if actor and u.username == actor.user %} <span class="muted">(you)</span>{% endif %}{% if u.disabled %} {{ m.status_badge("disabled") }}{% endif %}{% if u.must_change_password %} <span class="muted">· must choose a password</span>{% endif %}</th>
       <td data-col="role">{{ u.role }}</td>
       <td data-col="since">{{ u.created_at[:10] }}</td>
       <td>
@@ -76,6 +76,25 @@
 {% endif %}
 </div>
 <h2 id="tokens">API tokens</h2>
+{% if created %}<div class="notice notice-ok" role="status">
+  <p>The token <strong>{{ created[0] }}</strong> is made. Copy it now: it is not shown again.</p>
+  <p><code class="secret" id="new-token">{{ created[1] }}</code></p>
+  <p class="muted">Send it as <code>Authorization: Bearer &lt;token&gt;</code>, or set <code>FEATHER_TOKEN</code> for the CLI.</p>
+</div>{% endif %}
+<details class="add-panel">
+  <summary class="button">Make a token</summary>
+  <form method="post" action="/tokens" class="stack-form" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p><label for="token-name">Name (what it is for)</label><br><input id="token-name" name="name" type="text" maxlength="200" required placeholder="uptime-check"></p>
+    <p><label for="token-user">For</label><br><select id="token-user" name="user">{% for u in users if not u.disabled %}<option value="{{ u.username }}"{% if u.username == actor.user %} selected{% endif %}>{{ u.username }} ({{ u.role }})</option>{% endfor %}</select></p>
+    <p><label for="token-role">Role</label><br><select id="token-role" name="role"><option value="">the user's role</option>{% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}</select>
+      <br><span class="muted">No higher than the user's. A token that only reads, such as an uptime check's, is a viewer.</span></p>
+    <p><label for="token-scope">May</label><br><select id="token-scope" name="scope"><option value="all">use the API</option><option value="publish">only upload packages to the registry</option></select></p>
+    <p><label for="token-days">Lasts</label><br><select id="token-days" name="days">{% for value, label in token_lifetimes %}<option value="{{ value }}"{% if value == "90" %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></p>
+    <p><label for="token-reason">Reason (optional)</label><br><input id="token-reason" name="reason" type="text" maxlength="500"></p>
+    <button type="submit" class="primary">Make the token</button>
+  </form>
+</details>
 {% if tokens %}
 <div class="table-panel"><div class="table-wrap"><table>
   <thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Role</th><th scope="col">Scope</th><th scope="col">User</th><th scope="col">Created</th><th scope="col">Expires</th><th scope="col">Revoke</th></tr></thead>
@@ -102,5 +121,5 @@
 {% else %}
 <p class="empty">No API tokens yet.</p>
 {% endif %}
-<p class="muted">Make API tokens with <code>feather server create-token</code>. Users can also be added with <code>feather server create-user</code>, or through the API.</p>
+<p class="muted">A token is refused once its user is disabled. Tokens for automation with no user, and users too, can also be made with <code>feather server create-token</code> and <code>feather server create-user</code>, or through the API.</p>
 {% endblock %}

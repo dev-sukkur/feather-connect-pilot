@@ -1,11 +1,14 @@
 """`feather run`: run a flow here (`--local`), on simulation data if asked (`--sim`), or start a run on the server.
 
 A local run uses the in-memory store and the local engine, in this process, against the connections the
-environment names; `--sim` swaps each of them for a simulation stand-in that reads the project's `fixtures/`.
+environment names; `--sim` swaps each of them for a simulation stand-in that reads the project's `fixtures/`. A
+webhook (push) dataset's fixture rows then arrive as events, one each, as the ingress would have taken them.
 """
 
+import json
 import logging
 from collections import Counter
+from datetime import timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -14,10 +17,12 @@ import typer
 from feather_cli.options import Env, Json, ProjectDir
 from feather_cli.output import emit, fail
 from feather_connect.clock import SystemClock
+from feather_connect.core.connector import InboundRequest
 from feather_connect.core.flow import Flow
 from feather_connect.engine.local import LocalEngine
 from feather_connect.project import Project, ProjectError, connection_windows, load_project
 from feather_connect.runtime.runtime import Runtime
+from feather_connect.runtime.sealer import seal_once
 from feather_connect.storage.memory import MemoryStore
 from feather_connect.storage.spool import MemorySpool
 from feather_connect.worker import config_of
@@ -81,9 +86,26 @@ def _check_credentials(found: Project, flow: Flow, json_mode: bool) -> None:
         )
 
 
+def _feed_events(store: MemoryStore, flow: Flow, clock: SystemClock) -> int:
+    """Put each fixture row of the flow's push datasets in the inbox as an event, as the ingress would after checking
+    its signature; return how many. Only a simulation stand-in has rows to give (`--sim`)."""
+    fed = 0
+    for dataset in flow.datasets:
+        source = dataset.source
+        if dataset.strategy.name != "push" or not getattr(source, "stands_in", False):
+            continue
+        for row in source.fixture_rows():  # pyright: ignore[reportAttributeAccessIssue] - a simulation stand-in
+            request = InboundRequest(
+                "POST", "/", {"content-type": "application/json"}, json.dumps(row).encode(), clock.now()
+            )
+            store.inbox.put(dataset.name, request, None)
+            fed += 1
+    return fed
+
+
 def run_local(found: Project, flow: Flow, partitions: list[str] | None) -> dict[str, Any]:
     """Run the flow to the end in this process and say how it went, per route. Raises `ValueError` for a partition
-    that isn't one of the flow's."""
+    that isn't one of the flow's. A push dataset on simulation data is fed its fixture rows as events first."""
     for dataset in flow.datasets:
         for key in partitions or ():
             try:
@@ -106,6 +128,9 @@ def run_local(found: Project, flow: Flow, partitions: list[str] | None) -> dict[
         windows=connection_windows(found),
     )
     engine.register(runtime.tasks())
+    if _feed_events(store, flow, clock):
+        seal_once(runtime, now=clock.now() + timedelta(seconds=2))
+        engine.run_until_idle()
     run_id = runtime.start_run(flow.name, trigger="manual", actor="cli", partitions=partitions)
     engine.run_until_idle()
     run = store.runs.get_run(run_id)

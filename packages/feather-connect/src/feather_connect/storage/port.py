@@ -1216,6 +1216,7 @@ class UserRow:
     role: Role
     grants: tuple[AccessGrant, ...] = ()
     disabled_at: datetime | None = None  # set: they can't sign in, and their tokens are refused
+    must_change_password: bool = False  # set by an admin's new password: they choose their own at sign-in
 
 
 @dataclass(frozen=True)
@@ -1258,8 +1259,9 @@ class UserStore(Protocol):
         such user."""
         ...
 
-    def set_password_hash(self, username: str, password_hash: str) -> None:
-        """Give the user a new password hash. Raises `KeyError` when there is no such user."""
+    def set_password_hash(self, username: str, password_hash: str, *, must_change: bool = False) -> None:
+        """Give the user a new password hash, and say whether they must change it when they next sign in. Raises
+        `KeyError` when there is no such user."""
         ...
 
     def set_disabled(self, username: str, at: datetime | None) -> None:

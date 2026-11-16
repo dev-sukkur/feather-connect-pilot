@@ -125,3 +125,24 @@ def test_feather_test_fails_with_pytests_code(cli: Callable[..., Result], demo: 
     r = cli("test", "--json")
     doc = json.loads(r.stdout)
     assert r.exit_code == 1 and doc["failed"] == 1 and not doc["ok"]
+
+
+def test_run_local_sim_sends_a_signed_webhook_flow_its_fixtures_as_events(
+    cli: Callable[..., Result], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A signed webhook source needs no secret on simulation data, and its fixture rows arrive as events."""
+    monkeypatch.chdir(tmp_path)
+    assert cli("new", "project", "p").exit_code == 0
+    monkeypatch.chdir(tmp_path / "p")
+    made = cli("new", "flow", "orders", "--template", "webhook-to-api")
+    assert made.exit_code == 0, made.output
+    monkeypatch.delenv("PARTNER_WEBHOOK_SECRET", raising=False)
+    r = cli("run", "partner-orders-to-erp", "--local", "--sim", "--json")
+    assert r.exit_code == 0, r.output
+    doc = json.loads(r.stdout)
+    rows = json.loads((tmp_path / "p" / "fixtures" / "orders.json").read_text(encoding="utf-8"))
+    assert doc["status"] == "succeeded" and doc["routes"]["erp"]["applied"] == len(rows) > 0
+    without = cli("run", "partner-orders-to-erp", "--local")
+    assert (
+        without.exit_code != 0 and "PARTNER_WEBHOOK_SECRET" in without.stderr
+    )  # for real, the secret is needed

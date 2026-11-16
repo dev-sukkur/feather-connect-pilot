@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
@@ -1782,7 +1782,12 @@ def check_connection(request: Request, actor: CurrentActor, name: str) -> Respon
 
 
 def _users_page(
-    request: Request, actor: Actor, *, status: int = 200, notice: tuple[str, str] | None = None
+    request: Request,
+    actor: Actor,
+    *,
+    status: int = 200,
+    notice: tuple[str, str] | None = None,
+    created: tuple[str, str] | None = None,
 ) -> HTMLResponse:
     accounts: Accounts = request.app.state.accounts
     everyone = accounts.users(actor)
@@ -1806,7 +1811,47 @@ def _users_page(
         grants=GRANTS,
         tokens=tokens,
         notice=notice,
+        created=created,  # (name, secret) of a token just made: shown this once
+        token_lifetimes=TOKEN_LIFETIMES,
     )
+
+
+TOKEN_LIFETIMES = (("30", "30 days"), ("90", "90 days"), ("365", "a year"), ("never", "never expires"))
+
+
+@router.post("/tokens", dependencies=[Depends(require_csrf)])
+def create_token(
+    request: Request,
+    actor: CurrentActor,
+    name: Annotated[str, Form()] = "",  # checked after the role, so a refusal says why
+    user: Annotated[str, Form()] = "",
+    role: Annotated[str, Form()] = "",
+    scope: Annotated[str, Form()] = "all",
+    days: Annotated[str, Form()] = "90",
+    reason: Reason = "",
+) -> Response:
+    """Make an API token, for a user (yourself by default), with their role or a lower one. It is shown once."""
+    accounts: Accounts = request.app.state.accounts
+    try:
+        lifetime = None if days.strip() in ("", "never") else timedelta(days=int(days))
+        if lifetime is not None and not 1 <= lifetime.days <= 3650:
+            raise ValueError("a token lasts 1 to 3650 days, or for ever")
+        secret = accounts.create_token(
+            actor,
+            name.strip(),
+            lifetime,
+            role or None,
+            user=user or None,
+            scope=scope,
+            reason=_reason(reason),
+        )
+    except KeyError as error:
+        return _users_page(request, actor, status=404, notice=("bad", str(error).strip("'\"")))
+    except ValueError as error:
+        return _users_page(request, actor, status=422, notice=("bad", f"No token made: {error}."))
+    page = _users_page(request, actor, created=(name.strip(), secret))
+    page.headers["Cache-Control"] = "no-store"  # the secret is on it
+    return page
 
 
 @router.post("/tokens/{token_id}/revoke", dependencies=[Depends(require_csrf)])
@@ -1848,7 +1893,13 @@ def add_user(
     return _users_page(
         request,
         actor,
-        notice=("ok", f"{name} can sign in now, as an {role}. Tell them the password another way."),
+        notice=(
+            "ok",
+            (
+                f"{name} can sign in now, as an {role}. Tell them the password another way: it works once, and "
+                "they choose their own when they sign in."
+            ),
+        ),
     )
 
 
@@ -1893,7 +1944,8 @@ def set_password(
         return _not_found(request, f"No user named {username!r}.")
     except ValueError as error:
         return _users_page(request, actor, status=422, notice=("bad", str(error)))
-    return _users_page(request, actor, notice=("ok", f"{username} has a new password."))
+    said = f"{username} has a new password, for one sign-in: they choose their own then."
+    return _users_page(request, actor, notice=("ok", said))
 
 
 @router.post("/users/{username}/role", dependencies=[Depends(require_csrf)])

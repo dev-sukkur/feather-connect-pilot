@@ -1596,6 +1596,13 @@ class StoreContract(
         )
         with pytest.raises(KeyError):
             store.users.set_password_hash("nobody", "hash-3")
+        assert found.must_change_password is False
+        store.users.set_password_hash("op", "hash-4", must_change=True)
+        reset = store.users.get_user("op")
+        assert reset is not None and (reset.password_hash, reset.must_change_password) == ("hash-4", True)
+        store.users.set_password_hash("op", "hash-5")
+        again = store.users.get_user("op")
+        assert again is not None and again.must_change_password is False
 
     def test_tokens_are_found_by_hash_and_revoked_once(self, store: Store, clock: FrozenClock):
         assert store.users.find_token("h1") is None

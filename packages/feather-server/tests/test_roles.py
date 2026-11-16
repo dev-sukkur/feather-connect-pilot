@@ -321,7 +321,8 @@ def _signs_in(app: Any, username: str, password: str) -> bool:
     assert found
     form = {"username": username, "password": password, "csrf_token": found.group(1)}
     browser.post("/login", data=form)
-    return browser.get("/").status_code == 200
+    home = browser.get("/")  # someone given a password by an admin is sent to choose their own first
+    return home.status_code == 200 or home.headers.get("location") == "/account/password"
 
 
 def test_an_admin_adds_a_user_and_sets_a_password_on_the_users_page(world: World) -> None:
@@ -337,6 +338,7 @@ def test_an_admin_adds_a_user_and_sets_a_password_on_the_users_page(world: World
     }
     done = browser.post("/users", data=form)
     assert done.status_code == 200 and "ann can sign in now, as an operator." in done.text
+    assert "they choose their own when they sign in" in done.text
     assert world.store.users.get_user("ann").role == "operator"  # type: ignore[union-attr]
     assert "first password" not in str([a.request for a in world.store.audit.list_audit()])
     again = browser.post("/users", data={**form, "csrf_token": _csrf(browser)})
@@ -350,7 +352,7 @@ def test_an_admin_adds_a_user_and_sets_a_password_on_the_users_page(world: World
     reset = browser.post(
         "/users/ann/password", data={"password": "second password", "csrf_token": _csrf(browser)}
     )
-    assert reset.status_code == 200 and "ann has a new password." in reset.text
+    assert reset.status_code == 200 and "ann has a new password, for one sign-in" in reset.text
     assert _signs_in(app, "ann", "second password") and not _signs_in(app, "ann", "first password")
     gone = browser.post("/users/nobody/password", data={"password": "x", "csrf_token": _csrf(browser)})
     assert gone.status_code == 404
@@ -471,3 +473,151 @@ def test_a_disabled_user_cant_sign_in_their_session_ends_and_their_tokens_are_re
         "enable_user",
         "disable_user",
     ]
+
+
+def _browser_of(app: Any, username: str, password: str) -> TestClient:
+    browser = TestClient(app, base_url="http://localhost:8000", follow_redirects=False)
+    found = re.search(r'name="csrf_token" value="([^"]+)"', browser.get("/login").text)
+    assert found
+    signed = browser.post(
+        "/login", data={"username": username, "password": password, "csrf_token": found.group(1)}
+    )
+    assert signed.status_code == 303, signed.text
+    return browser
+
+
+def _form_csrf(page: str) -> str:
+    found = re.search(r'name="csrf_token" value="([^"]+)"', page)
+    assert found
+    return found.group(1)
+
+
+def test_a_password_an_admin_set_works_once_and_the_user_chooses_their_own(world: World) -> None:
+    app = create_app(state=world.state, loops=lambda s: [])
+    admin = sign_in(app, "root", "admin")
+    admin.post(
+        "/users",
+        data={"username": "ann", "password": "given", "role": "operator", "csrf_token": _csrf(admin)},
+    )
+    assert world.store.users.get_user("ann").must_change_password  # type: ignore[union-attr]
+    assert "must choose a password" in admin.get("/users").text
+
+    ann = _browser_of(app, "ann", "given")
+    assert ann.get("/").headers["location"] == "/account/password"  # every page waits for it
+    assert ann.get("/flows").headers["location"] == "/account/password"
+    assert ann.get("/api/v1/flows").status_code == 403  # an API call by her session too
+    page = ann.get("/account/password")
+    assert page.status_code == 200 and "Choose your own password" in page.text
+    csrf = _form_csrf(page.text)
+    wrong = ann.post(
+        "/account/password", data={"current": "nope", "new": "mine", "again": "mine", "csrf_token": csrf}
+    )
+    assert wrong.status_code == 403 and "the current password is wrong" in wrong.text
+    differ = ann.post(
+        "/account/password", data={"current": "given", "new": "mine", "again": "mine2", "csrf_token": csrf}
+    )
+    assert differ.status_code == 422 and "differ" in differ.text
+    same = ann.post(
+        "/account/password", data={"current": "given", "new": "given", "again": "given", "csrf_token": csrf}
+    )
+    assert same.status_code == 422
+    done = ann.post(
+        "/account/password", data={"current": "given", "new": "mine", "again": "mine", "csrf_token": csrf}
+    )
+    assert done.status_code == 303 and done.headers["location"] == "/"
+    assert ann.get("/").status_code == 200  # this session goes on
+    assert not world.store.users.get_user("ann").must_change_password  # type: ignore[union-attr]
+    assert not _signs_in(app, "ann", "given") and _signs_in(app, "ann", "mine")
+    results = [
+        (a.action, a.target, a.result)
+        for a in world.store.audit.list_audit()
+        if a.action == "change_password"
+    ]
+    assert ("change_password", "user:ann", "ok") in results
+    assert any(r.startswith("failed") for _, _, r in results)
+    assert "mine" not in str([a.request for a in world.store.audit.list_audit()])
+
+    admin.post("/users/ann/password", data={"password": "reset", "csrf_token": _csrf(admin)})
+    assert world.store.users.get_user("ann").must_change_password  # type: ignore[union-attr]
+    assert ann.get("/").headers["location"] == "/login"  # her session ended with the new password
+
+
+def test_anybody_changes_their_own_password_and_their_other_sessions_end(world: World) -> None:
+    app = create_app(state=world.state, loops=lambda s: [])
+    _user(
+        world.store, "vic", "viewer"
+    )  # with PASSWORD, set on the database as the CLI does: no change needed
+    first = _browser_of(app, "vic", PASSWORD)
+    other = _browser_of(app, "vic", PASSWORD)
+    home = first.get("/").text
+    assert 'href="/account/password"' in home
+    page = first.get("/account/password")
+    assert "Change your password" in page.text
+    form = {
+        "current": PASSWORD,
+        "new": "a new one",
+        "again": "a new one",
+        "csrf_token": _form_csrf(page.text),
+    }
+    done = first.post("/account/password", data=form)
+    assert done.status_code == 200 and "Your password is changed" in done.text
+    assert first.get("/").status_code == 200
+    assert other.get("/").headers["location"] == "/login"
+
+
+def test_the_api_changes_your_own_password(world: World) -> None:
+    app = create_app(state=world.state, loops=lambda s: [])
+    _user(world.store, "ann", "operator")
+    client = TestClient(app, base_url="http://localhost:8000")
+    token = issue_token(world.store, "ann-t", timedelta(days=1), role="operator", created_by="ann")
+    headers = {"Authorization": f"Bearer {token}"}
+    wrong = client.put(
+        "/api/v1/me/password", json={"current_password": "x", "new_password": "y"}, headers=headers
+    )
+    assert wrong.status_code == 403
+    bad = client.put(
+        "/api/v1/me/password", json={"current_password": PASSWORD, "new_password": ""}, headers=headers
+    )
+    assert bad.status_code == 422
+    ok = client.put(
+        "/api/v1/me/password", json={"current_password": PASSWORD, "new_password": "new"}, headers=headers
+    )
+    assert ok.status_code == 204 and _signs_in(app, "ann", "new")
+    assert client.get("/api/v1/me", headers=headers).status_code == 200  # the token stays
+
+
+def test_a_password_set_by_the_cli_needs_no_change(world: World) -> None:
+    accounts = Accounts(world.store, world.clock)
+    accounts.create_user(CLI, "first", "pw", "admin")
+    accounts.set_password(CLI, "first", "pw2")
+    assert not world.store.users.get_user("first").must_change_password  # type: ignore[union-attr]
+
+
+def test_an_admin_makes_a_token_on_the_users_page_and_sees_it_once(world: World) -> None:
+    app = create_app(state=world.state, loops=lambda s: [])
+    admin = sign_in(app, "root", "admin")
+    _user(world.store, "ann", "operator")
+    form = {"name": "uptime-check", "user": "ann", "role": "viewer", "days": "30", "csrf_token": _csrf(admin)}
+    made = admin.post("/tokens", data=form)
+    assert made.status_code == 200 and made.headers["cache-control"] == "no-store"
+    found = re.search(r'<code class="secret" id="new-token">([^<]+)</code>', made.text)
+    assert found and "it is not shown again" in made.text
+    secret = found.group(1)
+    client = TestClient(app, base_url="http://localhost:8000")
+    me = client.get("/api/v1/me", headers={"Authorization": f"Bearer {secret}"})
+    assert me.status_code == 200 and me.json()["role"] == "viewer" and me.json()["user"] == "ann"
+    assert secret not in admin.get("/users").text  # once
+    [row] = [t for t in Accounts(world.store, world.clock).tokens(CLI) if t.name == "uptime-check"]
+    assert row.expires_at is not None and row.user == "ann"
+    higher = admin.post("/tokens", data={**form, "role": "admin", "csrf_token": _csrf(admin)})
+    assert higher.status_code == 422 and "higher role" in higher.text
+    nobody = admin.post("/tokens", data={**form, "user": "nobody", "csrf_token": _csrf(admin)})
+    assert nobody.status_code == 404
+    forever = admin.post(
+        "/tokens",
+        data={**form, "name": "ci", "user": "", "role": "", "days": "never", "csrf_token": _csrf(admin)},
+    )
+    assert forever.status_code == 200
+    [ci] = [t for t in Accounts(world.store, world.clock).tokens(CLI) if t.name == "ci"]
+    assert ci.expires_at is None and ci.user == "root" and ci.role == "admin"
+    assert ("create_token", "ok") in [(a.action, a.result) for a in world.store.audit.list_audit()]

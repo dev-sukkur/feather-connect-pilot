@@ -206,6 +206,9 @@ def test_a_sql_transform_joins_the_material_master_and_a_late_material_completes
     assert latest == {1: "Steel bar", 2: "Bolt"}  # the next delivery read the new reference version (H16)
 
 
+# The window opens one to two minutes after `project` is made, and the stack starts in between: the default limit of
+# 120 s counts that start and the wait together, which a slow runner went past. The waits below bound it anyway.
+@pytest.mark.timeout(420)
 def test_a_closed_window_holds_the_write_visibly_until_it_opens(project, stack):  # H19
     opens = datetime.fromisoformat((project / "opens.txt").read_text())
     version = stack.packages.versions(PACKAGE)[-1]

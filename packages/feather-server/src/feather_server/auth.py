@@ -31,6 +31,7 @@ from fastapi import APIRouter, Depends, FastAPI, Form, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
+from pydantic import BaseModel
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -88,6 +89,19 @@ class AuthError(Exception):
     def __init__(self, status: int, title: str, detail: str) -> None:
         super().__init__(title)
         self.status, self.title, self.detail = status, title, detail
+
+
+PASSWORD_PAGE = "/account/password"
+# What a user who must change their password may still reach: that page, signing out, and who they are.
+_WHILE_CHANGING = {PASSWORD_PAGE, "/logout", "/api/v1/me", "/api/v1/me/password"}
+
+
+class PasswordChangeRequired(AuthError):
+    """The user signed in with a password an admin set, and must choose their own first: a page goes to
+    `/account/password`, an API call gets 403."""
+
+    def __init__(self) -> None:
+        super().__init__(403, "Forbidden", f"choose your own password first, at {PASSWORD_PAGE}")
 
 
 # Passwords.
@@ -262,6 +276,8 @@ def current_actor(request: Request) -> Actor:
             and session.epoch is not None
             and _same(session.epoch, _epoch(state, user.username, user.password_hash))
         ):
+            if user.must_change_password and request.url.path not in _WHILE_CHANGING:
+                raise PasswordChangeRequired
             return Actor(
                 "human",
                 session.user,
@@ -408,7 +424,7 @@ def login(request: Request, username: Annotated[str, Form()], password: Annotate
         return _login_page(request, "This user is disabled. Ask an admin to enable it.", 403)
     _start_session(request, user.username, _epoch(state, user.username, user.password_hash))
     state.store.audit.record("human", user.username, "login", None, ip, "ok")
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse(PASSWORD_PAGE if user.must_change_password else "/", status_code=303)
 
 
 @router.post("/logout", dependencies=[Depends(require_csrf)])
@@ -421,6 +437,94 @@ def logout(request: Request, actor: CurrentActor) -> Response:
     _start_session(request)
     state.store.audit.record(actor.kind, actor.name, "logout", None, {}, "ok")
     return RedirectResponse("/login", status_code=303)
+
+
+def _password_page(
+    request: Request, actor: Actor, message: tuple[str, str] | None = None, status: int = 200
+) -> Response:
+    from feather_server.web.routes import render  # the dashboard's pages import this module
+
+    state: AppState = request.app.state.feather
+    user = None if actor.user is None else state.store.users.get_user(actor.user)
+    response = render(
+        request,
+        "account_password.html",
+        status=status,
+        title="Your password",
+        actor=actor,
+        forced=bool(user and user.must_change_password),
+        message=message,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _change_own_password(request: Request, actor: Actor, current: str, new: str) -> None:
+    """Change the caller's password, counting a wrong current one as a failed sign-in, and keep this session (the
+    others end, as the password changed). Raises `PermissionError` or `ValueError` as `Accounts` does."""
+    state: AppState = request.app.state.feather
+    throttle: LoginThrottle = request.app.state.login_throttle
+    key = ((actor.user or actor.name).lower()[:_MAX_NAME], request.client.host if request.client else "")
+    if throttle.blocked(key):
+        raise PermissionError("too many failed attempts: try again later")
+    try:
+        user = request.app.state.accounts.change_own_password(actor, current[: MAX_PASSWORD + 1], new)
+    except PermissionError:
+        throttle.fail(key)
+        raise
+    throttle.clear(key)
+    if "authorization" not in request.headers:
+        found = state.store.users.get_user(user.username)
+        assert found is not None
+        _start_session(request, found.username, _epoch(state, found.username, found.password_hash))
+
+
+@router.get(PASSWORD_PAGE)
+def password_form(request: Request, actor: CurrentActor) -> Response:
+    return _password_page(request, actor)
+
+
+@router.post(PASSWORD_PAGE, dependencies=[Depends(require_csrf)])
+def change_password(
+    request: Request,
+    actor: CurrentActor,
+    current: Annotated[str, Form()],
+    new: Annotated[str, Form()],
+    again: Annotated[str, Form()],
+) -> Response:
+    if new != again:
+        return _password_page(request, actor, ("bad", "The two new passwords differ."), 422)
+    state: AppState = request.app.state.feather
+    before = None if actor.user is None else state.store.users.get_user(actor.user)
+    try:
+        _change_own_password(request, actor, current, new)
+    except PermissionError as error:
+        return _password_page(request, actor, ("bad", f"Not changed: {error}."), 403)
+    except ValueError as error:
+        return _password_page(request, actor, ("bad", f"Not changed: {error}."), 422)
+    if before is not None and before.must_change_password:
+        return RedirectResponse("/", status_code=303)  # in, with their own password now
+    return _password_page(
+        request, actor, ("ok", "Your password is changed, and your other sessions have ended.")
+    )
+
+
+class PasswordBody(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@router.put("/api/v1/me/password", status_code=204, dependencies=[Depends(require_csrf)])
+def change_password_api(request: Request, actor: CurrentActor, body: PasswordBody) -> Response:
+    """Change your own password, given the one you have. Your other sessions end; tokens stay."""
+    try:
+        _change_own_password(request, actor, body.current_password, body.new_password)
+    except PermissionError as error:
+        raise AuthError(403, "Forbidden", str(error)) from None
+    except ValueError as error:
+        problem = {"type": "about:blank", "title": "Unprocessable", "status": 422, "detail": str(error)}
+        return JSONResponse(problem, 422, media_type="application/problem+json")
+    return Response(status_code=204)
 
 
 @router.get("/api/v1/me")
@@ -451,6 +555,8 @@ def _refuse(request: Request, error: AuthError) -> Response:
         return JSONResponse(problem, error.status, headers, media_type="application/problem+json")
     if error.status == 401:
         return RedirectResponse("/login", status_code=303)
+    if isinstance(error, PasswordChangeRequired):
+        return RedirectResponse(PASSWORD_PAGE, status_code=303)
     return PlainTextResponse(f"{error.title}: {error.detail}", status_code=error.status)
 
 

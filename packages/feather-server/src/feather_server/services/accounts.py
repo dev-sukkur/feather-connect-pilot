@@ -22,11 +22,17 @@ from feather_connect.storage.port import (
     TokenScope,
     UserRow,
 )
-from feather_server.auth import MAX_PASSWORD, Actor, hash_password, issue_token
+from feather_server.auth import MAX_PASSWORD, Actor, hash_password, issue_token, verify_password
 from feather_server.services.access import Capability, at_least, require, require_reason
 
 MAX_NAME = 200
 CLI = Actor("system", "cli", "admin")  # the server's CLI, which works on the database directly
+
+
+def _for_someone_else(actor: Actor, username: str) -> bool:
+    """Whether a person sets this password for another user (on the dashboard or the API), who must then choose
+    their own. The server's CLI, on the database itself, sets one that stays, as for the first admin."""
+    return actor.kind == "human" and actor.user != username
 
 
 @dataclass(frozen=True)
@@ -38,11 +44,17 @@ class User:
     created_at: str
     grants: tuple[str, ...] = ()
     disabled: bool = False
+    must_change_password: bool = False
 
     @classmethod
     def of(cls, row: UserRow) -> "User":
         return cls(
-            row.username, row.role, row.created_at.isoformat(), tuple(row.grants), row.disabled_at is not None
+            row.username,
+            row.role,
+            row.created_at.isoformat(),
+            tuple(row.grants),
+            row.disabled_at is not None,
+            row.must_change_password,
         )
 
 
@@ -160,7 +172,10 @@ class Accounts:
             _name(username, "username")
             if not password or len(password) > MAX_PASSWORD:
                 raise ValueError(f"a password has 1 to {MAX_PASSWORD} characters")
-            self._store.users.create_user(username, hash_password(password), chosen)
+            hashed = hash_password(password)
+            self._store.users.create_user(username, hashed, chosen)
+            if _for_someone_else(actor, username):
+                self._store.users.set_password_hash(username, hashed, must_change=True)
             found = self._store.users.get_user(username)
             assert found is not None
             return User.of(found)
@@ -200,20 +215,54 @@ class Accounts:
         return self._do(actor, "users.manage", action, f"user:{username}", {"reason": reason}, change)
 
     def set_password(self, actor: Actor, username: str, password: str, *, reason: str | None = None) -> User:
-        """Give the user a new password, as an admin does for someone who forgot theirs. The password is never in the
-        audit record. Raises `KeyError` for an unknown user and `ValueError` for a bad password."""
+        """Give the user a new password, as an admin does for someone who forgot theirs. Set by an admin on the
+        dashboard or the API for someone else, it is only for signing in once: they choose their own then. The
+        password is never in the audit record. Raises `KeyError` for an unknown user and `ValueError` for a bad one."""
 
         def change() -> User:
             if not password or len(password) > MAX_PASSWORD:
                 raise ValueError(f"a password has 1 to {MAX_PASSWORD} characters")
             if self._store.users.get_user(username) is None:
                 raise KeyError(username)
-            self._store.users.set_password_hash(username, hash_password(password))
+            self._store.users.set_password_hash(
+                username, hash_password(password), must_change=_for_someone_else(actor, username)
+            )
             found = self._store.users.get_user(username)
             assert found is not None
             return User.of(found)
 
         return self._do(actor, "users.manage", "set_password", f"user:{username}", {"reason": reason}, change)
+
+    def change_own_password(self, actor: Actor, current: str, new: str) -> User:
+        """The signed-in user changes their own password, given the one they have: what anybody may do, whatever their
+        role. Their other sessions end, as a session is bound to the password. Audited, never with a password. Raises
+        `PermissionError` for a wrong current password or a caller who is no user, and `ValueError` for a bad new one."""
+        target = f"user:{actor.user}"
+
+        def change() -> User:
+            found = None if actor.user is None else self._store.users.get_user(actor.user)
+            if found is None or found.disabled_at is not None:
+                raise PermissionError("only a signed-in user can change their password")
+            if not verify_password(found.password_hash, current):
+                raise PermissionError("the current password is wrong")
+            if not new or len(new) > MAX_PASSWORD:
+                raise ValueError(f"a password has 1 to {MAX_PASSWORD} characters")
+            if new == current:
+                raise ValueError("the new password is the one you have: choose another")
+            self._store.users.set_password_hash(found.username, hash_password(new))
+            changed = self._store.users.get_user(found.username)
+            assert changed is not None
+            return User.of(changed)
+
+        try:
+            result = change()
+        except Exception as error:
+            self._store.audit.record(
+                actor.kind, actor.name, "change_password", target, {}, f"failed: {error}"
+            )
+            raise
+        self._store.audit.record(actor.kind, actor.name, "change_password", target, {}, "ok")
+        return result
 
     def _first(self) -> bool:
         return not self._store.users.list_users()
