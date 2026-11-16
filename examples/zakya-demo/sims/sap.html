@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ERP simulator</title>
+<style>
+  :root { --fg: #1f2328; --muted: #59636e; --line: #d1d9e0; --head: #f6f8fa; --blue: #0969da; --green: #1a7f37;
+          --amber: #9a6700; --red: #cf222e; --bg: #fff; }
+  * { box-sizing: border-box; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; color: var(--fg); background: var(--bg); }
+  header { padding: 16px 24px 0; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 16px; margin: 0 0 8px; }
+  .sub { color: var(--muted); margin: 2px 0 12px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 8px 24px; border-bottom: 1px solid var(--line); }
+  .bar .grow { flex: 1; }
+  .tabs { display: flex; gap: 4px; padding: 0 24px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 10px 12px; }
+  .tabs button.on { border-bottom-color: var(--blue); font-weight: 600; }
+  main { padding: 16px 24px 40px; }
+  .card { border: 1px solid var(--line); border-radius: 6px; padding: 16px; margin-bottom: 24px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: top; }
+  th { font-weight: 600; background: var(--head); }
+  td.num, th.num { text-align: right; }
+  td.items { white-space: normal; min-width: 280px; }
+  .scroll { overflow-x: auto; }
+  .pill { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 12px; font-weight: 600; background: #eaeef2; color: var(--muted); }
+  .B2B { background: #ddf4ff; color: var(--blue); }
+  .B2C { background: #dafbe1; color: var(--green); }
+  .parked { background: #fff8c5; color: var(--amber); }
+  .posted { background: #dafbe1; color: var(--green); }
+  .reversed, .rejected { background: #ffebe9; color: var(--red); }
+  .neg { color: var(--red); }
+  button { font: inherit; padding: 4px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--head); cursor: pointer; }
+  button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  input, select { font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; max-width: 100%; }
+  input.qty { width: 80px; } input.amount { width: 110px; }
+  .lines td { border: 0; padding: 4px 6px 4px 0; }
+  .toggle button { border-radius: 0; } .toggle button:first-child { border-radius: 6px 0 0 6px; }
+  .toggle button:last-child { border-radius: 0 6px 6px 0; } .toggle button.on { background: var(--blue); color: #fff; border-color: var(--blue); }
+  .msg { min-height: 1.5em; color: var(--muted); } .msg.error { color: var(--red); }
+  .small { font-size: 12px; color: var(--muted); }
+  [hidden] { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ERP simulator (SAP through CPI)</h1>
+  <p class="sub">What the integration posts: a billing document per B2B invoice, a credit memo per B2B return, and
+  per-material summaries of B2C sales and returns. Only posted documents count in the views.</p>
+</header>
+<div class="bar">
+  <span>Mode</span>
+  <span class="toggle"><button id="auto">Auto</button><button id="manual">Manual</button></span>
+  <span id="modeText" class="small"></span>
+  <span class="grow"></span>
+  <label class="small">Day <input id="day" type="date"></label>
+  <button id="refresh">Refresh</button>
+</div>
+<nav class="tabs">
+  <button data-tab="byDoc" class="on">By invoice</button>
+  <button data-tab="byMat">By material per day</button>
+  <button data-tab="enter">Enter a document</button>
+  <button data-tab="master">Materials</button>
+</nav>
+<main>
+  <p id="msg" class="msg"></p>
+  <section id="byDoc">
+    <div class="scroll"><table>
+      <thead><tr><th>Document</th><th>Kind</th><th>Type</th><th>Posting date</th><th>Customer</th><th>From</th>
+        <th>Items</th><th class="num">Net amount</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody id="docs"></tbody>
+    </table></div>
+  </section>
+  <section id="byMat" hidden>
+    <p class="small">Each posting of the day adds up: B2B invoices and credit memos item by item, B2C summaries as the
+    integration sent them, and documents entered by hand. To date is the running total over the days shown.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Day</th><th>Material</th><th>Description</th><th class="num">Sold</th><th class="num">Returned</th>
+        <th class="num">Net qty</th><th class="num">Net amount</th><th class="num">B2B qty</th><th class="num">B2C qty</th>
+        <th class="num">Documents</th><th class="num">Qty to date</th><th class="num">Amount to date</th></tr></thead>
+      <tbody id="mats"></tbody>
+      <tfoot id="matsTotal"></tfoot>
+    </table></div>
+  </section>
+  <section id="enter" hidden>
+    <div class="card">
+      <h2>Enter a document by hand</h2>
+      <p class="small">A sale or a return keyed in the ERP itself, not through the integration. Either barcode or the material number finds the material; the amount is the list price unless you give one.</p>
+      <p>
+        <label>Kind <select id="kind"><option value="sale">Sale</option><option value="return">Return</option></select></label>
+        <label>Type <select id="channel"><option>B2B</option><option>B2C</option></select></label>
+        <label>Customer <input id="customer" placeholder="name"></label>
+        <label>Posting date <input id="postingDate" type="date"></label>
+      </p>
+      <table class="lines"><tbody id="lines"></tbody></table>
+      <p><button id="addLine">Add line</button> <button id="save" class="primary">Post document</button></p>
+    </div>
+  </section>
+  <section id="master" hidden>
+    <div class="scroll"><table>
+      <thead><tr><th>Material</th><th>Description</th><th>EAN-13</th><th>POS code</th><th>Unit</th><th class="num">List price</th></tr></thead>
+      <tbody id="materials"></tbody>
+    </table></div>
+  </section>
+</main>
+<script>
+let state = null;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const money = (n) => Number(n).toLocaleString("en-IN", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const qty = (n) => Number(n).toLocaleString("en-IN", {maximumFractionDigits: 3});
+const signed = (n, f) => `<span class="${n < 0 ? "neg" : ""}">${f(n)}</span>`;
+
+async function call(path, body) {
+  const res = await fetch(path, body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+function say(text, error) { $("msg").textContent = text; $("msg").className = "msg" + (error ? " error" : ""); }
+
+function lineRow() {
+  const tr = document.createElement("tr");
+  tr.innerHTML = '<td><input class="code" list="codes" placeholder="material, EAN or POS code" size="22"></td>' +
+    '<td><input class="qty" type="number" min="1" value="1"></td><td><input class="amount" type="number" step="0.01" placeholder="net amount"></td>' +
+    '<td><button>Remove</button></td>';
+  tr.querySelector("button").addEventListener("click", () => tr.remove());
+  $("lines").appendChild(tr);
+}
+
+function render() {
+  $("auto").className = state.mode === "auto" ? "on" : "";
+  $("manual").className = state.mode === "manual" ? "on" : "";
+  $("modeText").textContent = state.mode === "auto" ? "each posting is booked as it arrives"
+    : "each posting is parked until you post or reject it";
+  const day = $("day").value;
+  const docs = state.documents.filter((d) => !day || d.posting_date === day);
+  $("docs").innerHTML = docs.map((d) => {
+    const items = d.items.map((i) => `${esc(i.material)} ${esc(i.description)} × ${signed(i.quantity, qty)} = ${signed(i.amount, money)}`).join("<br>");
+    const from = d.origin === "manual" ? "entered by hand" : `${esc(d.business_key)}${d.reference ? "<div class=small>against " + esc(d.reference) + "</div>" : ""}`;
+    const actions = d.status === "parked" ? `<button data-post="${esc(d.doc_no)}">Post</button> <button data-reject="${esc(d.doc_no)}">Reject</button>` : "";
+    return `<tr><td>${esc(d.doc_no)}</td><td>${esc(d.kind)}</td><td><span class="pill ${esc(d.channel)}">${esc(d.channel)}</span></td>` +
+      `<td>${esc(d.posting_date)}</td><td>${esc(d.customer)}</td><td>${from}</td><td class="items">${items}</td>` +
+      `<td class="num">${signed(d.total, money)}</td><td><span class="pill ${esc(d.status)}">${esc(d.status)}</span></td><td>${actions}</td></tr>`;
+  }).join("") || '<tr><td colspan="10" class="small">No documents yet.</td></tr>';
+  const mats = state.by_material.filter((m) => !day || m.posting_date === day);
+  $("mats").innerHTML = mats.map((m) => `<tr><td>${esc(m.posting_date)}</td><td>${esc(m.material)}</td><td>${esc(m.description)}</td>` +
+    `<td class="num">${qty(m.sold_qty)}</td><td class="num">${qty(m.returned_qty)}</td><td class="num">${signed(m.net_qty, qty)}</td>` +
+    `<td class="num">${signed(m.net_amount, money)}</td><td class="num">${qty(m.b2b_qty)}</td><td class="num">${qty(m.b2c_qty)}</td>` +
+    `<td class="num">${m.documents}</td><td class="num">${qty(m.qty_to_date)}</td><td class="num">${money(m.amount_to_date)}</td></tr>`).join("")
+    || '<tr><td colspan="12" class="small">Nothing posted yet.</td></tr>';
+  const sum = (f) => mats.reduce((a, m) => a + m[f], 0);
+  $("matsTotal").innerHTML = mats.length ? `<tr><th colspan="3">Total${day ? " " + esc(day) : ""}</th><th class="num">${qty(sum("sold_qty"))}</th>` +
+    `<th class="num">${qty(sum("returned_qty"))}</th><th class="num">${qty(sum("net_qty"))}</th><th class="num">${money(sum("net_amount"))}</th>` +
+    `<th class="num">${qty(sum("b2b_qty"))}</th><th class="num">${qty(sum("b2c_qty"))}</th><th colspan="3"></th></tr>` : "";
+  $("materials").innerHTML = state.materials.map((m) => `<tr><td>${esc(m.material)}</td><td>${esc(m.description)}</td>` +
+    `<td>${esc(m.ean)}</td><td>${esc(m.pos_code)}</td><td>${esc(m.uom)}</td><td class="num">${money(m.price)}</td></tr>`).join("");
+  let codes = $("codes");
+  if (!codes) { codes = document.createElement("datalist"); codes.id = "codes"; document.body.appendChild(codes); }
+  codes.innerHTML = state.materials.map((m) => `<option value="${esc(m.material)}">${esc(m.description)}</option>`).join("");
+}
+
+async function load() { try { state = await call("/sim/state"); render(); } catch (e) { say(e.message, true); } }
+
+document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => {
+  document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
+  document.querySelectorAll("main > section").forEach((s) => { s.hidden = s.id !== b.dataset.tab; });
+}));
+$("refresh").addEventListener("click", load);
+$("day").addEventListener("change", render);
+$("auto").addEventListener("click", async () => { await call("/sim/mode", {mode: "auto"}); load(); });
+$("manual").addEventListener("click", async () => { await call("/sim/mode", {mode: "manual"}); load(); });
+$("addLine").addEventListener("click", lineRow);
+$("save").addEventListener("click", async () => {
+  const lines = [...$("lines").querySelectorAll("tr")].map((tr) => ({
+    code: tr.querySelector(".code").value.trim(), quantity: Number(tr.querySelector(".qty").value),
+    amount: tr.querySelector(".amount").value || null,
+  })).filter((l) => l.code);
+  try {
+    const made = await call("/sim/documents", {kind: $("kind").value, channel: $("channel").value,
+      customer: $("customer").value, posting_date: $("postingDate").value || null, lines});
+    say("Posted document " + made.doc_no + "."); $("lines").innerHTML = ""; lineRow(); load();
+  } catch (e) { say(e.message, true); }
+});
+document.addEventListener("click", async (event) => {
+  const data = event.target.dataset || {};
+  const doc = data.post || data.reject;
+  if (!doc) return;
+  try { await call("/sim/decide", {doc_no: doc, decision: data.post ? "post" : "reject"}); load(); } catch (e) { say(e.message, true); }
+});
+lineRow();
+load();
+setInterval(load, 10000);
+</script>
+</body>
+</html>

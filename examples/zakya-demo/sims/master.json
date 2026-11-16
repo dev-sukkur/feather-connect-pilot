@@ -1,0 +1,18 @@
+{
+  "_about": "Master data the demo's Zakya, ERP and POS share. A material has two barcodes: its EAN-13 (the GS1 code on the pack, which the POS scans) and its POS code (the SKU in Zakya). The ERP keys a material by its own number and keeps both codes, so either side can find it. A customer's gst_treatment says B2B (business_gst, with a GSTIN) or B2C (consumer).",
+  "materials": [
+    {"material": "MAT-1001", "description": "Assam tea 250 g", "ean": "8901234500101", "pos_code": "TEA-250", "item_id": "5100000001", "uom": "EA", "price": 180.0},
+    {"material": "MAT-1002", "description": "Basmati rice 5 kg", "ean": "8901234500200", "pos_code": "RICE-5", "item_id": "5100000002", "uom": "EA", "price": 640.0},
+    {"material": "MAT-1003", "description": "Mustard oil 1 l", "ean": "8901234500309", "pos_code": "OIL-1", "item_id": "5100000003", "uom": "EA", "price": 210.0},
+    {"material": "MAT-1004", "description": "Toor dal 1 kg", "ean": "8901234500408", "pos_code": "DAL-1", "item_id": "5100000004", "uom": "EA", "price": 165.0},
+    {"material": "MAT-1005", "description": "Sugar 1 kg", "ean": "8901234500507", "pos_code": "SUGAR-1", "item_id": "5100000005", "uom": "EA", "price": 48.0}
+  ],
+  "customers": [
+    {"customer_id": "c-101", "customer_name": "Asha Traders", "gst_treatment": "business_gst", "gst_no": "33AAACA1111A1Z5"},
+    {"customer_id": "c-102", "customer_name": "Bharat Stores", "gst_treatment": "business_gst", "gst_no": "33AAACB2222B1Z3"},
+    {"customer_id": "c-103", "customer_name": "Chennai Mart", "gst_treatment": "business_gst", "gst_no": "33AAACC3333C1Z1"},
+    {"customer_id": "c-104", "customer_name": "Delhi Deli", "gst_treatment": "business_gst", "gst_no": "07AAACD4444D1Z8"},
+    {"customer_id": "c-900", "customer_name": "Walk-in customer", "gst_treatment": "consumer", "gst_no": ""},
+    {"customer_id": "c-901", "customer_name": "Online shopper", "gst_treatment": "consumer", "gst_no": ""}
+  ]
+}
