@@ -938,8 +938,9 @@ class _Versions(VersionStore):
             ).fetchone()
             if row is not None:
                 return _unjson(row["watermark"])
-            # Sealed before migration 0012, or not yet: work it out once, under the sealers' lock, and keep it.
-            conn.execute(SEAL_LOCK)
+            # Sealed before migration 0012, or not yet. Not yet is the common case (a dataset that has never sealed,
+            # asked on every tick), and needs no lock: a seal keeps its watermark itself. Otherwise work it out once
+            # and keep it, under the sealers' lock.
             rows = conn.execute(
                 """select watermark from feather.version
                    where tenant_id = %s and dataset = %s and status = 'sealed' and watermark is not null""",
@@ -947,6 +948,7 @@ class _Versions(VersionStore):
             ).fetchall()
             found = max((_unjson(r["watermark"]) for r in rows), default=None)
             if found is not None:
+                conn.execute(SEAL_LOCK)
                 self._raise_watermark(conn, dataset, found)
         return found
 
