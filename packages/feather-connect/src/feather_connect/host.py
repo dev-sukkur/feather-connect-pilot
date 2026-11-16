@@ -57,6 +57,7 @@ from feather_connect.project import (
     use_db_secrets,
     use_secret_broker,
 )
+from feather_connect.runtime.http import share_tokens
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.runtime.scheduler import tick
 from feather_connect.runtime.sealer import seal_once
@@ -279,6 +280,7 @@ def run_host(
             link.send("failed", error=why, taken=True)
         return HOST_TAKEN
     store, spool = connect(database_url, tenant=tenant)
+    share_tokens(store.oauth_tokens)  # one OAuth2 token per grant for the tenant's processes, not one each
     if link is not None:
         use_secret_broker(_brokered(link))
     else:

@@ -20,6 +20,7 @@ import email.utils
 import hashlib
 import logging
 import math
+import os
 import random
 import re
 import threading
@@ -27,14 +28,19 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import httpx
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from feather_connect.core.errors import BudgetDeferred, PermanentError, TransientError
 from feather_connect.logs import MIN_SECRET_LENGTH, register_secrets, unregister_secrets
 from feather_connect.logs import redact as redact_known
 from feather_connect.runtime.budgets import BudgetHandle
+
+if TYPE_CHECKING:
+    from feather_connect.storage.port import OAuthTokenStore
 
 __all__ = [
     "ApiKey",
@@ -47,10 +53,12 @@ __all__ = [
     "OAuth2ClientCredentials",
     "OAuth2RefreshToken",
     "redact",
+    "share_tokens",
 ]
 
 # httpx logs every request with its URL at INFO, query string and all.
 logging.getLogger("httpx").setLevel(logging.WARNING)
+log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30.0
 _LONGEST_RETRY_AFTER = 60.0  # longer than this is the engine's to wait, not a worker thread's
@@ -188,6 +196,7 @@ class _TokenCell:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.token: str | None = None
+        self.sealed: bytes | None = None  # the token as the shared store keeps it, if it went through there
         self.expires_at = 0.0
         self.issued: list[str] = []
         self.fetches = 0
@@ -195,12 +204,28 @@ class _TokenCell:
 
 _CELLS: dict[tuple[str, ...], _TokenCell] = {}
 _CELLS_LOCK = threading.Lock()
+_share: "OAuthTokenStore | None" = None
+_CLAIM_S = 30.0  # how long a process may take to fetch a token before another one may fetch it instead
+_CLAIM_POLL_S = 0.25  # how often a process waiting for another's token looks for it
 
 
 def forget_tokens() -> None:
     """Drop every access token this process holds, so that the next request fetches a new one. For tests."""
     with _CELLS_LOCK:
         _CELLS.clear()
+
+
+def share_tokens(store: "OAuthTokenStore | None") -> None:
+    """Share OAuth2 access tokens with the tenant's other processes through `store`, or stop (None).
+
+    The server, the worker and each package host would otherwise fetch their own token for one grant, and again on
+    each restart, and a token endpoint such as Zoho's turns a client away that asks too often. With a store, a process
+    that has no token takes the one kept there; if none is, one process fetches it while the others wait for it (for
+    at most `_CLAIM_S`, after which they fetch their own). A token is kept sealed with AES-256-GCM under a key derived
+    from its grant's secrets, under a name hashed from them, so the database can't open it and holds nothing that
+    names the grant. If the store fails, the process fetches its own token, as without one."""
+    global _share
+    _share = store
 
 
 class _OAuth2:
@@ -228,6 +253,7 @@ class _OAuth2:
         self.scheme = scheme
         self.partition = partition
         self._shared: _TokenCell | None = None
+        self._share_keys: tuple[str, bytes] | None = None
 
     def _form(self) -> dict[str, str]:
         raise NotImplementedError
@@ -256,16 +282,97 @@ class _OAuth2:
         cell = self._cell
         with cell.lock:
             if cell.token is None or time.monotonic() >= cell.expires_at - _EARLY_REFRESH_S:
-                self._fetch(cell, post)
+                share = _share
+                if share is None or not self._through_share(share, cell, post):
+                    self._fetch(cell, post)
             assert cell.token is not None
             return {"Authorization": f"{self.scheme} {cell.token}"}
 
     def expire(self, token_sent: str | None) -> None:
-        """Forget the token that a 401 came back for, unless another thread has fetched a new one already."""
+        """Forget the token that a 401 came back for, unless another thread has fetched a new one already, and the
+        shared store's copy of it too."""
         cell = self._cell
         with cell.lock:
             if token_sent is None or f"{self.scheme} {cell.token}" == token_sent:
                 cell.token = None
+                share, sealed = _share, cell.sealed
+                cell.sealed = None
+                if share is not None and sealed is not None:
+                    try:
+                        share.drop(self._share_key()[0], sealed)
+                    except Exception as error:  # noqa: BLE001 - the store's trouble is not the call's
+                        log.warning(
+                            "couldn't drop a turned-down OAuth2 token from the shared store: %s", error
+                        )
+
+    def _share_key(self) -> tuple[str, bytes]:
+        """The shared store's name for this grant's token, and the key that seals it: both from the grant's secrets."""
+        if self._share_keys is None:
+            grant = sorted(self._form().items())
+            material = repr(
+                (type(self).__name__, self.partition, self.token_url, self.client_id, self.scheme)
+                + (self._client_secret, grant)
+            ).encode()
+            name = hashlib.sha256(b"feather oauth2 token name\0" + material).hexdigest()
+            self._share_keys = (name, hashlib.sha256(b"feather oauth2 token seal\0" + material).digest())
+        return self._share_keys
+
+    def _through_share(self, share: "OAuthTokenStore", cell: _TokenCell, post: TokenPost) -> bool:
+        """Put a token in `cell` by way of the shared store: the one kept there, or one fetched here and kept there,
+        waiting while another process fetches it. False if the store failed or the wait ran out: fetch one alone."""
+        name, seal_key = self._share_key()
+        aes = AESGCM(seal_key)
+        deadline = time.monotonic() + _CLAIM_S
+        while True:
+            try:
+                kept = share.get(name)
+                if kept is not None and kept.expires_in > _EARLY_REFRESH_S:
+                    try:
+                        token = aes.decrypt(kept.sealed[:12], kept.sealed[12:], name.encode()).decode()
+                    except (InvalidTag, ValueError, UnicodeDecodeError):
+                        token = None  # not ours to open: fetch a new one over it
+                    if token:
+                        self._keep(cell, token, kept.expires_in)
+                        cell.sealed = kept.sealed
+                        return True
+                claimed = share.claim(name, _CLAIM_S)
+            except Exception as error:  # noqa: BLE001 - the store's trouble is not the call's
+                log.warning(
+                    "the shared OAuth2 token store failed, so this process fetches its own: %s", error
+                )
+                return False
+            if claimed:
+                break
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(_CLAIM_POLL_S)
+        try:
+            self._fetch(cell, post)
+        except BaseException:
+            try:
+                share.release(name)
+            except Exception:  # noqa: BLE001, S110 - the claim runs out by itself
+                pass
+            raise
+        assert cell.token is not None
+        nonce = os.urandom(12)
+        sealed = nonce + aes.encrypt(nonce, cell.token.encode(), name.encode())
+        try:
+            share.put(name, sealed, cell.expires_at - time.monotonic())
+            cell.sealed = sealed
+        except Exception as error:  # noqa: BLE001 - the token is in hand; the others fetch their own
+            log.warning("couldn't keep an OAuth2 token in the shared store: %s", error)
+        return True
+
+    def _keep(self, cell: _TokenCell, token: str, lifetime: float) -> None:
+        """Hold `token` for `lifetime` seconds, masked in logs until two newer ones replace it."""
+        register_secrets(token)
+        cell.issued.append(token)
+        if len(cell.issued) > _TOKENS_KEPT:
+            unregister_secrets(*cell.issued[:-_TOKENS_KEPT])
+            del cell.issued[:-_TOKENS_KEPT]
+        cell.token = token
+        cell.expires_at = time.monotonic() + lifetime
 
     def _fetch(self, cell: _TokenCell, post: TokenPost) -> None:
         form = {"client_id": self.client_id, "client_secret": self._client_secret, **self._form()}
@@ -287,15 +394,10 @@ class _OAuth2:
             raise PermanentError(
                 f"the token endpoint {self.token_url} gave no access token (HTTP {response.status_code}): {excerpt}"
             )
-        register_secrets(token)
-        cell.issued.append(token)
-        if len(cell.issued) > _TOKENS_KEPT:
-            unregister_secrets(*cell.issued[:-_TOKENS_KEPT])
-            del cell.issued[:-_TOKENS_KEPT]
         expires_in = body.get("expires_in")
         lifetime = float(expires_in) if isinstance(expires_in, int | float) else 3600.0
-        cell.token = token
-        cell.expires_at = time.monotonic() + lifetime
+        cell.sealed = None
+        self._keep(cell, token, lifetime)
 
     def secrets(self) -> Sequence[str]:
         token = self._shared.token if self._shared is not None else None

@@ -62,6 +62,7 @@ from feather_connect.storage.port import (
     KeyMismatch,
     KeySighting,
     Ledger,
+    OAuthTokenStore,
     Override,
     OverrideStore,
     PackageEnv,
@@ -91,6 +92,7 @@ from feather_connect.storage.port import (
     SealedPartition,
     SealedSecret,
     SecretStore,
+    SharedToken,
     SliceFinished,
     StaleWriter,
     StateRow,
@@ -188,6 +190,9 @@ class _Data:
     audit: list[AuditRow] = field(default_factory=list[AuditRow])
     alerts: dict[str, AlertRow] = field(default_factory=dict[str, AlertRow])
     alert_rules: dict[str, AlertRuleRow] = field(default_factory=dict[str, AlertRuleRow])
+    oauth_tokens: dict[str, tuple[bytes | None, datetime | None, datetime | None]] = field(
+        default_factory=dict[str, tuple[bytes | None, datetime | None, datetime | None]]
+    )  # (sealed token, when it expires, when the claim to fetch one ends), by key
     requests: dict[str, ActionRequestRow] = field(default_factory=dict[str, ActionRequestRow])
     # The key index, by (dataset, key): (version, partition, op, row hash, chunk), in seal order.
     keys: dict[tuple[str, str], list[tuple[str, str, str, int, int]]] = field(
@@ -1904,6 +1909,44 @@ class _Webhooks(WebhookEventStore):
         return len(old)
 
 
+class _OAuthTokens(OAuthTokenStore):
+    def __init__(self, data: _Data) -> None:
+        self._d = data
+
+    def _left(self, at: datetime | None) -> float:
+        return (at - self._d.clock.now()).total_seconds() if at is not None else 0.0
+
+    def get(self, key: str) -> SharedToken | None:
+        with self._d.lock:
+            sealed, expires_at, _ = self._d.oauth_tokens.get(key, (None, None, None))
+            left = self._left(expires_at)
+            return SharedToken(sealed, left) if sealed is not None and left > 0 else None
+
+    def claim(self, key: str, seconds: float) -> bool:
+        with self._d.lock:
+            sealed, expires_at, until = self._d.oauth_tokens.get(key, (None, None, None))
+            if self._left(until) > 0:
+                return False
+            self._d.oauth_tokens[key] = (sealed, expires_at, self._d.clock.now() + timedelta(seconds=seconds))
+            return True
+
+    def put(self, key: str, sealed: bytes, expires_in: float) -> None:
+        with self._d.lock:
+            self._d.oauth_tokens[key] = (sealed, self._d.clock.now() + timedelta(seconds=expires_in), None)
+
+    def release(self, key: str) -> None:
+        with self._d.lock:
+            if key in self._d.oauth_tokens:
+                sealed, expires_at, _ = self._d.oauth_tokens[key]
+                self._d.oauth_tokens[key] = (sealed, expires_at, None)
+
+    def drop(self, key: str, sealed: bytes) -> None:
+        with self._d.lock:
+            kept, _, until = self._d.oauth_tokens.get(key, (None, None, None))
+            if kept is not None and kept == sealed:
+                self._d.oauth_tokens[key] = (None, None, until)
+
+
 class _Requests(ActionRequestStore):
     def __init__(self, data: _Data) -> None:
         self._d = data
@@ -2447,4 +2490,5 @@ class MemoryStore(Store):
             readiness=_Readiness(data, runs, inbox),
             alerts=_Alerts(data),
             requests=_Requests(data),
+            oauth_tokens=_OAuthTokens(data),
         )

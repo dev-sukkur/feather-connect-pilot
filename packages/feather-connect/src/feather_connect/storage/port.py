@@ -2021,6 +2021,43 @@ class ActionRequestStore(Protocol):
 
 
 @dataclass(frozen=True)
+class SharedToken:
+    """An access token kept for the tenant's processes, sealed so that only a holder of its grant's secrets opens it,
+    and how many seconds it has left by the store's clock."""
+
+    sealed: bytes
+    expires_in: float
+
+
+class OAuthTokenStore(Protocol):
+    """The OAuth2 access tokens this tenant's processes share (`runtime.http`), each under a key derived from its
+    grant. The caller seals them: nothing here can open one. At most one process at a time fetches a new token for a
+    key: it claims the key for a while, and the others wait for its token, or fetch their own once the claim runs out.
+    """
+
+    def get(self, key: str) -> SharedToken | None:
+        """The token kept under `key`, if there is one and it hasn't expired."""
+        ...
+
+    def claim(self, key: str, seconds: float) -> bool:
+        """Take the right to fetch the token for `key` for `seconds`, unless another process holds it now. Returns
+        whether it was taken."""
+        ...
+
+    def put(self, key: str, sealed: bytes, expires_in: float) -> None:
+        """Keep a token just fetched, which expires in `expires_in` seconds, and give up the claim."""
+        ...
+
+    def release(self, key: str) -> None:
+        """Give up the claim on `key` (the fetch failed), keeping whatever token is there."""
+        ...
+
+    def drop(self, key: str, sealed: bytes) -> None:
+        """Forget the token under `key` if it is still `sealed`: the server turned it down."""
+        ...
+
+
+@dataclass(frozen=True)
 class Store:
     """The ports together. A backend provides one of these."""
 
@@ -2047,6 +2084,7 @@ class Store:
     readiness: ReadinessStore
     alerts: AlertStore
     requests: ActionRequestStore
+    oauth_tokens: OAuthTokenStore
 
     def is_unavailable(self, error: BaseException) -> bool:
         """Whether `error` says that the store can't be reached, or can't keep up, just now, so that the same call may
