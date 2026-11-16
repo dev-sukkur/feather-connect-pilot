@@ -299,7 +299,7 @@ def load_project(
     if simulate:
         connections = _all_simulated(flows, connections)
     flows = _simulated(flows, connections, root)
-    _check_push_sources(flows, connections, env)
+    _check_push_sources(flows, connections, env, simulate=simulate)
     if package is not None:
         flows = prefixed(flows, package)
     return Project(
@@ -759,11 +759,14 @@ def _retargeted(trigger: Trigger, datasets: Mapping[str, Any]) -> Trigger:
     return trigger
 
 
-def _check_push_sources(flows: Sequence[Flow], connections: Mapping[str, ConnectionConfig], env: str) -> None:
+def _check_push_sources(
+    flows: Sequence[Flow], connections: Mapping[str, ConnectionConfig], env: str, *, simulate: bool = False
+) -> None:
     """Refuse a push source that would take events from anybody, unless it says that is what it means (design 13.5).
 
     It must be able to verify, and the secret it verifies against must be a reference under its connection's `auth`. The
     reference is not resolved here: one that doesn't resolve is found when an event arrives, which is then told to retry.
+    With `simulate` (`feather run --sim`) the events come from fixtures, not over the wire, so no secret is needed.
     """
     for flow in flows:
         for dataset in flow.datasets:
@@ -777,6 +780,8 @@ def _check_push_sources(flows: Sequence[Flow], connections: Mapping[str, Connect
                     f"{where}: {source.spec.name} takes events but has no signature to verify them by. "
                     "Give it a signature_secret, or mark it unsigned=True if anybody may really send them"
                 )
+            if simulate:
+                continue
             connection = connections.get(source.connection)
             if connection is None or secret not in connection.secret_refs:
                 raise ProjectError(

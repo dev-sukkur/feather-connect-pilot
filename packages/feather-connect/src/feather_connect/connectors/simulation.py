@@ -156,6 +156,12 @@ class Source(connector.Source):
         self._late = []
         self._fixture = None
 
+    def fixture_rows(self) -> list[dict[str, Any]]:
+        """The rows the source has now (the fixture's, as it is on disk), as copies: what `feather run --sim` sends a
+        push dataset as events."""
+        self._reload_if_changed()
+        return [dict(row) for row in self._rows]
+
     def _stamp(self) -> tuple[int, int] | None:
         if self._fixture is None:
             return None
