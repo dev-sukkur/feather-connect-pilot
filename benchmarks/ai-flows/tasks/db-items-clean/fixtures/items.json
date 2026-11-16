@@ -1,0 +1,26 @@
+[
+  {
+    "item_id": "ITM-0001",
+    "sku": " tea-250",
+    "name": "Assam tea 250 g",
+    "category": "beverages",
+    "uom": "EA",
+    "updated_at": "2026-11-07T08:01:00Z"
+  },
+  {
+    "item_id": "ITM-0002",
+    "sku": "Rice-5k ",
+    "name": "Basmati rice 5 kg",
+    "category": "staples",
+    "uom": "EA",
+    "updated_at": "2026-11-07T08:02:00Z"
+  },
+  {
+    "item_id": "ITM-0003",
+    "sku": "SOAP-100",
+    "name": "Neem soap 100 g",
+    "category": "personal care",
+    "uom": "EA",
+    "updated_at": "2026-11-07T08:03:00Z"
+  }
+]

@@ -1,0 +1,23 @@
+[
+  {
+    "stock_id": "BLR-01:TEA-250",
+    "store_id": "BLR-01",
+    "sku": "TEA-250",
+    "on_hand": 42,
+    "changed_at": "2026-11-07T07:00:00Z"
+  },
+  {
+    "stock_id": "BLR-01:RICE-5K",
+    "store_id": "BLR-01",
+    "sku": "RICE-5K",
+    "on_hand": 9,
+    "changed_at": "2026-11-07T07:05:00Z"
+  },
+  {
+    "stock_id": "MAA-02:TEA-250",
+    "store_id": "MAA-02",
+    "sku": "TEA-250",
+    "on_hand": 17,
+    "changed_at": "2026-11-07T07:10:00Z"
+  }
+]

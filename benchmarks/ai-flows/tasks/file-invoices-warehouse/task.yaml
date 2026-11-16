@@ -1,0 +1,7 @@
+template: file-drop-to-db
+title: A second destination
+prompt: |
+  Finance also wants the invoices in the warehouse. Keep loading them into Postgres, and deliver each invoice as
+  well to the MotherDuck table `bronze_invoices`, upserted by `invoice_id`, through a new connection `warehouse`
+  (a `duckdb.table` connection to the database `md:bronze`, its token from the `MOTHERDUCK_TOKEN` environment
+  variable). In dev and qa the new destination runs on a simulation stand-in, as the others do.

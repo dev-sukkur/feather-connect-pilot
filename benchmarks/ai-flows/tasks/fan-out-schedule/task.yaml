@@ -1,0 +1,4 @@
+template: fan-out-demo
+title: Its own name and a calmer schedule
+prompt: |
+  Rename the demo's flow to `shop-orders`, and run it every 5 minutes instead of every minute.

@@ -1,0 +1,6 @@
+template: file-drop-to-db
+title: Return files in JSON lines
+prompt: |
+  Stores now also drop their returns, as JSON-lines files, at `s3://landing/returns/*.jsonl`. Change the project
+  so it loads those (instead of the invoices) into the Postgres table `store_returns`, upserted by `return_id`.
+  Name the dataset `returns`. `fixtures/returns.json` holds sample rows for dev.

@@ -1,0 +1,6 @@
+template: db-to-warehouse
+title: A second table to the warehouse
+prompt: |
+  The shop's app database also has a `categories` table, keyed by `category_id` and stamped by `updated_at`.
+  Change the project so it copies `categories` (instead of `items`) to the warehouse table `bronze_categories`,
+  once an hour. `fixtures/categories.json` holds sample rows for dev.

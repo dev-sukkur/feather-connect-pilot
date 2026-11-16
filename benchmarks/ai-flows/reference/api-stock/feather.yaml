@@ -1,0 +1,18 @@
+# Stock levels from the inventory API, within its limits, to a MotherDuck bronze table.
+name: api-to-warehouse
+modules: [flows.stock]
+settings: {timezone: UTC}
+budgets:
+  inventory-api: {limits: ["120/minute", "50000/day"]}
+connections:
+  inventory_api:
+    connector: http.rest
+    budget: inventory-api
+    base_url: https://inventory.example.com
+    auth_scheme: api_key
+    api_key_header: X-API-Key
+    auth: {api_key: "${secret:env:INVENTORY_API_KEY}"}
+  warehouse:
+    connector: duckdb.table
+    database: md:bronze
+    auth: {token: "${secret:env:MOTHERDUCK_TOKEN}"}

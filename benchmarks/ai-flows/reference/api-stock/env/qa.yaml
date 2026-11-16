@@ -1,0 +1,2 @@
+# qa runs on the same stand-ins as dev.
+connections: {inventory_api: {connector: simulation.source}, warehouse: {connector: simulation.sink}}

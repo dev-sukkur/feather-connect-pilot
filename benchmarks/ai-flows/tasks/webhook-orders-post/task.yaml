@@ -1,0 +1,5 @@
+template: webhook-to-api
+title: A new ERP endpoint
+prompt: |
+  The ERP's new order API takes `POST /v2/orders` instead of `PUT /orders/{order_id}`. Send the partner's orders
+  there, in the same shape as now, plus `"channel": "partner"`, and with `total` as a number rather than a string.

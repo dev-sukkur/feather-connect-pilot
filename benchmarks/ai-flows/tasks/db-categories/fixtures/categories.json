@@ -1,0 +1,26 @@
+[
+  {
+    "category_id": "CAT-01",
+    "name": "beverages",
+    "parent_id": null,
+    "updated_at": "2026-11-07T08:00:00Z"
+  },
+  {
+    "category_id": "CAT-02",
+    "name": "staples",
+    "parent_id": null,
+    "updated_at": "2026-11-07T08:01:00Z"
+  },
+  {
+    "category_id": "CAT-03",
+    "name": "tea",
+    "parent_id": "CAT-01",
+    "updated_at": "2026-11-07T08:02:00Z"
+  },
+  {
+    "category_id": "CAT-04",
+    "name": "personal care",
+    "parent_id": null,
+    "updated_at": "2026-11-07T08:03:00Z"
+  }
+]

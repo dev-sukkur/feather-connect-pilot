@@ -1,0 +1,20 @@
+[
+  {
+    "return_id": "RET-0001",
+    "store_id": "BLR-01",
+    "sku": "TEA-250",
+    "qty": 1,
+    "reason": "damaged",
+    "_object_path": "landing/returns/BLR-01-2026-11-06.jsonl",
+    "_object_mtime": "2026-11-07T02:01:00+00:00"
+  },
+  {
+    "return_id": "RET-0002",
+    "store_id": "MAA-02",
+    "sku": "RICE-5K",
+    "qty": 2,
+    "reason": "expired",
+    "_object_path": "landing/returns/MAA-02-2026-11-06.jsonl",
+    "_object_mtime": "2026-11-07T02:02:00+00:00"
+  }
+]

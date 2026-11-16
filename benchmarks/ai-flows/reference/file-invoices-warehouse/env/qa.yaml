@@ -1,0 +1,2 @@
+# qa runs on the same stand-ins as dev.
+connections: {landing: {connector: simulation.source}, app_db: {connector: simulation.sink}, warehouse: {connector: simulation.sink}}
