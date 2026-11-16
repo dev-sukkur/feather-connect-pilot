@@ -221,7 +221,9 @@ def test_a_route_is_paused_and_resumed_from_the_flow_page(
     form = {"csrf_token": csrf(), "flow": "orders", "reason": "warehouse upgrade"}
     response = client.post("/routes/warehouse/pause", data=form)
     assert response.status_code == 303 and response.headers["location"] == "/flows/orders?done=route-paused"
-    assert world.state.runtime.is_route_paused("warehouse") and not world.state.runtime.is_route_paused("gofrugal")
+    assert world.state.runtime.is_route_paused("warehouse") and not world.state.runtime.is_route_paused(
+        "gofrugal"
+    )
     assert not world.state.runtime.is_flow_paused("orders")
     page = client.get(response.headers["location"]).text
     assert "The route is paused" in page and 'action="/routes/warehouse/resume"' in page

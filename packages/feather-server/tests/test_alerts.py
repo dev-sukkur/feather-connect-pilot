@@ -250,7 +250,9 @@ def test_the_alerts_page_sets_dataset_quiet_s_datasets_as_name_equals_count(worl
     assert wrong.status_code == 422 and "name=count" in wrong.text
 
 
-def test_a_test_alert_reaches_the_channel_or_says_why_not(world: World, told: Told, monkeypatch: pytest.MonkeyPatch):
+def test_a_test_alert_reaches_the_channel_or_says_why_not(
+    world: World, told: Told, monkeypatch: pytest.MonkeyPatch
+):
     AlertActions(world.state).test_channel(DEV, "ops", told)
     assert told.calls == [("ops", "test", "info")] and world.store.alerts.list_alerts("firing") == []
     with pytest.raises(KeyError):

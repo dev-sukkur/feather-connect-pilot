@@ -154,7 +154,9 @@ def _flow_entry(name: str, value: Any) -> Any:
     off, such as {"triggers": {"cron": "0 6 * * *", "tz": "Asia/Kolkata"}} or {"enabled": false}."""
     package, _, flow = name.partition("/")
     if not package or not flow or len(name) > 200:
-        raise ConfigProblem(f"{name!r} is not a flow's name: give the package and the flow, such as acme-orders/orders")
+        raise ConfigProblem(
+            f"{name!r} is not a flow's name: give the package and the flow, such as acme-orders/orders"
+        )
     try:
         flow_override(value)
     except ProjectError as error:

@@ -12,7 +12,16 @@ from typing import Any
 
 from feather_connect.clock import Clock
 from feather_connect.logs import redact
-from feather_connect.storage.port import GRANTS, ROLES, AccessGrant, Role, Store, TokenRow, TokenScope, UserRow
+from feather_connect.storage.port import (
+    GRANTS,
+    ROLES,
+    AccessGrant,
+    Role,
+    Store,
+    TokenRow,
+    TokenScope,
+    UserRow,
+)
 from feather_server.auth import MAX_PASSWORD, Actor, hash_password, issue_token
 from feather_server.services.access import Capability, at_least, require, require_reason
 
@@ -176,7 +185,9 @@ class Accounts:
                 raise KeyError(f"no user named {username!r}")
             if disabled and username == actor.user:
                 raise ValueError("you can't disable yourself: ask another admin")
-            admins = [u for u in self._store.users.list_users() if u.role == "admin" and u.disabled_at is None]
+            admins = [
+                u for u in self._store.users.list_users() if u.role == "admin" and u.disabled_at is None
+            ]
             if disabled and found.role == "admin" and found.disabled_at is None and len(admins) == 1:
                 raise ValueError(f"{username} is the only admin: make another user an admin first")
             if disabled != (found.disabled_at is not None):
@@ -218,7 +229,9 @@ class Accounts:
             wanted = _role(role)
             if found is None:
                 raise KeyError(f"no user named {username!r}")
-            admins = [u for u in self._store.users.list_users() if u.role == "admin" and u.disabled_at is None]
+            admins = [
+                u for u in self._store.users.list_users() if u.role == "admin" and u.disabled_at is None
+            ]
             if found.role == "admin" and found.disabled_at is None and wanted != "admin" and len(admins) == 1:
                 raise ValueError(f"{username} is the only admin: make another user an admin first")
             self._store.users.set_role(username, wanted)
@@ -276,7 +289,9 @@ class Accounts:
             now = self._clock.now()
             return next(Token.of(t, now) for t in self._store.users.list_tokens() if t.token_id == token_id)
 
-        return self._do(actor, "tokens.manage", "revoke_token", f"token:{token_id}", {"reason": reason}, revoke)
+        return self._do(
+            actor, "tokens.manage", "revoke_token", f"token:{token_id}", {"reason": reason}, revoke
+        )
 
     def create_token(
         self,

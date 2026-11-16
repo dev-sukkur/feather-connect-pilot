@@ -599,7 +599,9 @@ def resume_flow(request: Request, actor: CurrentActor, name: str, reason: Reason
     return _back(name, done="resumed")
 
 
-def _route_pause(request: Request, actor: CurrentActor, route: str, flow: str, reason: str, paused: bool) -> Response:
+def _route_pause(
+    request: Request, actor: CurrentActor, route: str, flow: str, reason: str, paused: bool
+) -> Response:
     try:
         if paused:
             actions(request).pause_route(actor, route, reason=_reason(reason))
@@ -1814,7 +1816,9 @@ def revoke_token(request: Request, actor: CurrentActor, token_id: str, reason: R
         token = accounts.revoke_token(actor, token_id, reason=_reason(reason))
     except KeyError:
         return _not_found(request, f"No token {token_id!r}.")
-    return _users_page(request, actor, notice=("ok", f"The token {token.name} is revoked: calls made with it fail now."))
+    return _users_page(
+        request, actor, notice=("ok", f"The token {token.name} is revoked: calls made with it fail now.")
+    )
 
 
 @router.get("/users", response_class=HTMLResponse)

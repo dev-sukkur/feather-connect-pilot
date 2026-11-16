@@ -390,6 +390,7 @@ def _notify(
 class ChannelFailed(Exception):
     """A test alert didn't reach its channel; the message says why."""
 
+
 SNOOZE_MAX = timedelta(days=7)
 
 
@@ -472,7 +473,7 @@ class AlertActions:
         )
         try:
             (send or Sender(self._state))(name, channels[name], alert)
-        except Exception as error:  # noqa: BLE001 - what failed is shown and audited
+        except Exception as error:
             said = redact(str(error)) or type(error).__name__
             self._state.store.audit.record(
                 actor.kind, actor.name, "alerts.test_channel", f"alert_channel:{name}", {}, f"failed: {said}"

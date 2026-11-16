@@ -540,7 +540,9 @@ def set_schedule(
     if set(trigger) - {"tz"}:
         value["triggers"] = trigger
     elif trigger:
-        return _flow_page(request, actor, name, short, status=422, notice=("bad", "A time zone goes with a cron."))
+        return _flow_page(
+            request, actor, name, short, status=422, notice=("bad", "A time zone goes with a cron.")
+        )
     try:
         if value:
             environment.put(actor, "flow", flow, value, reason=reason.strip() or None)

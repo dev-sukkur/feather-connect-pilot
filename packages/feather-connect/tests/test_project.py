@@ -428,6 +428,12 @@ def test_a_flow_entry_is_checked():
 
     assert flow_override({"enabled": False}) == (False, None)
     assert flow_override({"triggers": {"every": "15m"}})[1] == (Every(timedelta(minutes=15)),)
-    for bad in ({}, {"enabled": "no"}, {"triggers": {"cron": "not a cron"}}, {"triggers": {}}, {"paused": True}):
+    for bad in (
+        {},
+        {"enabled": "no"},
+        {"triggers": {"cron": "not a cron"}},
+        {"triggers": {}},
+        {"paused": True},
+    ):
         with pytest.raises(ProjectError):
             flow_override(bad)

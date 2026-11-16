@@ -513,7 +513,9 @@ def _layered(
         for name, knobs in _strkeys(environment.get("flows") or {}).items():
             if isinstance(flows, dict) and isinstance(knobs, dict) and "triggers" in knobs:
                 found = cast(dict[str, Any], flows).get(name)
-                if isinstance(found, dict):  # the environment's triggers replace the package's, not add to them
+                if isinstance(
+                    found, dict
+                ):  # the environment's triggers replace the package's, not add to them
                     cast(dict[str, Any], found).pop("triggers", None)
                     for path in [p for p in layers if p.startswith(f"flows.{name}.triggers")]:
                         del layers[path]
@@ -613,7 +615,9 @@ def _apply_overlay(
         if name not in by_name:
             set_by = {v for k, v in layers.items() if k.startswith(f"flows.{name}.")}
             if set_by == {_ENVIRONMENT_LAYER}:  # an environment's entry for a flow this version no longer has
-                log.warning("the environment's entry for flow %s is left out: this version has no such flow", name)
+                log.warning(
+                    "the environment's entry for flow %s is left out: this version has no such flow", name
+                )
                 del overlay[name]
                 continue
             raise ProjectError(f"{_where(layers, f'flows.{name}')}: the project has no flow named {name!r}")

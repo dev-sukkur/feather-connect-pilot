@@ -411,7 +411,11 @@ def revoke_token(
         try:
             token = _accounts(store).revoke_token(CLI, token_id, reason=reason)
         except KeyError:
-            fail(f"there is no token {token_id!r}", hint="feather server list-tokens shows them", json_mode=json_mode)
+            fail(
+                f"there is no token {token_id!r}",
+                hint="feather server list-tokens shows them",
+                json_mode=json_mode,
+            )
     emit(asdict(token), json_mode=json_mode, human=lambda _: typer.echo(f"{token.name} is revoked"))
 
 

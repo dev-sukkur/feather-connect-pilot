@@ -436,13 +436,21 @@ def test_a_disabled_user_cant_sign_in_their_session_ends_and_their_tokens_are_re
     bearer = TestClient(app, headers={"Authorization": f"Bearer {token}"})
     assert bearer.get(f"{API}/me").status_code == 200 and ann.get("/").status_code == 200
     page = admin.get("/users").text
-    assert 'action="/users/ann/disable"' in page and 'action="/users/root/disable"' not in page  # not yourself
+    assert (
+        'action="/users/ann/disable"' in page and 'action="/users/root/disable"' not in page
+    )  # not yourself
     done = admin.post("/users/ann/disable", data={"csrf_token": _csrf(admin), "reason": "left"})
-    assert done.status_code == 200 and "ann is disabled" in done.text and 'action="/users/ann/enable"' in done.text
+    assert (
+        done.status_code == 200
+        and "ann is disabled" in done.text
+        and 'action="/users/ann/enable"' in done.text
+    )
     assert ann.get("/").status_code in (303, 401) and bearer.get(f"{API}/me").status_code == 401
     assert TestClient(app, headers={"Authorization": f"Bearer {robot}"}).get(f"{API}/me").status_code == 200
     assert not _signs_in(app, "ann", PASSWORD)
-    assert ("ann", "login", "refused: disabled") in [(a.actor, a.action, a.result) for a in world.store.audit.list_audit()]
+    assert ("ann", "login", "refused: disabled") in [
+        (a.actor, a.action, a.result) for a in world.store.audit.list_audit()
+    ]
     accounts = Accounts(world.store, world.clock)
     with pytest.raises(ValueError, match="yourself"):
         accounts.set_disabled(ADMIN, "root", True)
@@ -450,8 +458,16 @@ def test_a_disabled_user_cant_sign_in_their_session_ends_and_their_tokens_are_re
         accounts.set_disabled(CLI, "root", True)
     with pytest.raises(KeyError):
         accounts.set_disabled(ADMIN, "nobody", True)
-    api = TestClient(app, headers={"Authorization": f"Bearer {issue_token(world.store, 'a', None, role='admin', created_by='root')}"})
+    api = TestClient(
+        app,
+        headers={
+            "Authorization": f"Bearer {issue_token(world.store, 'a', None, role='admin', created_by='root')}"
+        },
+    )
     back = api.put(f"{API}/users/ann/disabled", json={"disabled": False, "reason": "back"})
     assert back.status_code == 200 and back.json()["disabled"] is False
     assert bearer.get(f"{API}/me").status_code == 200 and _signs_in(app, "ann", PASSWORD)
-    assert [a.action for a in world.store.audit.list_audit() if a.target == "user:ann"][:2] == ["enable_user", "disable_user"]
+    assert [a.action for a in world.store.audit.list_audit() if a.target == "user:ann"][:2] == [
+        "enable_user",
+        "disable_user",
+    ]
