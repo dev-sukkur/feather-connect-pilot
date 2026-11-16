@@ -7,10 +7,17 @@ from typing import Any
 
 import psycopg
 import pytest
+from process_job import kill_children_on_exit
 from psycopg import sql
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 from real_stack import scratch_database, server_url, stop_gracefully
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """On Windows, the processes a test starts end with the run, even when a timeout ends it with no teardown
+    (`process_job`): left running, they held the test database's locks and the next run hung."""
+    kill_children_on_exit()
 
 
 @pytest.fixture(autouse=True)
