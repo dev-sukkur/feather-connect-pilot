@@ -21,7 +21,7 @@ evidence is in hand for the commit being released. Updated 13 Nov 2026, on branc
 | 10 Security | No known critical or high vulnerability; SBOM and signed images; the security review | CI `security` job and Trivy in `deploy`; `release.yml`; `docs/06-release/security-review.md` | Scans clean. **Open**: the sponsor's written acceptance of review findings X2-3 and X2-5 to X2-11 |
 | 11 Usability | An operator finds, understands and retries or replays a failed delivery in ≤ 5 clicks | `tests/dashboard/test_operator_journeys.py` walks it; a timed walk-through by hand | Journeys pass in CI. **At release**: the walk-through by hand |
 | 12 Portability | linux/amd64 and arm64 images; CI on Linux and Windows | `release.yml`; CI `check` matrix | Met |
-| 13 Accessibility | axe's WCAG 2.1 AA checks on the core screens and the M2 pages | `tests/dashboard/test_accessibility.py` | Met for 27 pages, in light and dark. The M3 reason page and the Holds page's requests table have no axe run yet, as the dashboard tests' stack isn't protected |
+| 13 Accessibility | axe's WCAG 2.1 AA checks on the core screens and the M2 pages | `tests/dashboard/test_accessibility.py` | Met for 27 pages, in light and dark, and for the two only a protected environment shows (the reason page, and the Holds page with an action waiting for a second person: `tests/dashboard/test_accessibility_protected.py`) |
 | 14 Documentation | The docs site: guides, runbooks, reference pages from the code, examples run in CI | `site-docs/`, `.github/workflows/docs.yml`, `tests/docs` | Builds strictly, examples pass. **Open**: GitHub Pages for the repository (`FEATHER_DOCS_PAGES`) |
 | 15 Cost | One VM, no paid licence | Architecture: Compose on one machine; every dependency is open source | Met |
 
