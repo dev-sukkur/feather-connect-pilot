@@ -206,7 +206,7 @@ Priorities use MoSCoW. Which milestone delivers each use case and requirement is
 | FR-G1 | Run now, re-run partitions, backfill, cancel. | Must |
 | FR-G2 | Retry, skip, quarantine and replay deliveries, singly or in bulk, with an impact preview before execution. | Must |
 | FR-G3 | Approve or reject holds, with a reason. | Should |
-| FR-G4 | Runtime overrides of operational knobs (pause, budgets, concurrency, schedules, availability windows), each with a reason, an audit record and an optional expiry. Drift from git is shown. | Should |
+| FR-G4 | Runtime overrides of operational knobs (pause, budgets, concurrency, schedules, availability windows), each with a reason, an audit record and an optional expiry. Drift from git is shown. (Pause of a flow or a route since M1; a flow's schedule and on/off per environment since M3.1, shown beside the package's own.) | Should |
 | FR-G5 | Test a connection. | Must |
 
 ### H. Environments
@@ -240,7 +240,7 @@ Priorities use MoSCoW. Which milestone delivers each use case and requirement is
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR-K1 | Local users and API tokens (M1); OIDC single sign-on (M3). | Must |
+| FR-K1 | Local users and API tokens (M1); OIDC single sign-on (M3). An admin adds users, resets passwords and disables leavers, and lists and revokes tokens, on the dashboard as well as the CLI and API (M3.1). | Must |
 | FR-K2 | Role-based access (viewer, operator, developer, admin, plus approver and PII-reader grants), scoped by tenant and environment. | Must |
 | FR-K3 | Secrets are referenced, never stored. Environment variables and files are supported in M1; Vault and the AWS, Azure and GCP secret stores in M3. Secrets are never logged or displayed. | Must |
 | FR-K4 | An immutable audit record for every action by a human, an agent or the system. | Must |
@@ -261,7 +261,7 @@ Priorities use MoSCoW. Which milestone delivers each use case and requirement is
 |---|---|---|
 | FR-M1 | Structured logs carrying correlation ids (tenant, flow, run, task, dataset, partition, version, route). | Must |
 | FR-M2 | Optional export of Prometheus metrics and OpenTelemetry traces. The dashboard works without them. | Should |
-| FR-M3 | Alert rules (failures, staleness, missing partitions, budgets, volume anomalies, waiting holds, agent down) sent to email, Slack, Teams and webhooks. | Must |
+| FR-M3 | Alert rules (failures, staleness, missing partitions, budgets, volume anomalies, waiting holds, agent down) sent to email, Slack, Teams and webhooks. Each channel can be sent a test alert (M3.1). | Must |
 
 ## 8. Non-functional requirements
 

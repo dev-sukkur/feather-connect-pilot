@@ -1215,6 +1215,7 @@ class UserRow:
     created_at: datetime
     role: Role
     grants: tuple[AccessGrant, ...] = ()
+    disabled_at: datetime | None = None  # set: they can't sign in, and their tokens are refused
 
 
 @dataclass(frozen=True)
@@ -1261,6 +1262,11 @@ class UserStore(Protocol):
         """Give the user a new password hash. Raises `KeyError` when there is no such user."""
         ...
 
+    def set_disabled(self, username: str, at: datetime | None) -> None:
+        """Disable the user as of `at`, or enable them again with None. Raises `KeyError` when there is no such
+        user."""
+        ...
+
     def create_token(
         self,
         name: str,
@@ -1280,6 +1286,10 @@ class UserStore(Protocol):
 
     def revoke_token(self, token_id: str) -> None:
         """Revoke the token, from now. Revoking one twice, or one that isn't there, changes nothing."""
+        ...
+
+    def list_tokens(self) -> list[TokenRow]:
+        """Every token of the tenant, revoked and expired ones too, newest first."""
         ...
 
 
@@ -1644,8 +1654,9 @@ class AuditStore(Protocol):
 
 # Environment-level configuration (flow packages §8) and the secret store.
 
-EnvKind = Literal["connection", "budget", "setting"]
-ENV_KINDS: tuple[EnvKind, ...] = ("connection", "budget", "setting")
+EnvKind = Literal["connection", "budget", "setting", "flow"]
+# A `flow` entry, named `<package>/<flow>`, changes an installed flow's schedule or turns it off, with no new version.
+ENV_KINDS: tuple[EnvKind, ...] = ("connection", "budget", "setting", "flow")
 MAX_ENV_ROWS = 1000  # the most entries of an environment a listing returns
 
 

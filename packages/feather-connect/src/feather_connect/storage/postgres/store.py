@@ -2234,6 +2234,7 @@ class _Users(UserStore):
             row["created_at"],
             row["role"],
             tuple(g for g in GRANTS if g in (row["grants"] or ())),
+            row["disabled_at"],
         )
 
     def get_user(self, username: str) -> UserRow | None:
@@ -2266,6 +2267,15 @@ class _Users(UserStore):
             changed = conn.execute(
                 "update feather.app_user set role = %s where tenant_id = %s and username = %s",
                 (role, self._db.tenant, username),
+            )
+        if changed.rowcount == 0:
+            raise KeyError(username)
+
+    def set_disabled(self, username: str, at: datetime | None) -> None:
+        with self._db.tx() as conn:
+            changed = conn.execute(
+                "update feather.app_user set disabled_at = %s where tenant_id = %s and username = %s",
+                (at, self._db.tenant, username),
             )
         if changed.rowcount == 0:
             raise KeyError(username)
@@ -2314,19 +2324,15 @@ class _Users(UserStore):
                 "select * from feather.api_token where tenant_id = %s and token_hash = %s",
                 (self._db.tenant, token_hash),
             ).fetchone()
-        if row is None:
-            return None
-        return TokenRow(
-            row["token_id"],
-            row["name"],
-            row["token_hash"],
-            row["created_at"],
-            row["expires_at"],
-            row["revoked_at"],
-            row["role"],
-            row["created_by"],
-            row["scope"],
-        )
+        return None if row is None else _token(row)
+
+    def list_tokens(self) -> list[TokenRow]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                "select * from feather.api_token where tenant_id = %s order by created_at desc, token_id desc",
+                (self._db.tenant,),
+            ).fetchall()
+        return [_token(row) for row in rows]
 
     def revoke_token(self, token_id: str) -> None:
         with self._db.tx() as conn:
@@ -2335,6 +2341,20 @@ class _Users(UserStore):
                    where tenant_id = %s and token_id = %s and revoked_at is null""",
                 (self._db.clock.now(), self._db.tenant, token_id),
             )
+
+
+def _token(row: Mapping[str, Any]) -> TokenRow:
+    return TokenRow(
+        row["token_id"],
+        row["name"],
+        row["token_hash"],
+        row["created_at"],
+        row["expires_at"],
+        row["revoked_at"],
+        row["role"],
+        row["created_by"],
+        row["scope"],
+    )
 
 
 class _Registry(RegistryStore):
@@ -3586,7 +3606,7 @@ class _EnvConfig(EnvConfigStore):
             rows = conn.execute(
                 """select env, kind, name, value, changed_by, changed_at from feather.env_config
                    where tenant_id = %s and env = %s and (%s::text is null or kind = %s)
-                   order by array_position(array['connection', 'budget', 'setting'], kind), name collate "C"
+                   order by array_position(array['connection', 'budget', 'setting', 'flow'], kind), name collate "C"
                    limit %s""",
                 (self._db.tenant, env, kind, kind, MAX_ENV_ROWS),
             ).fetchall()

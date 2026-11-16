@@ -1613,6 +1613,21 @@ class StoreContract(
         assert revoked is not None and revoked.revoked_at == T0 + timedelta(hours=1)
         untouched = store.users.find_token("h2")
         assert untouched is not None and untouched.token_id == other and untouched.revoked_at is None
+        store.users.create_user("dora", "hash", "viewer")
+        store.users.set_disabled("dora", T0)
+        assert store.users.get_user("dora").disabled_at == T0  # type: ignore[union-attr]
+        store.users.set_disabled("dora", None)
+        assert store.users.get_user("dora").disabled_at is None  # type: ignore[union-attr]
+        with pytest.raises(KeyError):
+            store.users.set_disabled("nobody", T0)
+        clock.advance(timedelta(hours=1))
+        newest = store.users.create_token("agent", "h3", None, "viewer", "ann")
+        listed = store.users.list_tokens()
+        assert [t.token_id for t in listed[:1]] == [newest]  # newest first
+        assert {t.token_id for t in listed} == {token_id, other, newest} and listed == sorted(
+            listed, key=lambda t: t.created_at, reverse=True
+        )
+        assert [t.revoked_at is not None for t in listed if t.token_id == token_id] == [True]
 
     def test_a_users_role_can_be_changed(self, store: Store):
         store.users.create_user("ann", "hash-1", "admin")
@@ -1985,6 +2000,11 @@ class StoreContract(
         assert store.env_config.remove("prod", "connection", "zakya") == changed
         assert store.env_config.entry("prod", "connection", "zakya") is None
         assert store.env_config.remove("prod", "connection", "zakya") is None
+        store.env_config.put(EnvEntry("prod", "flow", "acme/orders", {"enabled": False}, "root", T0))
+        assert [(e.kind, e.name) for e in store.env_config.entries("prod")] == [
+            ("budget", "zoho-api"),
+            ("flow", "acme/orders"),
+        ]
 
     def test_secrets_are_kept_as_ciphertext_by_name(self, store: Store):
         from feather_connect.storage.port import SealedSecret

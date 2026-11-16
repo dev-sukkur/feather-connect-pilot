@@ -202,6 +202,28 @@ def test_create_token_prints_once_and_stores_only_the_hash(cli, migrated, open_s
     assert json.loads(again.stdout)["token"] != token
 
 
+def test_disable_and_enable_a_user(cli, migrated):
+    cli("server", "create-user", "boss", "--role", "admin", input="pw-boss-1\n")
+    cli("server", "create-user", "dora", "--role", "operator", input="pw-dora-1\n")
+    off = cli("server", "disable-user", "dora", "--reason", "left", "--json")
+    assert off.exit_code == 0 and json.loads(off.stdout)["disabled"] is True
+    on = cli("server", "disable-user", "dora", "--enable", "--json")
+    assert on.exit_code == 0 and json.loads(on.stdout)["disabled"] is False
+    assert cli("server", "disable-user", "nobody").exit_code == 1
+
+
+def test_list_tokens_and_revoke_one(cli, migrated):
+    cli("server", "create-token", "rotate-me", "--json")
+    listed = json.loads(cli("server", "list-tokens", "--json").stdout)["items"]
+    mine = [t for t in listed if t["name"] == "rotate-me"]
+    assert [t["state"] for t in mine] == ["active"] and "token_hash" not in mine[0]
+    r = cli("server", "revoke-token", mine[0]["token_id"], "--reason", "rotated", "--json")
+    assert r.exit_code == 0 and json.loads(r.stdout)["state"] == "revoked"
+    assert "revoked" in cli("server", "list-tokens").stdout
+    missing = cli("server", "revoke-token", "nope")
+    assert missing.exit_code == 1 and "list-tokens" in missing.stderr
+
+
 def test_create_token_with_a_ttl_that_is_not_a_duration_explains(cli, migrated):
     r = cli("server", "create-token", "ci", "--ttl", "soon")
     assert r.exit_code == 1 and "soon" in r.stderr and "90d" in r.stderr
