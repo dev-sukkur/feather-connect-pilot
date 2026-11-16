@@ -236,6 +236,7 @@ class Mutation(_HttpConnector, connector.Sink):
         config=HttpConfig,
         modes=frozenset({"upsert", "append"}),
         cost={"default": 1},
+        record_cost={"write": 1},  # one call a record
         maturity="beta",
     )
 

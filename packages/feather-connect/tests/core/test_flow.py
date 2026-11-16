@@ -361,8 +361,8 @@ def test_spec_dict_records_the_connectors_costs_for_a_server_with_no_package_cod
     import dataclasses
 
     source, sink = memory.Source(), memory.Sink("dst")
-    source.spec = dataclasses.replace(source.spec, cost={"read": 2})  # pyright: ignore[reportAttributeAccessIssue]
-    sink.spec = dataclasses.replace(sink.spec, cost={"write": 5})  # pyright: ignore[reportAttributeAccessIssue]
+    source.spec = dataclasses.replace(source.spec, record_cost={"read": 2})  # pyright: ignore[reportAttributeAccessIssue]
+    sink.spec = dataclasses.replace(sink.spec, record_cost={"write": 5})  # pyright: ignore[reportAttributeAccessIssue]
     flow = fc.Flow(
         "f",
         reads=fc.Dataset("d", source=source, key="id", strategy=fc.strategy.replace()),

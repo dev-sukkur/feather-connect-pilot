@@ -94,6 +94,7 @@ class Source(Zakya, http.Rest):
         config=ZakyaConfig,
         strategies=frozenset({"by_stamp", "replace", "snapshot_diff"}),
         cost={"default": 1, "detail": 1, "token": 1},
+        record_cost={"read": 1},  # a document read with its lines is a call of its own; a page is shared
         resumable=True,
         maturity="beta",
     )

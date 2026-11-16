@@ -206,6 +206,7 @@ class Items(_Sink):
         config=ZakyaConfig,
         modes=frozenset({"upsert"}),
         cost={"default": 1, "lookup": 1, "token": 1},
+        record_cost={"write": 2},  # a lookup by SKU (often cached) and a write
         maturity="beta",
     )
 
@@ -255,6 +256,7 @@ class Prices(_Sink):
         config=ZakyaConfig,
         modes=frozenset({"upsert"}),
         cost={"default": 1, "lookup": 1, "token": 1},
+        record_cost={"write": 1},  # a lookup by SKU; a price list is read and written once a chunk
         maturity="beta",
     )
 
@@ -350,6 +352,7 @@ class Stock(_Sink):
         config=ZakyaConfig,
         modes=frozenset({"append"}),
         cost={"default": 1, "lookup": 1, "token": 1},
+        record_cost={"write": 2},  # a lookup by reference and a post
         maturity="beta",
     )
 

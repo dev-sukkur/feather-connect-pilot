@@ -40,14 +40,16 @@ Secret = SecretStr
 class ConnectorSpec:
     """What a connector declares about itself, so that a flow can be checked against it before it runs.
 
-    `strategies` are the change strategies a source can serve and `modes` the route modes a sink can apply.
-    `deletes` says how the connector reports deleted records, `"none"` when it doesn't. `config` is the
-    Pydantic model of its connection settings and `cost` the budget units each kind of call uses. `maturity` says how
-    far it has come, and `resumable` that a source's read saves checkpoints and can start again from one.
+        `strategies` are the change strategies a source can serve and `modes` the route modes a sink can apply.
+        `deletes` says how the connector reports deleted records, `"none"` when it doesn't. `config` is the
+        Pydantic model of its connection settings and `cost` the budget units each kind of call uses. `record_cost` is what
+    one record typically costs, `read` or `write`, for previews to estimate a re-run's or a retry's budget use: a
+    connector that can't say (a paged read, whose cost per record depends on the page) leaves it out. `maturity` says how
+        far it has come, and `resumable` that a source's read saves checkpoints and can start again from one.
 
-    `secrets` names the settings that are secret: they are given only as secret references, under the connection's
-    `auth`, and never shown. When it is None, they are the fields of `config` typed `Secret`. Every other setting, such
-    as a base URL, an organisation id or a client id, is a plain value that may be shown and edited.
+        `secrets` names the settings that are secret: they are given only as secret references, under the connection's
+        `auth`, and never shown. When it is None, they are the fields of `config` typed `Secret`. Every other setting, such
+        as a base URL, an organisation id or a client id, is a plain value that may be shown and edited.
     """
 
     name: str
@@ -56,6 +58,9 @@ class ConnectorSpec:
     modes: AbstractSet[RouteMode] = frozenset({"upsert"})
     deletes: str = "none"
     cost: Mapping[str, int] = field(default_factory=dict[str, int])
+    record_cost: Mapping[str, int] = field(
+        default_factory=dict[str, int]
+    )  # "read", "write": units per record
     maturity: Maturity = "experimental"
     resumable: bool = False
     secrets: AbstractSet[str] | None = None
