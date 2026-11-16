@@ -29,7 +29,7 @@ def protected_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     world = build_world(
         tmp_path_factory.mktemp("protected"), FrozenClock(datetime(2026, 11, 16, 9, tzinfo=UTC))
     )
-    world.state.project.settings["protected"] = True
+    mp.setitem(world.state.project.settings, "protected", True)  # pyright: ignore[reportArgumentType]
     world.state.store.users.create_user("ann", hash_password(PASSWORD), "admin")
     world.state.store.requests.add(
         "skip_deliveries", "warehouse", {"version_ids": ["v1"]}, "bob", "the supplier sent a duplicate file"
