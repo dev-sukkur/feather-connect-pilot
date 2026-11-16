@@ -54,6 +54,7 @@
           <div class="menu-panel">
             <p><strong>{{ actor.name }}</strong> <span class="muted">· {{ actor.role }}</span><br><span class="muted">in environment {{ env }}</span></p>
             <button type="button" class="link" id="theme-system" hidden>Follow the system theme</button>
+            {% if actor.user %}<p><a href="/account/password">Change your password</a></p>{% endif %}
             <form method="post" action="/logout">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button type="submit">Sign out</button>

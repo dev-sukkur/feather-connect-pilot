@@ -24,7 +24,7 @@
   <tbody>
   {% for u in users %}
     <tr id="user-{{ u.username }}">
-      <th scope="row">{{ u.username }}{% if actor and u.username == actor.user %} <span class="muted">(you)</span>{% endif %}{% if u.disabled %} {{ m.status_badge("disabled") }}{% endif %}</th>
+      <th scope="row">{{ u.username }}{% if actor and u.username == actor.user %} <span class="muted">(you)</span>{% endif %}{% if u.disabled %} {{ m.status_badge("disabled") }}{% endif %}{% if u.must_change_password %} <span class="muted">· must choose a password</span>{% endif %}</th>
       <td data-col="role">{{ u.role }}</td>
       <td data-col="since">{{ u.created_at[:10] }}</td>
       <td>

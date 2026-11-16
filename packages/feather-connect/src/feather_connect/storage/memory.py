@@ -1403,9 +1403,11 @@ class _Users(UserStore):
         with self._d.lock:
             return sorted(self._d.users.values(), key=lambda user: user.username)
 
-    def set_password_hash(self, username: str, password_hash: str) -> None:
+    def set_password_hash(self, username: str, password_hash: str, *, must_change: bool = False) -> None:
         with self._d.lock:
-            self._d.users[username] = replace(self._d.users[username], password_hash=password_hash)
+            self._d.users[username] = replace(
+                self._d.users[username], password_hash=password_hash, must_change_password=must_change
+            )
 
     def set_role(self, username: str, role: Role) -> None:
         with self._d.lock:

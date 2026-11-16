@@ -35,8 +35,13 @@ PUBLIC = {
     ("POST", "/ingress/{tenant}/{source}"),
     ("POST", "/ingress/{tenant}/{package}/{webhook}"),
 }
-# What a viewer may send: signing in and out.
-VIEWER_MAY = {("POST", "/logout"), ("POST", "/login")}
+# What a viewer may send: signing in and out, and changing their own password.
+VIEWER_MAY = {
+    ("POST", "/logout"),
+    ("POST", "/login"),
+    ("POST", "/account/password"),
+    ("PUT", "/api/v1/me/password"),
+}
 ADMIN_ONLY = {
     ("POST", "/api/v1/users"),
     ("PUT", "/api/v1/users/{username}/role"),

@@ -1848,7 +1848,13 @@ def add_user(
     return _users_page(
         request,
         actor,
-        notice=("ok", f"{name} can sign in now, as an {role}. Tell them the password another way."),
+        notice=(
+            "ok",
+            (
+                f"{name} can sign in now, as an {role}. Tell them the password another way: it works once, and "
+                "they choose their own when they sign in."
+            ),
+        ),
     )
 
 
@@ -1893,7 +1899,8 @@ def set_password(
         return _not_found(request, f"No user named {username!r}.")
     except ValueError as error:
         return _users_page(request, actor, status=422, notice=("bad", str(error)))
-    return _users_page(request, actor, notice=("ok", f"{username} has a new password."))
+    said = f"{username} has a new password, for one sign-in: they choose their own then."
+    return _users_page(request, actor, notice=("ok", said))
 
 
 @router.post("/users/{username}/role", dependencies=[Depends(require_csrf)])

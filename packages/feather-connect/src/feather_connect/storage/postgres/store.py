@@ -2235,6 +2235,7 @@ class _Users(UserStore):
             row["role"],
             tuple(g for g in GRANTS if g in (row["grants"] or ())),
             row["disabled_at"],
+            row["must_change_password"],
         )
 
     def get_user(self, username: str) -> UserRow | None:
@@ -2253,11 +2254,12 @@ class _Users(UserStore):
             ).fetchall()
         return [self._user(row) for row in rows]
 
-    def set_password_hash(self, username: str, password_hash: str) -> None:
+    def set_password_hash(self, username: str, password_hash: str, *, must_change: bool = False) -> None:
         with self._db.tx() as conn:
             changed = conn.execute(
-                "update feather.app_user set password_hash = %s where tenant_id = %s and username = %s",
-                (password_hash, self._db.tenant, username),
+                """update feather.app_user set password_hash = %s, must_change_password = %s
+                   where tenant_id = %s and username = %s""",
+                (password_hash, must_change, self._db.tenant, username),
             )
         if changed.rowcount == 0:
             raise KeyError(username)
