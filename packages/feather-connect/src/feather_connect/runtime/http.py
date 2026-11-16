@@ -115,6 +115,10 @@ class HttpStatusError(PermanentError):
         self.excerpt = excerpt
         self.response = response
 
+    def __reduce__(self) -> tuple[type["HttpStatusError"], tuple[str, int, str]]:
+        """Pickled without the response, as a durable engine keeps a step's error: the status and excerpt say it."""
+        return (type(self), (str(self), self.status_code, self.excerpt))
+
 
 class Auth(Protocol):
     """How a request is signed. `headers` gives what to add; `secrets` what must never be shown."""

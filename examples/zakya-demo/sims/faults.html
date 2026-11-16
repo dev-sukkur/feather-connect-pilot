@@ -1,0 +1,115 @@
+<section class="card faults" id="faults" aria-labelledby="faultsTitle">
+  <style>
+    .faults { border: 1px solid #d1d9e0; border-radius: 6px; padding: 16px; }
+    .faults h2 { font-size: 16px; margin: 0 0 4px; }
+    .faults .row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: end; margin: 8px 0; }
+    .faults label { display: flex; flex-direction: column; font-size: 12px; color: #59636e; gap: 2px; }
+    .faults input, .faults select { font: inherit; padding: 4px 6px; border: 1px solid #d1d9e0; border-radius: 6px; }
+    .faults input.n { width: 90px; }
+    .faults .expect { background: #f6f8fa; border-radius: 6px; padding: 8px 10px; margin: 8px 0; font-size: 13px; }
+    .faults table { border-collapse: collapse; width: 100%; margin: 4px 0 12px; }
+    .faults th, .faults td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #d1d9e0; font-size: 13px; }
+    .faults .presets button { margin: 0 4px 4px 0; }
+    .faults .err { color: #cf222e; }
+  </style>
+  <h2 id="faultsTitle">Faults on purpose</h2>
+  <p class="small">Make the next calls fail, to watch Feather retry, wait, fail a delivery or quarantine a record. A fault
+  goes to the next calls it fits: reads (GET), writes (POST, PUT) or sign-ins. Then look at the run, the delivery,
+  the Failures and the Quarantine pages in Feather.</p>
+  <div class="presets small">Quick:
+    <button data-preset="503,2,any">2 × 503</button>
+    <button data-preset="429,3,any">3 × 429</button>
+    <button data-preset="429-long,1,any">429, wait 10 min</button>
+    <button data-preset="401,1,read">401 once</button>
+    <button data-preset="401,,any">401 until cleared</button>
+    <button data-preset="403,,any">403 until cleared</button>
+    <button data-preset="422,1,write">422 on one write</button>
+    <button data-preset="timeout,1,any">timeout</button>
+    <button data-preset="reset,1,any">connection drop</button>
+    <button data-preset="lost,1,write">applied, answer lost</button>
+  </div>
+  <div class="row">
+    <label>Fault <select id="faultKind"></select></label>
+    <label>Calls <input id="faultTimes" class="n" type="number" min="1" max="1000" value="1"></label>
+    <label><span><input id="faultSticky" type="checkbox"> until cleared</span></label>
+    <label>For <select id="faultScope"></select></label>
+    <label>Retry-After (s) <input id="faultRetry" class="n" type="number" min="0" step="1"></label>
+    <label>Seconds (slow, timeout) <input id="faultSeconds" class="n" type="number" min="0" step="1"></label>
+    <button id="faultAdd" class="primary">Queue it</button>
+  </div>
+  <div id="faultExpect" class="expect"></div>
+  <p id="faultMsg" class="small"></p>
+  <div class="row">
+    <label>Random faults (share of calls answered 429 or 503) <input id="faultRate" class="n" type="number" min="0" max="1" step="0.01"></label>
+    <button id="faultRateSet">Set</button>
+    <button id="faultClearAll">Clear all queued</button>
+  </div>
+  <h3 class="small">Queued</h3>
+  <table><thead><tr><th>#</th><th>Fault</th><th>For</th><th>Left</th><th>Served</th><th></th></tr></thead><tbody id="faultQueued"></tbody></table>
+  <h3 class="small">Served, newest first</h3>
+  <table><thead><tr><th>At</th><th>Fault</th><th>Call</th></tr></thead><tbody id="faultServed"></tbody></table>
+</section>
+<script>
+(() => {
+  const el = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+  let kinds = {};
+  async function post(path, body) {
+    const res = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    return data;
+  }
+  function say(text, bad) { el("faultMsg").textContent = text; el("faultMsg").className = "small" + (bad ? " err" : ""); }
+  function expect() {
+    const k = kinds[el("faultKind").value];
+    if (!k) return;
+    el("faultExpect").innerHTML = `<b>${k.status === null ? "No answer" : "HTTP " + k.status}</b>: ${esc(k.label)}.<br>Feather should: ${esc(k.expect)}`;
+    el("faultRetry").placeholder = k.retry_after ?? "";
+    el("faultSeconds").placeholder = k.seconds ?? "";
+  }
+  async function load() {
+    try {
+      const s = await (await fetch("/sim/faults")).json();
+      if (!Object.keys(kinds).length) {
+        kinds = s.kinds;
+        el("faultKind").innerHTML = Object.entries(kinds).map(([n, k]) => `<option value="${esc(n)}">${esc(n)}: ${esc(k.label)}</option>`).join("");
+        el("faultScope").innerHTML = s.scopes.map((x) => `<option>${esc(x)}</option>`).join("");
+        expect();
+      }
+      if (document.activeElement !== el("faultRate")) el("faultRate").value = s.fault_rate;
+      el("faultQueued").innerHTML = s.queued.map((f) => `<tr><td>${f.fault_id}</td><td>${esc(f.kind)}</td><td>${esc(f.scope)}</td>` +
+        `<td>${f.left === null ? "until cleared" : f.left}</td><td>${f.served}</td><td><button data-clear="${f.fault_id}">Clear</button></td></tr>`).join("")
+        || '<tr><td colspan="6" class="small">Nothing queued: calls answer as usual (apart from random faults).</td></tr>';
+      el("faultServed").innerHTML = s.served.map((x) => `<tr><td>${esc(x.at)}</td><td>${esc(x.kind)}</td><td>${esc(x.call)}</td></tr>`).join("")
+        || '<tr><td colspan="3" class="small">None yet.</td></tr>';
+    } catch (e) { say(e.message, true); }
+  }
+  async function queue(kind, times, scope) {
+    try {
+      const f = await post("/sim/faults", {kind, times, scope,
+        retry_after: el("faultRetry").value, seconds: el("faultSeconds").value});
+      say(`Queued #${f.fault_id}: ${f.kind} for ${f.left === null ? "every call until cleared" : f.left + " call(s)"} (${f.scope}).`);
+      load();
+    } catch (e) { say(e.message, true); }
+  }
+  el("faultKind").addEventListener("change", expect);
+  el("faultAdd").addEventListener("click", () => queue(el("faultKind").value, el("faultSticky").checked ? null : Number(el("faultTimes").value), el("faultScope").value));
+  el("faultClearAll").addEventListener("click", async () => { await post("/sim/faults/clear", {}); say("Cleared."); load(); });
+  el("faultRateSet").addEventListener("click", async () => {
+    try { await post("/sim/fault-rate", {rate: Number(el("faultRate").value)}); say("Random fault rate set."); load(); } catch (e) { say(e.message, true); }
+  });
+  document.addEventListener("click", async (event) => {
+    const d = event.target.dataset || {};
+    if (d.clear) { await post("/sim/faults/clear", {fault_id: Number(d.clear)}); load(); }
+    if (d.preset) {
+      const [kind, times, scope] = d.preset.split(",");
+      if (!kinds[kind]) { say(`This simulator has no ${kind} fault.`, true); return; }
+      el("faultKind").value = kind; expect();
+      queue(kind, times ? Number(times) : null, scope);
+    }
+  });
+  load();
+  setInterval(load, 3000);
+})();
+</script>

@@ -23,6 +23,9 @@ accountant checking each posting would. The page at `/` shows two views of the p
 document and its items) and by material per day (sold, returned and net quantity and amount, accumulated over every
 posting of the day, B2B and B2C, with the running total to date), and a form to enter a document by hand.
 
+The page's **Faults on purpose** panel (`faults.py`) queues faults for the next calls, among them `csrf`, a 403 that
+says the CSRF token is no longer valid, as a CPI sender with CSRF protection answers after a session ends.
+
     python sims/sap.py --port 29102 --db .data/sap.sqlite            # auto mode
     python sims/sap.py --port 29102 --db .data/sap.sqlite --manual   # manual mode
 """
@@ -32,12 +35,19 @@ import json
 import random
 import secrets
 import sqlite3
+import sys
 import threading
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent)
+)  # faults.py beside it, run as a script or loaded by path
+from faults import GARBAGE, KINDS, Faults, Kind, body_of  # pyright: ignore[reportMissingImports]
 
 __all__ = ["IFLOWS", "MATERIALS", "ErpSim", "serve"]
 
@@ -122,6 +132,13 @@ class ErpSim:
         self._random = random.Random(seed)
         self.fault_rate = fault_rate
         self.posts = 0  # postings taken (not repeats), parked ones too
+        kinds = {k: v for k, v in KINDS.items() if k != "429-day"}  # Zoho's own
+        kinds["csrf"] = Kind(
+            403,
+            "CSRF token validation failed",
+            "The CPI sink fetches a new CSRF token and session with the chunk's retry; a write isn't lost.",
+        )
+        self.faults = Faults(kinds)
         if self.setting("mode") is None:
             self.set_mode(mode)
 
@@ -155,7 +172,12 @@ class ErpSim:
         with self._lock:
             try:
                 if path.startswith("/sim/"):
-                    return 200, {}, self._counter(method, path.removeprefix("/sim/"), content)
+                    action = path.removeprefix("/sim/")
+                    body_in = json.loads(content or b"{}") if method == "POST" else {}
+                    controlled = self.faults.control(method, action, body_in, self)
+                    if controlled is not None:
+                        return 200, {}, controlled
+                    return 200, {}, self._counter(method, action, content)
                 if self._random.random() < self.fault_rate:
                     return 503, {}, {"error": "busy, try again"}
                 if path == "/oauth/token":
@@ -488,7 +510,13 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-PAGE = Path(__file__).with_name("sap.html").read_bytes()
+PAGE = (
+    Path(__file__)
+    .with_name("sap.html")
+    .read_text(encoding="utf-8")
+    .replace("</main>", Path(__file__).with_name("faults.html").read_text(encoding="utf-8") + "</main>")
+    .encode("utf-8")
+)
 
 
 def serve(sim: ErpSim, port: int) -> ThreadingHTTPServer:
@@ -501,9 +529,28 @@ def serve(sim: ErpSim, port: int) -> ThreadingHTTPServer:
                 self._send(200, {"Content-Type": "text/html; charset=utf-8"}, PAGE)
                 return
             length = int(self.headers.get("Content-Length") or 0)
-            status, headers, body = sim.answer(
-                self.command, path, dict(self.headers), self.rfile.read(length)
-            )
+            content = self.rfile.read(length)
+            fault = None if path.startswith("/sim/") else sim.faults.take(self.command, path)
+            if fault is not None:
+                if fault.kind in ("slow", "timeout"):
+                    time.sleep(fault.seconds or 0)
+                if fault.kind in ("timeout", "reset"):
+                    self.close_connection = True  # no answer at all
+                    return
+                if fault.kind == "garbage":
+                    self._send(200, {"Content-Type": "text/html"}, GARBAGE)
+                    return
+                if fault.kind == "csrf" or fault.kind not in ("slow", "lost"):
+                    status, headers, body = body_of(fault, sim.faults.kinds, "plain")
+                    if fault.kind == "csrf":
+                        headers = {"X-CSRF-Token": "Required"}
+                    self._send(
+                        status, {**headers, "Content-Type": "application/json"}, json.dumps(body).encode()
+                    )
+                    return
+            status, headers, body = sim.answer(self.command, path, dict(self.headers), content)
+            if fault is not None and fault.kind == "lost":  # carried out; the answer is lost
+                status, headers, body = body_of(fault, sim.faults.kinds, "plain")
             self._send(status, {**headers, "Content-Type": "application/json"}, json.dumps(body).encode())
 
         def _send(self, status: int, headers: Mapping[str, str], data: bytes) -> None:

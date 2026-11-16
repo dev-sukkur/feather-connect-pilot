@@ -604,3 +604,157 @@ def test_the_chain_posts_b2b_per_invoice_and_b2c_per_material_with_a_return_of_e
             erp_server.shutdown()
             erp.close()
             forget_tokens()
+
+
+# Faults on purpose (sims/faults.py): each simulator answers the next calls with what was queued on its page.
+
+
+def test_the_zakya_simulator_answers_the_faults_queued_on_its_page():
+    zakya = _module("zakya").ZakyaSim()
+    client = httpx.Client(transport=zakya.transport(), base_url="http://zakya")
+    assert "Faults on purpose" in client.get("/").text
+    queued = client.post("/sim/faults", json={"kind": "503", "times": 2, "scope": "read", "retry_after": 3})
+    assert queued.status_code == 200 and queued.json()["left"] == 2
+    client.post("/sim/faults", json={"kind": "429-day", "times": 1, "scope": "write"})
+    first = client.get("/inventory/v1/invoices")
+    assert (first.status_code, first.headers["Retry-After"]) == (503, "3")
+    assert client.post("/oauth/v2/token").status_code != 503  # a sign-in is neither a read nor a write
+    assert client.get("/inventory/v1/invoices").status_code == 503
+    assert (
+        client.get("/inventory/v1/invoices").status_code == 401
+    )  # used up: as usual, which is unsigned here
+    capped = client.put("/inventory/v1/invoices/1", json={})
+    assert capped.status_code == 429 and capped.json()["code"] == 45
+    client.post("/sim/faults", json={"kind": "garbage"})
+    assert client.get("/inventory/v1/items").headers["content-type"].startswith("text/html")
+    client.post("/sim/faults", json={"kind": "reset"})
+    with pytest.raises(httpx.ReadError):
+        client.get("/inventory/v1/items")
+    client.post("/sim/faults", json={"kind": "403", "times": None})
+    assert [client.get("/inventory/v1/items").status_code for _ in range(3)] == [403, 403, 403]
+    state = client.get("/sim/faults").json()
+    assert [(f["kind"], f["left"], f["served"]) for f in state["queued"]] == [("403", None, 3)]
+    assert [s["kind"] for s in state["served"]][:4] == ["403", "403", "403", "reset"]
+    assert "Feather should" not in state["kinds"]["403"]["expect"] and state["kinds"]["401"]["status"] == 401
+    assert client.post("/sim/faults/clear", json={}).json() == {"cleared": 1}
+    assert (
+        client.post("/sim/fault-rate", json={"rate": 0.5}).json() == {"fault_rate": 0.5}
+        and zakya.fault_rate == 0.5
+    )
+    assert client.post("/sim/faults", json={"kind": "418"}).status_code == 400
+    assert client.post("/sim/fault-rate", json={"rate": 2}).status_code == 400
+
+
+def test_the_erp_simulator_drops_hangs_and_loses_answers_on_purpose(tmp_path):
+    sap_sim = _module("sap")
+    erp = sap_sim.ErpSim(tmp_path / "sap.sqlite")
+    port = _free_port()
+    server = sap_sim.serve(erp, port)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        assert "Faults on purpose" in httpx.get(base + "/").text
+        assert "csrf" in httpx.get(base + "/sim/faults").json()["kinds"]
+        httpx.post(base + "/sim/faults", json={"kind": "reset", "scope": "token"})
+        with pytest.raises(httpx.TransportError):
+            httpx.post(base + "/oauth/token")
+        token = httpx.post(base + "/oauth/token").json()["access_token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        httpx.post(base + "/sim/faults", json={"kind": "timeout", "seconds": 2})
+        with pytest.raises(httpx.ReadTimeout):
+            httpx.get(base + "/http/materials", headers=auth, timeout=0.5)
+        csrf = httpx.get(base + "/http/invoices", headers={**auth, "X-CSRF-Token": "Fetch"})
+        sent = {**auth, "X-CSRF-Token": csrf.headers["X-CSRF-Token"], "Idempotency-Key": "k-1"}
+        httpx.post(base + "/sim/faults", json={"kind": "csrf", "scope": "write"})
+        refused = httpx.post(base + "/http/invoices", headers=sent, json=_invoice("inv-1", (TEA, 2, 100)))
+        assert refused.status_code == 403 and refused.headers["X-CSRF-Token"] == "Required"
+        assert erp.documents() == []
+        httpx.post(base + "/sim/faults", json={"kind": "lost", "scope": "write"})
+        lost = httpx.post(base + "/http/invoices", headers=sent, json=_invoice("inv-1", (TEA, 2, 100)))
+        assert lost.status_code == 504 and len(erp.documents()) == 1  # carried out though the answer was lost
+        again = httpx.post(base + "/http/invoices", headers=sent, json=_invoice("inv-1", (TEA, 2, 100)))
+        assert again.status_code == 201 and len(erp.documents()) == 1  # the key finds it: not posted twice
+    finally:
+        server.shutdown()
+        erp.close()
+
+
+@pytest.fixture
+def faulty(tmp_path: Path, monkeypatch) -> Iterator[Any]:
+    """The ERP leg (Zakya to the receiver) on a runtime, with both simulators' faults at hand."""
+    from types import SimpleNamespace
+
+    zakya_sim, receiver_sim = _module("zakya"), _module("receiver")
+    zakya = zakya_sim.ZakyaSim()
+    receiver = receiver_sim.Receiver(tmp_path / "receiver.sqlite", fault_rate=0)
+    server, thread, erp_url = _serve(receiver_sim.create_app(receiver))
+    monkeypatch.chdir(DEMO.parent)
+    project = load_project(DEMO, "dev")
+    clock = FrozenClock(datetime(2026, 11, 7, 10, tzinfo=UTC))
+    store, spool, engine = MemoryStore(clock), MemorySpool(clock), LocalEngine(clock)
+    with zakya_sim.running(zakya) as zakya_url:
+        urls = {"zakya": zakya_url, "erp": erp_url}
+
+        def config_of(connection: str) -> dict[str, Any]:
+            config = project.connections[connection].resolve()
+            base = urls[connection]
+            return {
+                **config,
+                "base_url": base,
+                **({"accounts_url": base} if "accounts_url" in config else {}),
+            }
+
+        flow = zakya_invoices_to_erp(source="zakya", destination="erp", name="zakya-invoices", page_size=25)
+        runtime = Runtime([flow], store, spool, engine, code_sha="demo", clock=clock, config_of=config_of)
+        engine.register(runtime.tasks())
+
+        def run() -> Any:
+            started = runtime.start_run("zakya-invoices")
+            engine.run_until_idle()
+            return store.runs.get_run(started)
+
+        yield SimpleNamespace(
+            zakya=zakya,
+            receiver=receiver,
+            store=store,
+            runtime=runtime,
+            engine=engine,
+            run=run,
+            received=lambda: _received(tmp_path / "receiver.sqlite"),
+        )
+    server.should_exit = True
+    thread.join(10)
+    receiver.close()
+
+
+def test_feather_retries_a_503_and_fails_a_read_that_is_forbidden_until_it_is_fixed(faulty):
+    faulty.zakya.add(2, channel="B2B")
+    faulty.zakya.faults.add("503", times=2, scope="read", retry_after=0)
+    assert faulty.run().status == "succeeded"  # tried again: the two 503s cost only time
+    assert len(faulty.received()) == 2
+    assert [s["kind"] for s in faulty.zakya.faults.snapshot()["served"]] == ["503", "503"]
+
+    faulty.zakya.add(1, channel="B2B")
+    faulty.zakya.faults.add("403", times=None, scope="read")
+    failed = faulty.run()
+    assert failed.status == "failed" and "403" in str(failed.reason)
+    faulty.zakya.faults.clear()  # the right is granted again
+    assert faulty.run().status == "succeeded" and len(faulty.received()) == 3
+
+
+def test_a_record_the_destination_refuses_is_quarantined_and_a_forbidden_delivery_waits_for_a_retry(faulty):
+    faulty.zakya.add(3, channel="B2B")
+    faulty.receiver.faults.add("422", times=1, scope="write")
+    assert faulty.run().status == "succeeded"
+    [kept] = faulty.store.quarantine.list_open()
+    assert kept.route == "erp" and "422" in kept.error  # one record kept back, with the answer
+    assert len(faulty.received()) == 2  # the other two went
+
+    faulty.zakya.add(1, channel="B2B")
+    faulty.receiver.faults.add("403", times=None, scope="write")
+    faulty.run()
+    failed = [d for d in faulty.store.ledger.list_deliveries(route="erp") if d.status == "failed"]
+    assert len(failed) == 1 and len(faulty.received()) == 2
+    faulty.receiver.faults.clear()  # the account may write again
+    faulty.runtime.retry("erp", failed[0].version_id, actor="op", reason="rights granted")
+    faulty.engine.run_until_idle()
+    assert len(faulty.received()) == 3

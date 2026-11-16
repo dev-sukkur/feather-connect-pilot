@@ -21,6 +21,10 @@ class TransientError(Exception):
         super().__init__(message)
         self.retry_after = retry_after
 
+    def __reduce__(self) -> tuple[type["TransientError"], tuple[str, float | None]]:
+        """Pickled with its `retry_after`, which a durable engine's retry reads after a restart."""
+        return (type(self), (str(self), self.retry_after))
+
 
 class PermanentError(Exception):
     """A failure that must not be retried."""
