@@ -217,6 +217,15 @@ def test_datetime_watermarks_compare_as_datetimes(store: Store):
     assert [v.version_id for v in store.versions.since_watermark("d", "p", late)] == ["v2"]
 
 
+def test_a_dataset_never_sealed_has_no_watermark_without_waiting_for_the_sealers(store: Store, pg_url: str):
+    """Asked on every tick: it must not queue behind a seal that holds the sealers' lock."""
+    with psycopg.connect(pg_url, autocommit=False) as holder:
+        holder.execute("select pg_advisory_xact_lock(hashtext('feather.seal'))")
+        with ThreadPoolExecutor(1) as pool:
+            assert pool.submit(store.versions.latest_watermark, "never-sealed").result(timeout=5) is None
+        holder.rollback()
+
+
 def test_connect_opens_a_store_and_a_spool_on_one_pool(
     pg: Pg, pg_url: str, clock: FrozenClock, pg_connect: Any
 ):

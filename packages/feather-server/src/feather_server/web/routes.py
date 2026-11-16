@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from feather_connect.core.errors import PermanentError
+from feather_connect.core.partitions import PartitionScheme
 from feather_connect.runtime.runtime import FlowPaused
 from feather_connect.storage.port import (
     GRANTS,
@@ -34,7 +35,7 @@ from feather_connect.vault import KeyConflict, VaultError
 from feather_server.api.errors import ApiProblem
 from feather_server.api.paging import decode, encode
 from feather_server.auth import Actor, CurrentActor, csrf_token, current_actor, require_csrf
-from feather_server.catalog_view import dataset_of, route_of
+from feather_server.catalog_view import dataset_of, partition_label, route_of, scheme_of
 from feather_server.services import actions as action_limits
 from feather_server.services import alerts, diff, pii
 from feather_server.services.access import Capability, Forbidden, ReasonRequired, can
@@ -213,11 +214,12 @@ def render(
     state = request.app.state.feather
     wanted = fragment if fragment and request.headers.get("hx-request") == "true" else template
 
+    schemes: dict[str, PartitionScheme | None] = {}
+
     def label_of(dataset: str, partition: str) -> str:
-        try:
-            return state.runtime.dataset(dataset).partition.label_of(partition)
-        except (KeyError, ValueError):
-            return partition
+        if dataset not in schemes:  # a packaged dataset's is read from the catalogue: once a page
+            schemes[dataset] = scheme_of(state, dataset)
+        return partition_label(schemes[dataset], partition)
 
     def url(**changes: str | None) -> str:
         """This page's address with some query parameters set, or removed when None."""
@@ -799,10 +801,7 @@ def verify_partition(request: Request, actor: CurrentActor, dataset: str, partit
         return _grid_page(request, actor, dataset, status=422, notice=("bad", str(error)))
     except TimeoutError as error:  # a packaged dataset's host is slow to answer: the run will hold the answer
         return _grid_page(request, actor, dataset, status=202, notice=("warn", str(error)))
-    try:
-        label = request.app.state.feather.runtime.dataset(dataset).partition.label_of(partition)
-    except KeyError:  # a packaged dataset: its scheme, which labels partitions, is in its code
-        label = partition
+    label = partition_label(scheme_of(request.app.state.feather, dataset), partition)
     if not (found.upserts or found.deletes):
         return _grid_page(
             request, actor, dataset, notice=("ok", f"{label} matches its source. Nothing was changed.")

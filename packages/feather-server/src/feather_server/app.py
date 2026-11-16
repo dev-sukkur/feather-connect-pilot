@@ -22,6 +22,7 @@ from feather_connect.project import (
     use_db_secrets,
 )
 from feather_connect.runtime.catalogue import Catalogue
+from feather_connect.runtime.http import share_tokens
 from feather_connect.runtime.runtime import Runtime
 from feather_connect.storage.port import Store
 from feather_connect.storage.postgres.connect import connect
@@ -81,6 +82,7 @@ def build_state(settings: Settings) -> AppState:
     migrate(settings.database_url)
     clock = SystemClock()
     store, spool = connect(settings.database_url, clock=clock)
+    share_tokens(store.oauth_tokens)  # one OAuth2 token per grant for the tenant's processes, not one each
     vault = Vault(store.secrets, settings.env, keyring)
     use_db_secrets(vault.open)
     environment = environment_layer(
@@ -96,7 +98,7 @@ def build_state(settings: Settings) -> AppState:
             settings.legacy_project,
         )
     configure_logging(os.environ.get("FEATHER_LOG_LEVEL", "INFO"), secrets=[settings.secret_key])
-    closers: list[Callable[[], None]] = [store.close, install_task_logs(store)]
+    closers: list[Callable[[], None]] = [store.close, lambda: share_tokens(None), install_task_logs(store)]
     for budget in project.budgets.values():  # the overview reads their use
         store.budgets.define(budget)
     local = LocalEngine() if settings.engine == "local" else None

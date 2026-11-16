@@ -171,22 +171,72 @@ def _template_call(template_dir: Path) -> tuple[str, str, str]:
 
 
 def _merge_yaml(path: Path, add: Mapping[str, Any], module: str | None) -> str:
-    """The YAML file with the connections and budgets of `add` that it lacks, and `module` among its modules."""
-    found: dict[str, Any] = (
-        yaml.safe_load(path.read_text(encoding="utf-8")) if path.is_file() else None
-    ) or {}
+    """The YAML file with the connections and budgets of `add` that it lacks, and `module` among its modules.
+
+    What is added is written into the file's text, under its section or as a new section at the end, so the file's
+    comments, order and layout stay as they were. Only if that text doesn't read back as the merge (a section written
+    in flow style, `connections: {}`, say) is the file written out whole, without its comments."""
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    found: dict[str, Any] = yaml.safe_load(text) or {} if text.strip() else {}
+    want = dict(found)
+    out = text
     for section in ("connections", "budgets"):
-        merged = dict(found.get(section) or {})
-        for name, settings in (add.get(section) or {}).items():
-            merged.setdefault(name, settings)
-        if merged:
-            found[section] = merged
+        have = dict(found.get(section) or {})
+        new = {name: s for name, s in (add.get(section) or {}).items() if name not in have}
+        if new:
+            want[section] = {**have, **new}
+            out = _add_to_section(out, section, new)
     if module is not None:
         modules = list(found.get("modules") or [])
         if module not in modules:
-            modules.append(module)
-        found["modules"] = modules
-    return yaml.safe_dump(found, sort_keys=False)
+            want["modules"] = [*modules, module]
+            out = _add_to_section(out, "modules", [module])
+    if not text.strip():
+        return yaml.safe_dump(want, sort_keys=False)
+    try:
+        if yaml.safe_load(out) == want:
+            return out
+    except yaml.YAMLError:
+        pass
+    return yaml.safe_dump(want, sort_keys=False)
+
+
+def _add_to_section(text: str, key: str, value: Mapping[str, Any] | list[Any]) -> str:
+    """`text` with `value`'s entries added at the end of its top-level block `key:`, indented as that block's entries
+    are, or with `key:` and them appended if it has no such block."""
+    lines = text.splitlines(keepends=True)
+    if isinstance(value, list):  # a list on one line, `modules: [flows.hello]`, takes the items on that line
+        inline = re.compile(rf"^({re.escape(key)}:\s*\[)([^\]#]*?)(\s*\].*)$", re.DOTALL)
+        for i, line in enumerate(lines):
+            m = inline.match(line)
+            if m:
+                items = [
+                    yaml.safe_dump(v, default_flow_style=True).strip().removesuffix("...").strip()
+                    for v in value
+                ]
+                joined = ", ".join([m.group(2).strip(), *items] if m.group(2).strip() else items)
+                lines[i] = m.group(1) + joined + m.group(3)
+                return "".join(lines)
+    head = re.compile(rf"^{re.escape(key)}:\s*(#.*)?$")
+    start = next((i for i, line in enumerate(lines) if head.match(line.rstrip("\r\n"))), None)
+    if start is None:
+        prefix = text if not text or text.endswith("\n") else text + "\n"
+        return prefix + yaml.safe_dump({key: value}, sort_keys=False)
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        stripped = lines[i].strip()
+        # A list's items may start at the key's own column (`- flows.hello`): they are still its block.
+        if stripped and not stripped.startswith(("#", "-")) and not lines[i][0].isspace():
+            end = i
+            break
+    content = [i for i in range(start + 1, end) if lines[i].strip() and not lines[i].lstrip().startswith("#")]
+    indent = len(lines[content[0]]) - len(lines[content[0]].lstrip()) if content else 2
+    after = content[-1] + 1 if content else start + 1
+    if after > 0 and not lines[after - 1].endswith("\n"):
+        lines[after - 1] += "\n"
+    body = yaml.safe_dump(value, sort_keys=False)
+    added = "".join(" " * indent + line if line.strip() else line for line in body.splitlines(keepends=True))
+    return "".join(lines[:after]) + added + "".join(lines[after:])
 
 
 def _flow_files(root: Path, name: str, ident: str, template: str | None) -> tuple[dict[str, str], list[str]]:

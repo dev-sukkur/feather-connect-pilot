@@ -181,7 +181,7 @@ Each host is today's worker, so retries, checkpoints, heartbeats and the sweeper
 |---|---|---|
 | Scheduler | The triggers of active flows, from the catalogue | It refreshes on NOTIFY. A flow activated at 10:00:05 fires at its next tick |
 | Webhook ingress | Webhooks a package declares in `feather.yaml`, and push datasets of active flows whose source is Feather Connect's own | It verifies the signature with a built-in scheme (HMAC, Shopify, Stripe, Zoho, bearer), keeps each event once by its key, and puts it in the push dataset's inbox. The package's own code parses it, on the active version's host. A package that brings its own webhook source as code is refused at install (§12) |
-| Dashboard and API | The catalogue, as today | Adds the Packages pages (§10). A packaged dataset or route is described from its flow's catalogue spec, which names things but holds no code: its partitions show by key, not by label, and its write cost is unknown |
+| Dashboard and API | The catalogue, as today | Adds the Packages pages (§10). A packaged dataset or route is described from its flow's catalogue spec, which names things but holds no code. Its partition scheme is there as data, so its partitions are labelled and checked by it, unless the package wrote its own scheme (shown by key); its read and write costs per record are there too, for previews (16 Nov 2026) |
 | Budgets | Defined at environment level (§8) | As today |
 
 ## 8. Connections, budgets and names across packages
@@ -262,7 +262,7 @@ Installing a package runs its code on the workers. So:
 ## 12. Limits of this design
 
 - A package can't bring its own **webhook source connector**: the server, which doesn't load package code, verifies every event. It declares its webhooks instead (§7.2), and its own code parses them on its host. Its own polling sources and sinks are fine.
-- **What the server knows of a packaged flow** is its catalogue spec: no partition labels and no write cost. Work that needs the package's code goes to the active version's host as a run: a **backfill** is queued by its days (`params.backfill`), and the host names their partitions as it plans; a **partition check** is a `verify` run, which the host answers on the run (`feather.run.result`, migration 0027) while the server waits up to 60 seconds. A backfill's preview counts days, not partitions.
+- **What the server knows of a packaged flow** is its catalogue spec: partition labels from the scheme recorded there (none for a scheme of the package's own), and read and write costs per record when the package was checked by a Feather that records them (16 Nov 2026). Work that needs the package's code goes to the active version's host as a run: a **backfill** is queued by its days (`params.backfill`), and the host names their partitions as it plans; a **partition check** is a `verify` run, which the host answers on the run (`feather.run.result`, migration 0027) while the server waits up to 60 seconds. A backfill's preview counts days, not partitions.
 - **Hosts have the worker's network.** Egress rules belong to the deployment.
 - **A tick of a packaged flow is a run of its own**, queued for the version's host, where an M1 poller attached its ticks to one stream run a day. A frequent poller writes many runs; bringing back the stream run is an M2 item.
 - The **dashboard can't show a package's transforms** as code. It shows the spec, as today.

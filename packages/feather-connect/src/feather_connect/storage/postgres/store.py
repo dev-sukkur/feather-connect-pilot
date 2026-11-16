@@ -71,6 +71,7 @@ from feather_connect.storage.port import (
     KeyMismatch,
     KeySighting,
     Ledger,
+    OAuthTokenStore,
     Override,
     OverrideStore,
     PackageEnv,
@@ -100,6 +101,7 @@ from feather_connect.storage.port import (
     SealedPartition,
     SealedSecret,
     SecretStore,
+    SharedToken,
     SliceFinished,
     StaleWriter,
     StateRow,
@@ -938,8 +940,9 @@ class _Versions(VersionStore):
             ).fetchone()
             if row is not None:
                 return _unjson(row["watermark"])
-            # Sealed before migration 0012, or not yet: work it out once, under the sealers' lock, and keep it.
-            conn.execute(SEAL_LOCK)
+            # Sealed before migration 0012, or not yet. Not yet is the common case (a dataset that has never sealed,
+            # asked on every tick), and needs no lock: a seal keeps its watermark itself. Otherwise work it out once
+            # and keep it, under the sealers' lock.
             rows = conn.execute(
                 """select watermark from feather.version
                    where tenant_id = %s and dataset = %s and status = 'sealed' and watermark is not null""",
@@ -947,6 +950,7 @@ class _Versions(VersionStore):
             ).fetchall()
             found = max((_unjson(r["watermark"]) for r in rows), default=None)
             if found is not None:
+                conn.execute(SEAL_LOCK)
                 self._raise_watermark(conn, dataset, found)
         return found
 
@@ -3007,6 +3011,59 @@ def _request_row(row: Row) -> ActionRequestRow:
     )
 
 
+class _OAuthTokens(OAuthTokenStore):
+    def __init__(self, db: _Db) -> None:
+        self._db = db
+
+    def get(self, key: str) -> SharedToken | None:
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """select sealed, expires_at from feather.oauth_token
+                   where tenant_id = %s and token_key = %s and sealed is not null""",
+                (self._db.tenant, key),
+            ).fetchone()
+        if row is None:
+            return None
+        left = (row["expires_at"] - self._db.clock.now()).total_seconds()
+        return SharedToken(bytes(row["sealed"]), left) if left > 0 else None
+
+    def claim(self, key: str, seconds: float) -> bool:
+        now = self._db.clock.now()
+        with self._db.tx() as conn:
+            row = conn.execute(
+                """insert into feather.oauth_token (tenant_id, token_key, fetching_until) values (%s, %s, %s)
+                   on conflict (tenant_id, token_key) do update set fetching_until = excluded.fetching_until
+                   where oauth_token.fetching_until is null or oauth_token.fetching_until <= %s
+                   returning token_key""",
+                (self._db.tenant, key, now + timedelta(seconds=seconds), now),
+            ).fetchone()
+        return row is not None
+
+    def put(self, key: str, sealed: bytes, expires_in: float) -> None:
+        with self._db.tx() as conn:
+            conn.execute(
+                """insert into feather.oauth_token (tenant_id, token_key, sealed, expires_at) values (%s, %s, %s, %s)
+                   on conflict (tenant_id, token_key) do update
+                   set sealed = excluded.sealed, expires_at = excluded.expires_at, fetching_until = null""",
+                (self._db.tenant, key, sealed, self._db.clock.now() + timedelta(seconds=expires_in)),
+            )
+
+    def release(self, key: str) -> None:
+        with self._db.tx() as conn:
+            conn.execute(
+                "update feather.oauth_token set fetching_until = null where tenant_id = %s and token_key = %s",
+                (self._db.tenant, key),
+            )
+
+    def drop(self, key: str, sealed: bytes) -> None:
+        with self._db.tx() as conn:
+            conn.execute(
+                """update feather.oauth_token set sealed = null, expires_at = null
+                   where tenant_id = %s and token_key = %s and sealed = %s""",
+                (self._db.tenant, key, sealed),
+            )
+
+
 class _Requests(ActionRequestStore):
     def __init__(self, db: _Db) -> None:
         self._db = db
@@ -4101,6 +4158,7 @@ class PostgresStore(Store):
             readiness=_Readiness(db),
             alerts=_Alerts(db),
             requests=_Requests(db),
+            oauth_tokens=_OAuthTokens(db),
         )
         object.__setattr__(self, "_pool", pool)  # `Store` is frozen
         object.__setattr__(self, "_db", db)

@@ -1604,6 +1604,34 @@ class StoreContract(
         again = store.users.get_user("op")
         assert again is not None and again.must_change_password is False
 
+    def test_a_shared_oauth_token_is_claimed_by_one_kept_until_it_expires_and_dropped_once(
+        self, store: Store, clock: FrozenClock
+    ):
+        tokens = store.oauth_tokens
+        assert tokens.get("k") is None
+        assert tokens.claim("k", 30) is True
+        assert tokens.claim("k", 30) is False  # another process is fetching it
+        clock.advance(timedelta(seconds=31))
+        assert tokens.claim("k", 30) is True  # that claim ran out
+        tokens.release("k")
+        assert tokens.claim("k", 30) is True
+        tokens.put("k", b"sealed-1", 3600)
+        assert tokens.claim("k", 30) is True  # putting gave up the claim
+        tokens.release("k")
+        kept = tokens.get("k")
+        assert kept is not None and (kept.sealed, kept.expires_in) == (b"sealed-1", 3600)
+        tokens.drop("k", b"sealed-0")  # not the one kept: nothing changes
+        assert tokens.get("k") is not None
+        clock.advance(timedelta(seconds=3000))
+        kept = tokens.get("k")
+        assert kept is not None and kept.expires_in == 600
+        tokens.drop("k", b"sealed-1")
+        assert tokens.get("k") is None
+        tokens.put("k", b"sealed-2", 60)
+        clock.advance(timedelta(seconds=61))
+        assert tokens.get("k") is None  # expired
+        assert store.oauth_tokens.get("other") is None
+
     def test_tokens_are_found_by_hash_and_revoked_once(self, store: Store, clock: FrozenClock):
         assert store.users.find_token("h1") is None
         expiry = T0 + timedelta(days=1)

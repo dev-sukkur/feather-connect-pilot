@@ -357,6 +357,23 @@ def test_spec_dict_describes_the_flow_as_json():
     ]
 
 
+def test_spec_dict_records_the_connectors_costs_for_a_server_with_no_package_code():
+    import dataclasses
+
+    source, sink = memory.Source(), memory.Sink("dst")
+    source.spec = dataclasses.replace(source.spec, cost={"read": 2})  # pyright: ignore[reportAttributeAccessIssue]
+    sink.spec = dataclasses.replace(sink.spec, cost={"write": 5})  # pyright: ignore[reportAttributeAccessIssue]
+    flow = fc.Flow(
+        "f",
+        reads=fc.Dataset("d", source=source, key="id", strategy=fc.strategy.replace()),
+        deliver=[fc.to(sink)],
+    )
+    spec = flow.spec_dict()
+    assert spec["datasets"][0]["read_cost"] == 2 and spec["routes"][0]["write_cost"] == 5
+    free = make_flow().spec_dict()
+    assert "read_cost" not in free["datasets"][0] and "write_cost" not in free["routes"][0]
+
+
 def test_fail_on_record_error_is_refused_on_a_push_dataset():  # S17
     events = fc.Dataset(
         "events", source=memory.Source(), key="id", strategy=fc.strategy.push(), on_record_error="fail"

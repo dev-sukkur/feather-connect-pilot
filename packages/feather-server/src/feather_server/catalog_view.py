@@ -2,17 +2,21 @@
 
 The server imports no package code, so its runtime holds none of an installed package's flows: what a page or an API
 answer says of a dataset or a route comes from the active flow's catalogue spec (`Flow.spec_dict`). That spec names
-things but holds no code, so a partition is shown by its key (no label) and a route's write cost is unknown.
+things but holds no code. Its partition scheme is there as data (`scheme_spec`), from which the server labels and
+checks partition keys, unless the package wrote its own scheme; and its read and write costs per record, if the
+package was checked by a Feather that recorded them (16 Nov 2026), from which previews estimate budget units.
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from feather_connect.core.partitions import PartitionScheme, scheme_of_spec
+
 if TYPE_CHECKING:
     from feather_server.app import AppState
 
-__all__ = ["CatalogDataset", "CatalogRoute", "dataset_of", "route_of"]
+__all__ = ["CatalogDataset", "CatalogRoute", "dataset_of", "partition_label", "route_of", "scheme_of"]
 
 
 @dataclass(frozen=True)
@@ -26,6 +30,8 @@ class CatalogDataset:
     priority: str
     routes: tuple[str, ...]
     pii: tuple[str, ...] = ()
+    partition: PartitionScheme | None = None  # None: the package's own scheme, which only its code knows
+    read_cost: int | None = None  # budget units per record read; None: not recorded
 
 
 @dataclass(frozen=True)
@@ -37,6 +43,7 @@ class CatalogRoute:
     mode: str
     priority: str
     datasets: tuple[str, ...]
+    write_cost: int | None = None  # budget units per record written; None: not recorded
 
 
 def _specs(state: "AppState") -> list[Mapping[str, Any]]:
@@ -68,6 +75,8 @@ def dataset_of(state: "AppState", name: str) -> CatalogDataset:
                     str(d.get("priority", "normal")),
                     tuple(str(r["name"]) for r in spec.get("routes") or []),
                     tuple(str(f) for f in d.get("pii") or ()),
+                    scheme_of_spec(d.get("partition")),
+                    _cost(d.get("read_cost")),
                 )
     raise KeyError(f"no dataset is named {name!r}")
 
@@ -85,5 +94,34 @@ def route_of(state: "AppState", name: str) -> CatalogRoute:
                     str(r.get("mode", "")),
                     str(r.get("priority", "normal")),
                     tuple(str(d["name"]) for d in spec.get("datasets") or []),
+                    _cost(r.get("write_cost")),
                 )
     raise KeyError(f"no route is named {name!r}")
+
+
+def _cost(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def scheme_of(state: "AppState", dataset: str) -> PartitionScheme | None:
+    """The partition scheme of a dataset: the runtime's own, else the active package's from its catalogue spec. None
+    when neither knows the dataset or its package wrote its own scheme."""
+    try:
+        return state.runtime.dataset(dataset).partition
+    except KeyError:
+        pass
+    try:
+        return dataset_of(state, dataset).partition
+    except KeyError:
+        return None
+
+
+def partition_label(scheme: PartitionScheme | None, key: str) -> str:
+    """`key` in business words by `scheme` (`Store 1509 · 18 Oct 2026`), or the key itself when there's no scheme or
+    the key isn't one of its."""
+    if scheme is None:
+        return key
+    try:
+        return scheme.label_of(key)
+    except (ValueError, KeyError):
+        return key

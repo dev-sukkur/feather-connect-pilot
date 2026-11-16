@@ -7,9 +7,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+import yaml
 from typer.testing import Result
 
-from feather_cli.commands.new import available_templates
+from feather_cli.commands.new import _add_to_section, available_templates
 from feather_connect.project import load_project, validate_project
 
 TEMPLATES = ["api-to-warehouse", "db-to-warehouse", "fan-out-demo", "file-drop-to-db", "webhook-to-api"]
@@ -88,6 +89,45 @@ def test_new_blank_flow_validates_and_its_test_passes(cli: Callable[..., Result]
     assert "flows.second" in (made / "feather.yaml").read_text(encoding="utf-8")
     done = _pytest(made)
     assert done.returncode == 0, done.stdout[-2000:]
+
+
+def test_a_new_flow_keeps_the_comments_and_layout_of_the_yaml_it_adds_to(
+    cli: Callable[..., Result], made: Path
+) -> None:
+    yaml_file = made / "feather.yaml"
+    before = "# Our project: ask Priya before adding a connection.\n" + yaml_file.read_text(encoding="utf-8")
+    assert "modules: [flows.hello]\n" in before
+    before = before.replace("modules: [flows.hello]\n", "modules: [flows.hello]  # one per flow\n", 1)
+    yaml_file.write_text(before, encoding="utf-8")
+    dev = made / "env" / "dev.yaml"
+    dev_before = "# dev runs on the simulators\n" + dev.read_text(encoding="utf-8")
+    dev.write_text(dev_before, encoding="utf-8")
+
+    r = cli("new", "flow", "copied", "--template", TEMPLATES[0], "--json")
+    assert r.exit_code == 0, r.output
+
+    after = yaml_file.read_text(encoding="utf-8")
+    assert after.startswith(before.split("modules:")[0])  # everything before the modules untouched
+    assert "modules: [flows.hello, flows.copied]  # one per flow\n" in after
+    assert "pricing_api" in (yaml.safe_load(after) or {})["connections"]
+    assert "# dev runs on the simulators" in dev.read_text(encoding="utf-8")
+    problems = [p for p in validate_project(load_project(made, "dev")) if p.severity == "error"]
+    assert problems == []
+
+
+def test_entries_go_at_the_end_of_their_block_indented_as_its_others() -> None:
+    text = (
+        "# top\nmodules:  # one per flow\n- flows.a\n\n# the connections\nconnections:\n"
+        "    a: {connector: file}  # ours\nbudgets: {}\n"
+    )
+    out = _add_to_section(
+        _add_to_section(text, "modules", ["flows.b"]), "connections", {"b": {"connector": "x"}}
+    )
+    assert out == (
+        "# top\nmodules:  # one per flow\n- flows.a\n- flows.b\n\n# the connections\nconnections:\n"
+        "    a: {connector: file}  # ours\n    b:\n      connector: x\nbudgets: {}\n"
+    )
+    assert _add_to_section("name: x", "modules", ["flows.a"]) == "name: x\nmodules:\n- flows.a\n"
 
 
 def test_new_connector_passes_the_conformance_kit_stubs(cli: Callable[..., Result], made: Path) -> None:

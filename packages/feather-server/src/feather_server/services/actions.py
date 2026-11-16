@@ -19,6 +19,7 @@ from feather_connect.core.context import Context
 from feather_connect.core.dataset import Dataset
 from feather_connect.core.errors import PermanentError
 from feather_connect.core.flow import Flow
+from feather_connect.core.partitions import PartitionScheme
 from feather_connect.logs import redact, register_secrets
 from feather_connect.project import ProjectError
 from feather_connect.runtime.budgets import BudgetHandle
@@ -37,7 +38,7 @@ from feather_connect.storage.port import (
     split_error,
 )
 from feather_server.auth import Actor
-from feather_server.catalog_view import CatalogDataset, dataset_of, route_of
+from feather_server.catalog_view import CatalogDataset, dataset_of, partition_label, route_of, scheme_of
 from feather_server.services.access import Capability, require, require_reason
 from feather_server.services.previews import (
     Impact,
@@ -174,13 +175,13 @@ def request_doc(row: ActionRequestRow) -> dict[str, Any]:
     }
 
 
-def _label(dataset: Dataset | None, partition: str) -> str:
-    if dataset is None:  # a packaged dataset: the server has no partition object for it (catalog_view)
-        return partition
-    try:
-        return dataset.partition.label_of(partition)
-    except (ValueError, KeyError):
-        return partition
+def _check_keys(scheme: PartitionScheme, dataset: str, partitions: Sequence[str]) -> None:
+    """Raise `ValueError` for the first key that isn't a partition of the scheme."""
+    for partition in partitions:
+        try:
+            scheme.label_of(partition)
+        except (ValueError, KeyError):
+            raise ValueError(f"{partition!r} is not a partition of dataset {dataset!r}") from None
 
 
 VERIFY_WAIT_S = 60.0  # how long a packaged partition check is waited for, in the request
@@ -270,11 +271,11 @@ class Actions:
                     return flow, dataset
         raise KeyError(f"no dataset named {name!r}")
 
-    def _rows(self, dataset: Dataset, partitions: Sequence[str]) -> int | None:
+    def _rows(self, dataset: str, partitions: Sequence[str]) -> int | None:
         """How many records the partitions held when last sealed, or None if any was never."""
         total = 0
         for partition in partitions:
-            version = self._store.versions.latest_sealed(dataset.name, partition)
+            version = self._store.versions.latest_sealed(dataset, partition)
             if version is None:
                 return None
             total += version.upserts + version.deletes
@@ -286,25 +287,21 @@ class Actions:
         for dataset in flow.datasets:
             cost = getattr(dataset.source, "spec", None)
             per_row = None if cost is None else cost.cost.get("read")
-            rows = self._rows(dataset, partitions)
+            rows = self._rows(dataset.name, partitions)
             units = None if units is None or per_row is None or rows is None else units + rows * per_row
         first = flow.datasets[0]
         return Impact(
             len(partitions),
             len(partitions) * len(flow.datasets) * len(flow.routes),
             units,
-            tuple(_label(first, p) for p in partitions[:_SAMPLES]),
+            tuple(partition_label(first.partition, p) for p in partitions[:_SAMPLES]),
         )
 
     def _check_partitions(self, dataset: Dataset, partitions: Sequence[str]) -> list[str]:
         chosen = list(dict.fromkeys(partitions))
         if not chosen:
             raise ValueError("choose at least one partition")
-        for partition in chosen:
-            try:
-                dataset.partition.label_of(partition)
-            except (ValueError, KeyError):
-                raise ValueError(f"{partition!r} is not a partition of dataset {dataset.name!r}") from None
+        _check_keys(dataset.partition, dataset.name, chosen)
         return chosen
 
     # Runs.
@@ -353,12 +350,6 @@ class Actions:
             ),
             lambda run_id: f"ok: run {run_id}",
         )
-
-    def _dataset_or_none(self, name: str) -> Dataset | None:
-        try:
-            return self._rt.dataset(name)
-        except KeyError:
-            return None
 
     def _packaged(self, flow: str) -> ActiveFlow | None:
         """The active package flow of that name, when the runtime here has no flow of it."""
@@ -411,14 +402,23 @@ class Actions:
     def preview_rerun(self, actor: Actor, dataset: str, partitions: Sequence[str]) -> Preview:
         """Say what reading these partitions of the dataset again would touch."""
         packaged = self._packaged_dataset(dataset)
-        if packaged is not None:  # its host checks the partitions as it plans; its read cost is in its code
+        if (
+            packaged is not None
+        ):  # checked here by its catalogue's scheme, when it has one; by its host otherwise
+            found = packaged[1]
             chosen = list(dict.fromkeys(partitions))
             if not chosen:
                 raise ValueError("choose at least one partition")
+            if found.partition is not None:
+                _check_keys(found.partition, dataset, chosen)
             selection = {"dataset": dataset, "partitions": chosen}
             token = self._issue(actor, "rerun", selection, self._rerun_print(selection))
+            rows = self._rows(dataset, chosen)
             impact = Impact(
-                len(chosen), len(chosen) * len(packaged[1].routes), None, tuple(chosen[:_SAMPLES])
+                len(chosen),
+                len(chosen) * len(found.routes),
+                None if rows is None or found.read_cost is None else rows * found.read_cost,
+                tuple(partition_label(found.partition, p) for p in chosen[:_SAMPLES]),
             )
             return Preview(token, "rerun", impact)
         flow, found = self._dataset_flow(dataset)
@@ -716,21 +716,24 @@ class Actions:
             for d in found:
                 try:
                     cost = self._rt.route(d.route).sink.spec.cost.get("write")
-                except KeyError:
-                    cost = None  # a packaged route: its cost is in its package's code (catalog_view)
+                except KeyError:  # a packaged route: its cost as its catalogue recorded it, if it did
+                    try:
+                        cost = route_of(self._state, d.route).write_cost
+                    except KeyError:
+                        cost = None
                 version = versions.get(d.version_id)
                 units = (
                     None
                     if units is None or cost is None or version is None
                     else units + (version.upserts + version.deletes) * cost
                 )
-        by_dataset = {d.dataset: self._dataset_or_none(d.dataset) for d in found}
+        by_dataset = {d.dataset: scheme_of(self._state, d.dataset) for d in found}
         return Impact(
             len({(d.dataset, d.partition) for d in found}),
             len(found),
             units,
             tuple(
-                f"{d.route} · {_label(by_dataset[d.dataset], d.partition)}"
+                f"{d.route} · {partition_label(by_dataset[d.dataset], d.partition)}"
                 + (f" · version {d.version_id}" if action == "replay" else "")
                 for d in found[:_SAMPLES]
             ),

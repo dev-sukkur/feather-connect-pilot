@@ -35,7 +35,7 @@ from feather_connect.storage.port import (
     WorkerRow,
 )
 from feather_server.auth import Actor
-from feather_server.catalog_view import dataset_of
+from feather_server.catalog_view import dataset_of, partition_label
 from feather_server.services.access import require
 from feather_server.services.text import span
 
@@ -691,17 +691,15 @@ class Reads:
         try:
             found: Dataset | None = self._rt.dataset(dataset)
             routes = next(tuple(r.name for r in f.routes) for f in self._rt.flows() if found in f.datasets)
-        except KeyError:  # a packaged dataset: its routes from the catalogue, its partitions shown by key
+        except KeyError:  # a packaged dataset: its routes and partition scheme from the catalogue
             found, routes = None, dataset_of(self._state, dataset).routes
+        scheme = found.partition if found is not None else dataset_of(self._state, dataset).partition
         rows: list[PartitionRow] = self._store.reads.partition_grid(
             dataset, since=since, cursor=cursor, limit=limit
         )
         shown: list[GridRow] = []
         for row in rows:
-            try:
-                label = row.partition if found is None else found.partition.label_of(row.partition)
-            except (ValueError, KeyError):
-                label = row.partition
+            label = partition_label(scheme, row.partition)
             cells = tuple(GridCell(route, row.cells.get(route)) for route in routes)
             shown.append(
                 GridRow(row.partition, label, row.version_id, row.upserts + row.deletes, row.sealed_at, cells)

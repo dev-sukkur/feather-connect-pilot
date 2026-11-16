@@ -173,6 +173,7 @@ class World:
             readiness=base.readiness,
             alerts=base.alerts,
             requests=base.requests,
+            oauth_tokens=base.oauth_tokens,
         )
         self.store.budgets.define(spec)
         self.engine = LocalEngine(self.clock)
