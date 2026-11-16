@@ -86,6 +86,14 @@
       <tbody id="materials"></tbody>
     </table></div>
   </section>
+  <section>
+    <h2>Items and retail prices from SAP</h2>
+    <p class="small">What Feather has sent: items by <code>sap-materials</code>, and their rates in the <i>Retail</i> price list by <code>sap-prices-to-zakya</code>. Empty until those flows have run.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>SKU</th><th>Name</th><th>EAN-13</th><th class="num">Item rate</th><th class="num">Retail price</th></tr></thead>
+      <tbody id="items"></tbody>
+    </table></div>
+  </section>
 </main>
 <dialog id="returnDialog">
   <h2 id="returnTitle">Return goods</h2>
@@ -141,6 +149,9 @@ function render() {
     `<option value="${esc(m.pos_code)}">${esc(m.description)}</option>`).join("");
   $("materials").innerHTML = state.materials.map((m) =>
     `<tr><td>${esc(m.material)}</td><td>${esc(m.description)}</td><td>${esc(m.ean)}</td><td>${esc(m.pos_code)}</td><td class="num">${money(m.price)}</td></tr>`).join("");
+  $("items").innerHTML = (state.items || []).map((i) =>
+    `<tr><td>${esc(i.sku)}</td><td>${esc(i.name)}</td><td>${esc(i.ean)}</td><td class="num">${i.rate == null ? "" : money(i.rate)}</td>` +
+    `<td class="num">${i.retail == null ? "–" : money(i.retail)}</td></tr>`).join("");
   const lines = (doc) => doc.line_items.map((l) => `${esc(l.name)} × ${l.quantity}`).join("<br>");
   $("invoices").innerHTML = state.invoices.map((v) => {
     const left = Object.values(v.returnable).some((q) => q > 0);

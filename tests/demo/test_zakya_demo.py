@@ -38,6 +38,7 @@ FLOWS = [
     "invoices-to-sap",
     "b2b-returns-to-sap",
     "b2c-to-sap",
+    "sap-prices-to-zakya",
 ]
 TEA, RICE, SUGAR = "8901234500101", "8901234500200", "8901234500507"  # EANs of master.json
 
@@ -107,7 +108,9 @@ def test_the_zakya_demo_project_is_sound():
     routes = {f.name: [r.name for r in f.routes] for f in project.flows}
     assert routes["zakya-invoices"] == ["erp", "staging"]
     assert routes["zakya-credit-notes"] == ["staging-returns"]
-    held = {f.name: bool(f.routes[0].approval) for f in project.flows[3:]}
+    assert routes["sap-materials"] == ["staging-materials", "zakya-items"]
+    assert routes["sap-prices-to-zakya"] == ["zakya-prices"]
+    held = {f.name: bool(f.routes[0].approval) for f in project.flows[3:6]}
     assert held == {"invoices-to-sap": True, "b2b-returns-to-sap": True, "b2c-to-sap": False}
     assert validate_project(project) == []
     (budget,) = (
@@ -604,6 +607,131 @@ def test_the_chain_posts_b2b_per_invoice_and_b2c_per_material_with_a_return_of_e
             erp_server.shutdown()
             erp.close()
             forget_tokens()
+
+
+@pytest.mark.postgres
+def test_sap_master_data_reaches_zakya_items_first_then_their_retail_prices(sims, monkeypatch, tmp_path):
+    """ERP masters to the sales channel (UC-03): `sap-materials` fans out to staging and to Zakya's items, and
+    `sap-prices-to-zakya`, once those items are there, sets their rates in Zakya's Retail price list. A price changed
+    in SAP reaches Zakya on the next runs; a material that didn't change sends nothing."""
+    from real_stack import scratch_database, server_url
+
+    from feather_connect.runtime.http import forget_tokens
+
+    zakya, _db, urls = sims
+    monkeypatch.chdir(DEMO.parent)
+    forget_tokens()
+    sap_sim = _module("sap")
+    erp = sap_sim.ErpSim(tmp_path / "sap.sqlite")
+    port = _free_port()
+    erp_server = sap_sim.serve(erp, port)
+    with scratch_database(server_url()) as staging_url:
+        monkeypatch.setenv("FEATHER_DATABASE_URL", staging_url)
+        import psycopg
+
+        with psycopg.connect(staging_url, autocommit=True) as conn:
+            conn.execute(_module("staging").DDL)
+        project = load_project(DEMO, "dev")
+        clock = FrozenClock(datetime(2026, 11, 12, 10, tzinfo=UTC))
+        store, spool, engine = MemoryStore(clock), MemorySpool(clock), LocalEngine(clock)
+
+        def config_of(connection: str) -> dict[str, Any]:
+            config = project.connections[connection].resolve()
+            if connection in ("sap", "sap_master"):
+                base = f"http://127.0.0.1:{port}"
+                return {**config, "base_url": base, "token_url": f"{base}/oauth/token"}
+            if connection in ("staging", "staging_read"):
+                return config
+            base = urls[connection]
+            return {
+                **config,
+                "base_url": base,
+                **({"accounts_url": base} if "accounts_url" in config else {}),
+            }
+
+        runtime = Runtime(
+            project.flows, store, spool, engine, code_sha="demo", clock=clock, config_of=config_of
+        )
+        engine.register(runtime.tasks())
+
+        def run(flow: str) -> None:
+            started = runtime.start_run(flow)
+            engine.run_until_idle()
+            got = store.runs.get_run(started)
+            assert got.status == "succeeded", (flow, got.reason)
+
+        def retail() -> dict[str, float | None]:
+            return {str(i["sku"]): i["retail"] for i in zakya.items_with_prices()}
+
+        try:
+            run("sap-materials")
+            items = {i["sku"]: i for i in zakya.items_with_prices()}
+            assert sorted(items) == ["DAL-1", "OIL-1", "RICE-5", "SUGAR-1", "TEA-250"]
+            assert (items["TEA-250"]["name"], items["TEA-250"]["ean"], items["TEA-250"]["rate"]) == (
+                "Assam tea 250 g",
+                TEA,
+                180.0,
+            )
+            assert set(retail().values()) == {None}  # no price before its run
+
+            run("sap-prices-to-zakya")
+            assert retail() == {
+                "DAL-1": 165.0,
+                "OIL-1": 210.0,
+                "RICE-5": 640.0,
+                "SUGAR-1": 48.0,
+                "TEA-250": 180.0,
+            }
+
+            erp.set_price("MAT-1001", 195)  # the pricing clerk raises tea
+            calls = len(zakya.calls)
+            run("sap-materials")
+            run("sap-prices-to-zakya")
+            assert retail()["TEA-250"] == 195.0 and retail()["RICE-5"] == 640.0
+            assert {i["sku"]: i["rate"] for i in zakya.items_with_prices()}["TEA-250"] == 195.0
+            writes = [c for c in zakya.calls[calls:] if not c.startswith("GET")]
+            assert writes == [  # tea's item and the price list: nothing for the materials that didn't change
+                f"PUT /inventory/v1/items/{next(i for i in zakya.items.values() if i['sku'] == 'TEA-250')['item_id']}",
+                "PUT /inventory/v1/pricebooks/PB-RETAIL",
+            ]
+        finally:
+            erp_server.shutdown()
+            erp.close()
+            forget_tokens()
+
+
+def test_the_retail_prices_wait_for_the_items_to_reach_zakya():
+    """A price needs its item in Zakya, so `sap-prices-to-zakya` fires on `sap-materials`'s delivery to `zakya-items`,
+    never on its schedule."""
+    flow = next(f for f in load_project(DEMO, "dev").flows if f.name == "sap-prices-to-zakya")
+    assert len(flow.triggers) == 1
+    assert flow.spec_dict()["triggers"][0]["kind"] == "on_ready"
+    assert flow.spec_dict()["triggers"][0]["ready"]["delivered_to"] == {"materials": "zakya-items"}
+
+
+def test_the_sap_simulator_changes_a_price_and_keeps_it(tmp_path):
+    sap_sim = _module("sap")
+    erp = sap_sim.ErpSim(tmp_path / "sap.sqlite")
+    assert erp.set_price(TEA, "199.5") == 199.5  # by its EAN as well as its number
+    erp.close()
+    again = sap_sim.ErpSim(tmp_path / "sap.sqlite")
+    prices = {p["material"]: p["price"] for p in again.prices()}
+    assert prices["MAT-1001"] == 199.5 and prices["MAT-1002"] == 640.0
+    assert {p["pricebook_id"] for p in again.prices()} == {"PB-RETAIL"}
+    status, _, body = again.answer("POST", "/sim/price", {}, b'{"material": "MAT-9", "price": 5}')
+    assert status == 422 and "not in the material master" in body["error"]
+    again.close()
+
+
+def test_the_zakya_simulator_keeps_the_items_and_prices_sap_sent_across_a_restart(tmp_path):
+    zakya_sim = _module("zakya")
+    state = tmp_path / "zakya.json"
+    sim = zakya_sim.ZakyaSim(state=state)
+    sim.data["items"]["i1"] = {"item_id": "i1", "sku": "TEA-250", "name": "Assam tea 250 g", "rate": 180.0}
+    sim.data["pricebooks"]["PB-RETAIL"]["pricebook_items"] = [{"item_id": "i1", "pricebook_rate": 185.0}]
+    sim.raise_invoice("c-101", [{"code": TEA, "quantity": 1}])  # saves
+    again = zakya_sim.ZakyaSim(state=state)
+    assert [(i["sku"], i["retail"]) for i in again.items_with_prices()] == [("TEA-250", 185.0)]
 
 
 # Faults on purpose (sims/faults.py): each simulator answers the next calls with what was queued on its page.

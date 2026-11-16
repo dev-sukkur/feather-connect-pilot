@@ -100,6 +100,8 @@
     </div>
   </section>
   <section id="master" hidden>
+    <p class="small">The material master and the retail price list (<code>PB-RETAIL</code>). Feather sends both to Zakya: items with <code>sap-materials</code>, prices with <code>sap-prices-to-zakya</code> once the items are there.</p>
+    <p><label>Material <select id="priceMaterial"></select></label> <label>New price <input id="newPrice" type="number" min="0.01" step="0.01" size="8"></label> <button id="setPrice">Change price</button></p>
     <div class="scroll"><table>
       <thead><tr><th>Material</th><th>Description</th><th>EAN-13</th><th>POS code</th><th>Unit</th><th class="num">List price</th></tr></thead>
       <tbody id="materials"></tbody>
@@ -161,6 +163,9 @@ function render() {
   let codes = $("codes");
   if (!codes) { codes = document.createElement("datalist"); codes.id = "codes"; document.body.appendChild(codes); }
   codes.innerHTML = state.materials.map((m) => `<option value="${esc(m.material)}">${esc(m.description)}</option>`).join("");
+  const picked = $("priceMaterial").value;
+  $("priceMaterial").innerHTML = state.materials.map((m) => `<option value="${esc(m.material)}">${esc(m.material)} ${esc(m.description)}</option>`).join("");
+  if (picked) $("priceMaterial").value = picked;
 }
 
 async function load() { try { state = await call("/sim/state"); render(); } catch (e) { say(e.message, true); } }
@@ -174,6 +179,12 @@ $("day").addEventListener("change", render);
 $("auto").addEventListener("click", async () => { await call("/sim/mode", {mode: "auto"}); load(); });
 $("manual").addEventListener("click", async () => { await call("/sim/mode", {mode: "manual"}); load(); });
 $("addLine").addEventListener("click", lineRow);
+$("setPrice").addEventListener("click", async () => {
+  try {
+    const set = await call("/sim/price", {material: $("priceMaterial").value, price: $("newPrice").value});
+    say(`${set.material} now costs ${money(set.price)}.`); $("newPrice").value = ""; load();
+  } catch (e) { say(e.message, true); }
+});
 $("save").addEventListener("click", async () => {
   const lines = [...$("lines").querySelectorAll("tr")].map((tr) => ({
     code: tr.querySelector(".code").value.trim(), quantity: Number(tr.querySelector(".qty").value),

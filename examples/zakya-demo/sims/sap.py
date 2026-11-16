@@ -6,6 +6,8 @@ The iFlows:
 
 - `GET /http/materials`: the material master of `master.json`, as an OData pass-through answers (`d.results`); each
   material has its ERP number, its EAN-13 and its POS code, so Zakya's lines can be matched by either barcode.
+- `GET /http/prices`: the retail price of each material in the price list Zakya sells from (`PB-RETAIL`), as a
+  condition-record pass-through answers. The page's **Materials** tab changes a price, as a pricing clerk would.
 - `POST /http/invoices`: a B2B invoice, one billing document (F2) per Zakya invoice, keyed by `invoice_id`.
 - `POST /http/creditmemos`: a B2B return, a credit memo (G2) keyed by `creditnote_id`, against the billing document
   of `ReferenceInvoice`. It answers 424 (Failed Dependency) while that invoice isn't in the ERP, for the sender to
@@ -53,6 +55,7 @@ __all__ = ["IFLOWS", "MATERIALS", "ErpSim", "serve"]
 
 MASTER: dict[str, Any] = json.loads(Path(__file__).with_name("master.json").read_text(encoding="utf-8"))
 MATERIALS: list[dict[str, Any]] = MASTER["materials"]
+RETAIL_PRICEBOOK = "PB-RETAIL"  # the Zakya price list the stores sell from
 IST = timezone(timedelta(hours=5, minutes=30))
 # Each iFlow that posts: the field that keys its documents, and what kind of document it makes.
 IFLOWS: Mapping[str, tuple[str, str]] = {
@@ -153,6 +156,43 @@ class ErpSim:
     def mode(self) -> str:
         return self.setting("mode") or "auto"
 
+    def materials(self) -> list[dict[str, Any]]:
+        """The material master, each at its current list price."""
+        return [{**m, "price": self.price_of(str(m["material"]))} for m in MATERIALS]
+
+    def price_of(self, material: str) -> float:
+        changed = self.setting(f"price:{material}")
+        return float(changed) if changed is not None else float(_material(material)["price"])
+
+    def prices(self) -> list[dict[str, Any]]:
+        """The retail price list's condition records: one price per material."""
+        return [
+            {
+                "pricebook_id": RETAIL_PRICEBOOK,
+                "material": m["material"],
+                "ean": m["ean"],
+                "pos_code": m["pos_code"],
+                "price": m["price"],
+                "currency": "INR",
+            }
+            for m in self.materials()
+        ]
+
+    def set_price(self, material: str, price: Any) -> float:
+        """Change a material's list price, as a pricing clerk would in the ERP."""
+        material = str(
+            _material(material)["material"]
+        )  # by any of its codes; one it doesn't know is turned down
+        value = _number(price, "price")
+        if value <= 0:
+            raise Turned(400, "a price is more than 0")
+        with self._lock, self._db:
+            self._db.execute(
+                "insert into settings values (?, ?) on conflict (name) do update set value = excluded.value",
+                (f"price:{material}", str(value)),
+            )
+        return value
+
     def set_mode(self, mode: str) -> None:
         if mode not in ("auto", "manual"):
             raise Turned(400, "mode is auto or manual")
@@ -196,7 +236,9 @@ class ErpSim:
                         self._csrf.add(token)
                         return 200, {"X-CSRF-Token": token, "Set-Cookie": "JSESSIONID=sim; Path=/"}, {}
                     if iflow == "materials":
-                        return 200, {}, {"d": {"results": MATERIALS}}
+                        return 200, {}, {"d": {"results": self.materials()}}
+                    if iflow == "prices":
+                        return 200, {}, {"d": {"results": self.prices()}}
                     return 200, {}, {"d": {"results": self.documents(iflow=iflow)}}
                 if method != "POST":
                     return 405, {}, {"error": "method"}
@@ -487,7 +529,7 @@ class ErpSim:
                 "mode": self.mode,
                 "documents": self.documents()[:200],
                 "by_material": self.by_material(),
-                "materials": MATERIALS,
+                "materials": self.materials(),
             }
         if method != "POST":
             raise Turned(405, "POST it")
@@ -500,6 +542,11 @@ class ErpSim:
             return {"doc_no": body.get("doc_no")}
         if action == "documents":
             return {"doc_no": self.enter(body)}
+        if action == "price":
+            return {
+                "material": body.get("material"),
+                "price": self.set_price(str(body.get("material")), body.get("price")),
+            }
         raise Turned(404, f"no action {action!r}")
 
     def close(self) -> None:

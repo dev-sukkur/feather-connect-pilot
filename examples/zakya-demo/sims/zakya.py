@@ -47,6 +47,14 @@ MASTER: dict[str, Any] = json.loads(Path(__file__).with_name("master.json").read
 MATERIALS: list[dict[str, Any]] = MASTER["materials"]
 CUSTOMERS: list[dict[str, Any]] = MASTER["customers"]
 STATE_VERSION = 2  # the invoices of an older state file have no barcodes or GST treatment: it is set aside
+RETAIL_PRICEBOOK = "PB-RETAIL"
+RETAIL = {
+    "pricebook_id": RETAIL_PRICEBOOK,
+    "name": "Retail",
+    "pricebook_type": "per_item",
+    "currency_code": "INR",
+    "pricebook_items": [],
+}  # the price list the stores sell from, which SAP's retail prices fill
 TAX = 0.05  # one GST rate on everything, for the demo
 
 
@@ -111,9 +119,12 @@ class ZakyaSim(BaseZakyaSim):
             if kept.get("version") != STATE_VERSION:
                 state.replace(state.with_suffix(".old.json"))
         super().__init__(state=state, **kwargs)
+        self.data["pricebooks"] = {RETAIL_PRICEBOOK: dict(RETAIL)}  # the items and their prices come from SAP
         if state is not None and state.is_file():
             kept = json.loads(state.read_text(encoding="utf-8"))
             self.data["creditnotes"] = kept.get("creditnotes", {})
+            self.data["items"] = kept.get("items", {})
+            self.data["pricebooks"] = kept.get("pricebooks") or self.data["pricebooks"]
             self._next_note = kept.get("next_note", 1)
 
     # Modes.
@@ -151,6 +162,8 @@ class ZakyaSim(BaseZakyaSim):
             "next_note": self._next_note,
             "invoices": self.invoices,
             "creditnotes": self.data["creditnotes"],
+            "items": self.data["items"],
+            "pricebooks": self.data["pricebooks"],
         }
         draft.write_text(json.dumps(kept), encoding="utf-8")
         draft.replace(self._state)
@@ -409,7 +422,26 @@ class ZakyaSim(BaseZakyaSim):
                 for v in invoices
             ],
             "creditnotes": [{**v, "channel": channel_of(v)} for v in notes],
+            "items": self.items_with_prices(),
         }
+
+    def items_with_prices(self) -> list[dict[str, Any]]:
+        """The items SAP sent, by SKU, each with its rate in the retail price list (None until one is set)."""
+        book = self.data["pricebooks"].get(RETAIL_PRICEBOOK) or {}
+        rates = {str(i["item_id"]): i.get("pricebook_rate") for i in book.get("pricebook_items") or []}
+        return sorted(
+            (
+                {
+                    "sku": i.get("sku"),
+                    "name": i.get("name"),
+                    "ean": i.get("ean"),
+                    "rate": i.get("rate"),
+                    "retail": rates.get(str(i["item_id"])),
+                }
+                for i in self.data["items"].values()
+            ),
+            key=lambda i: str(i["sku"]),
+        )
 
 
 PAGE = (

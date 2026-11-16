@@ -5,7 +5,7 @@
 # Both ends are small simulators in sims/; env/dev.yaml points the connections at them.
 # `feather validate --project examples/zakya-demo` checks it.
 name: zakya-demo
-modules: [flows.invoices, flows.chain, flows.b2c]
+modules: [flows.invoices, flows.chain, flows.b2c, flows.masters]
 settings: {timezone: UTC}
 # The budget is the organisation's: every tenant, flow and connection that names the account shares its windows.
 budgets:
