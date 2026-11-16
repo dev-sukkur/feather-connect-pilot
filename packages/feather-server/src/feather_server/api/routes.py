@@ -947,6 +947,10 @@ class GrantsBody(Reason):
     grants: list[str]
 
 
+class DisabledBody(Reason):
+    disabled: bool
+
+
 class NewToken(Reason):
     name: str
     role: str | None = None  # the caller's own when left out
@@ -998,6 +1002,41 @@ def set_grants(
     """Give the user these add-on grants, `approver` and `pii-reader`, and no others."""
     return _once(
         request, actor, key, lambda: accounts.set_grants(actor, username, body.grants, reason=body.reason)
+    )
+
+
+@router.get("/tokens")
+def tokens(accounts: Manage, actor: CurrentActor) -> JSONResponse:
+    """Every API token, newest first, with its state: active, expired or revoked. Never its secret."""
+    return ok({"items": call(lambda: accounts.tokens(actor)), "next_cursor": None})
+
+
+@router.delete("/tokens/{token_id}")
+def revoke_token(
+    token_id: str,
+    request: Request,
+    accounts: Manage,
+    actor: CurrentActor,
+    body: Reason | None = None,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    """Revoke the token from now. Revoking it again changes nothing."""
+    reason = None if body is None else body.reason
+    return _once(request, actor, key, lambda: accounts.revoke_token(actor, token_id, reason=reason))
+
+
+@router.put("/users/{username}/disabled")
+def set_disabled(
+    username: str,
+    request: Request,
+    accounts: Manage,
+    actor: CurrentActor,
+    body: DisabledBody,
+    key: IdempotencyKey = None,
+) -> JSONResponse:
+    """Disable the user, who then can't sign in and whose tokens are refused, or enable them again."""
+    return _once(
+        request, actor, key, lambda: accounts.set_disabled(actor, username, body.disabled, reason=body.reason)
     )
 
 
@@ -1249,7 +1288,7 @@ def _environment(request: Request) -> Environment:
 
 
 Envs = Annotated[Environment, Depends(_environment)]
-Kind = Annotated[EnvKind, Path_(description="connection, budget or setting")]
+Kind = Annotated[EnvKind, Path_(description="connection, budget, setting or flow")]
 
 
 def _entry(entry: EnvEntry) -> dict[str, Any]:
@@ -1324,7 +1363,7 @@ def environment(envs: Envs, _: CurrentActor) -> JSONResponse:
     return ok({"env": envs.env, "items": [_entry(e) for e in envs.entries()], "next_cursor": None})
 
 
-@router.put("/environment/{kind}/{name}")
+@router.put("/environment/{kind}/{name:path}")
 def set_entry(
     request: Request,
     kind: Kind,
@@ -1339,7 +1378,7 @@ def set_entry(
     )
 
 
-@router.delete("/environment/{kind}/{name}")
+@router.delete("/environment/{kind}/{name:path}")
 def remove_entry(
     request: Request,
     kind: Kind,
@@ -1520,6 +1559,16 @@ def snooze_alert(
         key,
         lambda: _alerting(request).snooze(actor, alert_id, body.minutes, reason=body.reason),
     )
+
+
+@router.post("/alert-channels/{name}:test")
+def test_alert_channel(name: str, request: Request, actor: CurrentActor) -> JSONResponse:
+    """Send the channel a test alert now. 502 with why when it isn't reached."""
+    try:
+        call(lambda: alerts.AlertActions(request.app.state.feather).test_channel(actor, name))
+    except alerts.ChannelFailed as error:
+        raise ApiProblem(502, "Bad Gateway", str(error)) from error
+    return ok({"channel": name, "sent": True})
 
 
 @router.get("/alert-rules")

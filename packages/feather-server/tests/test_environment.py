@@ -521,3 +521,81 @@ def test_processed_webhook_events_are_deleted_after_the_retention_setting(keyed:
     [retention] = [r for r in default_loops(keyed) if r.name == "retention"]
     retention._fn()  # pyright: ignore[reportPrivateUsage]
     assert sorted(e.key for e in keyed.store.webhooks.events(PACKAGE, "h")) == ["recent", "waiting"]
+
+
+def test_an_environment_flow_entry_changes_a_packaged_flows_schedule_or_turns_it_off(
+    keyed: AppState, envs: Environment, tmp_path: Path
+):
+    clock = keyed.clock
+    assert isinstance(clock, FrozenClock)
+    packages = _installed(keyed, tmp_path)
+    packages.activate(OPERATOR, FLOW, "1.0.0")
+    host_up(keyed, PACKAGE)
+    catalogue = Catalogue(keyed.store, env=envs.env, monotonic=lambda: 0.0)
+    catalogue.tick(clock.now())
+    envs.put(ADMIN, "flow", FLOW, {"enabled": False}, reason="month end freeze")
+    catalogue.invalidate()  # in a server, within REFRESH_S
+    [flow] = catalogue.flows()
+    assert not flow.enabled and flow.spec["enabled"] is False
+    clock.advance(timedelta(hours=2))
+    assert catalogue.tick(clock.now()) == []
+    envs.put(ADMIN, "flow", FLOW, {"triggers": {"every": "15m"}})
+    catalogue.invalidate()
+    [flow] = catalogue.flows()
+    assert flow.enabled and [t.get("seconds") for t in flow.spec["triggers"]] == [900]
+    catalogue.tick(clock.now())  # a new trigger marks its start
+    clock.advance(timedelta(minutes=15))
+    assert len(catalogue.tick(clock.now())) == 1
+    envs.remove(ADMIN, "flow", FLOW)
+    catalogue.invalidate()
+    assert [t.get("seconds") for t in catalogue.flows()[0].spec["triggers"]] == [3600]
+    assert [a.action for a in keyed.store.audit.list_audit() if a.target == f"flow:{FLOW}"][:3] == [
+        "remove_flow",
+        "set_flow",
+        "set_flow",
+    ]
+    for name, value in (("invoices", {"enabled": False}), (FLOW, {"enabled": "no"}), (FLOW, {"cron": "x"})):
+        with pytest.raises(ConfigProblem):
+            envs.put(ADMIN, "flow", name, value)
+    with pytest.raises(Forbidden):
+        envs.put(OPERATOR, "flow", FLOW, {"enabled": False})
+
+
+def test_the_api_and_the_flow_page_set_a_flows_schedule_here(keyed: AppState, tmp_path: Path):
+    packages = _installed(keyed, tmp_path)
+    packages.activate(OPERATOR, FLOW, "1.0.0")
+    host_up(keyed, PACKAGE)
+    api = _client(keyed, "admin")
+    put = api.put(f"{API}/environment/flow/{FLOW}", json={"value": {"enabled": False}, "reason": "freeze"})
+    assert put.status_code == 200, put.text
+    assert keyed.store.env_config.entry(keyed.settings.env, "flow", FLOW).value == {"enabled": False}  # type: ignore[union-attr]
+    assert api.delete(f"{API}/environment/flow/{FLOW}").status_code == 200
+    app = create_app(state=keyed, loops=lambda s: [])
+    browser = sign_in(app, "dev1", "developer")
+    page = browser.get(f"/packages/{PACKAGE}/flows/invoices").text
+    assert "Schedule in" in page and "every 3600s" in page and "as the package has it" in page
+    token = re.search(r'name="csrf_token" value="([^"]+)"', page)
+    assert token
+    form = {"csrf_token": token.group(1), "runs": "yes", "cron": "0 6 * * *", "tz": "Asia/Kolkata"}
+    done = browser.post(f"/packages/{PACKAGE}/flows/invoices/schedule", data=form)
+    assert done.status_code == 303 and "schedule-set" in done.headers["location"]
+    value = keyed.store.env_config.entry(keyed.settings.env, "flow", FLOW).value  # type: ignore[union-attr]
+    assert value == {"triggers": {"cron": "0 6 * * *", "tz": "Asia/Kolkata"}}
+    assert "<code>0 6 * * *</code> (Asia/Kolkata)" in browser.get(done.headers["location"]).text
+    bad = browser.post(f"/packages/{PACKAGE}/flows/invoices/schedule", data={**form, "cron": "nope"})
+    assert bad.status_code == 422
+    back = browser.post(f"/packages/{PACKAGE}/flows/invoices/schedule", data={"csrf_token": token.group(1)})
+    assert "schedule-cleared" in back.headers["location"]
+    assert keyed.store.env_config.entry(keyed.settings.env, "flow", FLOW) is None
+    operator = sign_in(app, "op1", "operator")
+    assert "Save the schedule" not in operator.get(f"/packages/{PACKAGE}/flows/invoices").text
+    refused = operator.post(
+        f"/packages/{PACKAGE}/flows/invoices/schedule", data={**form, "csrf_token": _csrf_of(operator)}
+    )
+    assert refused.status_code == 403
+
+
+def _csrf_of(browser: TestClient) -> str:
+    found = re.search(r'<meta name="csrf-token" content="([^"]+)"', browser.get("/").text)
+    assert found
+    return found.group(1)

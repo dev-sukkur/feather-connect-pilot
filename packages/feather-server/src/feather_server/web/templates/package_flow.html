@@ -19,6 +19,27 @@
   {% set back = "flow" %}{% include "_package_flow_actions.html" %}
 </section>
 
+<section aria-labelledby="h-schedule">
+  <h2 id="h-schedule">Schedule in {{ env }}</h2>
+  <dl class="facts">
+    <dt>The package's</dt><dd>{% if spec_triggers %}{{ spec_triggers | join(", ") }}{% else %}<span class="muted">none on a clock</span>{% endif %}</dd>
+    <dt>Here</dt><dd>{% if override %}{% if override.get("enabled") == false %}<strong>off</strong>: it doesn't run on a clock or take webhooks{% if override.get("triggers") %}; {% endif %}{% endif %}{% if override.get("triggers") %}{% set t = override.triggers %}{% if t.get("cron") %}cron <code>{{ t.cron }}</code> ({{ t.get("tz", "UTC") }}){% endif %}{% if t.get("every") %} every <code>{{ t.every }}</code>{% endif %}{% if t.get("manual") %} by hand{% endif %}{% endif %}{% else %}<span class="muted">as the package has it</span>{% endif %}</dd>
+  </dl>
+  {% if can(actor, "environment.manage") %}
+  <form method="post" action="/packages/{{ name | urlencode }}/flows/{{ f.short | urlencode }}/schedule" class="stack-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% set t = (override or {}).get("triggers") or {} %}
+    <p><label for="sched-runs">Runs here</label><br><select id="sched-runs" name="runs"><option value="yes"{% if not override or override.get("enabled") != false %} selected{% endif %}>yes</option><option value="no"{% if override and override.get("enabled") == false %} selected{% endif %}>no: turned off in {{ env }}</option></select></p>
+    <p><label for="sched-cron">Cron</label><br><input id="sched-cron" name="cron" type="text" maxlength="200" value="{{ t.get('cron', '') }}" placeholder="0 6 * * *"></p>
+    <p><label for="sched-tz">Time zone of the cron</label><br><input id="sched-tz" name="tz" type="text" maxlength="64" value="{{ t.get('tz', '') }}" placeholder="Asia/Kolkata"></p>
+    <p><label for="sched-every">Or every</label><br><input id="sched-every" name="every" type="text" maxlength="32" value="{{ t.get('every', '') }}" placeholder="15m"></p>
+    <p><label for="sched-reason">Reason (optional)</label><br><input id="sched-reason" name="reason" type="text" maxlength="500"></p>
+    <button type="submit" class="primary">Save the schedule</button>
+  </form>
+  <p class="muted">Leave the cron and every empty, with Runs here at yes, to go back to the package's schedule. A webhook the flow's code starts it by stays.</p>
+  {% endif %}
+</section>
+
 <section aria-labelledby="h-versions">
   <h2 id="h-versions">Its versions</h2>
   <div class="table-wrap"><table>

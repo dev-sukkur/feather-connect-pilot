@@ -113,12 +113,37 @@ def sync_package_catalog(store: Store, package: str, version: PackageVersion) ->
     store.catalog.sync(package, version.sha256, {f: specs[f] for f in sorted(active) if f in specs})
 
 
+def _overridden(flow: str, spec: Mapping[str, Any], value: Any) -> dict[str, Any]:
+    """The flow's spec with the environment's `flow` entry applied: its scheduled triggers replaced, or it turned off.
+    An entry that isn't valid any more is left out with a warning, so the flow runs as its package has it."""
+    from feather_connect.core.flow import _trigger_dict  # pyright: ignore[reportPrivateUsage]
+    from feather_connect.project import ProjectError, flow_override
+
+    raw = cast(list[dict[str, Any]], spec.get("triggers") or [])
+    zone = next((str(t.get("tz")) for t in raw if t.get("kind") == "cron" and t.get("tz")), "UTC")
+    try:
+        enabled, triggers = flow_override(value, zone)
+    except ProjectError as error:
+        log.warning("the environment's entry for flow %s is left out: %s", flow, error)
+        return dict(spec)
+    changed = dict(spec)
+    if enabled is not None:
+        changed["enabled"] = enabled
+    if triggers is not None:
+        kept = [t for t in raw if t.get("kind") not in ("cron", "every", "reconcile", "manual")]
+        changed["triggers"] = kept + [_trigger_dict(t) for t in triggers]
+    return changed
+
+
 class Catalogue:
     """The active flows of a store's tenant, and the webhooks they take, read again when they change. `monotonic`
     gives the time the periodic refresh counts by."""
 
-    def __init__(self, store: Store, *, monotonic: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self, store: Store, *, env: str | None = None, monotonic: Callable[[], float] = time.monotonic
+    ) -> None:
         self._store = store
+        self._env = env  # whose `flow` entries change a flow's schedule, or turn it off
         self._monotonic = monotonic
         self._lock = threading.Lock()
         self._read_cache: _Read | None = None
@@ -170,6 +195,9 @@ class Catalogue:
         found: list[ActiveFlow] = []
         hooks: dict[tuple[str, str], Webhook] = {}
         pushes: dict[str, PackagePush] = {}
+        overrides = (
+            {e.name: e.value for e in self._store.env_config.entries(self._env, "flow")} if self._env else {}
+        )
         for activation in self._store.packages.active():
             version = self._store.packages.version(activation.package, activation.version)
             check: Mapping[str, Any] = version.load_check if version is not None else {}
@@ -183,6 +211,8 @@ class Catalogue:
                     activation.version,
                 )
                 continue
+            if activation.flow in overrides:
+                spec = _overridden(activation.flow, spec, overrides[activation.flow])
             listed = cast(list[dict[str, Any]], spec.get("datasets") or [])
             datasets = frozenset(str(d.get("name")) for d in listed)
             for d in listed:

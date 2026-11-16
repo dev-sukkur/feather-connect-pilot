@@ -41,6 +41,10 @@ The pilot has two phases, so that operating Feather is shaken out before real sy
   to the operator as the fallback. `worker_missing` and `delivery_failed` go to both; budget and stale-dataset
   warnings go to Teams only. Out of working hours nothing is watched: the pilot accepts that a failure at night waits
   until morning, and the success criteria count working hours only.
+- **Alert settings.** `delivery_failed` after 5 minutes, not the default 15, so a failure is seen within 5 (S2, S3).
+  `dataset_quiet` names each source dataset with the fewest records it should seal in a day (at least 1 for Zakya's
+  invoices), so a read that succeeds and finds nothing is not silent. Each source dataset has a `max_lag` in its code,
+  so `dataset_stale` covers it. The Railway guide's step 9 says where each is set.
 - **The server's own health.** An uptime check on `https://<domain>/readyz` every minute (the Railway guide's step
   10), alerting the same Teams channel and email.
 
@@ -95,12 +99,15 @@ These come before phase B, because phase B reads and writes real business data.
 | D3 | X2-11, no multi-factor sign-in | **Accept for phase A; for phase B, put an access proxy in front of the domain** (for example Cloudflare Access with the organisation's sign-in), with `/mcp`, `/api` and `/ingress` allowed through on their own tokens | On Railway the dashboard is on the internet, which X2-11's acceptance assumed it wouldn't be. A proxy brings MFA without waiting for SSO (M9) |
 | D4 | Backups | **Railway's daily snapshots for the pilot**, with one restore tried in week 1. **WAL archiving before production systems**, which is after the pilot | Phase B posts to a test tenant, where a lost day costs a re-run. Idempotency keys keep a re-run from posting twice where SAP CPI honours them. A day's loss of the ledger is not acceptable once production postings depend on it |
 | D5 | Who may hold the admin role | **The developer and the sponsor**; the operator is an operator with the `approver` grant | Admin can make tokens and users. The operator needs to retry, skip and approve, and nothing more |
+| D6 | SAP posts each invoice once | **The SAP team confirms the iFlow dedupes on `Idempotency-Key`** (an idempotent process call), before the first posting | Feather sends the same key for a record sent again, but only the iFlow can refuse a duplicate. Without it, S1 rests on luck after a retry |
+| D7 | Zakya's daily API cap (discovery Q4) | **Confirm it in writing**, and size the `zakya` budget to it | Published plans allow 1,500–2,500 calls a day; the reference evaluation reported 25,000. Invoice details cost a call each |
+| D8 | A change after a posting, such as an edited invoice or a goods return (discovery Q8) | **Finance chooses: reverse and post again, or post the difference**, for B2B invoices and for B2C day summaries | It decides how a return or a late edit reaches SAP. The simulators and example flows show the choice once it is made |
 
 ## 7. Week by week
 
 | Week | What |
 |---|---|
-| 0 | Railway set up (the guide's steps 1–11); the first admin; alert channels; the uptime check; a usage limit; a viewer token for the agent; D1–D5 decided |
+| 0 | Railway set up (the guide's steps 1–11); the first admin, and the other users added on the Users page; alert channels, each sent a test alert; the uptime check; a usage limit; a viewer token for the agent; D1–D8 decided |
 | 1 | Phase A: the demo on a schedule; a restore tried into a second environment; the operator walks a failed delivery end to end; `worker_missing` seen by scaling the worker to 0 |
 | 2 | Phase A: the reference chain and UC-06 against the simulators; a window on the simulated SAP connection; the first MCP investigation |
 | 3 | Phase B starts if access is there: Zakya read only, staging; SAP postings held for approval at first, all of them, until the first ten are checked by hand |
@@ -127,4 +134,4 @@ These come before phase B, because phase B reads and writes real business data.
 | 4 | Success criteria | Section 3 | | |
 | 5 | Where findings go | GitHub issues labelled `pilot` | | |
 | 6 | What decides v1 | Section 5 | | |
-| D1–D5 | Before real data | Section 6 | | |
+| D1–D8 | Before real data | Section 6 | | |

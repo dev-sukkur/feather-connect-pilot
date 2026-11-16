@@ -169,7 +169,7 @@ def _bearer_actor(request: Request, state: "AppState") -> Actor:
     if row.created_by is None:
         return Actor("token", row.name, row.role, scope=row.scope, protected=protected)
     user = state.store.users.get_user(row.created_by)
-    if user is None:  # its user is gone, and with them what the token may do
+    if user is None or user.disabled_at is not None:  # its user is gone or disabled, and so is what it may do
         raise AuthError(401, "Unauthorized", "the token is not valid")
     if row.scope == "publish" and user.role != "admin":  # publishing is an admin's, checked at each use
         raise AuthError(
@@ -258,6 +258,7 @@ def current_actor(request: Request) -> Actor:
         user = state.store.users.get_user(session.user)
         if (
             user is not None
+            and user.disabled_at is None  # a disabled user's session ends at their next request
             and session.epoch is not None
             and _same(session.epoch, _epoch(state, user.username, user.password_hash))
         ):
@@ -402,6 +403,9 @@ def login(request: Request, username: Annotated[str, Form()], password: Annotate
         state.store.audit.record("human", "anonymous", "login", None, ip, "failed")
         return _login_page(request, "The username or the password is wrong.", 401)
     throttle.clear(key)
+    if user.disabled_at is not None:  # said only to someone who knows the password
+        state.store.audit.record("human", user.username, "login", None, ip, "refused: disabled")
+        return _login_page(request, "This user is disabled. Ask an admin to enable it.", 403)
     _start_session(request, user.username, _epoch(state, user.username, user.password_hash))
     state.store.audit.record("human", user.username, "login", None, ip, "ok")
     return RedirectResponse("/", status_code=303)

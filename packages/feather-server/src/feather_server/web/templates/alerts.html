@@ -41,6 +41,18 @@
 <p class="empty">{% if shown == "firing" %}Nothing is firing.{% else %}No alerts.{% endif %}</p>
 {% endif %}
 </div>
+<section aria-labelledby="h-channels">
+  <h2 id="h-channels">Channels</h2>
+  {% if channels %}
+  <ul class="plain-list">
+    {% for c in channels %}<li><strong>{{ c }}</strong> <span class="muted">{{ channel_kinds.get(c, "") }}</span>
+      {% if can(actor, "alerts.manage") %}<form method="post" action="/alerts/channels/{{ c | urlencode }}/test" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit">Send a test alert<span class="sr-only"> to {{ c }}</span></button>
+      </form>{% endif %}</li>{% endfor %}
+  </ul>
+  {% else %}<p class="empty">No channels yet: add them under <code>settings.alert_channels</code>.</p>{% endif %}
+</section>
 <section aria-labelledby="h-rules">
   <h2 id="h-rules">Rules</h2>
   <p class="muted">A rule with no channels of its own tells every channel in <code>settings.alert_channels</code>{% if channels %}: {{ channels | join(", ") }}{% else %}, and there are none yet{% endif %}.</p>
@@ -56,7 +68,7 @@
           <form method="post" action="/alerts/rules/{{ r.name }}" class="inline-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <label><input type="checkbox" name="enabled"{% if r.enabled %} checked{% endif %}> on<span class="sr-only"> {{ r.name }}</span></label>
-            {% for k, v in r.params.items() %}<label for="rule-{{ r.name }}-{{ k }}">{{ k }}</label> <input id="rule-{{ r.name }}-{{ k }}" name="{{ k }}" type="text" size="6" value="{{ v }}"> {% endfor %}
+            {% for k, v in r.params.items() %}<label for="rule-{{ r.name }}-{{ k }}">{{ k }}</label> {% if v is mapping %}<input id="rule-{{ r.name }}-{{ k }}" name="{{ k }}" type="text" size="30" placeholder="dataset=count, ..." value="{% for n, c in v.items() %}{{ n }}={{ c }}{% if not loop.last %}, {% endif %}{% endfor %}">{% else %}<input id="rule-{{ r.name }}-{{ k }}" name="{{ k }}" type="text" size="6" value="{{ v }}">{% endif %} {% endfor %}
             {% for c in channels %}<label><input type="checkbox" name="channel" value="{{ c }}"{% if c in r.channels %} checked{% endif %}> {{ c }}<span class="sr-only"> for {{ r.name }}</span></label> {% endfor %}
             <button type="submit">Save<span class="sr-only"> {{ r.name }}</span></button>
             {% if r.custom %}<button type="submit" name="reset" value="1">Reset<span class="sr-only"> {{ r.name }}</span></button>{% endif %}
@@ -64,7 +76,7 @@
         </td>
         {% else %}
         <td>{{ "yes" if r.enabled else "no" }}</td>
-        <td>{% for k, v in r.params.items() %}{{ k }}={{ v }} {% endfor %}</td>
+        <td>{% for k, v in r.params.items() %}{% if v is mapping %}{{ k }}: {% for n, c in v.items() %}{{ n }}={{ c }}{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}{% else %}{{ k }}={{ v }}{% endif %} {% endfor %}</td>
         <td>{{ r.channels | join(", ") or "all" }}</td>
         <td>{{ "yes" if r.custom else "default" }}</td>
         {% endif %}
