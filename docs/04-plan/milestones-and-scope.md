@@ -82,6 +82,8 @@ A task number such as `2.3` means Plan 2, Task 3.
 
 From the [exit report §5–§6](../06-release/m1-exit-report.md#5-open): pyright can't follow the namespace packages; OAuth2 tokens are shared per process, not across processes (M2); `feather dev` helpers on macOS; a lookback made longer later doesn't reach older versions; an `Idempotency-Key` race in the API; `feather new --template` loses YAML comments; a scheduler tick lost on a crash; the server image carries the demo's `erp-token.txt` (m1); `latest_watermark` locks needlessly (m2); `feather server` binds 0.0.0.0 by default (m3).
 
+Closed on 16 Nov 2026 (M3.1): OAuth2 tokens are shared by a tenant's processes through the database (migration 0038); `feather new flow` adds to `feather.yaml` and the env files in place, keeping their comments; `latest_watermark` takes no lock for a dataset never sealed; a packaged dataset's partitions are labelled from its catalogue spec, which records read and write costs too. Closed earlier: the demo's secret file in the image and the 0.0.0.0 default (X2-1, X2-2), the `Idempotency-Key` race within one server, and a packaged poller's ticks as one stream run a day (M2).
+
 Also found since: `feather validate` misses duplicate route names across flows (fixed in M3.1), and `feather run --sim` fails with signed webhook sources (fixed in M3.1: it needs no secret, and sends the fixtures as events).
 
 ## 4. M1.1: brought forward from later milestones
