@@ -514,7 +514,7 @@ class PasswordBody(BaseModel):
     new_password: str
 
 
-@router.put("/api/v1/me/password", status_code=204)
+@router.put("/api/v1/me/password", status_code=204, dependencies=[Depends(require_csrf)])
 def change_password_api(request: Request, actor: CurrentActor, body: PasswordBody) -> Response:
     """Change your own password, given the one you have. Your other sessions end; tokens stay."""
     try:
