@@ -47,6 +47,7 @@ ADMIN_ONLY = {
     ("PUT", "/api/v1/users/{username}/role"),
     ("PUT", "/api/v1/users/{username}/grants"),
     ("POST", "/api/v1/tokens"),
+    ("POST", "/tokens"),
     ("GET", "/api/v1/tokens"),
     ("DELETE", "/api/v1/tokens/{token_id}"),
     ("POST", "/tokens/{token_id}/revoke"),

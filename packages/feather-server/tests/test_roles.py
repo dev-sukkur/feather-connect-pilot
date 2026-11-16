@@ -591,3 +591,33 @@ def test_a_password_set_by_the_cli_needs_no_change(world: World) -> None:
     accounts.create_user(CLI, "first", "pw", "admin")
     accounts.set_password(CLI, "first", "pw2")
     assert not world.store.users.get_user("first").must_change_password  # type: ignore[union-attr]
+
+
+def test_an_admin_makes_a_token_on_the_users_page_and_sees_it_once(world: World) -> None:
+    app = create_app(state=world.state, loops=lambda s: [])
+    admin = sign_in(app, "root", "admin")
+    _user(world.store, "ann", "operator")
+    form = {"name": "uptime-check", "user": "ann", "role": "viewer", "days": "30", "csrf_token": _csrf(admin)}
+    made = admin.post("/tokens", data=form)
+    assert made.status_code == 200 and made.headers["cache-control"] == "no-store"
+    found = re.search(r'<code class="secret" id="new-token">([^<]+)</code>', made.text)
+    assert found and "it is not shown again" in made.text
+    secret = found.group(1)
+    client = TestClient(app, base_url="http://localhost:8000")
+    me = client.get("/api/v1/me", headers={"Authorization": f"Bearer {secret}"})
+    assert me.status_code == 200 and me.json()["role"] == "viewer" and me.json()["user"] == "ann"
+    assert secret not in admin.get("/users").text  # once
+    [row] = [t for t in Accounts(world.store, world.clock).tokens(CLI) if t.name == "uptime-check"]
+    assert row.expires_at is not None and row.user == "ann"
+    higher = admin.post("/tokens", data={**form, "role": "admin", "csrf_token": _csrf(admin)})
+    assert higher.status_code == 422 and "higher role" in higher.text
+    nobody = admin.post("/tokens", data={**form, "user": "nobody", "csrf_token": _csrf(admin)})
+    assert nobody.status_code == 404
+    forever = admin.post(
+        "/tokens",
+        data={**form, "name": "ci", "user": "", "role": "", "days": "never", "csrf_token": _csrf(admin)},
+    )
+    assert forever.status_code == 200
+    [ci] = [t for t in Accounts(world.store, world.clock).tokens(CLI) if t.name == "ci"]
+    assert ci.expires_at is None and ci.user == "root" and ci.role == "admin"
+    assert ("create_token", "ok") in [(a.action, a.result) for a in world.store.audit.list_audit()]
