@@ -869,13 +869,17 @@ class Invoices(fc.Source):
         strategies={"by_stamp", "replace"},
         deletes="none",
         cost={"list": 1, "detail": 1},  # budget units per API call
+        record_cost={"read": 1},        # what a record typically costs, for previews (optional)
     )
 ```
 
 - **What the spec drives:**
   - `feather validate`, which checks that strategies and modes are supported;
   - the connection forms and docs;
-  - `describe_connector` for AI agents (§14).
+  - `describe_connector` for AI agents (§14);
+  - the budget estimate of a mass action's preview: `record_cost` is what one record typically costs to read or write, which a
+    re-run, backfill, retry or replay multiplies by the rows it touches. A connector whose cost per record depends on
+    something else (a paged read) leaves it out, and the preview shows no estimate.
 - **Packaging.** Connectors are separate distributions, installed as extras (`pip install "feather-connect[sap,zakya]"`). Third-party connectors register through Python entry points (`feather_connect.connectors`) without forking.
 
 ### 8.3 v1 catalogue

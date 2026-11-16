@@ -375,7 +375,7 @@ uv run feather logs 01M6XP5XF244QQ3G4MJ0CCKD91          # each task's log lines,
 
 <section id="operate">
   <h2><span class="n">6</span>Operate it</h2>
-  <p class="prose">Every action takes an optional reason and writes an audit row. A mass action (retry, skip, replay, re-read, backfill) shows its impact before you confirm. The confirmation works once, for 10 minutes, and refuses if the selection has changed.</p>
+  <p class="prose">Every action takes an optional reason and writes an audit row. A mass action (retry, skip, replay, re-read, backfill) shows its impact before you confirm: the partitions and deliveries it touches and, where the connectors say what a record costs, the budget units it would spend (the rows stored, times each source's read cost or each destination's write cost). A paged API, whose cost per record depends on the page, can't say, so its preview shows no estimate. The confirmation works once, for 10 minutes, and refuses if the selection has changed.</p>
   <h3>Retry, skip or replay a delivery</h3>
   <p class="prose">Brief faults are retried automatically, so a failure on this page needs a person. Until it's handled, that destination holds its later deliveries for the same data, so they stay in order. Other destinations keep going.</p>
   <figure><img src="img/failures.jpg" alt="The failures page: archive route, PermanentError, holds up 1 later delivery, with Retry and Skip buttons." width="800" height="500"><figcaption>Fix the cause first, then press <b>Retry</b>, or <b>Skip</b> to give up on that delivery.</figcaption></figure>
