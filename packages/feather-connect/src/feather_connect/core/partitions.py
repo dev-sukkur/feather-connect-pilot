@@ -325,6 +325,39 @@ def scheme_spec(scheme: PartitionScheme) -> dict[str, Any]:
             return {"kind": "custom"}
 
 
+def scheme_of_spec(spec: Mapping[str, Any] | None) -> PartitionScheme | None:
+    """The scheme that `scheme_spec` wrote, for a process with no package code to label and check partition keys by;
+    None for a package's own scheme (`custom`), or a spec it can't read."""
+    if not spec:
+        return None
+    try:
+        match spec.get("kind"):
+            case "none":
+                return none()
+            case "field":
+                return _Field(str(spec["field"]))
+            case "day":
+                return by_day(str(spec["field"]), str(spec["tz"]))
+            case "month":
+                return by_month(str(spec["field"]), str(spec["tz"]))
+            case "bucket":
+                return by_bucket(str(spec["field"]), int(spec["n"]))
+            case "fields":
+                parts = [scheme_of_spec(p) for p in cast("list[Mapping[str, Any]]", spec.get("parts") or [])]
+                if not parts or any(p is None for p in parts):
+                    return None
+                return _Fields(tuple(p for p in parts if p is not None))
+            case _:
+                return None
+    except (
+        KeyError,
+        ValueError,
+        TypeError,
+        LookupError,
+    ):  # a zone this machine doesn't know is a LookupError
+        return None
+
+
 def spec_fields(spec: Mapping[str, Any]) -> list[str]:
     """The record fields a scheme's spec partitions by, in key order. A bucket's is its hashed field."""
     if spec.get("kind") == "fields":

@@ -172,3 +172,51 @@ def test_a_packaged_route_is_paused_and_resumed_from_its_flow_page(app: FastAPI,
     assert state.runtime.is_route_paused(route)
     assert browser.post(f"/routes/{route}/resume", data=form).status_code == 303
     assert not state.runtime.is_route_paused(route)
+
+
+def _by_day_with_costs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The active spec as a package checked by this Feather records it: the dataset by day, with read and write
+    costs. The sample package itself is unpartitioned, with free connectors."""
+    from feather_server import catalog_view
+
+    real = catalog_view._specs  # pyright: ignore[reportPrivateUsage]
+
+    def specs(state: AppState) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for spec in real(state):
+            changed = dict(spec)
+            changed["datasets"] = [
+                {**d, "partition": {"kind": "day", "field": "date", "tz": "UTC"}, "read_cost": 2}
+                for d in spec["datasets"]
+            ]
+            changed["routes"] = [{**r, "write_cost": 3} for r in spec["routes"]]
+            out.append(changed)
+        return out
+
+    monkeypatch.setattr(catalog_view, "_specs", specs)
+
+
+def test_a_packaged_datasets_partitions_are_labelled_and_checked_from_its_catalogue(
+    app: FastAPI, state: AppState, monkeypatch: pytest.MonkeyPatch
+):
+    from feather_server.catalog_view import dataset_of, partition_label, route_of, scheme_of
+
+    _by_day_with_costs(monkeypatch)
+    found = dataset_of(state, DATASET)
+    assert found.read_cost == 2 and route_of(state, found.routes[0]).write_cost == 3
+    assert partition_label(scheme_of(state, DATASET), "date=2026-10-12") == "12 Oct 2026"
+    preview = Actions(state).preview_rerun(ANN, DATASET, ["date=2026-10-12", "date=2026-10-13"])
+    assert preview.impact.samples == ("12 Oct 2026", "13 Oct 2026")
+    assert preview.impact.estimated_budget_units is None  # never sealed: its size isn't known
+    with pytest.raises(ValueError, match="is not a partition of dataset"):
+        Actions(state).preview_rerun(ANN, DATASET, ["store=12"])
+
+
+def test_a_package_that_wrote_its_own_scheme_is_shown_by_its_keys(app: FastAPI, state: AppState):
+    from feather_connect.core.partitions import scheme_of_spec
+    from feather_server.catalog_view import partition_label, scheme_of
+
+    assert scheme_of_spec({"kind": "custom"}) is None and scheme_of(state, "no-such-dataset") is None
+    assert partition_label(None, "date=2026-10-12") == "date=2026-10-12"
+    preview = Actions(state).preview_rerun(ANN, DATASET, ["_"])  # the sample is unpartitioned: one partition
+    assert preview.impact.samples == ("All",)

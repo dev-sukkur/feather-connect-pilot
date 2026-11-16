@@ -3,7 +3,16 @@ from datetime import UTC, date, datetime
 import pytest
 
 from feather_connect.core.errors import PartitionError
-from feather_connect.core.partitions import Bound, by_bucket, by_day, by_fields, by_month, none
+from feather_connect.core.partitions import (
+    Bound,
+    by_bucket,
+    by_day,
+    by_fields,
+    by_month,
+    none,
+    scheme_of_spec,
+    scheme_spec,
+)
 
 IST = "Asia/Kolkata"
 NOW = datetime(2026, 10, 18, 9, 30, tzinfo=UTC)  # 15:00 on 18 Oct in India
@@ -219,3 +228,26 @@ def test_a_key_of_another_scheme_is_refused(scheme):
 def test_a_composite_key_with_the_wrong_number_of_parts_is_refused():
     with pytest.raises(ValueError, match="2 parts"):
         by_fields("a", "b").label_of("a=1")
+
+
+@pytest.mark.parametrize(
+    "scheme",
+    [
+        none(),
+        by_day("date", "Asia/Kolkata"),
+        by_month("date", "UTC"),
+        by_bucket("customer", 8),
+        by_fields("store_id", by_day("date", "UTC")),
+    ],
+)
+def test_a_scheme_comes_back_from_its_catalogue_spec(scheme):
+    """A server with no package code labels and checks a packaged dataset's partition keys from the spec."""
+    assert scheme_of_spec(scheme_spec(scheme)) == scheme
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [None, {}, {"kind": "custom"}, {"kind": "day", "field": "d", "tz": "Mars/Olympus"}, {"kind": "bucket"}],
+)
+def test_a_spec_it_cannot_read_gives_no_scheme(spec):
+    assert scheme_of_spec(spec) is None
