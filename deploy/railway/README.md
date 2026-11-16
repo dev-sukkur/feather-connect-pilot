@@ -87,7 +87,8 @@ backups) is set in Railway, as below. No secret is in the repository.
    ```
 
    Then, inside the server's container, run `feather server create-user admin` and type the password at the prompt.
-   The first user is an admin. Then `exit`.
+   The first user is an admin. Then `exit`. Add everybody else on the dashboard's **Users** page: the password you
+   give works for one sign-in, and they choose their own then.
 
 7. **A role for package hosts.** A flow package's code runs in a package host, which by default connects to
    Postgres as the worker does, and could read every table, the sealed secrets, users and tokens included (the
@@ -163,7 +164,7 @@ backups) is set in Railway, as below. No secret is in the repository.
 
 Flows reach the deployment as packages, kept in its Postgres, as with Compose: build and publish a flow package to the
 server's own registry, then install it (`feather package publish`, `feather package install`, with
-`--server https://<domain>` and a token from `feather server create-token`). Connections and their secrets are set
+`--server https://<domain>` and a token made on the **Users** page, or with `feather server create-token`). Connections and their secrets are set
 with `feather config import` and `feather secret set` against the same server. See the docs site's *Write a flow*
 and *Deploy* pages (`site-docs/`).
 
@@ -174,7 +175,8 @@ The images also hold the demo project (`examples/demo`), as on Compose. It has n
 
 Claude, or another MCP client, can read the deployment through `https://<domain>/mcp` with a **viewer** token, and
 nothing else: an operator's or an admin's token is refused there, and a viewer can change nothing anyway. Make one
-inside the server's container (`railway ssh --service feather-server`):
+on the **Users** page (**Make a token**, role `viewer`, 30 days), or inside the server's container
+(`railway ssh --service feather-server`):
 
 ```bash
 feather server create-token claude --role viewer --ttl 30d

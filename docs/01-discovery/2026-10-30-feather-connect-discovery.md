@@ -240,7 +240,7 @@ Priorities use MoSCoW. Which milestone delivers each use case and requirement is
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR-K1 | Local users and API tokens (M1); OIDC single sign-on (M3). An admin adds users, resets passwords and disables leavers, and lists and revokes tokens, on the dashboard as well as the CLI and API (M3.1). | Must |
+| FR-K1 | Local users and API tokens (M1); OIDC single sign-on (M3). An admin adds users, resets passwords and disables leavers, and makes, lists and revokes tokens, on the dashboard as well as the CLI and API (M3.1). A password an admin sets works for one sign-in; each user then chooses, and can change, their own (M3.1). | Must |
 | FR-K2 | Role-based access (viewer, operator, developer, admin, plus approver and PII-reader grants), scoped by tenant and environment. | Must |
 | FR-K3 | Secrets are referenced, never stored. Environment variables and files are supported in M1; Vault and the AWS, Azure and GCP secret stores in M3. Secrets are never logged or displayed. | Must |
 | FR-K4 | An immutable audit record for every action by a human, an agent or the system. | Must |

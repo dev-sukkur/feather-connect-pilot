@@ -82,7 +82,7 @@ A task number such as `2.3` means Plan 2, Task 3.
 
 From the [exit report §5–§6](../06-release/m1-exit-report.md#5-open): pyright can't follow the namespace packages; OAuth2 tokens are shared per process, not across processes (M2); `feather dev` helpers on macOS; a lookback made longer later doesn't reach older versions; an `Idempotency-Key` race in the API; `feather new --template` loses YAML comments; a scheduler tick lost on a crash; the server image carries the demo's `erp-token.txt` (m1); `latest_watermark` locks needlessly (m2); `feather server` binds 0.0.0.0 by default (m3).
 
-Also found since: `feather validate` misses duplicate route names across flows, and `feather run --sim` fails with signed webhook sources.
+Also found since: `feather validate` misses duplicate route names across flows (fixed in M3.1), and `feather run --sim` fails with signed webhook sources (fixed in M3.1: it needs no secret, and sends the fixtures as events).
 
 ## 4. M1.1: brought forward from later milestones
 
@@ -205,7 +205,7 @@ discovery's flow scenarios still need, and what a pilot needs to be watched and 
 - **Operations** (from M4): connection availability windows (FR-D5's second half).
 - **AI, read only** (from M8): the MCP server's read tools and the local author tools that change nothing, for a viewer token only, and an `investigate-failure` skill (FR-L1's read half).
 - **The pilot:** a `worker_missing` alert (FR-M3's "agent down"); Teams if needed; the Railway guide's uptime check and code version; the pilot plan.
-- **Operating gaps** (found reviewing discovery against the build, 13 Nov 2026): add a user and reset a password on the Users page; list and revoke API tokens; disable a user (FR-K1); pause and resume a route from the flow page, a package's too; a test alert per channel (FR-M3); and a flow's schedule changed, or the flow turned off, per environment with no new package version (FR-G4's schedule part, brought forward from M4). Also the `dataset_quiet` alert, and `feather validate` refusing a route or dataset name two flows share.
+- **Operating gaps** (found reviewing discovery against the build, 13 Nov 2026): add a user and reset a password on the Users page; list and revoke API tokens; disable a user (FR-K1); pause and resume a route from the flow page, a package's too; a test alert per channel (FR-M3); and a flow's schedule changed, or the flow turned off, per environment with no new package version (FR-G4's schedule part, brought forward from M4). Also the `dataset_quiet` alert, and `feather validate` refusing a route or dataset name two flows share. Then (16 Nov 2026): anybody changes their own password, and one an admin sets works for one sign-in; an admin makes a token on the Users page; `feather run --local --sim` runs a signed webhook flow.
 
 **Exit criteria:** hard cases H16–H19 pass; UC-06 runs with a derived dataset; an MCP session with a viewer token investigates a failed delivery and can change nothing; `worker_missing` fires and clears in the chaos suite; the pilot plan is agreed and the pilot runs on Railway with alerts reaching someone.
 
