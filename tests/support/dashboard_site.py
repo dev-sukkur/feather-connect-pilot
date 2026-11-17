@@ -61,6 +61,10 @@ class Site:
         )
         return f"/runs/{version.run_id}/tasks/{task.task_id}/records"
 
+    def first_run(self) -> str:
+        """The run that made the lake's first delivery."""
+        return self.stack.store.versions.get(self.deliveries("lake")[0].version_id).run_id
+
     def write_rows(self, per_day: dict[str, int]) -> None:
         write_rows(self.fixture, per_day)
 

@@ -30,6 +30,7 @@ from feather_connect.storage.port import (
     QuarantineRow,
     ResponseRow,
     Run,
+    RunLogLine,
     TaskRow,
     Version,
     WorkerRow,
@@ -352,6 +353,8 @@ def _interval(flow: Flow, now: datetime) -> timedelta | None:
                 pass
     return min(gaps, default=None)
 
+
+_PROBLEM_LEVELS = frozenset({"WARNING", "ERROR", "CRITICAL"})  # what "problems only" keeps of a log
 
 class Reads:
     """The reads of the dashboard and the API, over one `AppState`."""
@@ -788,6 +791,15 @@ class Reads:
 
     def task_logs(self, task_id: str) -> list[str]:
         return self._store.runs.task_logs(task_id)
+
+    def run_logs(self, run_id: str, *, problems_only: bool = False) -> list[RunLogLine]:
+        """Every log line of the run's tasks in the order they were written, or only its warnings and errors.
+        Raises `KeyError` for an unknown run."""
+        self._store.runs.get_run(run_id)
+        lines = self._store.runs.run_logs(run_id)
+        if problems_only:
+            lines = [line for line in lines if line.level.upper() in _PROBLEM_LEVELS]
+        return lines
 
     def failures_grouped(
         self, route: str | None = None, cursor: str | None = None, limit: int = 100

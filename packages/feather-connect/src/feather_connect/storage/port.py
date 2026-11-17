@@ -87,6 +87,20 @@ class Run:
 
 
 @dataclass(frozen=True)
+class RunLogLine:
+    """One log line of a run, with the task that wrote it: what the run's whole log is made of."""
+
+    at: datetime
+    task_id: str
+    kind: str
+    dataset: str | None
+    partition: str | None
+    route: str | None
+    level: str
+    message: str
+
+
+@dataclass(frozen=True)
 class TaskRow:
     """One engine task of a run. `status` is running until `finish_task` sets succeeded, failed or cancelled."""
 
@@ -336,6 +350,10 @@ class RunJournal(Protocol):
     def log(self, task_id: str, level: str, message: str) -> None: ...
     def task_logs(self, task_id: str) -> list[str]:
         """The task's log lines in order, each as `level: message`."""
+        ...
+
+    def run_logs(self, run_id: str) -> list[RunLogLine]:
+        """Every log line of the run's tasks, in the order they were written, each with its task."""
         ...
 
     def delete_runs_before(self, cutoff: datetime) -> int:

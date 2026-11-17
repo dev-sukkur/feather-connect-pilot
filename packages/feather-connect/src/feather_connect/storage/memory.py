@@ -97,6 +97,7 @@ from feather_connect.storage.port import (
     StaleWriter,
     StateRow,
     Store,
+    RunLogLine,
     TaskRow,
     TokenRow,
     TokenScope,
@@ -131,6 +132,8 @@ class _Data:
     tasks: dict[str, TaskRow] = field(default_factory=dict[str, TaskRow])
     stream_runs: dict[tuple[str, str], str] = field(default_factory=dict[tuple[str, str], str])
     logs: dict[str, list[tuple[datetime, str]]] = field(default_factory=dict[str, list[tuple[datetime, str]]])
+    log_order: dict[tuple[str, int], int] = field(default_factory=dict[tuple[str, int], int])  # (task, line) -> seq
+    log_seq: int = 0
     versions: dict[str, Version] = field(default_factory=dict[str, Version])
     seal_seq: int = 0
     writers: dict[str, str] = field(default_factory=dict[str, str])  # who holds the claim of a version
@@ -395,11 +398,32 @@ class _Runs(RunJournal):
 
     def log(self, task_id: str, level: str, message: str) -> None:
         with self._d.lock:
-            self._d.logs.setdefault(task_id, []).append((self._d.clock.now(), f"{level}: {message}"))
+            lines = self._d.logs.setdefault(task_id, [])
+            self._d.log_seq += 1
+            self._d.log_order[(task_id, len(lines))] = self._d.log_seq
+            lines.append((self._d.clock.now(), f"{level}: {message}"))
 
     def task_logs(self, task_id: str) -> list[str]:
         with self._d.lock:
             return [line for _, line in self._d.logs.get(task_id, [])]
+
+    def run_logs(self, run_id: str) -> list[RunLogLine]:
+        with self._d.lock:
+            found: list[tuple[datetime, int, RunLogLine]] = []
+            for task in self.list_tasks(run_id):
+                for n, (at, line) in enumerate(self._d.logs.get(task.task_id, [])):
+                    level, _, message = line.partition(": ")
+                    seq = self._d.log_order.get((task.task_id, n), 0)
+                    found.append(
+                        (
+                            at,
+                            seq,
+                            RunLogLine(
+                                at, task.task_id, task.kind, task.dataset, task.partition, task.route, level, message
+                            ),
+                        )
+                    )
+            return [line for _, _, line in sorted(found, key=lambda item: (item[0], item[1]))]
 
     def delete_runs_before(self, cutoff: datetime) -> int:
         with self._d.lock:
@@ -417,7 +441,8 @@ class _Runs(RunJournal):
             }
             for task_id in [t.task_id for t in self._d.tasks.values() if t.run_id in gone]:
                 del self._d.tasks[task_id]
-                del self._d.logs[task_id]
+                for n in range(len(self._d.logs.pop(task_id, []))):
+                    self._d.log_order.pop((task_id, n), None)
             for key in [k for k in self._d.slices if k[0] in gone]:
                 del self._d.slices[key]
             for run_id in gone:
@@ -428,9 +453,12 @@ class _Runs(RunJournal):
         with self._d.lock:
             removed = 0
             for task_id, lines in self._d.logs.items():
-                kept = [(at, line) for at, line in lines if at >= cutoff]
+                seqs = [self._d.log_order.pop((task_id, n), 0) for n in range(len(lines))]
+                kept = [(entry, seq) for entry, seq in zip(lines, seqs, strict=True) if entry[0] >= cutoff]
                 removed += len(lines) - len(kept)
-                self._d.logs[task_id] = kept
+                self._d.logs[task_id] = [entry for entry, _ in kept]
+                for n, (_, seq) in enumerate(kept):
+                    self._d.log_order[(task_id, n)] = seq
             return removed
 
 

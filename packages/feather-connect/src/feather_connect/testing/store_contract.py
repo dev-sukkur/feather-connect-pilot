@@ -1234,6 +1234,39 @@ class StoreContract(
         assert store.runs.task_logs(t1) == ["info: started", "error: bad row"]
         assert store.runs.task_logs(t2) == []
 
+    def test_a_run_s_log_is_its_tasks_lines_in_the_order_they_were_written(self, store: Store, clock: FrozenClock):
+        rid = store.runs.create_run("f", "manual", "ann", {})
+        other = store.runs.create_run("f", "manual", "ann", {})
+        plan = store.runs.start_task(rid, "plan", "plan")
+        extract = store.runs.start_task(rid, "extract", "x:p1", dataset="orders", partition="p1")
+        apply = store.runs.start_task(rid, "apply", "a:p1", dataset="orders", partition="p1", route="erp")
+        elsewhere = store.runs.start_task(other, "plan", "plan")
+        store.runs.log(plan, "info", "planned 1 partition")
+        store.runs.log(extract, "info", "read 3 rows")  # the same instant: the order written still holds
+        clock.advance(timedelta(seconds=1))
+        store.runs.log(apply, "warning", "429, waiting 2 s")
+        store.runs.log(elsewhere, "info", "another run's line")
+        clock.advance(timedelta(seconds=1))
+        store.runs.log(extract, "info", "sealed")
+        store.runs.log(apply, "info", "applied 3")
+        lines = store.runs.run_logs(rid)
+        assert [(line.kind, line.level, line.message) for line in lines] == [
+            ("plan", "info", "planned 1 partition"),
+            ("extract", "info", "read 3 rows"),
+            ("apply", "warning", "429, waiting 2 s"),
+            ("extract", "info", "sealed"),
+            ("apply", "info", "applied 3"),
+        ]
+        assert (lines[2].task_id, lines[2].dataset, lines[2].partition, lines[2].route) == (
+            apply,
+            "orders",
+            "p1",
+            "erp",
+        )
+        assert lines[0].at == T0 and lines[-1].at == T0 + timedelta(seconds=2)
+        assert [line.message for line in store.runs.run_logs(other)] == ["another run's line"]
+        assert store.runs.run_logs("no-such-run") == []
+
     def test_listing_tasks_narrowed_and_paged(self, store: Store):
         rid = store.runs.create_run("f", "manual", "ann", {})
         other = store.runs.create_run("f", "manual", "ann", {})

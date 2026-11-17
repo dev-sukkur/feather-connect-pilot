@@ -9,12 +9,20 @@
 
   <section aria-labelledby="h-timeline">
     <h2 id="h-timeline">Timeline</h2>
-    {% if detail.tasks %}
+    {% set run_log = "/runs/" ~ (run.run_id | urlencode) ~ "/logs" %}
+    <p><a class="button" href="{{ run_log }}">Run log</a> <a href="{{ run_log }}?problems=true">Warnings and errors only</a> <span class="muted">Every task's lines on one page, in the order they were written.</span></p>
+    {# A plan that went well says little: one line. One that failed or was skipped keeps its row, with why. #}
+    {% set plans = [] if detail.ticks else (detail.tasks | selectattr("kind", "equalto", "plan") | list) %}
+    {% set plan = plans[0] if plans else none %}
+    {% set folded = plan is not none and plan.status == "succeeded" and plan.attempt == 1 %}
+    {% if folded %}<p class="plan-line muted">Planned {{ m.time_ago(plan.started_at) }}, in {{ ((plan.finished_at or now) - plan.started_at) | span }}{% if plan.worker %} on {{ plan.worker }}{% endif %}: it chose what to read and started the extracts. <a href="/tasks/{{ plan.task_id | urlencode }}/logs?run={{ run.run_id | urlencode }}">Plan log</a></p>{% endif %}
+    {% set shown = (detail.tasks | rejectattr("task_id", "equalto", plan.task_id) | list) if folded else detail.tasks %}
+    {% if shown %}
     <div class="table-wrap"><table>
       <caption class="sr-only">The tasks of the run, {{ "newest first" if detail.ticks else "in the order they started" }}</caption>
       <thead><tr><th scope="col">Task</th><th scope="col">For</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Started</th><th scope="col">Took</th><th scope="col">Worker</th><th scope="col">Code</th><th scope="col">Details</th></tr></thead>
       <tbody>
-      {% for task in detail.tasks %}
+      {% for task in shown %}
         <tr>
           <th scope="row">{% if detail.ticks and task.kind in ("plan", "skip") %}tick{% else %}{{ task.kind }}{% endif %}</th>
           <td>{% if task.dataset and task.partition %}{{ m.partition_label(task.dataset, task.partition) }}{% elif task.dataset %}{{ task.dataset }}{% endif %}{% if task.route %} &rarr; {{ task.route }}{% endif %}</td>
@@ -31,6 +39,8 @@
       {% endfor %}
       </tbody>
     </table></div>
+    {{ m.pagination(detail.next_task) }}
+    {% elif folded %}
     {{ m.pagination(detail.next_task) }}
     {% elif run.status == "skipped" %}
     <p class="empty">This run was skipped, so no task ran.</p>

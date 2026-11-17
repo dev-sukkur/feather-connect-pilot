@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+<h1>Run log <code>{{ run_id[:8] }}</code></h1>
+<p><a href="/runs/{{ run_id | urlencode }}">&larr; Back to the run</a></p>
+<p class="muted">Every task's lines, in the order they were written. A task's own log is behind its name.</p>
+<p>{% if problems %}Showing warnings and errors. <a href="{{ url(problems=None, offset=None) }}">Show every line</a>{% else %}Showing every line. <a href="{{ url(problems='true', offset=None) }}">Only warnings and errors</a>{% endif %}</p>
+{% if lines %}
+<p class="muted">Lines {{ first }} to {{ first + lines | length - 1 }} of {{ total }}.</p>
+<div class="table-wrap"><table class="run-log">
+  <caption class="sr-only">The run's log lines, oldest first</caption>
+  <thead><tr><th scope="col">Time</th><th scope="col">Task</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead>
+  <tbody>
+  {% for line in lines %}
+    {% set level = line.level | lower %}
+    <tr>
+      <td class="nowrap"><time datetime="{{ line.at.isoformat() }}" title="{{ line.at | stamp }}">{{ line.at.strftime("%H:%M:%S") }}</time></td>
+      <td><a href="/tasks/{{ line.task_id | urlencode }}/logs?run={{ run_id | urlencode }}">{{ line.kind }}<span class="sr-only"> task log</span></a>{% if line.dataset and line.partition %} {{ m.partition_label(line.dataset, line.partition) }}{% elif line.dataset %} {{ line.dataset }}{% endif %}{% if line.route %} &rarr; {{ line.route }}{% endif %}</td>
+      <td><span class="log-level log-level-{{ level if level in ('warning', 'error', 'critical') else 'info' }}">{{ level }}</span></td>
+      <td class="log-message">{{ line.message }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% if next_offset is not none %}<nav class="pager" aria-label="Pages"><a rel="next" href="{{ url(offset=next_offset | string) }}">Next page &rarr;</a></nav>{% endif %}
+{% elif problems %}
+<p class="empty">No warnings or errors in this run's log.</p>
+{% else %}
+<p class="empty">No log lines yet.</p>
+{% endif %}
+{% endblock %}
