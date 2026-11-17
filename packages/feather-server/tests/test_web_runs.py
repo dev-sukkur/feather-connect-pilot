@@ -108,6 +108,60 @@ def test_logs_are_shown_escaped_and_paged(client: TestClient, world: World) -> N
     assert "No log lines" in client.get("/tasks/none/logs").text
 
 
+def test_the_run_log_shows_every_task_s_lines_in_order_on_one_page(client: TestClient, world: World) -> None:
+    run_id = world.run([day(18)])
+    plan, extract, apply = world.store.runs.list_tasks(run_id)[:3]
+    world.store.runs.log(plan.task_id, "INFO", "planned 1 partition")
+    world.store.runs.log(extract.task_id, "WARNING", "<b>slow</b> page")
+    world.store.runs.log(apply.task_id, "ERROR", "warehouse said 500")
+    page = client.get(f"/runs/{run_id}/logs").text
+    assert (
+        page.index("planned 1 partition")
+        < page.index("&lt;b&gt;slow&lt;/b&gt; page")
+        < page.index("warehouse said 500")
+    )
+    assert "<b>slow</b>" not in page  # escaped
+    assert (
+        "18 Oct 2026" in page and "&rarr; warehouse" in page
+    )  # each line names its task's partition and route
+    assert f'href="/tasks/{apply.task_id}/logs?run={run_id}"' in page  # and links to that task's own log
+    assert 'class="log-level log-level-error"' in page and 'class="log-level log-level-warning"' in page
+    problems = client.get(f"/runs/{run_id}/logs?problems=true").text
+    assert "slow" in problems and "warehouse said 500" in problems and "planned 1 partition" not in problems
+    assert "Show every line" in problems
+    assert f'href="/runs/{run_id}/logs"' in client.get(f"/runs/{run_id}").text  # the button on the run page
+    assert client.get("/runs/nothing/logs").status_code == 404
+
+
+def test_the_run_log_is_paged(client: TestClient, world: World) -> None:
+    run_id = world.run([day(18)])
+    task = world.store.runs.list_tasks(run_id)[0]
+    for n in range(250):
+        world.store.runs.log(task.task_id, "INFO", f"line {n}")
+    total = len(world.store.runs.run_logs(run_id))
+    first = client.get(f"/runs/{run_id}/logs").text
+    assert f"Lines 1 to 200 of {total}." in first and "Next page" in first
+    last = client.get(f"/runs/{run_id}/logs?offset=200").text
+    assert "line 249" in last and "Next page" not in last
+    assert client.get(f"/runs/{run_id}/logs?offset=-1").status_code == 422
+
+
+def test_a_plan_that_went_well_is_one_line_and_one_that_failed_keeps_its_row(
+    client: TestClient, world: World
+) -> None:
+    run_id = world.run([day(18)])
+    page = client.get(f"/runs/{run_id}").text
+    plan = world.store.runs.list_tasks(run_id)[0]
+    assert plan.kind == "plan" and "Planned " in page and "Plan log" in page
+    assert '<th scope="row">plan</th>' not in page and '<th scope="row">extract</th>' in page
+    failed = world.store.runs.create_run("orders", "manual", "op", {})
+    task = world.store.runs.start_task(failed, "plan", "plan")
+    world.store.runs.finish_task(task, "failed", "the window is closed")
+    world.store.runs.set_run_status(failed, "failed", "the window is closed")
+    page = client.get(f"/runs/{failed}").text
+    assert '<th scope="row">plan</th>' in page and "the window is closed" in page and "Plan log" not in page
+
+
 def test_active_run_refreshes_through_htmx(client: TestClient, world: World) -> None:
     run_id = world.state.runtime.start_run("orders")  # nothing has run yet
     page = client.get(f"/runs/{run_id}").text

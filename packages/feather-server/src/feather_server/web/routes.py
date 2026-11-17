@@ -1122,6 +1122,34 @@ def task_logs(
     )
 
 
+@router.get("/runs/{run_id}/logs", response_class=HTMLResponse)
+def run_logs(
+    request: Request,
+    actor: CurrentActor,
+    run_id: str,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    problems: bool = False,
+) -> HTMLResponse:
+    """The run's whole log on one page: every task's lines in the order they were written, each with its task."""
+    try:
+        lines = reads(request).run_logs(run_id, problems_only=problems)
+    except KeyError:
+        return _not_found(request, f"No run with the id {run_id!r}.")
+    page = lines[offset : offset + _LOG_PAGE]
+    return render(
+        request,
+        "run_logs.html",
+        title=f"Run log {run_id[:8]}",
+        actor=actor,
+        run_id=run_id,
+        lines=page,
+        problems=problems,
+        first=offset + 1,
+        total=len(lines),
+        next_offset=offset + _LOG_PAGE if offset + _LOG_PAGE < len(lines) else None,
+    )
+
+
 @router.post("/runs/{run_id}/cancel", dependencies=[Depends(require_csrf)])
 def cancel_run(
     request: Request,

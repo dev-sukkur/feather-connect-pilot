@@ -28,6 +28,8 @@ PATHS = [
     "/trace?dataset=demo.items&key=2026-11-01-0",  # a record's trace: a version, two routes, a failure
     "{records:extract}",  # a task's Records: what a read sealed
     "{records:apply:flaky}",  # and what a route answered, turned down
+    "/runs/{run}",  # a run: its timeline, the plan on one line, the Run log button
+    "/runs/{run}/logs",  # and its whole log
     "/packages",  # task 9: the Packages pages and the Registries page
     "/packages/acme-invoices",
     "/packages/acme-invoices/flows/invoices",
@@ -47,6 +49,8 @@ def test_axe_finds_no_wcag_aa_violations(signed_in: Page, site: Site, path: str,
     signed_in.emulate_media(color_scheme=scheme)  # pyright: ignore[reportArgumentType]
     if "{version}" in path:
         path = path.format(version=site.deliveries("lake", "applied")[0].version_id)
+    if "{run}" in path:
+        path = path.format(run=site.first_run())
     if path.startswith("{records:"):
         kind, _, route = path.strip("{}").removeprefix("records:").partition(":")
         path = site.records_path(kind, route or None)

@@ -10,6 +10,7 @@ import json
 import re
 import threading
 from collections.abc import Callable, Iterator
+from dataclasses import asdict
 from datetime import date, timedelta
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -421,6 +422,14 @@ def task_records(
 @router.get("/tasks/{task_id}/logs")
 def task_logs(task_id: str, reads: See, _: CurrentActor) -> JSONResponse:
     return ok({"task_id": task_id, "lines": reads.task_logs(task_id)})
+
+
+@router.get("/runs/{run_id}/logs")
+def run_logs(run_id: str, reads: See, _: CurrentActor, problems: bool = False) -> JSONResponse:
+    """The run's whole log: every task's lines in the order they were written, each with its task. `problems`
+    keeps only the warnings and errors."""
+    lines = call(lambda: reads.run_logs(run_id, problems_only=problems))
+    return ok({"run_id": run_id, "lines": [asdict(line) for line in lines]})
 
 
 @router.post("/flows/{flow:path}:run", status_code=202)

@@ -42,6 +42,7 @@ def test_openapi_is_3_1_and_lists_every_endpoint(api: TestClient) -> None:
         "/runs/{run_id}",
         "/runs/{run_id}/tasks",
         "/tasks/{task_id}/logs",
+        "/runs/{run_id}/logs",
         "/flows/{flow}:run",
         "/runs/{run_id}:cancel",
         "/flows/{flow}:pause",
@@ -201,6 +202,22 @@ def test_catalogue_partitions_budgets_and_summary(api: TestClient, world: World)
     assert api.get(f"{API}/runs/{run_id}").json()["run"]["run_id"] == run_id
     tasks = api.get(f"{API}/runs/{run_id}/tasks").json()["items"]
     assert tasks and api.get(f"{API}/tasks/{tasks[0]['task_id']}/logs").status_code == 200
+
+
+def test_a_run_s_whole_log_in_one_call(api: TestClient, world: World) -> None:
+    run_id = world.run([day(18)])
+    plan, extract = world.store.runs.list_tasks(run_id)[:2]
+    world.store.runs.log(plan.task_id, "INFO", "planned")
+    world.store.runs.log(extract.task_id, "WARNING", "slow page")
+    lines = api.get(f"{API}/runs/{run_id}/logs").json()["lines"]
+    assert [(line["kind"], line["level"], line["message"]) for line in lines][-2:] == [
+        ("plan", "INFO", "planned"),
+        ("extract", "WARNING", "slow page"),
+    ]
+    assert lines[-1]["task_id"] == extract.task_id and lines[-1]["dataset"] == "orders"
+    problems = api.get(f"{API}/runs/{run_id}/logs?problems=true").json()["lines"]
+    assert [line["message"] for line in problems] == ["slow page"]
+    assert api.get(f"{API}/runs/nothing/logs").status_code == 404
 
 
 def test_rerun_and_backfill_through_previews(api: TestClient, world: World) -> None:

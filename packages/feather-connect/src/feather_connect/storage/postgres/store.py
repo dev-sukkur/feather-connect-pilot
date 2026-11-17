@@ -97,6 +97,7 @@ from feather_connect.storage.port import (
     RouteRow,
     Run,
     RunJournal,
+    RunLogLine,
     ScheduleStore,
     SealedPartition,
     SealedSecret,
@@ -578,6 +579,30 @@ class _Runs(RunJournal):
                 (self._db.tenant, task_id),
             ).fetchall()
         return [f"{r['level']}: {r['message']}" for r in rows]
+
+    def run_logs(self, run_id: str) -> list[RunLogLine]:
+        with self._db.tx() as conn:
+            rows = conn.execute(
+                """select l.at, l.task_id, t.kind, t.dataset, t.partition, t.route, l.level, l.message
+                   from feather.task t
+                   join feather.task_log l on l.tenant_id = t.tenant_id and l.task_id = t.task_id
+                   where t.tenant_id = %s and t.run_id = %s
+                   order by l.at, l.log_id""",
+                (self._db.tenant, run_id),
+            ).fetchall()
+        return [
+            RunLogLine(
+                r["at"],
+                r["task_id"],
+                r["kind"],
+                r["dataset"],
+                r["partition"],
+                r["route"],
+                r["level"],
+                r["message"],
+            )
+            for r in rows
+        ]
 
     def delete_runs_before(self, cutoff: datetime) -> int:
         with self._db.tx() as conn:
