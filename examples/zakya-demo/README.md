@@ -2,6 +2,7 @@
 
 The pilot's reference chain against simulators on this machine: Zakya's sales and returns go to Postgres staging, and
 from there to SAP through CPI. B2B sales go one document per invoice, and B2C sales are summed per day and material.
+The other way, SAP's master data goes to Zakya: each material as an item, then its retail price.
 Every invoice also goes to a plain ERP, one `PUT /invoices/{invoice_id}` each, every minute: the first demo leg.
 
 ## Run it
@@ -18,8 +19,8 @@ Ctrl+C stops them all. Their output shows in the same console, prefixed `[zakya-
 
 | Page | What it is |
 | --- | --- |
-| <http://127.0.0.1:29100/> | Zakya: the manual counter, the invoices and credit notes, and the auto/manual switch |
-| <http://127.0.0.1:29102/> | SAP through CPI: the views by invoice and by material per day, the parked postings in manual mode, and a form to enter a document by hand |
+| <http://127.0.0.1:29100/> | Zakya: the manual counter, the invoices and credit notes, the items and retail prices SAP sent, and the auto/manual switch |
+| <http://127.0.0.1:29102/> | SAP through CPI: the views by invoice and by material per day, the parked postings in manual mode, a form to enter a document by hand, and the material master with a form to change a price |
 | <http://127.0.0.1:29101/> | The plain ERP: every request it took, newest first |
 
 The credentials in `secrets/` are fake, and only the simulators take them. Their paths in `env/dev.yaml` are read
@@ -58,7 +59,8 @@ lists by `last_modified_time`, Zoho's rate limits, and about one call in 25 answ
   makes a credit note for what you enter, no more than was sold and not yet returned. **Mark paid** pays a B2B
   invoice.
 
-With `--state`, the invoices and credit notes are kept in a JSON file, so a restart carries on where it stopped.
+With `--state`, the invoices, credit notes, items and price lists are kept in a JSON file, so a restart carries on
+where it stopped. The simulator starts with one price list, *Retail* (`PB-RETAIL`), empty until SAP's prices fill it.
 
 **SAP through CPI** (`sims/sap.py`, port 29102) answers as the `feather-sap-cpi` package's simulator does (a client
 credentials token, a CSRF token per chunk, an `Idempotency-Key` on each post, a reversal path), and keeps what it posts
@@ -66,7 +68,8 @@ in `.data/sap.sqlite`. Its iFlows:
 
 | iFlow | Takes | Keyed by |
 | --- | --- | --- |
-| `GET /http/materials` | The material master, as `d.results` | |
+| `GET /http/materials` | The material master, as `d.results`, each at its current list price | |
+| `GET /http/prices` | The retail price list (`PB-RETAIL`): one price per material, as `d.results` | |
 | `POST /http/invoices` | A B2B invoice: a billing document (F2) with its items | `invoice_id` |
 | `POST /http/creditmemos` | A B2B return: a credit memo (G2) against `ReferenceInvoice` | `creditnote_id` |
 | `POST /http/salessummary` | One material's B2C sales, or returns, on one day | `document_id` |
@@ -147,6 +150,19 @@ would spend Zoho's 1400 a day in about three hours and leave the demo looking st
   state (`keep_state=True`), which is what lets the flows to SAP look a material up by EAN: `ctx.lookup("materials",
   ean)` in Python, `{{ dataset('materials') }}` in SQL. Until it has run once, a posting that needs it waits and
   retries.
+
+**To Zakya** (`flows/masters.py`), SAP's master data for the stores to sell from:
+
+- `sap-materials` also upserts each material into Zakya as an item (route `zakya-items`), matched by its POS code,
+  which is Zakya's SKU: its name, EAN-13, unit and list price as the item's rate. A material that hasn't changed
+  sends nothing.
+- `sap-prices-to-zakya` reads SAP's retail price list and sets each item's rate in Zakya's *Retail* price list
+  (route `zakya-prices`). A price needs its item in Zakya, so it runs each time `sap-materials` has delivered to
+  `zakya-items` (`fc.on_ready(fc.ready("materials", delivered_to="zakya-items"))`), never before.
+- To see it work, change a price on the SAP page's **Materials** tab, as a pricing clerk would. Within 15 minutes
+  (or at once, with **Run now** on `sap-materials`) the item's rate and its retail price change on the Zakya page;
+  the materials you didn't touch send nothing.
+- A price is set, never deleted: a material SAP stops selling is ended in Zakya by hand.
 
 **To SAP**, each once a run's documents are in staging (`fc.on_ready(..., delivered_to=...)`), at most every 5 minutes:
 

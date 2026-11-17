@@ -248,7 +248,11 @@ class Flow:
                     **({"pii": list(d.pii)} if d.pii else {}),
                     **({"max_lag": d.max_lag} if d.max_lag else {}),
                     "complete": d.strategy.complete,
-                    **({"read_cost": cost} if (cost := d.source.spec.cost.get("read")) is not None else {}),
+                    **(
+                        {"read_cost": cost}
+                        if (cost := d.source.spec.record_cost.get("read")) is not None
+                        else {}
+                    ),
                     "priority": d.priority,
                     "keep_state": d.keep_state,
                     **dataset_spec(d),
@@ -263,7 +267,11 @@ class Flow:
                     "connector": r.sink.spec.name,
                     "mode": r.mode,
                     "priority": r.priority,
-                    **({"write_cost": cost} if (cost := r.sink.spec.cost.get("write")) is not None else {}),
+                    **(
+                        {"write_cost": cost}
+                        if (cost := r.sink.spec.record_cost.get("write")) is not None
+                        else {}
+                    ),
                     **({"approval": r.approval.spec()} if r.approval is not None else {}),
                     **(
                         {"schema_policy": _policy_name(r.schema_policy)}

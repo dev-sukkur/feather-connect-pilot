@@ -131,3 +131,13 @@ def test_stock_is_adjusted_once_per_record_whatever_the_repeats(
         ctx, _batch([{"sku": "NONE", "quantity_adjusted": 1}], "append")
     )
     assert [r.error_class for r in unknown.rejected] == ["UnknownItem"]
+
+
+def test_each_sink_and_the_source_say_what_a_record_costs_for_previews():
+    """A retry's or a re-run's preview estimates its budget units from these (the per-call `cost` can't say)."""
+    from feather_connect.connectors.zakya import sinks, source  # pyright: ignore[reportMissingImports]
+
+    assert sinks.Items.spec.record_cost == {"write": 2}
+    assert sinks.Prices.spec.record_cost == {"write": 1}
+    assert sinks.Stock.spec.record_cost == {"write": 2}
+    assert source.Source.spec.record_cost == {"read": 1}

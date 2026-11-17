@@ -1,0 +1,6 @@
+template: db-to-warehouse
+title: Clean the items on their way
+prompt: |
+  The items in the app database are typed by hand. On their way to the warehouse, make each item's `sku` upper
+  case with no spaces around it, leave out the `uom` column, and add `source_system` set to `"app_db"`. Every other
+  column goes as it is. `fixtures/items.json` holds sample rows for dev.

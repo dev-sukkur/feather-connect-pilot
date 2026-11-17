@@ -46,7 +46,7 @@ FLOW_MODULE = """
 
     class Shop(memory.Source):
         spec = ConnectorSpec(
-            name="shop.api", strategies=frozenset({"replace"}), cost={"read": 2}
+            name="shop.api", strategies=frozenset({"replace"}), cost={"default": 1}, record_cost={"read": 2}
         )
 
 

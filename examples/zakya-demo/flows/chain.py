@@ -8,6 +8,7 @@ Staging, in the Postgres of `feather dev` (schema `zakya_demo`):
   invoice it is against.
 - `sap-materials` reads SAP's material master every 15 minutes and keeps its state, so that the flows to SAP can
   find a material by the EAN on Zakya's line (`ctx.lookup("materials", ean)`, or `{{ dataset('materials') }}` in SQL).
+  It also sends each material to Zakya as an item, and `sap-prices-to-zakya` then its retail price (flows/masters.py).
 
 To SAP, once a run's documents are in staging (`fc.on_ready`, at most every 5 minutes):
 
@@ -27,6 +28,7 @@ from typing import Any
 import feather_connect as fc
 from feather_connect.connectors import http, postgres, sap_cpi, zakya  # pyright: ignore[reportAttributeAccessIssue]
 from feather_connect.templates.retail import EVERY_MINUTE  # pyright: ignore[reportMissingImports]
+from flows.masters import zakya_items_route
 
 APPROVAL_ABOVE = 500_000
 NOT_YET = frozenset({424})  # SAP's answer to a credit memo whose invoice it doesn't have yet
@@ -134,7 +136,8 @@ sap_materials = fc.Flow(
         fc.to(
             postgres.Table("staging", table="materials", key_columns=["ean"]),
             name="staging-materials",
-        )
+        ),
+        zakya_items_route,  # and to Zakya, as items (flows/masters.py)
     ],
     triggers=[fc.cron("*/15 * * * *", tz="UTC")],
 )

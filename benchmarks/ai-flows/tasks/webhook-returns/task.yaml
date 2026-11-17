@@ -1,0 +1,8 @@
+template: webhook-to-api
+title: Return webhooks to the ERP
+prompt: |
+  The delivery partner now also sends signed webhooks for returns, one return per event, keyed by `return_id`.
+  Change the project to take those (instead of orders) as the dataset `returns`, and send each to the ERP with
+  `PUT /returns/{return_id}`, as `{"external_id": <return_id>, "order": <order_id>, "reason": <reason>,
+  "amount": <amount as a number>}` (the partner sends `amount` as a string such as `"145.00"`). The partner's
+  events and the ERP stay the same connections. `fixtures/returns.json` holds sample events for dev.

@@ -82,6 +82,7 @@ class Post(http.Call):
         config=CpiConfig,
         modes=frozenset({"upsert", "append"}),
         cost={"default": 1},
+        record_cost={"write": 1},  # one post a record (a CSRF token is fetched once a chunk)
         maturity="experimental",
         side_effect=True,
     )

@@ -1,0 +1,6 @@
+template: api-to-warehouse
+title: Prices in whole paise
+prompt: |
+  The warehouse wants prices as whole numbers. Keep the prices flow, and add to each price a `price_paise` column:
+  its `price` (a decimal string such as `"145.50"`) in paise as an integer, rounded half up, so `"145.505"` is
+  `14551`. Keep `price` as it is.

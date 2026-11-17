@@ -286,7 +286,7 @@ class Actions:
         units: int | None = 0
         for dataset in flow.datasets:
             cost = getattr(dataset.source, "spec", None)
-            per_row = None if cost is None else cost.cost.get("read")
+            per_row = None if cost is None else cost.record_cost.get("read")
             rows = self._rows(dataset.name, partitions)
             units = None if units is None or per_row is None or rows is None else units + rows * per_row
         first = flow.datasets[0]
@@ -715,7 +715,7 @@ class Actions:
             versions = {v.version_id: v for v in self._store.versions.get_many({d.version_id for d in found})}
             for d in found:
                 try:
-                    cost = self._rt.route(d.route).sink.spec.cost.get("write")
+                    cost = self._rt.route(d.route).sink.spec.record_cost.get("write")
                 except KeyError:  # a packaged route: its cost as its catalogue recorded it, if it did
                     try:
                         cost = route_of(self._state, d.route).write_cost

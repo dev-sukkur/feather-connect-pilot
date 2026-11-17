@@ -1,0 +1,3 @@
+flows:
+  categories-to-warehouse:
+    triggers: {every: 1h}

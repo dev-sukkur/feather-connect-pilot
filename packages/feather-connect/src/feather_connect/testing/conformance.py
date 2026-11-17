@@ -106,6 +106,8 @@ def _check_spec(spec: ConnectorSpec) -> None:
     assert spec.maturity in get_args(Maturity)
     assert set(spec.modes) <= set(get_args(RouteMode))
     assert all(isinstance(units, int) and units >= 0 for units in spec.cost.values())
+    assert set(spec.record_cost) <= {"read", "write"}, "record_cost names read and write only"
+    assert all(isinstance(units, int) and units >= 0 for units in spec.record_cost.values())
 
 
 class _Common:

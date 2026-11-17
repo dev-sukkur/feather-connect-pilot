@@ -1,0 +1,34 @@
+[
+  {
+    "price_id": "PR-0001",
+    "sku": "TEA-250",
+    "store_id": "BLR-01",
+    "price": "145.00",
+    "currency": "INR",
+    "updated_at": "2026-11-07T07:01:00Z"
+  },
+  {
+    "price_id": "PR-0002",
+    "sku": "TEA-250",
+    "store_id": "MAA-02",
+    "price": "149.5",
+    "currency": "INR",
+    "updated_at": "2026-11-07T07:02:00Z"
+  },
+  {
+    "price_id": "PR-0003",
+    "sku": "RICE-5K",
+    "store_id": "BLR-01",
+    "price": "0.105",
+    "currency": "INR",
+    "updated_at": "2026-11-07T07:03:00Z"
+  },
+  {
+    "price_id": "PR-0004",
+    "sku": "SOAP-100",
+    "store_id": "BLR-01",
+    "price": "145.505",
+    "currency": "INR",
+    "updated_at": "2026-11-07T07:04:00Z"
+  }
+]

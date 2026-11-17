@@ -1,0 +1,10 @@
+template: api-to-warehouse
+title: A different API, its own budget
+prompt: |
+  Replace the pricing API with the inventory API. It is at `https://inventory.example.com`, takes its key in the
+  `X-API-Key` header from the `INVENTORY_API_KEY` environment variable, and allows 120 calls a minute and 50,000 a
+  day. `GET /v2/stock` pages its stock levels (`?page=&per_page=`) under `levels`, with `has_more` set while more
+  pages follow, and filters them by `changed_since`. Each level is keyed by `stock_id` and stamped by
+  `changed_at`. Copy them to the warehouse table `bronze_stock`. Name the connection `inventory_api` and its budget
+  `inventory-api`; in dev it runs on simulation data, as the template's connection does. `fixtures/stock.json`
+  holds sample rows.

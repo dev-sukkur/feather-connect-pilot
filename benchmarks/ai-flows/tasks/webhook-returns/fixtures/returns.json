@@ -1,0 +1,16 @@
+[
+  {
+    "return_id": "RET-0001",
+    "order_id": "ORD-00001",
+    "reason": "damaged",
+    "amount": "145.00",
+    "store_id": "BLR-01"
+  },
+  {
+    "return_id": "RET-0002",
+    "order_id": "ORD-00002",
+    "reason": "wrong item",
+    "amount": "520.50",
+    "store_id": "MAA-02"
+  }
+]

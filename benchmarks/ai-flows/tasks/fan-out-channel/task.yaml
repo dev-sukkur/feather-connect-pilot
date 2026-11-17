@@ -1,0 +1,5 @@
+template: fan-out-demo
+title: Tag every order with its channel
+prompt: |
+  Every order the demo fans out should carry `"channel": "web"` to all three destinations, besides its own
+  fields.
