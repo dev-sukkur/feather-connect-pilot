@@ -62,6 +62,15 @@ exits 1 when the pass rate is below the target (`--target`, 0.8 by default). `--
 `score --reference` scores the reference answers: all ten pass. `tests/benchmarks` runs that on every CI build,
 and checks that each acceptance test fails the template left as it was, so a task can't be passed by doing nothing.
 
+## Results
+
+| Date | AI under test | Passed | Notes |
+|---|---|---|---|
+| 17 Nov 2026 | Claude Opus 5.5 (`claude-opus-5-5`), a fresh Claude Code session | 10 of 10 (100%) | One run. The session worked in a copy of the repository without `reference/` or the acceptance tests, by instruction, in a folder it shared with the session that scored it. No answer was fixed by hand |
+
+G2's target is 80%. One run of one model is a pass, not a rate: to make it firmer, run the benchmark again (a
+second model, or several runs of the same one) and add a row here.
+
 ## Adding a task
 
 Add `tasks/<task>/` with its `task.yaml`, any fixtures and `test_acceptance.py` (import what it needs from
