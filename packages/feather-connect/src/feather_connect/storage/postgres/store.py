@@ -97,6 +97,7 @@ from feather_connect.storage.port import (
     RouteRow,
     Run,
     RunJournal,
+    RunLogLine,
     ScheduleStore,
     SealedPartition,
     SealedSecret,
@@ -106,7 +107,6 @@ from feather_connect.storage.port import (
     StaleWriter,
     StateRow,
     Store,
-    RunLogLine,
     TaskRow,
     TokenRow,
     TokenScope,
@@ -592,7 +592,14 @@ class _Runs(RunJournal):
             ).fetchall()
         return [
             RunLogLine(
-                r["at"], r["task_id"], r["kind"], r["dataset"], r["partition"], r["route"], r["level"], r["message"]
+                r["at"],
+                r["task_id"],
+                r["kind"],
+                r["dataset"],
+                r["partition"],
+                r["route"],
+                r["level"],
+                r["message"],
             )
             for r in rows
         ]

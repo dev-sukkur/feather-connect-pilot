@@ -115,9 +115,15 @@ def test_the_run_log_shows_every_task_s_lines_in_order_on_one_page(client: TestC
     world.store.runs.log(extract.task_id, "WARNING", "<b>slow</b> page")
     world.store.runs.log(apply.task_id, "ERROR", "warehouse said 500")
     page = client.get(f"/runs/{run_id}/logs").text
-    assert page.index("planned 1 partition") < page.index("&lt;b&gt;slow&lt;/b&gt; page") < page.index("warehouse said 500")
+    assert (
+        page.index("planned 1 partition")
+        < page.index("&lt;b&gt;slow&lt;/b&gt; page")
+        < page.index("warehouse said 500")
+    )
     assert "<b>slow</b>" not in page  # escaped
-    assert "18 Oct 2026" in page and "&rarr; warehouse" in page  # each line names its task's partition and route
+    assert (
+        "18 Oct 2026" in page and "&rarr; warehouse" in page
+    )  # each line names its task's partition and route
     assert f'href="/tasks/{apply.task_id}/logs?run={run_id}"' in page  # and links to that task's own log
     assert 'class="log-level log-level-error"' in page and 'class="log-level log-level-warning"' in page
     problems = client.get(f"/runs/{run_id}/logs?problems=true").text

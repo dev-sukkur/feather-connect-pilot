@@ -88,6 +88,7 @@ from feather_connect.storage.port import (
     RouteRow,
     Run,
     RunJournal,
+    RunLogLine,
     ScheduleStore,
     SealedPartition,
     SealedSecret,
@@ -97,7 +98,6 @@ from feather_connect.storage.port import (
     StaleWriter,
     StateRow,
     Store,
-    RunLogLine,
     TaskRow,
     TokenRow,
     TokenScope,
@@ -132,7 +132,9 @@ class _Data:
     tasks: dict[str, TaskRow] = field(default_factory=dict[str, TaskRow])
     stream_runs: dict[tuple[str, str], str] = field(default_factory=dict[tuple[str, str], str])
     logs: dict[str, list[tuple[datetime, str]]] = field(default_factory=dict[str, list[tuple[datetime, str]]])
-    log_order: dict[tuple[str, int], int] = field(default_factory=dict[tuple[str, int], int])  # (task, line) -> seq
+    log_order: dict[tuple[str, int], int] = field(
+        default_factory=dict[tuple[str, int], int]
+    )  # (task, line) -> seq
     log_seq: int = 0
     versions: dict[str, Version] = field(default_factory=dict[str, Version])
     seal_seq: int = 0
@@ -419,7 +421,14 @@ class _Runs(RunJournal):
                             at,
                             seq,
                             RunLogLine(
-                                at, task.task_id, task.kind, task.dataset, task.partition, task.route, level, message
+                                at,
+                                task.task_id,
+                                task.kind,
+                                task.dataset,
+                                task.partition,
+                                task.route,
+                                level,
+                                message,
                             ),
                         )
                     )

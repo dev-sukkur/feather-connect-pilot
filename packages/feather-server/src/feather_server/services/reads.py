@@ -356,6 +356,7 @@ def _interval(flow: Flow, now: datetime) -> timedelta | None:
 
 _PROBLEM_LEVELS = frozenset({"WARNING", "ERROR", "CRITICAL"})  # what "problems only" keeps of a log
 
+
 class Reads:
     """The reads of the dashboard and the API, over one `AppState`."""
 

@@ -1234,7 +1234,9 @@ class StoreContract(
         assert store.runs.task_logs(t1) == ["info: started", "error: bad row"]
         assert store.runs.task_logs(t2) == []
 
-    def test_a_run_s_log_is_its_tasks_lines_in_the_order_they_were_written(self, store: Store, clock: FrozenClock):
+    def test_a_run_s_log_is_its_tasks_lines_in_the_order_they_were_written(
+        self, store: Store, clock: FrozenClock
+    ):
         rid = store.runs.create_run("f", "manual", "ann", {})
         other = store.runs.create_run("f", "manual", "ann", {})
         plan = store.runs.start_task(rid, "plan", "plan")

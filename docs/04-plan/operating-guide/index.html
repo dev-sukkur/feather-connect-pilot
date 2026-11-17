@@ -356,7 +356,7 @@ def test_orders_reach_the_warehouse():
   <div class="scroll"><table>
     <tr><th>Page</th><th>Answers</th></tr>
     <tr><td><b>Flows</b></td><td>What exists, its status, how fresh its data is, and who owns it.</td></tr>
-    <tr><td><b>Runs</b></td><td>What ran, how long it took, how many tasks retried, and why anything failed or was skipped. A run's page has its timeline, each task's log, and Cancel or Rerun.</td></tr>
+    <tr><td><b>Runs</b></td><td>What ran, how long it took, how many tasks retried, and why anything failed or was skipped. A run's page has its timeline, each task's log, the <b>Run log</b>, and Cancel or Rerun.</td></tr>
     <tr><td><b>Failures</b></td><td>What's broken now, grouped by destination and error.</td></tr>
     <tr><td><b>Deliveries</b> (from a route)</td><td>Each version's delivery to that destination, with what the destination answered, such as the id an ERP gave each record.</td></tr>
     <tr><td><b>Quarantine</b></td><td>Single records a destination refused, or that couldn't be read.</td></tr>
@@ -365,6 +365,7 @@ def test_orders_reach_the_warehouse():
   </table></div>
   <figure><img src="img/runs.jpg" alt="The runs list with running, failed and succeeded runs, retry counts and failure reasons." width="800" height="506"><figcaption>Runs arrive as they happen. A brief fault is retried by itself and shows as “1 task retried”.</figcaption></figure>
   <figure><img src="img/run.jpg" alt="A run's page with a timeline; the extract task reads succeeded after 2 attempts, last error simulated HTTP 503." width="800" height="506"><figcaption>Open a run for its timeline. This one hit a simulated HTTP 503, retried, and succeeded on attempt 2. Each task also has a log.</figcaption></figure>
+  <p class="prose">The run's page lists its tasks: one <b>extract</b> per partition read, and one <b>apply</b> per partition and destination. Before them, the <b>plan</b> chose what to read (from the schedule, a backfill range or a re-run's selection), checked windows and readiness, and started the extracts. A plan that went well is one line above the timeline, with its own log; a plan that failed or was skipped keeps its row, with why. <b>Run log</b> shows every task's lines on one page, in the order they were written, each naming its task, partition and destination, with a link to that task's own log. <b>Warnings and errors only</b> leaves out the rest. The API has it as <code>GET /api/v1/runs/{id}/logs</code> (<code>?problems=true</code> for warnings and errors).</p>
   <figure><img src="img/connections.jpg" alt="The connections page listing archive, shop and warehouse, each with a Check now button." width="800" height="500"><figcaption>Connections, with a check you can run on demand. A check counts against the connection's budget.</figcaption></figure>
   <h3>From the command line</h3>
   <p class="prose">These call a server: see <a href="#api">API and remote commands</a> for <code>--server</code> and the token. Each takes <code>--json</code>.</p>
@@ -522,7 +523,7 @@ flow = fc.Flow(
 curl -H "Authorization: Bearer fc_..." http://127.0.0.1:8080/api/v1/runs</code></pre>
   <div class="scroll"><table>
     <tr><th>Calls</th><th>Do</th></tr>
-    <tr><td><code>GET /flows</code>, <code>/runs</code>, <code>/runs/{id}/tasks</code>, <code>/tasks/{id}/logs</code>, <code>/summary</code>, <code>/connections</code>, <code>/budgets</code></td><td>Read</td></tr>
+    <tr><td><code>GET /flows</code>, <code>/runs</code>, <code>/runs/{id}/tasks</code>, <code>/tasks/{id}/logs</code>, <code>/runs/{id}/logs</code>, <code>/summary</code>, <code>/connections</code>, <code>/budgets</code></td><td>Read</td></tr>
     <tr><td><code>POST /flows/{flow}:run</code>, <code>/runs/{id}:cancel</code>, <code>/flows/{flow}:pause</code>, <code>:resume</code>, <code>/routes/{route}:pause</code>, <code>:resume</code></td><td>Act</td></tr>
     <tr><td><code>GET /users</code>, <code>POST /users</code>, <code>PUT /users/{name}/role</code>, <code>PUT /users/{name}/grants</code>, <code>POST /tokens</code></td><td>Manage users, roles, grants and tokens: admin only (see <a href="#roles">Roles</a>)</td></tr>
     <tr><td><code>POST /flows/{flow}:backfill:preview</code>, then <code>/flows/{flow}:backfill</code>; likewise <code>/deliveries:retry</code>, <code>:skip</code>, <code>:replay</code> and <code>/datasets/{d}/partitions:rerun</code></td><td>Mass actions: the preview returns the impact and a <code>confirmation_token</code>, which the action takes</td></tr>
